@@ -9,6 +9,8 @@
 
 const crypto = require('node:crypto')
 
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
+
 const PIPELINES_TABLE = 'integration_pipelines'
 const FIELD_MAPPINGS_TABLE = 'integration_field_mappings'
 const EXTERNAL_SYSTEMS_TABLE = 'integration_external_systems'
@@ -469,8 +471,26 @@ async function conflictFromRunningRun(db, normalized, details = {}) {
   })
 }
 
+// The endpoint check is also the WRITER'S HALF of the external-system delete lock protocol
+// (`external-system-pointer-lock.cjs`): the row is read `FOR KEY SHARE` on the caller's transaction
+// handle, so a concurrent `deleteExternalSystem` (which holds FOR UPDATE for its whole
+// count-then-delete) makes this read WAIT; when it resumes the row is gone and the pipeline write
+// refuses as the SAME values-free PipelineValidationError it always raised for a missing endpoint —
+// instead of reaching the INSERT and dying on 057's foreign key as a bare 23503. Conversely a delete
+// that arrives while this KEY SHARE is held waits for this transaction to commit, then counts the
+// pipeline and refuses 409. Only meaningful because `upsertPipeline` and `instantiateTemplate` run
+// this INSIDE `db.transaction`; a helper that cannot lock is refused rather than degraded to the
+// unprotected `selectOne` this replaces. LOCK ORDER: source system, target system, pipeline row,
+// field mappings — KEY SHARE is compatible with KEY SHARE, so two pipeline writers naming the same
+// two systems in opposite orders cannot deadlock. ISOLATION: this check cannot pin the level itself —
+// `SET TRANSACTION` must be a transaction's FIRST statement and `instantiateTemplate` reads its
+// name clash before calling `writePipelineRow` — so BOTH transaction openers pin READ COMMITTED as
+// their first statement (`upsertPipeline` below, `integration-templates.cjs` instantiateTemplate).
 async function requireExternalSystem(db, normalized, systemId, expectedRoles, field) {
-  const row = await db.selectOne(EXTERNAL_SYSTEMS_TABLE, {
+  if (!db || typeof db.selectOneForKeyShare !== 'function') {
+    throw new Error('pipelines: transaction handle with selectOneForKeyShare is required to write a pipeline (external-system delete lock protocol)')
+  }
+  const row = await db.selectOneForKeyShare(EXTERNAL_SYSTEMS_TABLE, {
     ...scopeWhere(normalized),
     id: systemId,
   })
@@ -593,15 +613,21 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   async function upsertPipeline(input) {
     const normalized = normalizePipelineInput(input)
 
-    const write = (scopedDb) => writePipelineRow(scopedDb, normalized, idGenerator)
-
-    if (normalized.fieldMappings !== undefined) {
-      if (typeof db.transaction !== 'function') {
-        throw new Error('createPipelineRegistry: db.transaction is required when fieldMappings are provided')
-      }
-      return db.transaction(write)
+    // READ COMMITTED is pinned as the transaction's FIRST statement (the lock protocol's isolation
+    // premise, enforced — see `external-system-pointer-lock.cjs`), then the KEY SHARE endpoint checks.
+    const write = async (scopedDb) => {
+      await pinLockProtocolIsolation(scopedDb)
+      return writePipelineRow(scopedDb, normalized, idGenerator)
     }
-    return write(db)
+
+    // ALWAYS one transaction, not only when field mappings ride along: the endpoint check inside
+    // `writePipelineRow` takes KEY SHARE on both external systems, and a lock taken in autocommit is
+    // released at statement end — which would leave the INSERT/UPDATE one statement later exactly as
+    // unprotected as before. A helper without `transaction` is refused rather than written around.
+    if (typeof db.transaction !== 'function') {
+      throw new Error('createPipelineRegistry: db.transaction is required to write a pipeline (external-system delete lock protocol)')
+    }
+    return db.transaction(write)
   }
 
   async function getPipeline(input) {

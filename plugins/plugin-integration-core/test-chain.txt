@@ -37,6 +37,7 @@ node __tests__/db.test.cjs
 node __tests__/external-systems.test.cjs
 node __tests__/external-systems-list-workspace-fallback.test.cjs
 node __tests__/external-systems-delete-dependent-references.test.cjs
+node __tests__/external-systems-delete-bind-lock-protocol.test.cjs
 node __tests__/connection-resolver.test.cjs
 node __tests__/legacy-binding-canonical-invariant.test.cjs
 node __tests__/pr1-canonical-legacy-read-equivalence.test.cjs
