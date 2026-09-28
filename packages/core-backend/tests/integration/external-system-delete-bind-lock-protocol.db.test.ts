@@ -266,9 +266,17 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
   // `transaction` runs the callback on ONE client inside BEGIN/COMMIT (ROLLBACK on throw). The gate
   // is the test's scheduling seam: the next statement whose text starts with `sqlPrefix` parks
   // until released, and `reached` resolves when it parks.
-  async function openSession(targetSchema: string = schema, defaultIsolation?: HostileLevel): Promise<Session> {
+  async function openSession(targetSchema: string = schema, defaultIsolation?: HostileLevel, { withPublic = true }: { withPublic?: boolean } = {}): Promise<Session> {
     const client = await ownerPool.connect()
-    await client.query(`SET search_path TO ${quotedIdentifier(targetSchema)}, public`)
+    // The 057-only session must NOT see `public`: on a shared database whose `public` already ran
+    // 079 / 062 / 073 (CI's metasheet_test after "Run DB migrations"), an unqualified
+    // `FROM "integration_stock_prep_source_binding"` would resolve to public's table, the probe would
+    // learn nothing is absent, and P-ABSENT would observe the dependent counts inside the
+    // transaction. With `public` off the path the missing tables raise 42P01 as on a real 057-only
+    // deployment. (pg_catalog stays implicitly searched.)
+    await client.query(withPublic
+      ? `SET search_path TO ${quotedIdentifier(targetSchema)}, public`
+      : `SET search_path TO ${quotedIdentifier(targetSchema)}`)
     if (defaultIsolation) {
       if (!HOSTILE_DEFAULTS.some((entry) => entry.level === defaultIsolation)) throw new Error('openSession: level outside HOSTILE_DEFAULTS')
       await client.query(`SET SESSION default_transaction_isolation = '${defaultIsolation}'`)
@@ -476,7 +484,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     deleter = await openSession()
     writer = await openSession()
     secondWriter = await openSession()
-    deleter057 = await openSession(schema057)
+    deleter057 = await openSession(schema057, undefined, { withPublic: false })
     for (const { tag, level } of HOSTILE_DEFAULTS) {
       hostile[tag] = { deleter: await openSession(schema, level), writer: await openSession(schema, level) }
     }
