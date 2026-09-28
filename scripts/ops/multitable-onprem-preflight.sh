@@ -187,6 +187,10 @@ function build_suggested_actions() {
     REQUIRE_STORAGE_DIRS\ must\ be\ 0\ or\ 1*)
       actions+=("Set REQUIRE_STORAGE_DIRS to 0 or 1 before rerunning multitable-onprem-preflight.sh.")
       ;;
+    DUPLICATE_ENV_KEY:*)
+      actions+=("Keep exactly one declaration of each key named in the error and set the intended value on that line. The backend (ecosystem.config.cjs) reads the first declaration of a key, so a value appended further down the file is ignored.")
+      actions+=("List the declaring line numbers of a key without printing its value: grep -n -E '^[[:space:]]*KEY[[:space:]]*=' app.env | cut -d: -f1")
+      ;;
     JWT_SECRET\ is\ missing*|JWT_SECRET\ is\ still\ \'change-me\'*)
       actions+=("Set a real JWT_SECRET in app.env and remove placeholder values such as change-me.")
       ;;
@@ -526,29 +530,134 @@ EOF
   fi
 }
 
+# --- app.env reader: the backend's own rules ------------------------------------------------------
+# The backend process reads this file through loadOnPremEnvFile() in ecosystem.config.cjs, so the
+# preflight judges each key by exactly the rules that loader applies:
+#   content.split(/\r?\n/)             one declaration per line; a CR before the LF is dropped
+#   line = rawLine.trim()              leading/trailing whitespace (and a UTF-8 BOM) is dropped
+#   skip '' and lines starting '#'     full-line comments only; an inline ' # ...' stays in the value
+#   eq = line.indexOf('='), eq <= 0    the FIRST '=' splits; '=' inside the value is kept
+#   key/value = both sides, trimmed    'export KEY=v' is NOT special: its key is 'export KEY'
+#   one matching '...' / "..." layer   is stripped from the value; no ${var} expansion
+#   if (!(key in process.env)) set     the FIRST declaration of a key wins; later ones are ignored
+# parse_env_line sets ENV_DECL_KEY / ENV_DECL_VALUE for one raw line and returns 1 when the line
+# declares nothing. Values stay in these variables and are never echoed (values-free output).
+ENV_DECL_KEY=""
+ENV_DECL_VALUE=""
+
+function parse_env_line() {
+  local line="$1"
+  local key
+  local value
+  ENV_DECL_KEY=""
+  ENV_DECL_VALUE=""
+  line="${line#$'\xef\xbb\xbf'}"
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [[ -n "$line" && "${line:0:1}" != "#" && "$line" == *=* ]] || return 1
+  key="${line%%=*}"
+  value="${line#*=}"
+  key="${key%"${key##*[![:space:]]}"}"
+  [[ -n "$key" ]] || return 1
+  value="${value#"${value%%[![:space:]]*}"}"
+  if [[ ( "$value" == \"* && "$value" == *\" ) || ( "$value" == \'* && "$value" == *\' ) ]]; then
+    if (( ${#value} >= 2 )); then
+      value="${value:1:${#value}-2}"
+    else
+      value=""
+    fi
+  fi
+  ENV_DECL_KEY="$key"
+  ENV_DECL_VALUE="$value"
+  return 0
+}
+
+# The value the backend loads for $1: the FIRST declaration of that key (ecosystem.config.cjs keeps
+# the first one it sees), or empty when the key is not declared at all.
 function get_env_value() {
   local key="$1"
+  local raw
   if [[ ! -f "$ENV_FILE" ]]; then
     echo ""
     return 0
   fi
-  local line
-  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n 1 || true)"
-  echo "${line#${key}=}"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    parse_env_line "$raw" || continue
+    if [[ "$ENV_DECL_KEY" == "$key" ]]; then
+      printf '%s\n' "$ENV_DECL_VALUE"
+      return 0
+    fi
+  done < "$ENV_FILE"
+  echo ""
 }
 
-function strip_quotes() {
-  local value="$1"
-  value="${value%$'\r'}"
-  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
-    echo "${value:1:${#value}-2}"
-    return 0
+# A key declared more than once has no single effective value: ecosystem.config.cjs (pm2 start /
+# pm2-runtime on the ecosystem file) keeps the FIRST declaration, while the start paths that load
+# the file into the environment before pm2 starts -- attendance-onprem-bootstrap.sh
+# (`set -a; source`) and the Import-AppEnvFile helpers of the Windows scripts -- let a later
+# declaration override an earlier one, and the loader never overrides a variable that is already
+# set. Which value the backend gets therefore depends on how it was started. The template ships
+# live empty ENCRYPTION_KEY= / ENCRYPTION_SALT= lines, so a value appended at the end of the file
+# instead of set in place is exactly this case: the backend reads the empty first line and
+# fail-closes at startup. Fails on every duplicated key and names keys and line numbers only.
+function require_unique_env_keys() {
+  local -a keys=()
+  local -a lines=()
+  local -a counts=()
+  local -a first_empty=()
+  local -a later_nonempty=()
+  local raw
+  local line_no=0
+  local index
+  local found
+  local blank
+  local message=""
+  local clause
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    line_no=$((line_no + 1))
+    parse_env_line "$raw" || continue
+    blank=0
+    [[ -n "${ENV_DECL_VALUE//[[:space:]]/}" ]] || blank=1
+    found=-1
+    for ((index = 0; index < ${#keys[@]}; index++)); do
+      if [[ "${keys[$index]}" == "$ENV_DECL_KEY" ]]; then
+        found=$index
+        break
+      fi
+    done
+    if (( found < 0 )); then
+      keys+=("$ENV_DECL_KEY")
+      lines+=("$line_no")
+      counts+=(1)
+      first_empty+=("$blank")
+      later_nonempty+=(0)
+    else
+      lines[found]="${lines[found]}, ${line_no}"
+      counts[found]=$((counts[found] + 1))
+      if (( blank == 0 )); then
+        later_nonempty[found]=1
+      fi
+    fi
+  done < "$ENV_FILE"
+
+  for ((index = 0; index < ${#keys[@]}; index++)); do
+    (( counts[index] > 1 )) || continue
+    clause="${keys[$index]} appears ${counts[$index]} times (lines ${lines[$index]}); the backend reads the FIRST occurrence (line ${lines[$index]%%,*})"
+    if (( first_empty[index] == 1 && later_nonempty[index] == 1 )); then
+      clause+=", which is EMPTY, and ignores the non-empty value on a later line"
+    elif (( first_empty[index] == 1 )); then
+      clause+=", which is EMPTY"
+    fi
+    if [[ -n "$message" ]]; then
+      message+="; ${clause}"
+    else
+      message="$clause"
+    fi
+  done
+
+  if [[ -n "$message" ]]; then
+    die "DUPLICATE_ENV_KEY: ${message}. ecosystem.config.cjs keeps the first declaration of a key, while a start path that sources the file first lets a later declaration override it, so keep exactly one declaration of each key in ${ENV_FILE} and set the value on that line."
   fi
-  if [[ "$value" == \'*\' && "$value" == *\' ]]; then
-    echo "${value:1:${#value}-2}"
-    return 0
-  fi
-  echo "$value"
 }
 
 function require_nonempty_env() {
@@ -574,13 +683,11 @@ function require_encryption_material() {
   local value="$2"
   local default_sentinel="$3"
 
-  # get_env_value does a literal `${line#KEY=}` with no shell re-parsing, unlike
-  # `docker compose --env-file` / `source` (the actual runtime path for this file).
-  # Without normalizing the same way here, a quoted value
-  # (ENCRYPTION_KEY="default-key-change-in-production"), a whitespace-only value
-  # (ENCRYPTION_KEY=   ), or a sentinel with a trailing \r left by a CRLF-saved
-  # env file would all sail past a byte-for-byte `==` compare below even though
-  # Compose/source would treat them as the bare default/empty value at runtime.
+  # get_env_value already applies the ecosystem.config.cjs rules (trim, one quote layer,
+  # CR dropped). This second pass is deliberately stricter than that loader: it also
+  # judges a quoted whitespace-only value (ENCRYPTION_KEY="   ") as empty -- the backend
+  # trims before its own check -- and a sentinel wrapped in a second quote layer as the
+  # sentinel, so neither can sail past the byte-for-byte `==` compare below.
   value="${value%$'\r'}"
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
@@ -599,16 +706,18 @@ function require_encryption_material() {
 [[ -f "$ENV_FILE" ]] || die "ENV_FILE not found: ${ENV_FILE}"
 [[ "$REQUIRE_STORAGE_DIRS" == "0" || "$REQUIRE_STORAGE_DIRS" == "1" ]] || die "REQUIRE_STORAGE_DIRS must be 0 or 1"
 
-JWT_SECRET="$(strip_quotes "$(get_env_value JWT_SECRET)")"
-POSTGRES_PASSWORD="$(strip_quotes "$(get_env_value POSTGRES_PASSWORD)")"
-DATABASE_URL="$(strip_quotes "$(get_env_value DATABASE_URL)")"
-PRODUCT_MODE="$(strip_quotes "$(get_env_value PRODUCT_MODE)")"
-DEPLOYMENT_MODEL="$(strip_quotes "$(get_env_value DEPLOYMENT_MODEL)")"
-IMPORT_REQUIRE_TOKEN="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)")"
-IMPORT_UPLOAD_DIR="$(strip_quotes "$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)")"
-ATTACHMENT_PATH="$(strip_quotes "$(get_env_value ATTACHMENT_PATH)")"
-ATTACHMENT_STORAGE_BASE_URL="$(strip_quotes "$(get_env_value ATTACHMENT_STORAGE_BASE_URL)")"
-ENABLE_PLM="$(strip_quotes "$(get_env_value ENABLE_PLM)")"
+require_unique_env_keys
+
+JWT_SECRET="$(get_env_value JWT_SECRET)"
+POSTGRES_PASSWORD="$(get_env_value POSTGRES_PASSWORD)"
+DATABASE_URL="$(get_env_value DATABASE_URL)"
+PRODUCT_MODE="$(get_env_value PRODUCT_MODE)"
+DEPLOYMENT_MODEL="$(get_env_value DEPLOYMENT_MODEL)"
+IMPORT_REQUIRE_TOKEN="$(get_env_value ATTENDANCE_IMPORT_REQUIRE_TOKEN)"
+IMPORT_UPLOAD_DIR="$(get_env_value ATTENDANCE_IMPORT_UPLOAD_DIR)"
+ATTACHMENT_PATH="$(get_env_value ATTACHMENT_PATH)"
+ATTACHMENT_STORAGE_BASE_URL="$(get_env_value ATTACHMENT_STORAGE_BASE_URL)"
+ENABLE_PLM="$(get_env_value ENABLE_PLM)"
 ENCRYPTION_KEY="$(get_env_value ENCRYPTION_KEY)"
 ENCRYPTION_SALT="$(get_env_value ENCRYPTION_SALT)"
 
