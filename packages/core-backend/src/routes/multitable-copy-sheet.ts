@@ -14,7 +14,8 @@
  *      与全文件其它 sheet-addressed 路由同一对；tests/unit/multitable-sheet-liveness-closure-all-routes.guard.test.ts
  *      在语法树上证明）。
  *   2. 源侧门 `hasFullTableReadAccess`（§1.9 三轴）→ 403 `COPY_SOURCE_NOT_FULLY_READABLE`，**不回任何计数**（CS-5/CS-6）。
- *   3. 目标侧门：S1 目标 = 源 Base；`resolveBaseWritable` + 审批 / e-learning 投影拒绝 → 403 `FORBIDDEN`（CS-3 / §4.2）。
+ *   3. 目标侧门：S1 目标 = 源 Base；`resolveCopyTargetWritable` = 平台管理员角色 ∨ `resolveBaseWritable`，含审批 /
+ *      e-learning 投影拒绝（对管理员同样拒）→ 403 `FORBIDDEN`（CS-3 / §4.2，2026-09-28 修订；三处门共用这一个谓词）。
  *   4. 系统表拒绝作为源（门后才回）→ 422 `COPY_SOURCE_SYSTEM_SHEET`（CS-14 / §6）。
  *   5. dry-run：`planCopySheet`（零写）→ 200 summary；execute：`executeCopySheet`（§7.2 单事务，事务内 DB-fresh
  *      重跑 2/3 两门）→ 201。
@@ -32,9 +33,7 @@ import { Logger } from '../core/logger'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
 import { rbacGuard } from '../rbac/rbac'
-import { deriveSheetAccessLevel, resolveBaseWritable, resolveSheetCapabilities, type QueryFn } from '../multitable/permission-service'
-import { isApprovalProjectionBaseId } from '../multitable/approval-projection-constants'
-import { isElearningProjectionBaseIdCandidate } from '../multitable/elearning-projection-constants'
+import { deriveSheetAccessLevel, resolveCopyTargetWritable, resolveSheetCapabilities, type QueryFn } from '../multitable/permission-service'
 import { SheetWriterBlockedError } from '../multitable/canonical-sheet-fence'
 import { SheetNotLiveError } from '../multitable/sheet-liveness'
 import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
@@ -191,8 +190,9 @@ async function gateCopySource(
   // Soft-deleted / gone between the liveness gate and here: the SAME values-free absent-sheet 404 the gate answers.
   if (!sheetRow) return { ok: false, status: 404, code: 'NOT_FOUND' }
   const baseId = sheetRow.baseId ?? ''
-  if (!baseId || isApprovalProjectionBaseId(baseId) || isElearningProjectionBaseIdCandidate(baseId)
-    || !(await resolveBaseWritable(access.userId, query, baseId))) {
+  // Target gate (CS-3 / §4.2): ONE shared predicate — platform admin ∨ resolveBaseWritable, projection bases refused
+  // for everyone — identical to the in-transaction re-check and the /context probe (copy-sheet-service.ts, univer-meta.ts).
+  if (!(await resolveCopyTargetWritable(access, query, baseId))) {
     return { ok: false, status: 403, code: COPY_SHEET_ERROR_CODES.forbidden }
   }
   try {

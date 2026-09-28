@@ -35,6 +35,8 @@
  *   E16 relation-aggregation formulas: quoted link/target/criteria ids remapped; formula_dependencies → new link (DATA-1).
  *   E17 a copy of a plugin-managed snapshot stays 'plugin-managed'; the plugin-scope deny holds on the grandchild (SEC-1).
  *   E18 intent lock not acquired within the bounded wait → 409 CONFLICT, no ledger read, no install (TX-4).
+ *   E19 in-transaction TARGET gate = platform admin ∨ resolveBaseWritable (CS-3 amended 2026-09-28): an admin who is
+ *       neither base owner nor base-write holder copies; a non-admin in that position → 403 FORBIDDEN, nothing written.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -677,5 +679,42 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(snapshotCounts(pg)).toEqual(before)
     release()
     await holder
+  })
+
+  it('E19: in-transaction target gate = platform admin ∨ resolveBaseWritable (CS-3 amended 2026-09-28) — an admin who neither owns the base nor holds a base-write code copies; a non-admin in the same position is 403 FORBIDDEN with nothing written', async () => {
+    // The service imports the shared predicate directly (not via deps), so this is the DB-fresh re-check itself: the
+    // route's fast gate is not in the picture. The fake answers no global permission codes → only ownership or the
+    // admin ROLE can admit anyone at the target gate.
+    const pg = new FakePg()
+    seedFixture(pg)
+    pg.rows('meta_bases')[0]!.owner_id = READER // the admin actor is NOT the owner
+    const outcome = await run(pg) // module-level actor: isAdminRole true, no base-write code
+    expect(outcome.replayed).toBe(false)
+    expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(1)
+
+    // Same position, admin role OFF: the source gate is stubbed open (deps.hasFullTableReadAccess → true) so the
+    // refusal below can come from the TARGET gate only. READER holds a sheet-level read grant (canRead in-tx passes).
+    const nonAdminPg = new FakePg()
+    seedFixture(nonAdminPg) // base owned by ADMIN
+    const before = snapshotCounts(nonAdminPg)
+    const d = deps()
+    const nonAdmin: CopySheetActor = {
+      access: { userId: READER, permissions: ['multitable:read', 'multitable:write'], isAdminRole: false },
+      actorId: READER,
+      tenantId: null,
+    }
+    const err = await expectRefusal(executeCopySheet({
+      pool: { transaction: (h) => nonAdminPg.transaction(h) },
+      request,
+      actor: nonAdmin,
+      deps: d,
+      targetBaseId: BASE,
+      copierCanManageSourceFields: false,
+      buildBody,
+      dedupe: { sleep: async () => {} },
+    }), 403, COPY_SHEET_ERROR_CODES.forbidden)
+    expect(err.details).toEqual({})
+    expect(d.hasFullTableReadAccess).toHaveBeenCalledTimes(1) // the source gate DID run and passed; the target gate refused
+    expect(snapshotCounts(nonAdminPg)).toEqual(before)
   })
 })

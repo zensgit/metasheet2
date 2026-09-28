@@ -208,10 +208,12 @@ export function defineCopySheetRealDbCases(): void {
       }
       for (const id of [ADMIN, WRITER, WRITER_MASKED, SCOPED_READER, WRITE_OWN, TAINTED, REVOKED]) await grantGlobal(id, ['multitable:read', 'multitable:write'])
       for (const id of [DENIED_A, DENIED_B, DENIED_C]) await grantGlobal(id, ['multitable:read'])
-      // The target gate is resolveBaseWritable (CS-3 / §4.2): `multitable:base:write` OR base ownership. ADMIN owns
-      // the base; the non-admin copiers need the code (plain `multitable:write` is NOT a base-write code). WRITER and
-      // WRITER_MASKED deliberately do NOT get it — their cases are refused by the SOURCE gate first (G1/G1b), which is
-      // what pins the gate ORDER: source 403 before target 403.
+      // The target gate is resolveCopyTargetWritable (CS-3 / §4.2, amended 2026-09-28): platform admin ROLE OR
+      // resolveBaseWritable (`multitable:base:write` OR base ownership). ADMIN owns the base here (so this fixture does
+      // not exercise the role arm — that is pinned on the fake by routes H11 / service E19); the non-admin copiers need
+      // the code (plain `multitable:write` is NOT a base-write code). WRITER and WRITER_MASKED deliberately do NOT get
+      // it — their cases are refused by the SOURCE gate first (G1/G1b), which is what pins the gate ORDER: source 403
+      // before target 403.
       await grantGlobal(SCOPED_READER, ['multitable:base:write'])
       await grantGlobal(TAINTED, ['multitable:base:write'])
       await grantGlobal(REVOKED, ['multitable:base:write'])
