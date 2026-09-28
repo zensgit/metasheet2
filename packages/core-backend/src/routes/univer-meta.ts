@@ -4585,6 +4585,19 @@ function invalidateFieldCache(sheetId: string): void {
   metaFieldCache.delete(sheetId)
 }
 
+/**
+ * Drop the two caches that carry a sheet's DISPLAY NAMES — its field list (`loadSheetFields`) and its
+ * summary (`loadSheetSummary`) — after a rename committed OUTSIDE this router. Both caches are
+ * process-lifetime maps with no TTL, so without this a relabel written through the plugin
+ * provisioning surface (multitable/object-display-name-relabel.ts) would keep serving the old names
+ * to GET /view until something unrelated happened to invalidate them. Call it only after the write's
+ * transaction has committed; calling it without a write is harmless (the next read re-fills).
+ */
+export function invalidateSheetDisplayNameCaches(sheetId: string): void {
+  invalidateFieldCache(sheetId)
+  invalidateSheetSummaryCache(sheetId)
+}
+
 function invalidateViewConfigCache(viewId?: string): void {
   if (typeof viewId === 'string' && viewId.trim().length > 0) {
     metaViewConfigCache.delete(viewId.trim())

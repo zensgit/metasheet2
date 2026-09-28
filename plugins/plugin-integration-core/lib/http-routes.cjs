@@ -115,6 +115,12 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
+  // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): relabel the managed tables that ALREADY
+  // exist from their English template labels to the Chinese ones — dry run unless `apply: true` +
+  // the preview's `planDigest`, compare-and-set, one config-history row per rename; the write leg is
+  // default OFF (MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED). stock-prep:admin (platform admin passes
+  // too); tenant from the VERIFIED claim only. See stock-preparation-managed-table-relabel.cjs.
+  ['POST', '/api/integration/stock-preparation/managed-tables/relabel-zh', 'stockPreparationManagedTableRelabel'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
@@ -454,6 +460,7 @@ const {
 // verbatim with the front end (the web alignment suite imports this same module), so the FE control
 // set and the BE gate set cannot drift.
 const {
+  STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_READ,
@@ -467,6 +474,12 @@ const {
 const {
   computeStockPreparationPreflight,
 } = require('./stock-preparation-preflight.cjs')
+// 「把系统表的英文表头改成中文」: the compare-and-set relabel of the managed tables that already exist.
+const {
+  runStockPreparationManagedTableRelabel,
+  // The ONE plan-digest shape, shared with the module rather than copied here.
+  PLAN_DIGEST_PATTERN: MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN,
+} = require('./stock-preparation-managed-table-relabel.cjs')
 // SOURCE PREFLIGHT + TOPOLOGY SELF-TEST: the other half of "is this ready" — the CUSTOMER'S source
 // rather than this deployment. It measures reachability, business-data presence, WHICH bridge the
 // source uses (order module vs DesignBom) and WHICH generic slot carries the BOM quantity, then
@@ -2249,6 +2262,45 @@ function stockPreparationTargetWriteInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
   }
+}
+
+// 「把系统表的英文表头改成中文」 — the relabel request has exactly TWO legal shapes:
+//   {}                                  the dry run (also `{ apply: false }`)
+//   { apply: true, planDigest: 'sha256:<64 hex>' }   the apply of THAT preview
+// `apply` must be a real boolean (a string "true" or a 1 is refused rather than coerced), a digest
+// without `apply: true` is refused, and `apply: true` without a well-formed digest is refused — so
+// the one bit that decides whether anything is written cannot be produced by accident, and cannot be
+// produced at all without having looked at a preview. The tables, the target names and the project
+// are all server-derived, so any other body key and ANY query key is a steering attempt and is
+// refused before the host is asked anything.
+const VALID_MANAGED_TABLE_RELABEL_BODY_KEYS = new Set(['apply', 'planDigest'])
+
+function normalizeManagedTableRelabelRequest(req) {
+  const body = requestBody(req)
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_MANAGED_TABLE_RELABEL_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const queryKeys = Object.keys(requestQuery(req))
+  if (queryKeys.length > 0) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported query field: ${queryKeys[0]}`, { field: queryKeys[0] })
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'apply') && typeof body.apply !== 'boolean') {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply must be a boolean', { field: 'apply' })
+  }
+  const apply = body.apply === true
+  const hasDigest = Object.prototype.hasOwnProperty.call(body, 'planDigest')
+  if (hasDigest && !apply) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'planDigest is only accepted together with apply: true', { field: 'planDigest' })
+  }
+  if (apply && (typeof body.planDigest !== 'string' || !MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN.test(body.planDigest))) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply requires the planDigest of the preview being confirmed', { field: 'planDigest' })
+  }
+  return { apply, planDigest: apply ? body.planDigest : null }
 }
 
 function stockPreparationTargetInput(req, rawInput = {}) {
@@ -7073,6 +7125,57 @@ function requireStockPreparationAudit() {
       } catch (error) {
         throw sandboxTargetRouteError(error)
       }
+    },
+
+    // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a). DRY RUN unless the body says
+    // `apply: true` AND carries the `planDigest` of the preview being confirmed; the apply recomputes
+    // the plan and refuses (409 MANAGED_TABLE_RELABEL_PLAN_CHANGED) if it moved. The write leg is
+    // DEFAULT OFF behind MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED (exactly 'true'); off, it answers
+    // 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED before asking the host anything, and the dry run keeps
+    // working and says `applyEnabled: false`. Every rename writes one config-history row: FIELD
+    // renames are revertible there, SHEET renames are recorded but not revertible there.
+    //
+    // GATE: stock-prep:admin — the workbench-scoped ceiling the 数据来源与体检 page this control
+    // lives on is already gated on (canOpenStockPrepInstallView); platform admin passes inside that
+    // decision. What it opens is narrow by construction: no table, no name and no project comes from
+    // the request, and a column a person already renamed is never touched.
+    //
+    // TENANT: the VERIFIED token claim only (`resolveVerifiedClaimTenantId`), never `user.tenantId`,
+    // which the host fills from the `x-tenant-id` header for a claimless token — a header must not
+    // choose whose tables get renamed. The dry run uses the same resolver so it rehearses exactly the
+    // tables the apply would act on.
+    async stockPreparationManagedTableRelabel(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      const input = normalizeManagedTableRelabelRequest(req)
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const provisioning = context && context.api && context.api.multitable ? context.api.multitable.provisioning : null
+      // The sandbox write allowlist (server config, else env) names sandbox tables too — server-held,
+      // never request-supplied, and namespace-filtered again inside the module.
+      const sandboxPolicy = resolveStockPrepApplySandboxPolicy(context && context.config)
+      const result = await runStockPreparationManagedTableRelabel({
+        provisioning,
+        projectId,
+        packCatalog: customerPackCatalog,
+        sandboxObjectIds: sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds) ? sandboxPolicy.allowedTargetObjectIds : [],
+        apply: input.apply,
+        planDigest: input.planDigest,
+        env: process.env,
+        // Attribution for the config-history rows (who pressed 确认). Stringified: an auth provider may
+        // carry a numeric id, and dropping it to null would lose the actor on every revision.
+        actorId: user && user.id !== undefined && user.id !== null && String(user.id).trim() ? String(user.id) : null,
+      })
+      if (input.apply && routeLogger && typeof routeLogger.info === 'function') {
+        // Counts only — never a project id, a sheet id or a name.
+        routeLogger.info('[plugin-integration-core] stock-preparation managed-table relabel applied', {
+          tableCount: result.tables.length,
+          renamed: result.totals.renamed,
+          skippedNameChanged: result.totals.skipped_name_changed,
+          skippedNameTaken: result.totals.skipped_name_taken,
+          revisionCount: result.revisionCount,
+        })
+      }
+      return sendOk(res, result)
     },
 
     async stockPreparationOptionsSync(req, res) {

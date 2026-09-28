@@ -93,6 +93,7 @@ import {
   runObjectFieldsRepairTransactionWith,
   type MultitableProvisioningQueryFn,
 } from './multitable/provisioning'
+import { runRelabelObjectDisplayNamesWith } from './multitable/object-display-name-relabel'
 import {
   createRecord as createMultitableRecord,
   deleteRecord as deleteMultitableRecord,
@@ -395,7 +396,7 @@ import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
-import { univerMetaRouter } from './routes/univer-meta'
+import { invalidateSheetDisplayNameCaches, univerMetaRouter } from './routes/univer-meta'
 import {
   createRecoveryArchiveApplication,
   type RecoveryArchiveApplication,
@@ -1069,6 +1070,31 @@ export class MetaSheetServer {
               }
               return ensureMultitableSystemBase({ query: txQuery, baseId, name })
             })
+          },
+          // Display-name relabel of an already-provisioned object: compare-and-set, one transaction,
+          // one config-history row per rename (multitable/object-display-name-relabel.ts). The whole
+          // runner is the tested glue over the poolManager transaction primitive; `afterCommit` drops
+          // univer-meta's process-lifetime field/sheet caches ONLY after a committed write, so the grid
+          // shows the new names without a restart. The plugin-scope wrapper in front of this adds the
+          // project-namespace and object-scope checks; the host itself binds the registry triple.
+          relabelObjectDisplayNames: async (args) => {
+            return runRelabelObjectDisplayNamesWith(
+              (run) =>
+                poolManager.get().transaction(async ({ query }) => {
+                  const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+                    const result = await query(sql, params)
+                    return {
+                      rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                        ? (result as { rows: unknown[] }).rows
+                        : [],
+                      rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                    }
+                  }
+                  return run(txQuery)
+                }),
+              args,
+              invalidateSheetDisplayNameCaches,
+            )
           },
         },
         records: {
