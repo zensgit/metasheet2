@@ -354,6 +354,7 @@ import {
   fieldRetypeConvertIdentityInvalid,
   fieldRetypeConvertNotSupported,
   isFieldRetypeConversionRevision,
+  revertWritesFieldTypeOrProperty,
   undoFieldRetypeConvert,
   type FieldRetypeConvertFailure,
   type FieldRetypeConvertQuery,
@@ -11154,8 +11155,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // ends plain scalars), so isSupportedFieldRetypeRevert would open them — but the conversion REWROTE every cell,
       // and a schema-only revert would flip the field back to text over cells that are still option-shaped, after
       // which the whole-column undo can never pass its field check and the pre-image is unreachable. Refused BEFORE
-      // any token is minted (the lossy branch and the generic path below both mint one).
-      if (rev.entity_type === 'field' && (await isFieldRetypeConversionRevision(pool.query.bind(pool) as FieldRetypeConvertQuery, String(rev.id)))) {
+      // any token is minted (the lossy branch and the generic path below both mint one). Only a revision whose
+      // revert would WRITE type or property is looked up: a rename / reorder revert issues no extra statement.
+      if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(pool.query.bind(pool) as FieldRetypeConvertQuery, String(rev.id)))) {
         const refusal = fieldRetypeConversionRestoreRefusal()
         return res.status(refusal.status).json({ ok: false, error: { code: refusal.code, message: refusal.message, details: refusal.details } })
       }
@@ -11524,7 +11526,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // active recovery block. Flag-off ⇒ no-op / byte-identical.
             await fenceWriterEntry(query, sheetId)
             // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before the 4c-1 rewrite.
-            if (rev.entity_type === 'field' && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+            if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
               return fieldRetypeConversionRestoreRefusal()
             }
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
@@ -11602,7 +11604,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // before the snapshot read and UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
         // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before applyConfigRevert.
-        if (rev.entity_type === 'field' && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+        if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
           return fieldRetypeConversionRestoreRefusal()
         }
         const snapshot = await loadEntityConfigSnapshot(query, rev)

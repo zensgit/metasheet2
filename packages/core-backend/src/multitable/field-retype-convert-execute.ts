@@ -783,6 +783,18 @@ export async function undoFieldRetypeConvert(
 
 // ── Tier-2 配置回滚的拒绝（ADR §3.10）───────────────────────────────────────────────────────────────────
 
+/**
+ * 这条修订的**回滚**会不会写字段的 type 或 property。只有会的才需要去查作业表：
+ *   - 转换修订与撤销修订的 changed_keys 恒为 `[type, property]`（本模块写的，单测钉住），所以它们一定在这个集合里；
+ *   - 配置回滚只写 changed_keys 里的键（config-restore.ts `applyConfigRevert`），一条只改名字 / 顺序的修订回滚时
+ *     碰不到 type 与 property，§3.10 要防的那件事（字段翻回文本、单元格仍是选项形）对它不可能发生。
+ * 纯结构判定、零 SQL：与转换无关的配置回滚（改名、排序、视图、表配置）发出的语句序列因此与今天逐字节相同。
+ */
+export function revertWritesFieldTypeOrProperty(rev: { entity_type?: unknown; changed_keys?: unknown }): boolean {
+  if (rev.entity_type !== 'field' || !Array.isArray(rev.changed_keys)) return false
+  return rev.changed_keys.some((key) => key === 'type' || key === 'property')
+}
+
 // 只缓存「表在」：表一旦建出来就不会消失；「表不在」每次重问（迁移可能在进程运行中落地）。
 let conversionsTablePresent = false
 export function __resetFieldRetypeConversionsTableProbe(): void {

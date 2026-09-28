@@ -236,6 +236,10 @@ export class FieldRetypeConvertFakePg {
     if (sql.startsWith('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1')) {
       return w.fields.filter((f) => f.id === p[0]).map((f) => ({ id: f.id, sheet_id: f.sheet_id, type: f.type, property: clone(f.property) }))
     }
+    // config-restore's 4c-1 lossy branch locates its field with this shape (with and without FOR UPDATE)
+    if (sql.startsWith('SELECT id, sheet_id, type FROM meta_fields WHERE id = $1')) {
+      return w.fields.filter((f) => f.id === p[0]).map((f) => ({ id: f.id, sheet_id: f.sheet_id, type: f.type }))
+    }
     if (sql.startsWith('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE')) {
       return w.fields.filter((f) => f.id === p[0]).map((f) => clone(f) as unknown as FakeRow)
     }

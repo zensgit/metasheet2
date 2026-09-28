@@ -33,6 +33,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { defineFieldRetypeConvertRealDbCases } from './multitable-field-retype-convert-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -678,3 +679,10 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     }
   })
 })
+
+// Field retype CONVERT slice 3 — execute + whole-column undo real-DB cases (ADR
+// docs/development/multitable-field-retype-first-batch-adr-20260926.md §6 row 3). They ride in this already-wired
+// real-DB host so they execute in the existing "Run multitable real-DB integration" step without a new lane file and
+// without touching the workflow. Self-contained fixtures (own base / users / sheets, unique ids), own cleanup, and a
+// fail-not-skip sentinel OUTSIDE the DB-gated describe.
+defineFieldRetypeConvertRealDbCases()
