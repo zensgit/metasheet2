@@ -527,10 +527,11 @@ const {
   // warning cannot drift apart.
   CARRY_TARGET_OWNERSHIP_STATES,
   decideCarryTargetOwnership,
-  // ...and the two refusal vocabularies that verdict is mapped into: the carry's and the materials
-  // export's. The wall below is ONE function; only the codes differ per route.
+  // ...and the three refusal vocabularies that verdict is mapped into: the carry's, the materials
+  // export's and the handoff advance's. The wall below is ONE function; only the codes differ per route.
   CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
   PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -814,13 +815,16 @@ function sendError(res, error) {
 // Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
 // sheet id, never a project id, never a row.
 //
-// ONE WALL, TWO ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
+// ONE WALL, THREE ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
 // through the very same deploy-global binding, so it needs the very same answer to "is this the
 // caller's sheet". It gets it from THIS function — the same two facts, gathered in the same order
 // from the same host port, decided by the same `decideCarryTargetOwnership` — and differs only in
-// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). A second
-// copy of the fact-gathering would be a second place for "registry, then derived id" to drift; a
-// change to how ownership is established must land in both routes at once or in neither.
+// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). The
+// handoff advance (通知下一步) is the third: it probes that same sheet for "does this project have any
+// row" before it writes a cursor, an audit row and a DingTalk ping, and the probe's answer is itself
+// a fact about the sheet, so it runs this wall first (#6121). A second copy of the fact-gathering
+// would be a second place for "registry, then derived id" to drift; a change to how ownership is
+// established must land in every route at once or in none.
 async function assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall } = {}) {
   if (!wall || !wall.refusalCodes || !wall.portUnavailableCode) {
     // A programming error, never a request-shaped one: every caller passes a frozen wall below.
@@ -852,8 +856,9 @@ async function assertStockPreparationTargetBelongsToTenant({ provisioning, targe
 }
 
 // The per-route refusal vocabularies. The carry keeps EXACTLY the codes it always answered (the
-// preflight quotes them back, and the runbook tells a deployer what they mean); the export gets its
-// own family, so an export click is never reported as a 结转 refusal.
+// preflight quotes them back, and the runbook tells a deployer what they mean); the export and the
+// handoff advance each get their own family, so neither click is ever reported as a 结转 refusal.
+// The handoff family stays inside the route's existing STOCK_PREPARATION_HANDOFF_* prefix.
 const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
   carry: Object.freeze({
     label: 'carry',
@@ -865,6 +870,11 @@ const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
     refusalCodes: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
     portUnavailableCode: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
   }),
+  handoffAdvance: Object.freeze({
+    label: 'handoff advance',
+    refusalCodes: STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE',
+  }),
 })
 
 function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
@@ -873,6 +883,10 @@ function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, targe
 
 function assertPrepLineExportTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
   return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.prepLineExport })
+}
+
+function assertHandoffAdvanceTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.handoffAdvance })
 }
 
 // One message per refusing state. Values-free: they name no sheet id and no project id.
@@ -9449,6 +9463,32 @@ function requireStockPreparationAudit() {
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
+      // ...BUT THAT SHEET IS DEPLOY-GLOBAL, SO IT MUST BE PROVEN TO BE THE CALLER'S OWN FIRST (#6121).
+      //
+      // `getTableAction` is keyed by actionId alone, so `action.target` is the same sheet for every
+      // tenant on the deployment. Without this wall the existence probe below answered "does this
+      // project number have rows in that sheet" to a caller whose sheet it is not — one bit per click,
+      // 404 PROJECT_NOT_FOUND versus carrying on — and on carrying on went on to write a cursor row and
+      // an audit row for that project number and send a DingTalk ping about it. The chain-for-tenant check above does
+      // not close this: it proves the CHAIN is the caller's, never the SHEET, and its policy for a
+      // chain is an owner decision this wall deliberately does not depend on.
+      //
+      // The SAME wall the 结转 write and the 按项目导出物料 read run
+      // (assertStockPreparationTargetBelongsToTenant), answering in this route's own
+      // STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary. It runs BEFORE the probe and therefore before
+      // every write: a refused caller gets one answer that does not depend on the project number,
+      // and the refusal costs one registry read (plus, on a registry miss, a pure id derivation) —
+      // zero records IO against the sheet, no cursor row, no audit row, no notification. The staging project is derived from the RESOLVED scope and
+      // nothing in the request, exactly as the export derives it, so the claimless (demo-machine)
+      // shape is walled on the directory-vouched tenant just as the claim-bearing one is.
+      await assertHandoffAdvanceTargetBelongsToTenant({
+        // The RAW host surface, as on the carry and the export: `getMultitableProvisioning()` would
+        // throw its own generic 503 for a host lacking `findObjectSheet`, masking this check's typed
+        // 501 about the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
       const projectExists = await stockPreparationProjectHasMainRows({
         recordsApi: getMultitableRecordsApi(),
         target: action.target,
@@ -10443,7 +10483,8 @@ module.exports = {
     stockPreparationExportSafeToken,
     stockPreparationExportTimestamp,
     // The ONE stock-prep target tenant wall and its per-route vocabularies, exported so a suite can
-    // witness that the carry and the export answer one verdict in two vocabularies.
+    // witness that the carry, the export and the handoff advance answer one verdict in three
+    // vocabularies.
     assertStockPreparationTargetBelongsToTenant,
     STOCK_PREPARATION_TARGET_TENANT_WALLS,
   },
