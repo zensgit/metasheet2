@@ -5,6 +5,7 @@ import { tmpdir, userInfo } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 
 /**
  * multitable-onprem-preflight.sh must judge app.env the way the backend loads it.
@@ -23,17 +24,21 @@ import { spawnSync } from 'node:child_process'
  *   - the preflight's reader agrees with the REAL ecosystem.config.cjs loader, run as the oracle,
  *     over a battery of line shapes (duplicates, CRLF, BOM, quotes, `export`, inline `#`, JS
  *     whitespace such as NBSP / U+3000), in the C, UTF-8 and (when present) GBK locales;
- *   - a key declared more than once is a DUPLICATE_ENV_KEY failure that names identifier keys and
+ *   - a key declared more than once is a DUPLICATE_ENV_KEY failure that names keys and PHYSICAL
  *     line numbers and says which deletion is safe, including the shipped template with the
- *     material appended;
+ *     material appended, and including a file with a GBK-saved comment read under a UTF-8 locale;
+ *   - two declarations are "identical" only when their raw value bytes are equal, so values that
+ *     differ only in a no-break space, U+3000 or U+FEFF are reported as DIFFER;
  *   - a UTF-16 / NUL-carrying file and an unreadable file fail with a report instead of passing or
  *     aborting;
  *   - no output channel (stdout, stderr, JSON report, Markdown report) ever carries a value, not
- *     even through the key position.
+ *     even through the key position: a key is printed only if the shipped template declares it or
+ *     it is an upper-case snake-case name with an underscore, at most 64 characters.
  *
  * Hermetic and values-free: every env fixture is synthetic and built here, no real env file is
  * read, no network, no npm dependency (bare `node --test`), and no assertion message prints a value.
- * Non-ASCII code points are built with String.fromCodePoint so this file stays pure ASCII.
+ * Non-ASCII code points are built with String.fromCodePoint and non-UTF-8 bytes with byte arrays, so
+ * this file stays pure ASCII.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -126,6 +131,16 @@ const UTF8_LOCALE = bashLocaleWorks('C.UTF-8', '\\xe4\\xb8\\xad', 1) ? 'C.UTF-8'
 const GBK_LOCALE = bashLocaleWorks('zh_CN.GBK', '\\xe4\\xb8\\xad', 2) ? 'zh_CN.GBK' : null
 const LOCALES = ['C', UTF8_LOCALE, ...(GBK_LOCALE ? [GBK_LOCALE] : [])]
 
+// The UTF-8 locale the CI image (ubuntu-24.04, `test` job of plugin-tests.yml) has: glibc ships
+// C.UTF-8 built in. The locale tests below mean nothing in C, so a missing C.UTF-8 FAILS them.
+const CI_UTF8_LOCALE = 'C.UTF-8'
+function requireCiUtf8Locale() {
+  assert.ok(
+    bashLocaleWorks(CI_UTF8_LOCALE, '\\xe4\\xb8\\xad', 1),
+    `${CI_UTF8_LOCALE} must be available to bash here: these tests only mean something under a UTF-8 locale`,
+  )
+}
+
 /**
  * Stage the LF script where BASH_SOURCE-relative paths still resolve, then run it on `content`
  * (a string, written as UTF-8, or a Buffer, written verbatim).
@@ -160,6 +175,8 @@ function runPreflight(content, { reports = true, locale = null, beforeRun = null
       if (result.error) throw result.error
       return {
         status: result.status,
+        stdout: result.stdout ?? '',
+        stderr: result.stderr ?? '',
         output: `${result.stdout ?? ''}${result.stderr ?? ''}`,
         json: reports && existsSync(jsonFile) ? JSON.parse(readFileSync(jsonFile, 'utf8')) : null,
         md: reports && existsSync(mdFile) ? readFileSync(mdFile, 'utf8') : null,
@@ -193,6 +210,15 @@ function assertFailedWith(run, prefix, label) {
   }
   if (run.md) assert.ok(run.md.includes(prefix), `${label}: markdown report must carry the error`)
 }
+
+// For ENCRYPTION_* an EMPTY line is safe to delete only under NODE_ENV=production; stderr says so
+// itself, not only the report's suggested actions (outside production that line can be in use).
+const MATERIAL_EMPTY_CLAUSE = lines =>
+  `EMPTY on line(s) ${lines} -- safe to delete only if this host's backend runs with NODE_ENV=production (it refuses empty material there, so no stored secret depends on an empty line); outside production an empty line can be the material in use (an empty value falls back to the built-in default material, a whitespace-only one can be used as it is), so confirm which material encrypted the stored secrets before deleting; keep one non-empty declaration`
+const PLAIN_EMPTY_CLAUSE = lines => `EMPTY on line(s) ${lines} -- safe to delete; keep one non-empty declaration`
+const MATERIAL_DIFFER_CLAUSE =
+  'the non-empty values DIFFER -- do NOT delete either line until you have confirmed which value encrypted the existing stored secrets'
+const WITHHELD = '<key withheld>'
 
 function assertFailedWithDuplicate(run, label) {
   assertFailedWith(run, 'DUPLICATE_ENV_KEY: ', label)
@@ -291,8 +317,8 @@ test('(b) shipped template: material set IN PLACE passes, the same material APPE
     ['ENCRYPTION_SALT', saltLine, lines.length + 2],
   ]) {
     assert.ok(
-      run.output.includes(`${key} appears 2 times (lines ${first}, ${later}): EMPTY on line(s) ${first} -- safe to delete; keep one non-empty declaration`),
-      `${key}: the message must name both lines and say the empty one is safe to delete`,
+      run.output.includes(`${key} appears 2 times (lines ${first}, ${later}): ${MATERIAL_EMPTY_CLAUSE(first)}`),
+      `${key}: the message must name both lines and say when the empty one is safe to delete`,
     )
   }
   assertNoValues(run, ['appendedKey', 'appendedSalt', 'jwt', 'pg'])
@@ -307,9 +333,10 @@ test('(b) any key: an empty declaration next to a non-empty one fails and is nam
     const firstLine = lineOf(base, key)
     const laterLine = Object.keys(base).length + 1
     assertFailedWithDuplicate(run, key)
+    const clause = key.startsWith('ENCRYPTION_') ? MATERIAL_EMPTY_CLAUSE(firstLine) : PLAIN_EMPTY_CLAUSE(firstLine)
     assert.ok(
-      run.output.includes(`${key} appears 2 times (lines ${firstLine}, ${laterLine}): EMPTY on line(s) ${firstLine} -- safe to delete`),
-      `${key}: wrong duplicate message shape`,
+      run.stderr.includes(`${key} appears 2 times (lines ${firstLine}, ${laterLine}): ${clause}`),
+      `${key}: wrong duplicate message shape on stderr`,
     )
     assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
   }
@@ -319,9 +346,33 @@ test('(b) any key: an empty declaration next to a non-empty one fails and is nam
   const run = runPreflight(`${envText(base)}ENCRYPTION_KEY=\n`, { reports: false })
   const n = Object.keys(base).length
   assert.ok(
-    run.output.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 1}): EMPTY on line(s) ${n + 1} -- safe to delete`),
-    'a later EMPTY declaration must be named as the safe deletion',
+    run.stderr.includes(`ENCRYPTION_KEY appears 2 times (lines ${lineOf(base, 'ENCRYPTION_KEY')}, ${n + 1}): ${MATERIAL_EMPTY_CLAUSE(n + 1)}`),
+    'a later EMPTY declaration must be named as the safe deletion, with the production condition',
   )
+})
+
+test('F4 stderr carries the NODE_ENV=production condition for an EMPTY ENCRYPTION_* line, not only the report', () => {
+  const base = validEnv({ ENCRYPTION_SALT: '' })
+  const n = Object.keys(base).length
+  const run = runPreflight(`${envText(base)}ENCRYPTION_SALT=${SYNTH.appendedSalt}\nJWT_SECRET=\n`)
+  assertFailedWithDuplicate(run, 'F4')
+  const saltLine = lineOf(base, 'ENCRYPTION_SALT')
+  assert.ok(
+    run.stderr.includes(`ENCRYPTION_SALT appears 2 times (lines ${saltLine}, ${n + 1}): ${MATERIAL_EMPTY_CLAUSE(saltLine)}`),
+    'the stderr clause for an EMPTY ENCRYPTION_SALT line must carry the production condition',
+  )
+  assert.doesNotMatch(run.stderr, /ENCRYPTION_SALT appears[^;]*-- safe to delete;/, 'no unconditional "safe to delete" for ENCRYPTION_*')
+  // Other keys keep the unconditional wording: no stored secret is derived from them.
+  assert.ok(
+    run.stderr.includes(`JWT_SECRET appears 2 times (lines ${lineOf(base, 'JWT_SECRET')}, ${n + 2}): ${PLAIN_EMPTY_CLAUSE(n + 2)}`),
+    'a non-material EMPTY line stays unconditionally deletable',
+  )
+  // The same condition in the report, so stderr and report cannot disagree.
+  assert.ok(
+    run.json.suggestedActions.some(action => action.includes('this holds on a host whose backend runs with NODE_ENV=production')),
+    'the report must carry the same condition',
+  )
+  assertNoValues(run, ['appendedSalt', 'key', 'jwt', 'pg'])
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -449,23 +500,22 @@ test('lines the backend loader ignores never count as declarations (comments, ke
 // Review S3: a value must not leak through the key position
 // ---------------------------------------------------------------------------------------------
 
-test('S3 a non-identifier duplicated key is printed as <non-identifier key>, never verbatim', () => {
+test('S3 a non-identifier duplicated key is printed as <key withheld>, never verbatim', () => {
   const base = validEnv()
   const n = Object.keys(base).length
   // `KEY: value` instead of `KEY=value`: the first '=' is inside the query string, so the loader's
   // "key" is the whole DSN up to it, secret included.
   const leaky = `DATABASE_URL: postgres://synthetic:${SYNTH.dsnLeak}@127.0.0.1:5432/synthetic?sslmode=disable`
-  // A bare hex secret pasted on its own line with a trailing '=' is identifier-shaped except that it
-  // starts with a digit (SYNTH.key does), so the leading-digit rule is what keeps it unprinted.
+  // A bare hex secret pasted on its own line with a trailing '=' (SYNTH.key starts with a digit).
   const bareHex = `${SYNTH.key}=`
   const run = runPreflight(
     `${envText(base)}${leaky}\n${leaky}\nexport ENCRYPTION_KEY=${SYNTH.laterKey}\nexport ENCRYPTION_KEY=${SYNTH.laterKey}\n${bareHex}\n${bareHex}\n`,
   )
   assertFailedWithDuplicate(run, 'non-identifier keys')
   assert.ok(
-    run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 1}, ${n + 2})`) &&
-      run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 3}, ${n + 4})`) &&
-      run.output.includes(`<non-identifier key> appears 2 times (lines ${n + 5}, ${n + 6})`),
+    run.output.includes(`${WITHHELD} appears 2 times (lines ${n + 1}, ${n + 2})`) &&
+      run.output.includes(`${WITHHELD} appears 2 times (lines ${n + 3}, ${n + 4})`) &&
+      run.output.includes(`${WITHHELD} appears 2 times (lines ${n + 5}, ${n + 6})`),
     'non-identifier keys must be labelled, with their line numbers',
   )
   assertNoValues(run, ['dsnLeak', 'laterKey', 'key', 'jwt', 'pg'])
@@ -525,7 +575,7 @@ const utf16be = text => {
   return le
 }
 
-test('S2 a UTF-16 or NUL-carrying app.env fails as not UTF-8; UTF-8 with a BOM still passes', () => {
+test('S2 a UTF-16 or NUL-carrying app.env fails as not UTF-8 text; UTF-8 with a BOM still passes', () => {
   const text = envText(validEnv())
   const cases = [
     ['UTF-16LE with BOM (PowerShell 5.1 Out-File)', Buffer.from(`${BOM}${text}`, 'utf16le')],
@@ -537,10 +587,20 @@ test('S2 a UTF-16 or NUL-carrying app.env fails as not UTF-8; UTF-8 with a BOM s
   ]
   for (const [label, bytes] of cases) {
     const run = runPreflight(bytes)
-    assertFailedWith(run, 'ENV_FILE is not UTF-8: ', label)
+    assertFailedWith(run, 'ENV_FILE is not UTF-8 text: ', label)
+    // F7: one message for both causes. A single stray NUL in a UTF-8 file is not "UTF-16".
+    assert.doesNotMatch(run.stderr, /looks like UTF-16/, `${label}: must not claim the file looks like UTF-16`)
     assert.ok(
-      run.json.suggestedActions.some(action => action.includes('Re-save app.env as UTF-8 without a byte-order mark')),
-      `${label}: must carry the re-save action`,
+      run.stderr.includes('Either it was saved as UTF-16') && run.stderr.includes('or it is UTF-8 with stray NUL bytes'),
+      `${label}: the message must name both causes`,
+    )
+    assert.ok(
+      run.json.suggestedActions.some(
+        action =>
+          action.includes('Re-save app.env as UTF-8 without a byte-order mark') &&
+          action.includes('If the file is already UTF-8, remove the stray NUL bytes'),
+      ),
+      `${label}: must carry the re-save action for both causes`,
     )
     assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
   }
@@ -813,6 +873,314 @@ test('(b)/(c) reader: a duplicated key resolves to its FIRST declaration, empty 
     assert.ok(salt === SYNTH.salt, '(c) ENCRYPTION_SALT: the first non-empty declaration must win')
     assert.ok(jwt === SYNTH.jwt, '(c) JWT_SECRET: the first non-empty declaration must win')
   })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Round-2 F1: the file is read byte-wise (LC_ALL=C) whatever the operator's locale, so a comment
+// saved in GBK cannot swallow the next line, and every reported line number is a physical one
+// ---------------------------------------------------------------------------------------------
+
+// '# ' + two CJK characters saved in GBK. The last byte (0xDC) is a UTF-8 lead byte, so under a
+// UTF-8 locale bash 5.2's `read` takes the LF after it as the rest of that character and swallows
+// the next line into the comment.
+const GBK_COMMENT = Buffer.from([0x23, 0x20, 0xbc, 0xd3, 0xc3, 0xdc])
+
+/** LF-join lines (strings or Buffers); `physical[i]` is physical line i + 1, one char per byte. */
+function lfFile(parts) {
+  const bytes = Buffer.concat(parts.flatMap(part => [Buffer.isBuffer(part) ? part : Buffer.from(part), Buffer.from('\n')]))
+  return { bytes, physical: bytes.toString('latin1').split('\n') }
+}
+
+function physicalLineOf(physical, text) {
+  const index = physical.indexOf(text)
+  assert.ok(index >= 0, 'fixture line not found')
+  return index + 1
+}
+
+/** Diagnostic only: does a bare `read` loop under `locale` swallow the line after `lineBytes`? */
+function bashReadSwallows(locale, lineBytes) {
+  return withTempDir('mt-onprem-read-probe-', dir => {
+    const file = path.join(dir, 'probe.env')
+    writeFileSync(file, Buffer.concat([lineBytes, Buffer.from('\nPROBE_NEXT=1\n')]))
+    const result = spawnSync(
+      'bash',
+      ['--noprofile', '--norc', '-c', 'n=0; while IFS= read -r l; do n=$((n + 1)); done < "$1"; printf %s "$n"', '_', shellPath(file)],
+      { encoding: 'utf8', env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', LC_ALL: locale } },
+    )
+    return result.stdout !== '2'
+  })
+}
+
+function localePremise(t) {
+  requireCiUtf8Locale()
+  const swallows = bashReadSwallows(CI_UTF8_LOCALE, GBK_COMMENT)
+  t.diagnostic(
+    `premise: a bare read loop under ${CI_UTF8_LOCALE} ${swallows ? 'DOES' : 'does NOT'} swallow the line after a GBK comment on this bash (bash 5.2 on the CI image does)`,
+  )
+}
+
+test('F1 a GBK comment directly above a duplicated key: still DUPLICATE_ENV_KEY, physical lines, under C.UTF-8 and C', t => {
+  localePremise(t)
+  const entries = Object.entries(validEnv({ ENCRYPTION_KEY: '' })).map(([key, value]) => `${key}=${value}`)
+  const at = entries.indexOf('ENCRYPTION_KEY=')
+  const appended = `ENCRYPTION_KEY=${SYNTH.appendedKey}`
+  const { bytes, physical } = lfFile([...entries.slice(0, at), GBK_COMMENT, ...entries.slice(at), appended])
+  const emptyLine = physicalLineOf(physical, 'ENCRYPTION_KEY=')
+  const laterLine = physicalLineOf(physical, appended)
+  for (const locale of [CI_UTF8_LOCALE, 'C']) {
+    const run = runPreflight(bytes, { locale })
+    assertFailedWithDuplicate(run, `${locale}: GBK comment above the empty line`)
+    assert.ok(
+      run.stderr.includes(`ENCRYPTION_KEY appears 2 times (lines ${emptyLine}, ${laterLine}): ${MATERIAL_EMPTY_CLAUSE(emptyLine)}`),
+      `${locale}: both declarations must be seen, at their physical line numbers`,
+    )
+    assertNoValues(run, ['appendedKey', 'salt', 'jwt', 'pg'])
+  }
+})
+
+test('F1 a GBK comment directly above the first of two different values: still DIFFER, physical lines, under C.UTF-8 and C', t => {
+  localePremise(t)
+  const entries = Object.entries(validEnv()).map(([key, value]) => `${key}=${value}`)
+  const first = `ENCRYPTION_KEY=${SYNTH.key}`
+  const later = `ENCRYPTION_KEY=${SYNTH.laterKey}`
+  const at = entries.indexOf(first)
+  const { bytes, physical } = lfFile([...entries.slice(0, at), GBK_COMMENT, ...entries.slice(at), later])
+  const firstLine = physicalLineOf(physical, first)
+  const laterLine = physicalLineOf(physical, later)
+  for (const locale of [CI_UTF8_LOCALE, 'C']) {
+    const run = runPreflight(bytes, { locale })
+    assertFailedWithDuplicate(run, `${locale}: GBK comment above the first value`)
+    assert.ok(
+      run.stderr.includes(`ENCRYPTION_KEY appears 2 times (lines ${firstLine}, ${laterLine}): ${MATERIAL_DIFFER_CLAUSE}`),
+      `${locale}: two different values must be reported as DIFFER at their physical line numbers`,
+    )
+    assertNoValues(run, ['key', 'laterKey', 'salt', 'jwt', 'pg'])
+  }
+})
+
+test('F1 a GBK comment near the top: the line called EMPTY is the physically empty one, not the value above it', t => {
+  localePremise(t)
+  const entries = Object.entries(validEnv({ ENCRYPTION_KEY: '' })).map(([key, value]) => `${key}=${value}`)
+  const at = entries.indexOf('ENCRYPTION_KEY=')
+  // The operator put the value on a NEW line directly above the template's empty line.
+  const value = `ENCRYPTION_KEY=${SYNTH.key}`
+  const { bytes, physical } = lfFile([GBK_COMMENT, ...entries.slice(0, at), value, ...entries.slice(at)])
+  const valueLine = physicalLineOf(physical, value)
+  const emptyLine = physicalLineOf(physical, 'ENCRYPTION_KEY=')
+  assert.equal(emptyLine, valueLine + 1, 'fixture: the empty line sits directly below the value')
+  for (const locale of [CI_UTF8_LOCALE, 'C']) {
+    const run = runPreflight(bytes, { locale })
+    assertFailedWithDuplicate(run, `${locale}: GBK comment near the top`)
+    const named = run.stderr.match(/ENCRYPTION_KEY appears 2 times \(lines [0-9, ]+\): EMPTY on line\(s\) ([0-9]+) /)
+    assert.ok(named, `${locale}: an EMPTY line must be named`)
+    assert.equal(physical[Number(named[1]) - 1], 'ENCRYPTION_KEY=', `${locale}: the line called EMPTY must be the empty declaration`)
+    assert.ok(
+      run.stderr.includes(`ENCRYPTION_KEY appears 2 times (lines ${valueLine}, ${emptyLine}): ${MATERIAL_EMPTY_CLAUSE(emptyLine)}`),
+      `${locale}: reported line numbers must be the physical ones`,
+    )
+    assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
+  }
+})
+
+test('F1 structure: every read loop over the env file sits in a function whose first statement is local LC_ALL=C', () => {
+  const source = readLf(SCRIPT)
+  const loops = [...source.matchAll(/^[ \t]*done < "\$ENV_FILE"$/gm)]
+  assert.ok(loops.length >= 2, 'expected the read loops of get_env_value and require_unique_env_keys')
+  for (const loop of loops) {
+    const head = source.lastIndexOf('\nfunction ', loop.index)
+    assert.ok(head >= 0, 'a read loop over the env file must sit inside a function')
+    const [signature, firstStatement] = source.slice(head + 1).split('\n')
+    assert.equal(firstStatement.trim(), 'local LC_ALL=C', `${signature.trim()} must start with local LC_ALL=C`)
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// Round-2 F2: "identical" means equal raw value bytes; matching after a trim is not enough
+// ---------------------------------------------------------------------------------------------
+
+test('F2 premise: JS trim drops NBSP / U+3000 / U+FEFF, but bash `set -a; source` keeps them in an unquoted value', () => {
+  for (const ch of [NBSP, IDEOGRAPHIC_SPACE, BOM]) assert.equal(`${ch}x${ch}`.trim(), 'x')
+  withTempDir('mt-onprem-source-', dir => {
+    const file = path.join(dir, 'source.env')
+    writeFileSync(file, [`PF_NBSP=x${NBSP}`, `PF_IDEO=x${IDEOGRAPHIC_SPACE}`, `PF_BOM=x${BOM}`, 'PF_PLAIN=x', ''].join('\n'))
+    for (const locale of ['C', CI_UTF8_LOCALE]) {
+      const result = spawnSync(
+        'bash',
+        [
+          '--noprofile',
+          '--norc',
+          '-c',
+          'set -a; . "$1"; LC_ALL=C; printf "%s %s %s %s" "${#PF_NBSP}" "${#PF_IDEO}" "${#PF_BOM}" "${#PF_PLAIN}"',
+          '_',
+          shellPath(file),
+        ],
+        { encoding: 'utf8', env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', LC_ALL: locale } },
+      )
+      // Byte lengths: 'x' + 2 / 3 / 3 bytes; the plain control is 1.
+      assert.equal(result.stdout, '3 4 4 1', `${locale}: sourcing must keep the character in the value`)
+    }
+  })
+})
+
+test('F2 values that differ only in NBSP / U+3000 / U+FEFF (start or end, either order) are DIFFER, never identical', () => {
+  for (const [name, ch] of [
+    ['NBSP', NBSP],
+    ['U+3000', IDEOGRAPHIC_SPACE],
+    ['U+FEFF', BOM],
+  ]) {
+    for (const [where, pad] of [
+      ['start', value => `${ch}${value}`],
+      ['end', value => `${value}${ch}`],
+    ]) {
+      // ENCRYPTION_KEY: plain first, padded copy later. ENCRYPTION_SALT: padded first, plain later.
+      const base = validEnv({ ENCRYPTION_SALT: pad(SYNTH.salt) })
+      const n = Object.keys(base).length
+      const run = runPreflight(`${envText(base)}ENCRYPTION_KEY=${pad(SYNTH.key)}\nENCRYPTION_SALT=${SYNTH.salt}\n`, {
+        reports: false,
+        locale: CI_UTF8_LOCALE,
+      })
+      const label = `${name} at the ${where}`
+      assertFailedWithDuplicate(run, label)
+      for (const [key, later, order] of [
+        ['ENCRYPTION_KEY', n + 1, 'plain first'],
+        ['ENCRYPTION_SALT', n + 2, 'padded first'],
+      ]) {
+        assert.ok(
+          run.stderr.includes(`${key} appears 2 times (lines ${lineOf(base, key)}, ${later}): ${MATERIAL_DIFFER_CLAUSE}`),
+          `${label}, ${order}: ${key} must be reported as DIFFER`,
+        )
+      }
+      assert.doesNotMatch(run.stderr, /identical -- delete all but one/, `${label}: must never say "delete all but one"`)
+      assertNoValues(run, ['key', 'salt', 'jwt', 'pg'])
+    }
+  }
+
+  // Quotes are not proven equivalent either: only equal raw bytes count as identical.
+  const base = validEnv()
+  const quoted = runPreflight(`${envText(base)}JWT_SECRET="${SYNTH.jwt}"\n`, { reports: false })
+  assert.ok(
+    quoted.stderr.includes(
+      `JWT_SECRET appears 2 times (lines ${lineOf(base, 'JWT_SECRET')}, ${Object.keys(base).length + 1}): the non-empty values DIFFER -- confirm which value is intended before deleting a line`,
+    ),
+    'a quoted and an unquoted copy are not byte-identical',
+  )
+  assertNoValues(quoted, ['jwt', 'key', 'salt', 'pg'])
+})
+
+// ---------------------------------------------------------------------------------------------
+// Round-2 F3: a key is printed only if the template declares it or it is an UPPER_SNAKE name with
+// an underscore, at most 64 characters; anything else is <key withheld>, with its line numbers
+// ---------------------------------------------------------------------------------------------
+
+/** A fresh random string of `shape`, generated here (never a pasted literal). */
+function synthetic(generate, shape) {
+  for (let attempt = 0; attempt < 10000; attempt++) {
+    const candidate = generate()
+    if (shape.test(candidate)) return candidate
+  }
+  throw new Error('could not generate a synthetic value of the requested shape')
+}
+
+/** Values-free: no 8-character window of `secret` may appear in any output channel. */
+function assertNoFragments(run, secret, label) {
+  const channels = {
+    stdout: run.stdout,
+    stderr: run.stderr,
+    'json report': run.json ? JSON.stringify(run.json) : '',
+    'markdown report': run.md ?? '',
+  }
+  for (const [channel, text] of Object.entries(channels)) {
+    for (let i = 0; i + 8 <= secret.length; i++) {
+      assert.ok(!text.includes(secret.slice(i, i + 8)), `${label}: an 8-character fragment of the value leaked into the ${channel}`)
+    }
+  }
+}
+
+test('F3 value-shaped text before the first "=" is never printed as a key (the reproduced leaks)', () => {
+  const alnum = /[^A-Za-z0-9]/g
+  const shapes = [
+    [
+      'letter-first base64 with one "=" pad, alone on a line',
+      synthetic(() => randomBytes(32).toString('base64'), /^[A-Za-z][A-Za-z0-9]{42}=$/),
+      secret => secret,
+    ],
+    [
+      'letter-first base64 with "==" pad, alone on a line',
+      synthetic(() => randomBytes(31).toString('base64'), /^[A-Za-z][A-Za-z0-9]{41}==$/),
+      secret => secret,
+    ],
+    ['letter-first lower-case hex then "=value"', synthetic(() => randomBytes(32).toString('hex'), /^[a-f]/), secret => `${secret}=value1`],
+    [
+      'letter-first upper-case hex then "=value"',
+      synthetic(() => randomBytes(32).toString('hex').toUpperCase(), /^[A-F]/),
+      secret => `${secret}=value1`,
+    ],
+    ['identifier glued to a secret (the "=" forgotten)', `q${randomBytes(12).toString('hex')}`, secret => `JWT_SECRET${secret}=`],
+    [
+      '300-character identifier-shaped string then "="',
+      `Z${randomBytes(400).toString('base64').replace(alnum, '').slice(0, 299)}`,
+      secret => `${secret}=v`,
+    ],
+  ]
+  assert.equal(shapes[5][1].length, 300, 'fixture: the long string must be 300 characters')
+  const lines = shapes.flatMap(([, secret, line]) => [line(secret), '# spacer', line(secret)])
+  const base = validEnv()
+  const n = Object.keys(base).length
+  for (const locale of [CI_UTF8_LOCALE, 'C']) {
+    const run = runPreflight(`${envText(base)}${lines.join('\n')}\n`, { locale })
+    assertFailedWithDuplicate(run, `${locale}: value-shaped keys`)
+    shapes.forEach(([label, secret], index) => {
+      assertNoFragments(run, secret, `${locale} ${label}`)
+      const first = n + 1 + index * 3
+      assert.ok(
+        run.stderr.includes(`${WITHHELD} appears 2 times (lines ${first}, ${first + 2})`),
+        `${locale} ${label}: must be shown as ${WITHHELD} with its line numbers`,
+      )
+    })
+    assert.ok(run.stderr.includes(`A key shown as ${WITHHELD} is not printed because its text could be part of a value`), 'stderr must explain the placeholder')
+    assert.ok(
+      run.json.suggestedActions.some(action => action.includes(`A key shown as ${WITHHELD} is not printed`)),
+      'the report must explain the placeholder',
+    )
+  }
+})
+
+test('F3 which keys print: template keys and UPPER_SNAKE names up to 64 characters; TZ-like keys are withheld (known cost)', () => {
+  const upper64 = `A_${'B'.repeat(62)}`
+  const upper65 = `A_${'B'.repeat(63)}`
+  const duplicated = ['HOST', 'CUSTOM_FEATURE_FLAG', upper64, 'TZ', upper65, 'Custom_Flag', 'LEADING__DOUBLE', 'TRAILING_']
+  const base = validEnv()
+  const n = Object.keys(base).length
+  const lines = duplicated.flatMap(key => [`${key}=1`, `${key}=1`])
+  const run = runPreflight(`${envText(base)}${lines.join('\n')}\n`, { reports: false })
+  assertFailedWithDuplicate(run, 'key label rule')
+  const printed = new Set(['HOST', 'CUSTOM_FEATURE_FLAG', upper64])
+  duplicated.forEach((key, index) => {
+    const first = n + 1 + index * 2
+    const label = printed.has(key) ? key : WITHHELD
+    assert.ok(
+      run.stderr.includes(`${label} appears 2 times (lines ${first}, ${first + 1}): the declarations are identical -- delete all but one`),
+      `key #${index + 1} (${printed.has(key) ? 'printed' : 'withheld'}): wrong label or line numbers`,
+    )
+  })
+  for (const key of ['TZ', upper65, 'Custom_Flag', 'LEADING__DOUBLE', 'TRAILING_']) {
+    assert.ok(!run.output.includes(`${key} appears`), `a key outside the rule must not be printed (${key.length} characters)`)
+  }
+})
+
+test('F3 the embedded template key list matches docker/app.env.multitable-onprem.template', () => {
+  const embedded = shellArray(readLf(SCRIPT), 'ENV_TEMPLATE_KEYS')
+    .replace(/^ENV_TEMPLATE_KEYS=\(/, '')
+    .replace(/\)$/, '')
+    .trim()
+    .split(/\s+/)
+  const declared = readLf(TEMPLATE)
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#') && line.indexOf('=') > 0)
+    .map(line => line.slice(0, line.indexOf('=')).trim())
+  assert.equal(new Set(embedded).size, embedded.length, 'the embedded list must not repeat a key')
+  assert.deepEqual([...embedded].sort(), [...new Set(declared)].sort(), 'ENV_TEMPLATE_KEYS drifted from the template')
 })
 
 // ---------------------------------------------------------------------------------------------
