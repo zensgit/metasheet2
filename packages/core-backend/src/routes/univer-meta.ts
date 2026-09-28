@@ -7426,6 +7426,14 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ *
+ * The three axes only look for RESTRICTIONS; none of them asks whether the actor may read the sheet at all. That is
+ * the precondition below: `capabilities.canRead`, the sheet's resolved read plane. It is NOT implied by every
+ * capability a caller may have gated on before reaching here — `canManageFields` holds on `multitable:manage-schema`
+ * alone (manage-schema-permission.ts) while `canRead` needs read/write/admin (access.ts `deriveCapabilities`), so
+ * without it a schema manager who cannot read the sheet passed as "full read" on any unrestricted sheet (the lossy
+ * config-restore retype-revert preview/execute, which gate on `canManageFields`). Checked FIRST and with no DB
+ * access, so a refused actor causes no row-level/field/taint read either. Config-derived like the three axes.
  */
 export async function hasFullTableReadAccess(
   req: Request | undefined,
@@ -7435,6 +7443,7 @@ export async function hasFullTableReadAccess(
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!capabilities.canRead) return false // no read plane on this sheet → no full read (see above)
   if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
   const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
   const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
