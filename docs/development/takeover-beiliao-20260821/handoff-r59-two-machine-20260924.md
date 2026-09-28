@@ -21,6 +21,11 @@
 
 **根因**：演示机 2026-09-21 重启后，后端由计划任务 `MetaSheet-PM2` → `start-pm2-runtime-persistent.bat` → `pm2-runtime` 托管，**`PM2_HOME` 是 `C:\Users\Administrator\.pm2-runtime`**；ssh 会话里的 `pm2` 用默认 `~\.pm2`。升级脚本的 stop 让应用退出后，`pm2-runtime` 因无应用而自行退出；随后在默认 home 里 restart 自然找不到。
 
+**订正（2026-09-28，运维机对抗核验 R60 wrapper，见 #6079）**：上面的根因只是第一跳。`pm2 restart` 报 not found 让升级脚本进了失败处理，但 18 分钟 503 的直接原因在 wrapper：它把升级子进程接在 `| Select-String | Select-Object -First 30` 后面，PS 5.1 在第 30 条匹配行时结束了升级子进程（r59 日志恰好 30 行，止于 RESTORE 块中段），升级脚本 `finally` 里删维护标志的代码因此没跑到，维护标志一直挂着。随后，升级脚本失败处理里的 `pm2 stop` 在 pm2-runtime 已退出时拉起了一个默认 home 的 pm2 守护进程，它继承了升级子进程的 stdout 管道，ssh 会话因此一直挂到被重置。
+- 规则：**任何上机 wrapper 都不得把远端子进程接在带 -First 的活管道后。** 要摘要输出，就先让子进程把完整输出写进文件、等它退出，再对文件做筛选。
+- 仓库侧对应修改（与本订正同一 PR）：失败处理在 Windows 上先查 pm2 的命名管道 `\\.\pipe\rpc.sock`，管道不存在（没有任何 pm2 守护进程）时一条 pm2 命令都不跑；托管主机（恰好一个 `MetaSheet-PM2` 计划任务）上，stop 之后再 `pm2 kill` 并等管道关闭。RESTORE 块的恢复配方只删除备份里有的目录：`BackupPaths` 补上了 `packages/core-backend/migrations`，替换清单与备份清单不一致时脚本启动即拒绝（`RESTORE_PATH_NOT_BACKED_UP`）；`plugins/` 改为把备份叠加复制回现网、不先删除，保住各插件现网的 `node_modules`（备份本来就不含它）。
+- 升级脚本已是纯 ASCII，在 5.1 下不依赖代码页。第 3 节第 1 步的「加 BOM」可以不做；要做就只加一次：两个 BOM 在 5.1 下无法解析（第二个 BOM 会被读成首行开头的一个不可见字符，首行 `#requires` 随即报 is not recognized）。
+
 **向前修复**（代码与迁移都已是 r59，只差拉起进程）：
 1. `Start-ScheduledTask -TaskName 'MetaSheet-PM2'`，27 秒 health 通过；
 2. 删除 `output\maintenance.flag`；
