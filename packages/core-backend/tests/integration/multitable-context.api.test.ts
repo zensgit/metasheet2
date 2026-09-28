@@ -251,6 +251,9 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // whole-sheet delete authority (mirrors DELETE /sheets/:sheetId): a reader has none
       canDeleteSheet: false,
+      // copy-sheet S1 (ADR #6094 §3): hasFullTableReadAccess ∧ resolveBaseWritable, fail-closed like
+      // canDeleteSheet — this mock pool answers no base-write lookup, so the probe throws and the entry hides.
+      canCopySheet: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -452,6 +455,12 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // admin role = global schema authority => may delete the selected sheet
       canDeleteSheet: true,
+      // copy-sheet S1, CS-3 amended 2026-09-28: the target gate is resolveCopyTargetWritable = platform admin ROLE ∨
+      // resolveBaseWritable. This actor is admin by req.user.role, is NOT the base owner (owner_1) and this mock
+      // answers no base-write code lookup — so the role arm is the only thing that can admit him; it needs just the
+      // base existence read (answered above) and the source gate (one field, no scope, admin skips the row-level
+      // switch) ⇒ true. Before the amendment this was false for the same fixture (owner ∨ code only).
+      canCopySheet: true,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.

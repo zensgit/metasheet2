@@ -7,10 +7,10 @@ Design: `docs/development/timemachine-private-db-backend-drain-design-20260925.m
 | Check | Result |
 |---|---|
 | Checkpoint calls `assertPrivateDatabaseBackendsExited` and no longer uses the one-shot count | unit guard `guards the checkpoint call site and the values-free census columns` |
-| Census SQL is `pid, application_name, backend_type, state, backend_start` and does not name `query` or `usename` | same guard, imported `PRIVATE_DB_BACKEND_CENSUS_SQL` |
+| Census SQL is `pid, backend_type, state, age_seconds` and does not name `query`, `usename`, or the caller-chosen connection label. Failure writes `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN` to stderr. | same guard, imported `PRIVATE_DB_BACKEND_CENSUS_SQL` |
 | Default unit Vitest excludes the DB proof, and plugin-tests.yml step `Run private-db backend drain proof` runs the file | same guard |
 | Positive. Explicit `drainTimeoutMs: 8000`, `pollIntervalMs: 100`. A backend closed after 1500 ms. The helper returns before that 8 s limit. This is not the default timeout. | integration `positive: waits for a backend that exits after a short delay and returns clean` |
-| Negative, short limit. Explicit `drainTimeoutMs: 400`, `pollIntervalMs: 50`. A backend is still held. The helper throws with pid, backend_type, state, application_name, backend_start, and without the statement marker. This is not the default timeout. | integration `negative: fails when a backend is still held, with values-free identifiers and no query text` |
+| Negative, short limit. Explicit `drainTimeoutMs: 400`, `pollIntervalMs: 50`. A backend is still held. The helper throws with pid, backend_type, state, and age_seconds, writes `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN`, and does not write the caller-chosen connection label or the statement marker. This is not the default timeout. | integration `negative: fails when a backend is still held, with values-free identifiers and no query text` |
 | Negative, default limit. No options argument, so `drainTimeoutMs` is `PRIVATE_DB_BACKEND_DRAIN_MS` (10000) and `pollIntervalMs` is `PRIVATE_DB_BACKEND_POLL_MS` (200). A backend is held past that 10 s deadline. The helper throws at about 10 s with the same values-free identifiers and without the statement marker. | integration `negative: default timeout fails when a backend is held past 10s, with values-free identifiers and no query text` |
 
 The integration file runs in CI on job `test` (`test (18.x)` and `test (20.x)`), step `Run private-db backend drain proof`.

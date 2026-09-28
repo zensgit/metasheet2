@@ -1222,6 +1222,23 @@ jobs:
             tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
             --reporter=verbose
 
+      # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
+      # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
+      # participating transaction. Two-session races against a real PostgreSQL; the suite's own
+      # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
+      # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      - name: Run external-system delete x pointer-write lock protocol real-DB proof
+        id: external-system-delete-bind-lock-protocol-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
+            --reporter=verbose
+
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'
         env:

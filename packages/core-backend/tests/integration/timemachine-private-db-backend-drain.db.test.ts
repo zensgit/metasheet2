@@ -37,6 +37,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function expectValuesFreeFailure(message: string, issued: string[], stderr: string, marker: string, holderName: string): void {
+  expect(stderr).toContain('SYNTHETIC_DATABASE_CONNECTIONS_REMAIN')
+  expect(stderr).not.toContain('application_name')
+  expect(stderr).not.toContain(holderName)
+  expect(stderr).not.toContain(marker)
+  expect(message).toMatch(/pid=\d+/)
+  expect(message).toMatch(/backend_type=client backend/)
+  expect(message).toMatch(/state=active/)
+  expect(message).toMatch(/age_seconds=\d+/)
+  expect(message).not.toContain('application_name')
+  expect(message).not.toContain(holderName)
+  expect(message).not.toContain(marker)
+  expect(message).not.toContain('pg_sleep')
+  expect(message).not.toContain('SELECT')
+  expect(message).not.toContain('usename')
+  expect(message).not.toMatch(/\bquery=/)
+  expect(issued.length).toBeGreaterThan(0)
+  for (const sql of issued) {
+    const lowered = sql.toLowerCase()
+    expect(lowered).not.toContain('usename')
+    expect(lowered).not.toContain('query')
+    expect(lowered).not.toContain('application_name')
+  }
+}
+
+async function captureStderr(run: () => Promise<void>): Promise<string> {
+  const lines: string[] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))).join(' '))
+  }
+  try {
+    await run()
+  } finally {
+    console.error = original
+  }
+  return lines.join('\n')
+}
+
 describe('private-database backend drain', () => {
   const admin = new Client({ connectionString: dbUrl })
   const created: string[] = []
@@ -124,32 +163,20 @@ describe('private-database backend drain', () => {
         },
       }
       let caught: unknown = null
-      try {
-        await assertPrivateDatabaseBackendsExited(proxy, name, {
-          drainTimeoutMs: 400,
-          pollIntervalMs: 50,
-        })
-      } catch (err) {
-        caught = err
-      }
+      const stderr = await captureStderr(async () => {
+        try {
+          await assertPrivateDatabaseBackendsExited(proxy, name, {
+            drainTimeoutMs: 400,
+            pollIntervalMs: 50,
+          })
+        } catch (err) {
+          caught = err
+        }
+      })
       expect(caught).toBeInstanceOf(Error)
       const message = (caught as Error).message
       expect(message).toContain('private database backends remain after 400ms:')
-      expect(message).toMatch(/pid=\d+/)
-      expect(message).toMatch(/backend_type=client backend/)
-      expect(message).toMatch(/state=active/)
-      expect(message).toMatch(/application_name=tm-drain-hold/)
-      expect(message).toMatch(/backend_start=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
-      expect(message).not.toContain(marker)
-      expect(message).not.toContain('pg_sleep')
-      expect(message).not.toContain('SELECT')
-      expect(message).not.toContain('usename')
-      expect(message).not.toMatch(/\bquery=/)
-      expect(issued.length).toBeGreaterThan(0)
-      for (const sql of issued) {
-        expect(sql.toLowerCase()).not.toContain('usename')
-        expect(sql.toLowerCase()).not.toContain('query')
-      }
+      expectValuesFreeFailure(message, issued, stderr, marker, 'tm-drain-hold')
     } finally {
       await holder.end().catch(() => undefined)
       await inflight
@@ -191,32 +218,20 @@ describe('private-database backend drain', () => {
       }
       const started = Date.now()
       let caught: unknown = null
-      try {
-        await assertPrivateDatabaseBackendsExited(proxy, name)
-      } catch (err) {
-        caught = err
-      }
+      const stderr = await captureStderr(async () => {
+        try {
+          await assertPrivateDatabaseBackendsExited(proxy, name)
+        } catch (err) {
+          caught = err
+        }
+      })
       const elapsed = Date.now() - started
       expect(caught).toBeInstanceOf(Error)
       const message = (caught as Error).message
       expect(message).toContain(`private database backends remain after ${PRIVATE_DB_BACKEND_DRAIN_MS}ms:`)
       expect(elapsed).toBeGreaterThanOrEqual(PRIVATE_DB_BACKEND_DRAIN_MS - 250)
       expect(elapsed).toBeLessThan(PRIVATE_DB_BACKEND_DRAIN_MS + 2_500)
-      expect(message).toMatch(/pid=\d+/)
-      expect(message).toMatch(/backend_type=client backend/)
-      expect(message).toMatch(/state=active/)
-      expect(message).toMatch(/application_name=tm-drain-default/)
-      expect(message).toMatch(/backend_start=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
-      expect(message).not.toContain(marker)
-      expect(message).not.toContain('pg_sleep')
-      expect(message).not.toContain('SELECT')
-      expect(message).not.toContain('usename')
-      expect(message).not.toMatch(/\bquery=/)
-      expect(issued.length).toBeGreaterThan(0)
-      for (const sql of issued) {
-        expect(sql.toLowerCase()).not.toContain('usename')
-        expect(sql.toLowerCase()).not.toContain('query')
-      }
+      expectValuesFreeFailure(message, issued, stderr, marker, 'tm-drain-default')
     } finally {
       await holder.end().catch(() => undefined)
       await inflight

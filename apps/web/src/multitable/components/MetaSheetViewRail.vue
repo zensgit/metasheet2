@@ -50,6 +50,24 @@
               <el-icon><component :is="s.id === activeSheetId ? IconCaretBottom : IconCaretRight" /></el-icon>
             </span>
             <span class="meta-view-rail__sheet-name">{{ s.name }}</span>
+            <!--
+              复制数据表 S1 provenance badges (ADR CS-14 / §3): driven ONLY by the server's copiedFrom,
+              read through the api client's single adapter (readSheetCopiedFrom) — absent/null/malformed
+              renders nothing. 「不随 PLM 刷新」 only for the exact 'plugin-managed' kind.
+            -->
+            <template v-if="copiedFromBySheetId.get(s.id)">
+              <span
+                class="meta-view-rail__copy-badge"
+                data-testid="rail-sheet-copy-badge"
+                :title="railLabel('rail.badgeSnapshotCopyTitle', isZh)"
+              >{{ railLabel('rail.badgeSnapshotCopy', isZh) }}</span>
+              <span
+                v-if="copiedFromBySheetId.get(s.id)?.pluginManaged"
+                class="meta-view-rail__copy-badge meta-view-rail__copy-badge--plm"
+                data-testid="rail-sheet-no-plm-refresh-badge"
+                :title="railLabel('rail.badgeNoPlmRefreshTitle', isZh)"
+              >{{ railLabel('rail.badgeNoPlmRefresh', isZh) }}</span>
+            </template>
           </button>
           <!--
             Rename affordance (feat/multitable-rename). Hiding is UX only — the server is the real
@@ -91,6 +109,22 @@
             :title="railLabel('rail.renameSheet', isZh)"
             @click.stop="startRenameSheet(s)"
           >&#x270E;</button>
+          <!--
+            Copy affordance (复制数据表 S1, ADR CS-2 entry ①). Same single-sheet discipline as delete below:
+            `canCopySheet` is the server-derived /context bit for the CURRENT sheet (full-table read on it ∧
+            its Base writable), so it renders on the SELECTED row only, never on the rail's other rows.
+            Hidden while that row is being renamed. Hiding is UX only — POST /sheets/:id/copy re-runs
+            both gates. Click only emits; the dialog lives in MultitableWorkbench.vue.
+          -->
+          <button
+            v-if="canCopySheet && s.id === activeSheetId && renamingSheetId !== s.id"
+            type="button"
+            class="meta-view-rail__sheet-rename-btn"
+            data-testid="rail-sheet-copy"
+            :title="railLabel('rail.copySheet', isZh)"
+            :aria-label="railLabel('rail.copySheet', isZh)"
+            @click.stop="emit('copy-sheet', s.id)"
+          ><el-icon><IconCopyDocument /></el-icon></button>
           <!--
             Delete affordance. Rendered for the SELECTED sheet only: `canDeleteSheet` is the
             server-derived, single-sheet authority bit /context computes for the current sheet
@@ -161,6 +195,7 @@ import type { Component } from 'vue'
 import type { MetaSheet, MetaView } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { railLabel } from '../utils/meta-sheet-view-rail-labels'
+import { readSheetCopiedFrom } from '../api/client'
 import { ElIcon } from 'element-plus'
 import {
   Grid as IconGrid,
@@ -173,6 +208,7 @@ import {
   Share as IconHierarchy,
   CaretRight as IconCaretRight,
   CaretBottom as IconCaretBottom,
+  CopyDocument as IconCopyDocument,
 } from '@element-plus/icons-vue'
 
 const props = defineProps<{
@@ -188,6 +224,9 @@ const props = defineProps<{
   // Delete affordance: the server-derived MetaCapabilities.canDeleteSheet bit for the CURRENT sheet
   // (single-sheet by construction — see /context). Absent/false hides the trash button (fail-closed).
   canDeleteSheet?: boolean
+  // 复制数据表 S1: the server-derived MetaCapabilities.canCopySheet bit for the CURRENT sheet (/context).
+  // Absent/false hides the copy button (fail-closed, same discipline as canDeleteSheet).
+  canCopySheet?: boolean
   // Slice 3: flag-derived session capability (MetaCapabilities.personalViewsEnabled) — absent/false hides
   // the toggle entirely (G-FE-4). NOT a client-side env const.
   personalViewsEnabled?: boolean
@@ -201,10 +240,14 @@ const emit = defineEmits<{
   (e: 'toggle-personal', viewId: string): void
   (e: 'rename-sheet', id: string, name: string): void
   (e: 'delete-sheet', id: string): void
+  (e: 'copy-sheet', id: string): void
 }>()
 
 const { isZh } = useLocale()
 const personalToggleLabel = computed(() => (isZh.value ? '个人视图' : 'My view'))
+
+// Copy provenance per sheet, mapped ONCE per sheets change through the api client's single adapter.
+const copiedFromBySheetId = computed(() => new Map(props.sheets.map((s) => [s.id, readSheetCopiedFrom(s)])))
 
 function onAddSheet() {
   const name = `Sheet ${props.sheets.length + 1}`
@@ -476,6 +519,22 @@ function onTreeKeydown(event: KeyboardEvent, node: FlatNode) {
 .meta-view-rail__sheet-rename-cancel:hover { background: var(--ms-bg-card); color: var(--ms-color-danger); }
 .meta-view-rail__chevron { display: inline-flex; align-items: center; width: 14px; flex-shrink: 0; font-size: 12px; color: var(--ms-text-3); }
 .meta-view-rail__sheet-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 复制数据表 S1 provenance badges — token-only like the rest of this file (T6 gate). */
+.meta-view-rail__copy-badge {
+  flex-shrink: 0;
+  padding: 0 var(--ms-space-1);
+  border-radius: var(--ms-radius-sm);
+  background: var(--el-color-info-light-9);
+  color: var(--ms-color-info);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.meta-view-rail__copy-badge--plm {
+  background: var(--el-color-warning-light-9);
+  color: var(--ms-color-warning);
+}
 .meta-view-rail__views { list-style: none; margin: 0; padding: 0; }
 .meta-view-rail__view-row { display: flex; align-items: center; gap: var(--ms-space-1); padding-right: var(--ms-space-2); }
 .meta-view-rail__view {

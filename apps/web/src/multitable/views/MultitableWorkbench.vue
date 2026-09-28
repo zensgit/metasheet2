@@ -189,6 +189,7 @@
               {{ saveTemplateSubmitting ? wb('saveTpl.saving', isZh) : wb('saveTpl.submit', isZh) }}
             </MtButton>
           </footer>
+          <button v-if="canCopySheet" type="button" class="mt-save-tpl__link" data-action="save-sheet-as-template-copy-with-data" @click="openCopySheetFromSaveTemplate">{{ copySheetLabel('copySheet.entryFromTemplate', isZh) }}</button>
         </template>
         <div v-else class="mt-save-tpl__result" data-testid="save-sheet-as-template-result">
           <strong>{{ wb('saveTpl.successTitle', isZh) }}</strong>
@@ -283,7 +284,7 @@
             @click="railCollapsed = !railCollapsed"
           >{{ railCollapsed ? '›' : '‹' }}</button>
         </div>
-        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" />
+        <MetaSheetViewRail v-show="!railCollapsed" :sheets="workbench.sheets.value" :views="visibleWorkbenchViews" :active-sheet-id="workbench.activeSheetId.value" :active-view-id="workbench.activeViewId.value" :can-create-sheet="canCreateBasesAndSheets" :can-manage-fields="caps.canManageFields.value" :can-delete-sheet="canDeleteSheet" :can-copy-sheet="canCopySheet" :personal-views-enabled="personalViewsEnabled" :is-personal-mode="personalView.isPersonalMode" @select-sheet="onSelectSheet" @select-view="onSelectView" @create-sheet="onCreateSheet" @toggle-personal="onTogglePersonalView" @rename-sheet="onRenameSheet" @delete-sheet="onDeleteSheet" @copy-sheet="onOpenCopySheet" />
       </aside>
       <div class="mt-workbench__main">
         <MetaDashboardView
@@ -565,6 +566,17 @@
       :initial-format="exportInitialFormat"
       @confirm="onExportDialogConfirm"
       @cancel="exportDialogVisible = false"
+    />
+    <MetaCopySheetDialog
+      :visible="showCopySheetDialog"
+      :sheet-id="copySheetSourceId"
+      :sheet-name="copySheetSourceName"
+      :base-name="copySheetBaseName"
+      :fields="copySheetFieldChoices"
+      :views="copySheetViewChoices"
+      :client="workbench.client"
+      @close="closeCopySheetDialog"
+      @copied="onCopySheetCopied"
     />
     <RestorePreviewDialog
       :visible="restorePreview.visible"
@@ -851,6 +863,9 @@ import MetaSheetViewRail from '../components/MetaSheetViewRail.vue'
 import MetaToolbar from '../components/MetaToolbar.vue'
 import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
+import MetaCopySheetDialog from '../components/MetaCopySheetDialog.vue'
+import { copySheetLabel, copySheetSuccessToast } from '../utils/meta-copy-sheet-labels'
+import type { CopySheetResult } from '../types'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
 import type {
@@ -4152,6 +4167,58 @@ async function onDeleteSheet(sheetId: string) {
   } else {
     await workbench.loadSheetMeta(workbench.activeSheetId.value)
   }
+}
+
+// --- 复制数据表（含数据）S1 (ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md) ---
+// Entry ① = the rail's copy button (selected sheet only); entry ② = the 「存为模板」 dialog's hand-off
+// link. Both are gated on the server-derived `canCopySheet` bit, read straight off the /context
+// capabilities object exactly like canDeleteSheet (`=== true`): an old backend without the key, a legacy
+// role-string source, or a stale object all fail CLOSED (no entry anywhere). Hiding is UX only — the
+// copy route re-runs the full-table-read and Base-writable gates. Entry ③ (template center) is S4.
+const canCopySheet = computed(() => capabilitySource.value?.canCopySheet === true)
+const showCopySheetDialog = ref(false)
+// Pinned when the dialog opens, so a sheet switch underneath can never retarget an open dialog.
+const copySheetSourceId = ref('')
+const copySheetSourceName = computed(() => workbench.sheets.value.find((s) => s.id === copySheetSourceId.value)?.name ?? '')
+// S1 target = the source sheet's Base (the active one); shown disabled in the dialog.
+const copySheetBaseName = computed(() => bases.value.find((b) => b.id === activeBaseId.value)?.name ?? '')
+const copySheetFieldChoices = computed(() => workbench.fields.value.map((f) => ({ id: f.id, name: f.name })))
+const copySheetViewChoices = computed(() => workbench.views.value.map((v) => ({ id: v.id, name: v.name })))
+
+function onOpenCopySheet(sheetId?: string): void {
+  const target = sheetId || workbench.activeSheetId.value
+  // The bit describes the ACTIVE sheet only; a request for any other sheet (stale rail) is refused.
+  if (!canCopySheet.value || !target || target !== workbench.activeSheetId.value) return
+  // Success navigates to the copy, so ask about unsaved edits up front — same order as onCreateSheet.
+  if (!confirmDiscardContextChanges()) return
+  copySheetSourceId.value = target
+  showCopySheetDialog.value = true
+}
+
+function openCopySheetFromSaveTemplate(): void {
+  closeSaveSheetAsTemplate()
+  onOpenCopySheet()
+}
+
+function closeCopySheetDialog(): void {
+  showCopySheetDialog.value = false
+}
+
+async function onCopySheetCopied(result: CopySheetResult): Promise<void> {
+  showCopySheetDialog.value = false
+  // Same refresh + select path as onCreateSheet: /context for the new sheet re-pulls the Base's sheet
+  // list (the copy included, with its copiedFrom badge) and makes it the active sheet.
+  const ok = await workbench.syncExternalContext({
+    baseId: (result.sheet.baseId ?? activeBaseId.value) || undefined,
+    sheetId: result.sheet.id,
+  })
+  if (!ok) {
+    showError(workbench.error.value ?? wb('toast.sheetRefreshFailed', isZh.value))
+    return
+  }
+  exitDashboard()
+  showSuccess(copySheetSuccessToast(result.sheet.name, result.summary, result.replayed, isZh.value))
+  if (result.formulaRecompute?.failed) showError(copySheetLabel('copySheet.formulaRecomputeFailed', isZh.value))
 }
 
 // --- Base management ---

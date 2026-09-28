@@ -21,6 +21,11 @@
 
 **根因**：演示机 2026-09-21 重启后，后端由计划任务 `MetaSheet-PM2` → `start-pm2-runtime-persistent.bat` → `pm2-runtime` 托管，**`PM2_HOME` 是 `C:\Users\Administrator\.pm2-runtime`**；ssh 会话里的 `pm2` 用默认 `~\.pm2`。升级脚本的 stop 让应用退出后，`pm2-runtime` 因无应用而自行退出；随后在默认 home 里 restart 自然找不到。
 
+**订正（2026-09-28，运维机对抗核验 R60 wrapper，见 #6079）**：上面的根因只是第一跳。`pm2 restart` 报 not found 让升级脚本进了失败处理，但 18 分钟 503 的直接原因在 wrapper：它把升级子进程接在 `| Select-String | Select-Object -First 30` 后面，PS 5.1 在第 30 条匹配行时结束了升级子进程（r59 日志恰好 30 行，止于 RESTORE 块中段），升级脚本 `finally` 里删维护标志的代码因此没跑到，维护标志一直挂着。随后，升级脚本失败处理里的 `pm2 stop` 在 pm2-runtime 已退出时拉起了一个默认 home 的 pm2 守护进程，它继承了升级子进程的 stdout 管道，ssh 会话因此一直挂到被重置。
+- 规则：**任何上机 wrapper 都不得把远端子进程接在带 -First 的活管道后。** 要摘要输出，就先让子进程把完整输出写进文件、等它退出，再对文件做筛选。
+- 仓库侧对应修改（与本订正同一 PR）：失败处理在 Windows 上先查 pm2 的命名管道 `\\.\pipe\rpc.sock`，管道不存在（没有任何 pm2 守护进程）时一条 pm2 命令都不跑；托管主机（恰好一个 `MetaSheet-PM2` 计划任务）上，stop 之后再 `pm2 kill` 并等管道关闭。RESTORE 块的恢复配方只删除备份里有的目录：`BackupPaths` 补上了 `packages/core-backend/migrations`，替换清单与备份清单不一致时脚本启动即拒绝（`RESTORE_PATH_NOT_BACKED_UP`）；`plugins/` 改为把备份叠加复制回现网、不先删除，保住各插件现网的 `node_modules`（备份本来就不含它）。
+- 升级脚本已是纯 ASCII，在 5.1 下不依赖代码页。第 3 节第 1 步的「加 BOM」可以不做；要做就只加一次：两个 BOM 在 5.1 下无法解析（第二个 BOM 会被读成首行开头的一个不可见字符，首行 `#requires` 随即报 is not recognized）。
+
 **向前修复**（代码与迁移都已是 r59，只差拉起进程）：
 1. `Start-ScheduledTask -TaskName 'MetaSheet-PM2'`，27 秒 health 通过；
 2. 删除 `output\maintenance.flag`；
@@ -73,3 +78,5 @@
 **待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部（清单与预检统一追加在 #6079）。另需手工：演示机现网 nginx.conf 同步 #6097 的 index.html no-cache 段；#6109 导出租户墙上线前跑预检看 `checks.carryTargetBinding.ownershipState`。
 
 - R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。
+
+> 2026-09-28 追加（同一 24h 窗口内并行的客户反馈线收尾，详见 `docs/development/autonomous-run-20260926-cf-outcome.md`）。该线合入 main 的 20 支与本节上方所述内容互不重叠（本节是开发机/运维接管线）。待上机增量与其上机后回归要点已（或将于窗口收尾前）追加到 #6079；复制数据表 S1（#6112 后端 / #6116 前端）不在 R60 之列——真库并发撤销用例在真实 PostgreSQL 上失败，诊断未完成，合入前不要在演示机演示该功能。

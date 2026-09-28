@@ -12,25 +12,21 @@
  *
  * The failure text is values-free. `query` is not selected: statement text can
  * embed row values (review #4799 P2-2). `usename` is omitted for the same
- * reason that residual census does not log role names. What is emitted is
- * `pid`, `backend_type`, `state`, `application_name`, and `backend_start`,
- * each passed through a positive charset bound.
+ * reason that residual census does not log role names. The caller-chosen
+ * connection label is omitted too. What is emitted is `pid` (a server-assigned
+ * integer), `backend_type` and `state` (server categories), and `age_seconds`
+ * (a non-negative integer). On failure those rows are written to stderr with
+ * the marker SYNTHETIC_DATABASE_CONNECTIONS_REMAIN, then the helper throws.
  */
 
 const PRIVATE_DB_BACKEND_DRAIN_MS = 10_000
 const PRIVATE_DB_BACKEND_POLL_MS = 200
 
-/** The only census this helper issues. It must not name `query` or `usename`. */
+/** The only census this helper issues. It must not name `query`, `usename`, or the caller-chosen connection label. */
 const PRIVATE_DB_BACKEND_CENSUS_SQL =
-  'SELECT pid, application_name, backend_type, state, backend_start FROM pg_stat_activity WHERE datname = $1 ORDER BY pid'
+  'SELECT pid, backend_type, state, round(extract(epoch FROM now()-backend_start))::int AS age_seconds FROM pg_stat_activity WHERE datname = $1 ORDER BY pid'
 
-const IDENTITY_TOKEN = /[^A-Za-z0-9_.-]+/g
 const CATEGORY_TOKEN = /[^A-Za-z0-9_. -]+/g
-
-function identityToken(value) {
-  const cleaned = String(value ?? '').replace(IDENTITY_TOKEN, '').slice(0, 80)
-  return cleaned.length > 0 ? cleaned : 'unknown'
-}
 
 function categoryToken(value) {
   const cleaned = String(value ?? '').replace(CATEGORY_TOKEN, '').replace(/\s+/g, ' ').trim().slice(0, 80)
@@ -43,10 +39,10 @@ function formatPid(value) {
   return String(pid)
 }
 
-function formatBackendStart(value) {
-  const date = value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null
-  if (!date || Number.isNaN(date.getTime())) return 'unknown'
-  return date.toISOString()
+function formatAgeSeconds(value) {
+  const age = typeof value === 'number' ? value : Number(value)
+  if (!Number.isInteger(age) || age < 0 || age > 2_147_483_647) return 'unknown'
+  return String(age)
 }
 
 function formatCensusRow(row) {
@@ -54,8 +50,7 @@ function formatCensusRow(row) {
     `pid=${formatPid(row.pid)}`,
     `backend_type=${categoryToken(row.backend_type)}`,
     `state=${categoryToken(row.state)}`,
-    `application_name=${identityToken(row.application_name)}`,
-    `backend_start=${formatBackendStart(row.backend_start)}`,
+    `age_seconds=${formatAgeSeconds(row.age_seconds)}`,
   ].join(' ')
 }
 
@@ -80,8 +75,9 @@ async function assertPrivateDatabaseBackendsExited(admin, databaseName, options 
     if (remaining <= 0) break
     await sleep(Math.min(pollIntervalMs, remaining))
   }
-  const detail = rows.map((row) => formatCensusRow(row)).join(' | ')
-  throw new Error(`private database backends remain after ${drainTimeoutMs}ms: ${detail}`)
+  const formatted = rows.map((row) => formatCensusRow(row))
+  console.error('SYNTHETIC_DATABASE_CONNECTIONS_REMAIN', formatted)
+  throw new Error(`private database backends remain after ${drainTimeoutMs}ms: ${formatted.join(' | ')}`)
 }
 
 exports.PRIVATE_DB_BACKEND_DRAIN_MS = PRIVATE_DB_BACKEND_DRAIN_MS

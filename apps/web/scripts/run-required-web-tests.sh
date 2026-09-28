@@ -1593,6 +1593,9 @@ exec npx vitest run \
   multitable-config-history-modal \
   multitable-config-revert-refresh \
   multitable-conflict-ux \
+  multitable-copy-sheet-dialog \
+  multitable-copy-sheet-rail \
+  multitable-copy-sheet-workbench \
   multitable-core-i18n \
   multitable-crossbase-link-normalizer \
   multitable-crossbase-link-picker \

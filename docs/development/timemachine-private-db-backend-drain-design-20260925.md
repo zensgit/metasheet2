@@ -12,9 +12,9 @@ The census connection is the script's admin client on the `postgres` database, s
 
 ## Values-free failure text
 
-The census SQL is `SELECT pid, application_name, backend_type, state, backend_start`. It does not select `query`. Statement text can embed row values, which is the same rule as review #4799 P2-2 on the scratch-database drain. `usename` is omitted: that residual census does not log role names, and this failure line follows that rule.
+The census SQL is `SELECT pid, backend_type, state, round(extract(epoch FROM now()-backend_start))::int AS age_seconds`. It does not select `query`. Statement text can embed row values, which is the same rule as review #4799 P2-2 on the scratch-database drain. `usename` is omitted: that residual census does not log role names. The caller-chosen connection label is omitted too, matching the diagnostic #6059 prints for a remaining synthetic connection. `pid` is a server-assigned integer. `backend_type` and `state` are server categories, not client text. `age_seconds` is a non-negative integer, so the start timestamp itself is not printed.
 
-Each emitted field is charset-bounded. `pid` is an integer. `backend_start` is an ISO-8601 timestamp or `unknown`. `backend_type` and `state` keep letters, digits, dot, underscore, hyphen, and single spaces. `application_name` keeps letters, digits, dot, underscore, and hyphen. Anything else is dropped before the string is thrown, so it cannot reach a CI log.
+Each emitted field is charset-bounded. `pid` and `age_seconds` are integers or `unknown`. `backend_type` and `state` keep letters, digits, dot, underscore, hyphen, and single spaces. Anything else is dropped before the string is thrown. On failure the helper writes those rows to stderr with the marker `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN`, then throws.
 
 ## Observation this wait is aimed at
 
@@ -25,7 +25,7 @@ On draft #6051 head `abfb1f824`, `test (20.x)` job `108158496668` failed the pre
 The source-string test is only a wiring guard. Behavior is proved on a throwaway database:
 
 - Positive: a client stays connected for about 1.5 seconds and is then closed. The call passes `drainTimeoutMs: 8000` and `pollIntervalMs: 100`. The helper returns inside that 8 second limit, and the elapsed time shows it waited. That limit is not the default.
-- Negative, short limit: a client runs `pg_sleep` past an explicit `drainTimeoutMs: 400` (`pollIntervalMs: 50`). The helper throws. The message contains `pid`, `backend_type`, `state`, `application_name`, and `backend_start`, and it does not contain the statement text. That 400 ms limit is not the default.
-- Negative, default limit: the same held client, and the call passes no options. The helper uses `PRIVATE_DB_BACKEND_DRAIN_MS` (10 seconds) and `PRIVATE_DB_BACKEND_POLL_MS` (200 ms). It throws at about 10 seconds with the same values-free identifiers and without the statement text.
+- Negative, short limit: a client runs `pg_sleep` past an explicit `drainTimeoutMs: 400` (`pollIntervalMs: 50`). The helper throws. Stderr contains `SYNTHETIC_DATABASE_CONNECTIONS_REMAIN`. The message contains `pid`, `backend_type`, `state`, and `age_seconds`, and it does not contain the caller-chosen connection label or the statement text. That 400 ms limit is not the default.
+- Negative, default limit: the same held client, and the call passes no options. The helper uses `PRIVATE_DB_BACKEND_DRAIN_MS` (10 seconds) and `PRIVATE_DB_BACKEND_POLL_MS` (200 ms). It throws at about 10 seconds with the same values-free identifiers, the same stderr marker, and without the statement text.
 
 CI runs that file from plugin-tests.yml job `test` (check names `test (18.x)` and `test (20.x)`), step `Run private-db backend drain proof`, after Postgres is up. The default unit Vitest config excludes the file so the no-database job cannot skip it.
