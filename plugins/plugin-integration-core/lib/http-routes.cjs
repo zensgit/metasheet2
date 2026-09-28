@@ -904,6 +904,73 @@ function inferErrorCode(error) {
   return error.code || error.name || 'INTERNAL_ERROR'
 }
 
+// R2 — THE ONE WORD A ROUTE-FAILURE LOG LINE MAY CARRY.
+// (docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §5 R2)
+// The route wrapper's warn used to carry only method + route template, so a 400 from the connection
+// layer and a 500 from a bug read the same in the server log. It now also names the response's own
+// code (`inferErrorCode`) — but only when that code is EXACTLY one of the words below; anything else
+// is logged as ROUTE_FAILURE_UNLISTED_CODE. `error.code` is free text on an arbitrary thrown error (a
+// driver, a dependency, a wrapped facade message, a code someone built by interpolating a value), and
+// `inferErrorCode` itself passes any `DATA_SOURCE_*` code through verbatim, so admitting a code by
+// PREFIX would let a value ride into the log behind a familiar prefix. Membership is exact-string only:
+// no prefix, no case folding, no trimming.
+// The response is untouched: `sendError` still answers with `inferErrorCode(error)` exactly as before.
+const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
+  // connection-resolver.cjs — every code a `new ConnectionResolutionError(...)` there can carry.
+  // __tests__/route-failure-log-closed-code.test.cjs scans that file and fails if one is missing here.
+  'CONNECTION_RESOLUTION_INVALID_BINDING',
+  'CONNECTION_RESOLUTION_UNAVAILABLE',
+  'CONNECTION_REGISTRATION_INVALID',
+  'CONNECTION_ID_MISMATCH',
+  'CONNECTION_ID_REQUIRED',
+  'CONNECTION_TENANT_MISMATCH',
+  'CONNECTION_TYPE_UNSUPPORTED',
+  'CONNECTION_CANONICAL_UNAVAILABLE',
+  'CONNECTION_BINDING_MISMATCH',
+  'CONNECTION_LEGACY_FALLBACK_DENIED',
+  'CONNECTION_LEGACY_POINTER_REQUIRED',
+  'CONNECTION_LEGACY_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_KIND_UNSUPPORTED',
+  'CONNECTION_SEALED_SNAPSHOT_USER_REQUIRED',
+  'CONNECTION_SEALED_SNAPSHOT_INVALID',
+  // external-systems.cjs — its fallback when the resolver threw something without a string code.
+  'CONNECTION_RESOLUTION_FAILED',
+  // The host data-source facade's and DataSourceManager's coded refusals
+  // (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts, DataSourceManager.ts).
+  'DATA_SOURCE_PRINCIPAL_REQUIRED',
+  'DATA_SOURCE_NOT_FOUND',
+  'DATA_SOURCE_NOT_READ_ONLY',
+  'DATA_SOURCE_NOT_WRITABLE',
+  'DATA_SOURCE_NOT_C6_WRITE_TARGET',
+  'DATA_SOURCE_QUERY_INVALID',
+  'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED',
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID',
+  'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED',
+  'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED',
+  'SOURCE_UNAVAILABLE',
+  // `inferErrorCode` falls back to the error's class name when it carries no code.
+  'ExternalSystemValidationError',
+  'ExternalSystemNotFoundError',
+  'ExternalSystemConflictError',
+  'INTERNAL_ERROR',
+])
+const ROUTE_FAILURE_LOGGABLE_CODE_SET = new Set(ROUTE_FAILURE_LOGGABLE_CODES)
+const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
+
+// The code a route-failure log line carries: the response's own code when it is in the closed list
+// above, the fixed placeholder otherwise. Synchronous, no I/O, never throws — a thrown `null` or a
+// throwing getter costs the word, never the `sendError` call that follows it (which then behaves
+// exactly as it did before this line existed).
+function loggableRouteFailureCode(error) {
+  try {
+    const code = inferErrorCode(error)
+    return typeof code === 'string' && ROUTE_FAILURE_LOGGABLE_CODE_SET.has(code) ? code : ROUTE_FAILURE_UNLISTED_CODE
+  } catch {
+    return ROUTE_FAILURE_UNLISTED_CODE
+  }
+}
+
 function inferHttpStatus(error) {
   const name = error && error.name ? String(error.name) : ''
   if (inferDataSourceBridgeErrorCode(error)) return 422
@@ -10320,7 +10387,12 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
         return await handler(req, res)
       } catch (error) {
         if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
-          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`)
+          // R2: method + route TEMPLATE + one closed-list code (loggableRouteFailureCode). No request
+          // value — no param, no query, no id — is interpolated. Same single synchronous call as
+          // before, on the same branches, right before the unchanged `sendError`.
+          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`, {
+            code: loggableRouteFailureCode(error),
+          })
         }
         return sendError(res, error)
       }
@@ -10355,6 +10427,9 @@ module.exports = {
     scopedInput,
     sendError,
     inferHttpStatus,
+    ROUTE_FAILURE_LOGGABLE_CODES,
+    ROUTE_FAILURE_UNLISTED_CODE,
+    loggableRouteFailureCode,
     publicRunInput,
     redactDeadLetter,
     asSampleLimit,
