@@ -90,7 +90,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   COPY_SOURCE_RULE_ON_RENUMBERED_FIELD: 'A row-level read rule references an auto-number column whose values would change in the copy.',
   COPY_UNSUPPORTED_FIELD_TYPE: 'The source sheet has a field type the copy does not support.',
   NOT_FOUND: 'Sheet not found',
-  CONFLICT: 'Conflict',
+  CONFLICT: 'Another operation on this sheet is in progress; retry shortly.',
   RECOVERY_IN_PROGRESS: 'Another recovery operation is in progress on this sheet; retry shortly.',
 }
 
@@ -234,10 +234,18 @@ function parseRequest(req: Request, res: Response): { sheetId: string; body: Cop
   return { sheetId, body: { sourceSheetId: sheetId, name, withData: parsed.data.withData, permissionMode: 'inherit' } }
 }
 
+/**
+ * PG 锁类 SQLSTATE → 409（可重试，不是 500）：40P01 deadlock_detected（围栏先于行锁之后不该再出现 —— 出现即是
+ * 新写者的锁序回归，仍按可重试回）、55P03 lock_not_available、40001 serialization_failure。只认 code，不看散文。
+ */
+const RETRYABLE_LOCK_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '55P03', '40001'])
+
 function mapError(res: Response, err: unknown): Response | null {
   if (err instanceof CopySheetError) return fail(res, err.statusCode, err.code, err.details)
   if (err instanceof SheetNotLiveError) return sendSheetNotLive(res, err.liveness)
   if (err instanceof SheetWriterBlockedError) return fail(res, 409, 'RECOVERY_IN_PROGRESS')
+  const sqlState = (err as { code?: unknown } | null | undefined)?.code
+  if (typeof sqlState === 'string' && RETRYABLE_LOCK_SQLSTATES.has(sqlState)) return fail(res, 409, 'CONFLICT')
   const hint = getDbNotReadyMessage(err)
   if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
   return null
@@ -264,8 +272,10 @@ export function createMultitableCopySheetRoutes(): Router {
         await auditRefusal(query, access.userId, sheetId, gate.status, gate.code, 'dry-run')
         return fail(res, gate.status, gate.code)
       }
+      // 超限的 with-data 预检回 200 + `summary.overLimit=true`（记录不读、结构披露照常；ADR §3「超限与否」/ FE-2）。
       const plan = await planCopySheet(query, body, gate.actor, copySheetDeps(), {
         copierCanManageSourceFields: gate.copierCanManageSourceFields,
+        overLimit: 'report',
       })
       logger.info('[multitable.sheet.copy.dry-run]', {
         sourceSheetId: sheetId,
@@ -338,12 +348,6 @@ export function createMultitableCopySheetRoutes(): Router {
         res.set('Idempotent-Replayed', 'true')
         return res.status(201).json(outcome.body)
       }
-      if (!outcome.lockHeld && !outcome.ledgerUnavailable) {
-        logger.warn('Copy-sheet dedupe lock not acquired within the bounded wait; copied with primary-key fallback only', {
-          sourceSheetId: sheetId,
-          userId: access.userId,
-        })
-      }
       if (outcome.ledgerUnavailable) {
         logger.warn('Copy-sheet dedupe ledger unavailable; copied without dedupe', { sourceSheetId: sheetId, userId: access.userId })
       }
@@ -353,19 +357,20 @@ export function createMultitableCopySheetRoutes(): Router {
       invalidateSheetCachesAfterCopy(result.sheetId)
       let formulaRecompute: { attempted: number; recomputed: number; failed: boolean; errorCode?: string } | null = null
       if (result.formulaFieldIds.length > 0 && result.newRecordIds.length > 0) {
-        const freshFields = await loadFieldsForSheet(query, result.sheetId)
         let recomputed = 0
         let failed = false
-        for (let i = 0; i < result.newRecordIds.length; i += FORMULA_RECOMPUTE_CHUNK_SIZE) {
-          const chunk = result.newRecordIds.slice(i, i + FORMULA_RECOMPUTE_CHUNK_SIZE)
-          try {
-            const results = await recalculateAllFormulaFieldsForActor(access.userId, query, result.sheetId, freshFields as never, chunk)
+        try {
+          // TX-5：字段读也在 try 里 —— 提交后的任何失败都不能把一次已提交的复制变成 500。
+          const freshFields = await loadFieldsForSheet(query, result.sheetId)
+          for (let i = 0; i < result.newRecordIds.length; i += FORMULA_RECOMPUTE_CHUNK_SIZE) {
+            const chunk = result.newRecordIds.slice(i, i + FORMULA_RECOMPUTE_CHUNK_SIZE)
+            // DATA-7：先按复制者的读权限水合 lookup / rollup，再算 formula（formula-over-lookup 才看得到真实值）。
+            const results = await recalculateAllFormulaFieldsForActor(access.userId, query, result.sheetId, freshFields as never, chunk, { hydrateLookupRollupFor: access })
             recomputed += results.length
-          } catch (err) {
-            logger.error('[multitable.sheet.copy] formula recompute failed mid-chunk', err instanceof Error ? new Error(err.name) : undefined)
-            failed = true
-            break
           }
+        } catch (err) {
+          logger.error('[multitable.sheet.copy] formula recompute failed mid-chunk', err instanceof Error ? new Error(err.name) : undefined)
+          failed = true
         }
         formulaRecompute = {
           attempted: result.newRecordIds.length,

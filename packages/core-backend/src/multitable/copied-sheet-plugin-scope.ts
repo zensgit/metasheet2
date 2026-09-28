@@ -25,7 +25,7 @@ export const COPIED_SNAPSHOT_SCOPE_OWNER = 'copied-snapshot'
 export const COPIED_FROM_KIND_PLUGIN_MANAGED = 'plugin-managed'
 export const COPIED_FROM_KIND_USER = 'user'
 
-/** 词表（迁移 zzzz20260927120000 的 CHECK 约束就是这两个值）。 */
+/** 词表（迁移 zzzz20260927120500 的 CHECK 约束就是这两个值）。 */
 export type CopiedFromKind = typeof COPIED_FROM_KIND_PLUGIN_MANAGED | typeof COPIED_FROM_KIND_USER
 
 export function isCopiedFromKind(value: unknown): value is CopiedFromKind {

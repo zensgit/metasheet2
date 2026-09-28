@@ -108,6 +108,11 @@ function mapFieldIdOrThrow(ctx: FieldRemapContext, ownerFieldId: string, raw: un
 const LINK_FIELD_ID_ALIASES = ['linkFieldId', 'relatedLinkFieldId', 'linkedFieldId', 'sourceFieldId'] as const
 const TARGET_FIELD_ID_ALIASES = ['targetFieldId', 'lookUpTargetFieldId', 'lookupTargetFieldId', 'lookupFieldId'] as const
 const FOREIGN_SHEET_ID_ALIASES = ['foreignSheetId', 'foreignDatasheetId', 'datasheetId'] as const
+/**
+ * rollup 的过滤条件列表（`univer-meta.ts` parseRollupFilterConditions 读 `filters ?? conditions ?? filterConditions`；
+ * 叶子 `{ fieldId, operator, value? }`，fieldId 是 **link 外表**的字段）。外表 = 源表（自指 link）时 remap，否则原样。
+ */
+const ROLLUP_FILTER_KEYS = ['filters', 'conditions', 'filterConditions'] as const
 
 /**
  * property 里**已显式处理**的键。除此之外的键做残留扫描：任何 `fld_` 形状的值 → 拒绝。
@@ -117,6 +122,7 @@ const HANDLED_PROPERTY_KEYS: ReadonlySet<string> = new Set([
   ...LINK_FIELD_ID_ALIASES,
   ...TARGET_FIELD_ID_ALIASES,
   ...FOREIGN_SHEET_ID_ALIASES,
+  ...ROLLUP_FILTER_KEYS,
   'foreignBaseId',
   'mirrorFieldId',
   'mirrorOf',
@@ -162,12 +168,108 @@ function remapRuleLike(ctx: FieldRemapContext, ownerFieldId: string, raw: unknow
   return next
 }
 
+/**
+ * relation-aggregation 函数族（`univer-meta.ts` RELATION_AGG_FUNCTIONS ∪ RELATION_LOOKUP_FUNCTIONS ∪
+ * RELATION_ARRAY_FUNCTIONS；tests/unit/multitable-copy-sheet-remap.test.ts R9 钉住两处一致）。它们的 link /
+ * target / criteria 参数是**带引号的字段 id 字符串**（`RELSUMIF("fld_link", "fld_target", "fld_criteria", ">", 3)`；
+ * RELCOUNTIF 四参：link, criteria, op, value），不是 `{fld_…}`——所以必须单独 remap（DATA-1）。
+ */
+export const RELATION_AGGREGATION_FUNCTIONS: ReadonlySet<string> = new Set(['RELSUMIF', 'RELAVGIF', 'RELCOUNTIF', 'RELLOOKUP', 'RELVALUES'])
+const QUOTED_FIELD_ID_PATTERN = /"(fld_[a-zA-Z0-9_-]+)"/g
+const RELATION_CALL_PATTERN = /^(\s*=?\s*)([A-Za-z_]+)(\s*\()([\s\S]*)(\)\s*)$/
+
+/** 顶层逗号切分，保留每段原文（含空白）；引号内的逗号不切；出现嵌套括号 → null（不在该函数族的文法内）。 */
+function splitTopLevelArgsRaw(argText: string): string[] | null {
+  const segments: string[] = []
+  let current = ''
+  let inQuote = false
+  for (const ch of argText) {
+    if (ch === '"') { inQuote = !inQuote; current += ch; continue }
+    if (!inQuote && ch === ',') { segments.push(current); current = ''; continue }
+    if (!inQuote && (ch === '(' || ch === ')')) return null
+    current += ch
+  }
+  if (inQuote) return null
+  segments.push(current)
+  return segments
+}
+
+function quotedFieldIdOf(segment: string): string | null {
+  const m = /^"(fld_[a-zA-Z0-9_-]+)"$/.exec(segment.trim())
+  return m ? m[1]! : null
+}
+
+function hasQuotedFieldId(text: string): boolean {
+  return new RegExp(QUOTED_FIELD_ID_PATTERN.source, 'g').test(text)
+}
+
+/**
+ * relation-aggregation 调用里带引号的字段 id 参数 remap：
+ *   - link 参数：本表 link 字段 → 必须能映射（否则 COPY_UNMAPPED_FIELD_REF）；
+ *   - target / criteria 参数：link 外表的字段 —— 外表 = 源表（自指）时映射，否则原样保留；
+ *   - op / value 位置、非该函数族的表达式：任何带引号的 `fld_` 字符串都是未列举引用 → 拒绝（fail-closed）。
+ */
+function remapRelationAggregationArgs(ctx: FieldRemapContext, ownerFieldId: string, expression: string): string {
+  const m = RELATION_CALL_PATTERN.exec(expression)
+  if (!m || !RELATION_AGGREGATION_FUNCTIONS.has(m[2]!.toUpperCase())) {
+    if (hasQuotedFieldId(expression)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+    return expression
+  }
+  const [, prefix, fnName, open, argText, close] = m
+  const segments = splitTopLevelArgsRaw(argText!)
+  if (!segments) {
+    if (hasQuotedFieldId(expression)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+    return expression
+  }
+  const roles: Array<'link' | 'foreign' | 'literal'> = fnName!.toUpperCase() === 'RELCOUNTIF'
+    ? ['link', 'foreign', 'literal', 'literal']
+    : ['link', 'foreign', 'foreign', 'literal', 'literal']
+  const linkId = quotedFieldIdOf(segments[0] ?? '')
+  const linkProperty = linkId ? ctx.fieldPropertyById.get(linkId) : undefined
+  const linkIsSelfRef = linkProperty ? foreignSheetIdOf(linkProperty) === ctx.sourceSheetId : false
+  const out = segments.map((segment, index) => {
+    const quoted = quotedFieldIdOf(segment)
+    if (!quoted) {
+      // 非「恰好一个带引号字段 id」的段：引号里若混着 fld_ 也算未列举引用。
+      if (hasQuotedFieldId(segment)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+      return segment
+    }
+    const role = roles[index] ?? 'literal'
+    if (role === 'literal') throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+    if (role === 'foreign' && !linkIsSelfRef) return segment
+    const mapped = mapFieldIdOrThrow(ctx, ownerFieldId, quoted)
+    return segment.replace(`"${quoted}"`, `"${mapped}"`)
+  })
+  return `${prefix}${fnName}${open}${out.join(',')}${close}`
+}
+
 export function remapFormulaExpression(ctx: FieldRemapContext, ownerFieldId: string, expression: unknown): string {
   if (typeof expression !== 'string') return ''
-  return expression.replace(FORMULA_FIELD_REF_PATTERN, (_match, fieldId: string) => {
+  const braced = expression.replace(FORMULA_FIELD_REF_PATTERN, (_match, fieldId: string) => {
     const mapped = ctx.fieldIdMap.get(fieldId)
     if (!mapped) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
     return `{${mapped}}`
+  })
+  return remapRelationAggregationArgs(ctx, ownerFieldId, braced)
+}
+
+/**
+ * rollup 过滤条件列表的 remap（DATA-4）：叶子 `fieldId` 是 link 外表的字段 —— 自指 link 时映射（映射不到 → 拒绝），
+ * 外表时原样；叶子其余部分与非叶子元素里任何 `fld_` 形状 → 拒绝。
+ */
+function remapRollupFilterList(ctx: FieldRemapContext, ownerFieldId: string, raw: unknown, targetIsInSource: boolean): unknown {
+  if (!Array.isArray(raw)) {
+    if (containsFieldIdLike(raw)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+    return raw
+  }
+  return raw.map((item) => {
+    if (!isPlainObject(item) || typeof item.fieldId !== 'string') {
+      if (containsFieldIdLike(item)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+      return item
+    }
+    const { fieldId, ...rest } = item
+    if (containsFieldIdLike(rest)) throw new CopySheetRemapError(COPY_UNMAPPED_FIELD_REF, ownerFieldId)
+    return { ...item, fieldId: targetIsInSource ? mapFieldIdOrThrow(ctx, ownerFieldId, fieldId) : fieldId }
   })
 }
 
@@ -205,6 +307,11 @@ export function remapFieldProperty(ctx: FieldRemapContext, field: SourceFieldRow
   for (const key of TARGET_FIELD_ID_ALIASES) {
     if (typeof src[key] !== 'string' || !(src[key] as string).trim()) continue
     next[key] = targetIsInSource ? mapFieldIdOrThrow(ctx, field.id, src[key]) : src[key]
+  }
+  // rollup 过滤条件（DATA-4）：叶子 fieldId 属于 link 外表 —— 与 targetFieldId 同一判定。
+  for (const key of ROLLUP_FILTER_KEYS) {
+    if (!(key in src)) continue
+    next[key] = remapRollupFilterList(ctx, field.id, src[key], targetIsInSource)
   }
 
   // 双向 / 镜像配对：`mirrorFieldId` 丢弃、`twoWay` 不带（否则要在外表建镜像列，§5.1）；`mirrorOf` 列本就不建。
@@ -314,6 +421,12 @@ function dependsOnBlanked(ctx: FieldRemapContext, field: SourceFieldRow): boolea
     let m: RegExpExecArray | null
     while ((m = pattern.exec(expression)) !== null) {
       if (blankedOrUnbuilt(m[1])) return true
+    }
+    // relation-aggregation 调用的 link 参数（带引号的字段 id）也是依赖。
+    const call = RELATION_CALL_PATTERN.exec(expression)
+    if (call && RELATION_AGGREGATION_FUNCTIONS.has(call[2]!.toUpperCase())) {
+      const linkId = quotedFieldIdOf(splitTopLevelArgsRaw(call[4]!)?.[0] ?? '')
+      if (linkId && blankedOrUnbuilt(linkId)) return true
     }
     return false
   }
@@ -466,12 +579,21 @@ export function remapFilterInfo(
 
 const FIELD_ID_KEY = /(^fieldId$)|(FieldId$)/
 const FIELD_IDS_KEY = /(^fieldIds$)|(FieldIds$)/
+/**
+ * 键名不以 `fieldId(s)` 结尾却装着字段 id 的视图 config 键（Web 共享 view.config 的写入点：
+ * `frozenLeftColumnIds: string[]`（apps/web/src/multitable/utils/frozen-columns.ts）、
+ * `columnWidths: Record<fieldId, number>`（view-display-prefs.ts）、`aggregations: Record<fieldId, fn>`
+ * （multitable/aggregation-helpers.ts）。ADR §5.2 列举；FE-1。
+ */
+export const VIEW_CONFIG_FIELD_ID_LIST_KEYS: ReadonlySet<string> = new Set(['frozenLeftColumnIds'])
+export const VIEW_CONFIG_FIELD_ID_KEYED_OBJECT_KEYS: ReadonlySet<string> = new Set(['columnWidths', 'aggregations'])
 
 /**
  * 视图 `config` / `sortInfo` / `groupInfo` 的 remap：
  *   - `publicForm` 整段剥离（分享令牌）；
  *   - 键名为 `fieldId` 或以 `FieldId` 结尾 → remap（指向未建 / 未知列 → 删键；被清空但建了的列照常 remap）；
- *   - 键名为 `fieldIds` 或以 `FieldIds` 结尾且为数组 → 逐个 remap、丢未建 / 未知；
+ *   - 键名为 `fieldIds` 或以 `FieldIds` 结尾且为数组、以及 `frozenLeftColumnIds` → 逐个 remap、丢未建 / 未知；
+ *   - `columnWidths` / `aggregations`：**对象键**是字段 id → 键 remap、丢未建 / 未知，值照常递归扫描；
  *   - `conditionalFormattingRules[*]`（及嵌套）落在同一规则里（数组递归）；
  *   - 其它位置残留的 `fld_` 形状字符串 → COPY_UNMAPPED_FIELD_REF。
  */
@@ -492,10 +614,20 @@ export function remapViewConfig(ctx: FieldRemapContext, config: Record<string, u
         next[key] = mapped
         continue
       }
-      if (FIELD_IDS_KEY.test(key) && Array.isArray(value)) {
+      if ((FIELD_IDS_KEY.test(key) || VIEW_CONFIG_FIELD_ID_LIST_KEYS.has(key)) && Array.isArray(value)) {
         next[key] = value
           .map((id) => builtFieldId(ctx, id))
           .filter((id): id is string => typeof id === 'string')
+        continue
+      }
+      if (VIEW_CONFIG_FIELD_ID_KEYED_OBJECT_KEYS.has(key) && isPlainObject(value)) {
+        const remapped: Record<string, unknown> = {}
+        for (const [fieldId, inner] of Object.entries(value)) {
+          const mapped = builtFieldId(ctx, fieldId)
+          if (!mapped) continue // 未建 / 未知列的宽度 / 汇总 → 丢
+          remapped[mapped] = walk(inner)
+        }
+        next[key] = remapped
         continue
       }
       next[key] = walk(value)

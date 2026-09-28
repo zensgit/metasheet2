@@ -3345,9 +3345,39 @@ export async function recalculateAllFormulaFieldsForActor(
   sheetId: string,
   fields: UniverMetaField[],
   recordIds: string[],
+  opts: {
+    /**
+     * Copy-sheet (ADR #6094 §7.2 step 7, DATA-7): hydrate same-record lookup/rollup for these rows under THIS
+     * actor's read authority before evaluating, so a formula-over-lookup sees the real lookup value instead of
+     * the absent-on-reload 0 (RWS Step 4 / recalcNewRecordFormulas parity). Skipped when the sheet has no
+     * lookup/rollup field (no extra statements).
+     */
+    hydrateLookupRollupFor?: ResolvedRequestAccess
+  } = {},
 ): Promise<Array<{ recordId: string; data: Record<string, unknown> }>> {
   const formulaFieldIds = new Set(fields.filter((f) => f.type === 'formula').map((f) => f.id))
   if (formulaFieldIds.size === 0 || recordIds.length === 0) return []
+  let hydratedDataByRecord: Map<string, Record<string, unknown>> | undefined
+  const hasLookupRollup = fields.some((f) => f.type === 'lookup' || f.type === 'rollup')
+  if (opts.hydrateLookupRollupFor && hasLookupRollup) {
+    const recordRes = await query(
+      'SELECT id, version, data FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+      [sheetId, recordIds],
+    )
+    const rows = (recordRes.rows as Array<{ id: unknown; version: unknown; data: unknown }>).map((row) => ({
+      id: String(row.id),
+      version: Number(row.version ?? 0),
+      data: normalizeJson(row.data),
+    })) as UniverMetaRecord[]
+    if (rows.length > 0) {
+      const relationalLinkFields = fields
+        .map((f) => (f.type === 'link' ? { fieldId: f.id, cfg: parseLinkFieldConfig(f.property) } : null))
+        .filter((v): v is RelationalLinkField => !!v && !!v.cfg)
+      const linkValuesByRecord = await loadLinkValuesByRecord(query, rows.map((r) => r.id), relationalLinkFields)
+      await applyLookupRollup(undefined, query, sheetId, fields, rows, relationalLinkFields, linkValuesByRecord, opts.hydrateLookupRollupFor)
+      hydratedDataByRecord = new Map(rows.map((row) => [row.id, { ...row.data }]))
+    }
+  }
   return recalculateFormulaFields(
     buildWriterTaintContext(actorId),
     query,
@@ -3355,7 +3385,7 @@ export async function recalculateAllFormulaFieldsForActor(
     fields,
     recordIds,
     [],
-    undefined,
+    hydratedDataByRecord,
     formulaFieldIds,
   )
 }

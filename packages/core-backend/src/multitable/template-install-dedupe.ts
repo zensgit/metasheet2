@@ -156,6 +156,18 @@ export class TemplateInstallLedgerUnavailableError extends Error {
   }
 }
 
+/**
+ * 有界等待内拿不到意图锁,且调用方选了 `onLockTimeout: 'refuse'`(复制数据表,ADR CS-16 / TX-4):
+ * 先到者还没提交时账本读不到它,「降级照常做」会建出第二张表 —— 所以宁可拒绝(路由映射 409)。
+ * 模板安装保持旧的降级姿态(多一个 Base 可接受),不抛这个。
+ */
+export class DedupeLockTimeoutError extends Error {
+  constructor() {
+    super('the intent lock was not acquired within the bounded wait; the action was refused, not degraded')
+    this.name = 'DedupeLockTimeoutError'
+  }
+}
+
 /** PG 缺表 SQLSTATE。中文 locale 下 PG 散文被翻译,散文匹配会漏判 —— 只认 code。 */
 function isUndefinedTable(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === '42P01'
@@ -360,6 +372,11 @@ export interface RunDeduplicatedIntentInput {
   readonly lockPollMs?: number
   /** 退避实现;默认 setTimeout。测试注入。 */
   readonly sleep?: (ms: number) => Promise<void>
+  /**
+   * 有界等待内拿不到锁时:`'degrade'`(默认,模板安装的旧行为)→ lockHeld=false 继续读账本 + 照常动作;
+   * `'refuse'`(复制数据表)→ 抛 {@link DedupeLockTimeoutError},一条账本语句都不发、install() 不调用。
+   */
+  readonly onLockTimeout?: 'degrade' | 'refuse'
 }
 
 export interface RunDeduplicatedTemplateInstallInput extends Omit<RunDeduplicatedIntentInput, 'scope'> {
@@ -393,6 +410,7 @@ export async function runDeduplicatedIntent(
     input.lockPollMs ?? TEMPLATE_INSTALL_LOCK_POLL_MS,
     input.sleep ?? defaultSleep,
   )
+  if (!lockHeld && input.onLockTimeout === 'refuse') throw new DedupeLockTimeoutError()
 
   // ② 窗口内的上一次动作。
   const priorResult = await ledgerQuery(

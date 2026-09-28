@@ -6,10 +6,12 @@
  * 两个入口：
  *   - {@link planCopySheet}：零写分析（dry-run 与执行共用）：字段计划 / 视图计划 / 规则 remap / 计数 / 披露。
  *   - {@link executeCopySheet}：§7.2 的单事务（READ COMMITTED = pool 裸 BEGIN）：
- *       ① 咨询锁（事务第一条语句，去重账本）→ ② 源表行 `FOR UPDATE` + 存活重读 → ③ 全参与表围栏一次取全 →
- *       ④ tripwire 基线 → ⑤ DB-fresh 两侧门 → ⑥ meta_sheets / 字段 / 视图 → ⑦ 记录（facade 上的
- *       `RecordService.createRecord` 复制扩展）→ ⑧ 授权行 + record_permissions remap → ⑨ 拒绝集等价断言 →
- *       ⑩ tripwire 比对 → ⑪ 两行审计 → 账本写回 → COMMIT。任一步抛错 = 整体回滚（CS-18）。
+ *       ① 咨询锁（事务第一条语句，去重账本；等不到 → 409，不降级）→ ② 无锁预读源表 link 字段 → 全参与表
+ *       围栏一次取全（**围栏先于行锁**：与每个围栏写者同向，ADR §7.2 第 4 步 r4 修订）→ ③ 源表行 `FOR UPDATE` +
+ *       存活重读 → ④ tripwire 基线（在任何源数据读之前）→ ⑤ DB-fresh 两侧门（在任何计数之前）→ 计划 + 参与表
+ *       集合核对 → ⑥ meta_sheets / 字段 / 视图 → ⑦ 记录（facade 上的 `RecordService.createRecord` 复制扩展）→
+ *       ⑧ 授权行 + record_permissions remap → ⑨ 拒绝集等价断言 → ⑩ tripwire 比对 → ⑪ 两行审计 → 账本写回 →
+ *       COMMIT。任一步抛错 = 整体回滚（CS-18）。
  *
  * 这个模块**不知道** req / res：路由层负责事务外快速拒、错误 → HTTP 映射、提交后的 formula 重算 / 事件 / 日志。
  * 所有错误都是 values-free 的：只带 code + 位置（rowIndex / fieldId / viewId / 计数），永不带单元格值。
@@ -64,6 +66,7 @@ import { isPluginManagedSheet, isSystemManagedSheet } from './sheet-delete-guard
 import { assertSheetLiveForUpdate } from './sheet-liveness'
 import {
   COPY_SHEET_INTENT_KIND,
+  DedupeLockTimeoutError,
   runDeduplicatedIntent,
   type DedupeIntentScope,
 } from './template-install-dedupe'
@@ -173,6 +176,11 @@ export interface CopySheetPlanSummary {
   conditionalRuleCount: number
   notCopied: readonly string[]
   limits: { maxRows: number; maxFields: number }
+  /**
+   * dry-run 专用（ADR §3「超限与否」/ FE-2）：`withData` 且源行数 > `limits.maxRows` → true，此时记录**未读**
+   * （`rowCount` 仍是源行数、结构披露照常）。执行路径永不 true —— 超限在执行时是 413 `COPY_TOO_LARGE`。
+   */
+  overLimit: boolean
 }
 
 /** 不复制项（ADR §3 / §10），固定清单，dry-run 与结果一并透出。 */
@@ -202,14 +210,18 @@ interface SourceSheetRow {
   rowLevelReadEnabled: boolean
   conditionalReadRulesRaw: unknown
   systemKind: string | null
+  /** 源表自己的 provenance kind（源表本身是托管表的快照 → 'plugin-managed'；SEC-1：二次复制不洗白）。 */
+  copiedFromKind: string | null
 }
 
 async function loadSourceSheet(query: QueryFn, sheetId: string): Promise<SourceSheetRow | null> {
+  // `to_jsonb(...) ->> col` 对尚未迁移的列回 NULL 而不是 42703（provenance / 行级开关 / 规则 / system_kind 都是后加列）。
   const res = await query(
     `SELECT id, base_id, name, description,
             (to_jsonb(meta_sheets) ->> 'row_level_read_permissions_enabled') AS row_level,
             (to_jsonb(meta_sheets) -> 'conditional_read_rules') AS rules,
-            (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind
+            (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
+            (to_jsonb(meta_sheets) ->> 'copied_from_kind') AS copied_from_kind
        FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL`,
     [sheetId],
   )
@@ -223,7 +235,23 @@ async function loadSourceSheet(query: QueryFn, sheetId: string): Promise<SourceS
     rowLevelReadEnabled: row.row_level === 'true' || row.row_level === true,
     conditionalReadRulesRaw: row.rules ?? [],
     systemKind: typeof row.system_kind === 'string' ? row.system_kind : null,
+    copiedFromKind: typeof row.copied_from_kind === 'string' ? row.copied_from_kind : null,
   }
+}
+
+/** 无锁预读：源表每个 link 字段的外表 id（围栏集合用；§7.2 第 4 步 r4 —— 围栏必须先于行锁、先于计划）。 */
+async function loadSourceLinkTargets(query: QueryFn, sheetId: string): Promise<string[]> {
+  const res = await query('SELECT id, type, property FROM meta_fields WHERE sheet_id = $1', [sheetId])
+  const targets: string[] = []
+  for (const row of res.rows as Array<Record<string, unknown>>) {
+    if (row.type !== 'link') continue
+    const property = normalizeJson(row.property)
+    const foreign = ['foreignSheetId', 'foreignDatasheetId', 'datasheetId']
+      .map((k) => property[k])
+      .find((v) => typeof v === 'string' && v.trim()) as string | undefined
+    if (foreign) targets.push(foreign.trim())
+  }
+  return targets
 }
 
 async function loadSourceFields(query: QueryFn, sheetId: string): Promise<SourceFieldRow[]> {
@@ -399,15 +427,28 @@ export async function assertSourceIsNotSystemSheet(query: QueryFn, source: { id:
  * 零写分析。前置：调用方已跑事务外快速拒（canRead / liveness / 全表读门 / 目标 Base 可写 / 系统表）。
  * 这里再做：字段数与行数上限、字段 / 视图 / 规则 remap（fail-closed）、计数与披露。
  */
+export interface PlanCopySheetOptions {
+  copierCanManageSourceFields: boolean
+  /** 执行路径预 mint（围栏集合要先于计划知道新表 id）；dry-run 缺省 mint。 */
+  newSheetId?: string
+  /**
+   * `withData` 且源行数 > 上限时：`'refuse'`（执行路径，默认）→ 413 `COPY_TOO_LARGE`；`'report'`（dry-run）→
+   * 不读记录、`summary.overLimit = true`、结构披露照常（ADR §3 / FE-2）。
+   */
+  overLimit?: 'refuse' | 'report'
+  /** 调用方已在同事务里读过的源表行（执行路径：门先于计划）；缺省自读。 */
+  source?: SourceSheetRow
+}
+
 export async function planCopySheet(
   query: QueryFn,
   request: CopySheetRequest,
   actor: CopySheetActor,
   deps: Pick<CopySheetDeps, 'mintId'>,
-  opts: { copierCanManageSourceFields: boolean; newSheetId?: string },
+  opts: PlanCopySheetOptions,
 ): Promise<CopySheetPlan> {
   const mintId = deps.mintId ?? defaultMintId
-  const source = await loadSourceSheet(query, request.sourceSheetId)
+  const source = opts.source ?? await loadSourceSheet(query, request.sourceSheetId)
   if (!source) throw new CopySheetError(404, 'NOT_FOUND')
   await assertSourceIsNotSystemSheet(query, source)
 
@@ -417,7 +458,8 @@ export async function planCopySheet(
     throw new CopySheetError(413, COPY_SHEET_ERROR_CODES.tooManyFields, { fieldCount: fields.length, limit: COPY_SHEET_MAX_FIELDS })
   }
   const rowCount = await countSourceRecords(query, source.id)
-  if (request.withData && rowCount > maxRows) {
+  const overLimit = request.withData && rowCount > maxRows
+  if (overLimit && opts.overLimit !== 'report') {
     throw new CopySheetError(413, COPY_SHEET_ERROR_CODES.tooLarge, { rowCount, limit: maxRows })
   }
 
@@ -442,14 +484,16 @@ export async function planCopySheet(
   const { plans: fieldPlans, ctx } = planned
 
   // 记录（withData 才读）—— dry-run 也读：autoNumber 重编号与 null 省略计数需要看数据（复制者已过全表读门）。
-  const records = request.withData ? await loadSourceRecords(query, source.id, maxRows) : []
+  // 超限的 dry-run（'report'）不读记录：只回结构披露 + overLimit。
+  const readRecords = request.withData && !overLimit
+  const records = readRecords ? await loadSourceRecords(query, source.id, maxRows) : []
   if (records.length > maxRows) {
     throw new CopySheetError(413, COPY_SHEET_ERROR_CODES.tooLarge, { rowCount: records.length, limit: maxRows })
   }
   const linkFieldIds = fieldPlans
     .filter((p) => p.build && p.copyValues && p.type === 'link')
     .map((p) => p.sourceFieldId)
-  const linkValues = request.withData
+  const linkValues = readRecords
     ? await loadLinkValues(query, linkFieldIds, records.map((r) => r.id))
     : new Map<string, Map<string, string[]>>()
 
@@ -467,16 +511,13 @@ export async function planCopySheet(
     }
   }
 
-  // null / 空值省略计数（CS-21）。
+  // null 省略计数（CS-21；'' / [] 保留，见 isEmptyCell）。
   let nullCellsOmitted = 0
   if (request.withData) {
     for (const row of records) {
       for (const plan of fieldPlans) {
         if (!plan.build || !plan.copyValues) continue
-        const v = plan.type === 'link'
-          ? (linkValues.get(row.id)?.get(plan.sourceFieldId) ?? [])
-          : row.data[plan.sourceFieldId]
-        if (isEmptyCell(v)) nullCellsOmitted += 1
+        if (isEmptyCell(sourceCellValue(row, plan, linkValues))) nullCellsOmitted += 1
       }
     }
   }
@@ -495,7 +536,8 @@ export async function planCopySheet(
   }
 
   const permissions = await loadPermissionRows(query, source.id, views.map((v) => v.id))
-  const copiedFromKind: CopiedFromKind = (await isPluginManagedSheet(query, source.id))
+  // CS-14 / SEC-1：源是托管表（registry 有行）**或**源本身已是托管表的快照 → 'plugin-managed'。快照的快照不洗白。
+  const copiedFromKind: CopiedFromKind = (await isPluginManagedSheet(query, source.id)) || source.copiedFromKind === COPIED_FROM_KIND_PLUGIN_MANAGED
     ? COPIED_FROM_KIND_PLUGIN_MANAGED
     : COPIED_FROM_KIND_USER
 
@@ -507,7 +549,7 @@ export async function planCopySheet(
     baseId: source.baseId,
     targetName,
     copiedFromKind,
-    rowCount: request.withData ? records.length : 0,
+    rowCount: request.withData ? (overLimit ? rowCount : records.length) : 0,
     fieldCount: fields.length,
     builtFieldCount: fieldPlans.filter((p) => p.build).length,
     viewCount: views.length,
@@ -523,6 +565,7 @@ export async function planCopySheet(
     conditionalRuleCount: rules.length,
     notCopied: COPY_SHEET_NOT_COPIED,
     limits: { maxRows, maxFields: COPY_SHEET_MAX_FIELDS },
+    overLimit,
   }
 
   return {
@@ -531,10 +574,25 @@ export async function planCopySheet(
   }
 }
 
+/**
+ * CS-21「null 键省略」只省略 null / undefined。`''` 与 `[]` **保留**：规则求值器对缺失键走 asStringOrThrow /
+ * asArrayOrThrow → deny，对 `''` / `[]` 正常求值 → 不 deny；省略它们会让源 / 新表的规则拒绝集不等（DATA-5，
+ * 拒绝集等价断言 500）。
+ */
 function isEmptyCell(value: unknown): boolean {
-  if (value === null || value === undefined || value === '') return true
-  if (Array.isArray(value) && value.length === 0) return true
-  return false
+  return value === null || value === undefined
+}
+
+/**
+ * 一个源单元格将写入新表的值。link 列以 `meta_links` 为准；links 为空时只保留源 `data` 里**显式**的 `[]`
+ * （规则求值 undefined ≠ []，DATA-5），不复活 `data` 里没有对应 links 的陈旧 id。
+ */
+function sourceCellValue(row: SourceRecordRow, plan: FieldCopyPlan, linkValues: ReadonlyMap<string, ReadonlyMap<string, string[]>>): unknown {
+  if (plan.type !== 'link') return row.data[plan.sourceFieldId]
+  const linked = linkValues.get(row.id)?.get(plan.sourceFieldId)
+  if (linked && linked.length > 0) return linked
+  const stored = row.data[plan.sourceFieldId]
+  return Array.isArray(stored) && stored.length === 0 ? [] : undefined
 }
 
 // ── 执行（单事务） ──────────────────────────────────────────────────────────
@@ -546,11 +604,16 @@ interface TripwireBaseline {
   links: string
 }
 
-async function readTripwireBaseline(query: QueryFn, sheetId: string, fieldIds: readonly string[]): Promise<TripwireBaseline> {
+/**
+ * tripwire 基线 / 重读（§7.2 第 4 / 6 步）：字段 id 集来自**它自己**的 meta_fields SELECT（不依赖计划 —— 基线必须
+ * 在计划读任何源数据之前取到，SEC-2 / TX-1 / DATA-6）。
+ */
+async function readTripwireBaseline(query: QueryFn, sheetId: string): Promise<TripwireBaseline> {
   const fields = await query(
     'SELECT id, updated_at FROM meta_fields WHERE sheet_id = $1 ORDER BY id ASC',
     [sheetId],
   )
+  const fieldIds = (fields.rows as Array<Record<string, unknown>>).map((r) => String(r.id))
   const views = await query(
     'SELECT id, updated_at FROM meta_views WHERE sheet_id = $1 ORDER BY id ASC',
     [sheetId],
@@ -572,7 +635,18 @@ async function readTripwireBaseline(query: QueryFn, sheetId: string, fieldIds: r
 }
 
 /**
- * 参与表围栏集合（§7.2 第 4 步）：源表、新表、新表全部 link 字段（非自指）的 foreignSheetId。排序去重后一次取全，
+ * 参与表围栏集合（§7.2 第 4 步）—— 从**无锁预读**的 link 外表算（围栏先于行锁、先于计划）：源表、新表（预 mint）、
+ * 全部 link 外表（自指 → 新表，已在集合里）。可能比计划最终的集合**大**（镜像列不建但其外表也进来了）——多围一把
+ * 只是多等一会儿，不影响正确性；计划算出的集合必须 ⊆ 它（`copyInsideTransaction` 核对，否则 409）。
+ */
+export function participatingSheetIdsFromLinkTargets(sourceSheetId: string, newSheetId: string, linkTargets: readonly string[]): string[] {
+  const ids = new Set<string>([sourceSheetId, newSheetId])
+  for (const foreign of linkTargets) if (foreign && foreign !== sourceSheetId) ids.add(foreign)
+  return [...ids]
+}
+
+/**
+ * 计划最终的参与表集合：源表、新表、新表全部 link 字段（非自指）的 foreignSheetId。排序去重后一次取全，
  * 之后每行 `createRecord` 对同键的重取是同会话重入（PG §13.3.5），零等待、零新键。
  */
 export function participatingSheetIds(plan: Pick<CopySheetPlan, 'source' | 'newSheetId' | 'fieldPlans'>): string[] {
@@ -653,39 +727,54 @@ async function copyInsideTransaction(
   const now = deps.now ?? (() => new Date())
   const startedAt = now()
   const batchId = randomUUID()
+  const mintId = deps.mintId ?? defaultMintId
 
-  // ② 源表行 FOR UPDATE + 存活重读（与五路授权 PUT 同一把行锁）。
-  await assertSheetLiveForUpdate(query, request.sourceSheetId)
-
-  // 计划（读结构、记录、授权行；fail-closed remap）。行锁已握住，结构写者被挡在外面。
-  const plan = await planCopySheet(query, request, actor, deps, preplan)
-
-  // ③ 全参与表围栏一次取全（源、新、全部 link 外表），再逐表查 durable block（flag 门）。
-  const fenced = await acquireCanonicalSheetFencesInOrder(query, participatingSheetIds(plan))
+  // ② 围栏**先于**行锁（ADR §7.2 第 4 步 r4 修订，TX-2）：无锁预读源表 link 外表 → 参与表集合 {源, 新（预 mint）,
+  //    全部 link 外表} → 排序一次取全。锁序 = 围栏 → 源表行锁，与每个围栏写者同向（createRecord：围栏 →
+  //    INSERT meta_records 的 FK `FOR KEY SHARE` 于 meta_sheets(源)）；反过来（行锁 → 围栏）会与它们构成 40P01 环
+  //    （trust-checkpoint-activation-authz.ts 记录的仓库不变量：任何 meta_sheets 行锁都不得在围栏之前）。
+  const newSheetId = mintId('sheet')
+  const linkTargets = await loadSourceLinkTargets(query, request.sourceSheetId)
+  const fenced = new Set(await acquireCanonicalSheetFencesInOrder(query, participatingSheetIdsFromLinkTargets(request.sourceSheetId, newSheetId, linkTargets)))
   if (isWriterFenceEnabled()) {
     for (const sid of fenced) await assertNoActiveWriterBlock(query, sid)
   }
 
-  // ④ tripwire 基线（围栏 flag 关时不取围栏的源表写者 —— patchRecords / deleteRecord / 字段创建 —— 由它兜底）。
-  const baseline = await readTripwireBaseline(query, plan.source.id, plan.fields.map((f) => f.id))
+  // ③ 源表行 FOR UPDATE + 存活重读（与五路授权 PUT 同一把行锁；围栏已在手，行锁之后再无新围栏）。
+  await assertSheetLiveForUpdate(query, request.sourceSheetId)
 
-  // ⑤ DB-fresh 两侧门（§4.1 / §4.2）。
-  const fresh = await resolveSheetCapabilitiesForAccess(query, plan.source.id, actor.access)
+  // ④ tripwire 基线 —— 在任何源数据读之前（SEC-2 / TX-1 / DATA-6）。围栏 flag 关时不取围栏也不取行锁的源表写者
+  //    （patchRecords / deleteRecord / 字段 PATCH / 视图 PATCH）由它兜底：基线之后任何已提交的改动都让 ⑩ 不等 → 409。
+  const baseline = await readTripwireBaseline(query, request.sourceSheetId)
+
+  // ⑤ DB-fresh 两侧门（§4.1 / §4.2）—— 在任何计数 / 413 / 422 之前（SEC-3；ADR §3「先门后 COUNT」）。
+  const source = await loadSourceSheet(query, request.sourceSheetId)
+  if (!source) throw new CopySheetError(404, 'NOT_FOUND')
+  const fresh = await resolveSheetCapabilitiesForAccess(query, source.id, actor.access)
   const baseCaps = deriveCapabilities(actor.access.permissions, actor.access.isAdminRole)
   if (fresh.sheetLiveness !== 'live' || !canReadWithSheetGrant(baseCaps, fresh.sheetScope, actor.access.isAdminRole)) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.forbidden)
   }
-  if (!(await deps.hasFullTableReadAccess(query, plan.source.id, actor.access, fresh.capabilities))) {
+  if (!(await deps.hasFullTableReadAccess(query, source.id, actor.access, fresh.capabilities))) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.sourceNotFullyReadable)
   }
-  if (isApprovalProjectionBaseId(plan.source.baseId) || isElearningProjectionBaseIdCandidate(plan.source.baseId)
-    || !(await resolveBaseWritable(actor.actorId, query, plan.source.baseId))) {
+  if (isApprovalProjectionBaseId(source.baseId) || isElearningProjectionBaseIdCandidate(source.baseId)
+    || !(await resolveBaseWritable(actor.actorId, query, source.baseId))) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.forbidden)
   }
-  // 第二层：property-hidden 列的值只在复制者持有源表 canManageFields 时复制（§4.1）。计划已按事务外判定建好；
-  // 事务内若能力**收窄**（撤销）则重算计划（收紧方向）。
+  // 第二层：property-hidden 列的值只在复制者持有源表 canManageFields 时复制（§4.1）。计划按事务外判定建；
+  // 事务内若能力**收窄**（撤销）→ 409（收紧方向，不静默改计划）。
   if (preplan.copierCanManageSourceFields && !fresh.capabilities.canManageFields) {
     throw new CopySheetError(409, COPY_SHEET_ERROR_CODES.sourceChanged)
+  }
+
+  // 计划（读结构、记录、授权行；fail-closed remap）。行锁 + 围栏都已在手；flag 关时的字段 / 视图写者由 ⑩ 兜底。
+  const plan = await planCopySheet(query, request, actor, deps, { ...preplan, newSheetId, overLimit: 'refuse', source })
+
+  // 参与表集合核对：无锁预读与计划之间有人加 / 改 link 字段 → 围栏可能缺一把 → 不补取（补取 = 行锁之后取围栏，
+  // 正是要避免的锁序），整体 409 让调用方重试。
+  for (const sid of participatingSheetIds(plan)) {
+    if (!fenced.has(sid)) throw new CopySheetError(409, COPY_SHEET_ERROR_CODES.sourceChanged)
   }
 
   await assertLinkTargetsLive(query, plan)
@@ -778,10 +867,8 @@ async function copyInsideTransaction(
       const row = plan.records[rowIndex]!
       const data: Record<string, unknown> = {}
       for (const p of valuePlans) {
-        const value = p.type === 'link'
-          ? (plan.linkValues.get(row.id)?.get(p.sourceFieldId) ?? [])
-          : row.data[p.sourceFieldId]
-        if (isEmptyCell(value)) continue // CS-21：null / 空值键省略
+        const value = sourceCellValue(row, p, plan.linkValues)
+        if (isEmptyCell(value)) continue // CS-21：null 键省略（'' / [] 保留）
         data[p.newFieldId] = value
       }
       try {
@@ -893,7 +980,7 @@ async function copyInsideTransaction(
   }
 
   // ⑩ 源表变更 tripwire（§7.2 第 6 步）。
-  const after = await readTripwireBaseline(query, plan.source.id, plan.fields.map((f) => f.id))
+  const after = await readTripwireBaseline(query, plan.source.id)
   if (after.fields !== baseline.fields || after.views !== baseline.views || after.records !== baseline.records || after.links !== baseline.links) {
     throw new CopySheetError(409, COPY_SHEET_ERROR_CODES.sourceChanged)
   }
@@ -1074,6 +1161,9 @@ export async function executeCopySheet(input: ExecuteCopySheetInput): Promise<Ex
       query,
       scope,
       ...(input.dedupe ?? {}),
+      // TX-4：等不到咨询锁 → 拒绝（409），不降级成「读账本 + 照常复制」——先到者还没提交时账本读不到它，
+      // 降级会建出第二张表；模板安装保持旧的降级姿态（那边多一个 Base 可接受，这边违反 CS-16）。
+      onLockTimeout: 'refuse',
       install: async () => {
         const result = await copyInsideTransaction(query, request, actor, deps, preplan)
         fresh = result
@@ -1091,6 +1181,7 @@ export async function executeCopySheet(input: ExecuteCopySheetInput): Promise<Ex
     }
     return { replayed: false, lockHeld: outcome.lockHeld, ledgerUnavailable: false, result: fresh, body: outcome.body }
   } catch (err) {
+    if (err instanceof DedupeLockTimeoutError) throw new CopySheetError(409, 'CONFLICT')
     if (!(err instanceof Error) || err.name !== 'TemplateInstallLedgerUnavailableError') throw err
     // 账本未迁移：退回**不去重**的旧姿态；上一个事务已回滚、什么都没写。
     const result = await pool.transaction(async ({ query }) => copyInsideTransaction(query, request, actor, deps, preplan))
@@ -1113,6 +1204,7 @@ function replayedResultFromBody(body: unknown, baseId: string): CopySheetResult 
       autoNumberRenumberedRows: 0, nullCellsOmitted: 0, permissionRowCount: 0, fieldPermissionRowCount: 0,
       viewPermissionRowCount: 0, recordPermissionRowCount: 0, rowLevelReadEnabled: false, conditionalRuleCount: 0,
       notCopied: COPY_SHEET_NOT_COPIED, limits: { maxRows: resolveCopySheetSyncMaxRows(), maxFields: COPY_SHEET_MAX_FIELDS },
+      overLimit: false,
     },
     batchId: '',
     newFieldIds: [],

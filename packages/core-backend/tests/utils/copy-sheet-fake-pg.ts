@@ -314,6 +314,9 @@ export class FakePg {
         row_level: r.row_level_read_permissions_enabled ? 'true' : 'false',
         rules: r.conditional_read_rules,
         system_kind: r.system_kind ?? null,
+        // `to_jsonb(...) ->> 'copied_from_kind'` is NULL (not 42703) on an unmigrated server, so the fake answers
+        // null when the option says the column is missing.
+        copied_from_kind: this.opts.provenanceColumnsMissing ? null : (r.copied_from_kind ?? null),
       })))
     }
     if (sql.startsWith('SELECT (to_jsonb(meta_sheets) ->> \'system_kind\') AS system_kind, description FROM meta_sheets WHERE id = $1')) {
@@ -362,6 +365,9 @@ export class FakePg {
     }
     if (sql === 'SELECT id, type FROM meta_fields WHERE sheet_id = $1') {
       return ok(fields.filter((f) => f.sheet_id === s(0)).map((f) => ({ id: f.id, type: f.type })))
+    }
+    if (sql === 'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1') {
+      return ok(fields.filter((f) => f.sheet_id === s(0)).map((f) => ({ id: f.id, type: f.type, property: f.property })))
     }
     if (sql.startsWith('SELECT id, updated_at FROM meta_fields WHERE sheet_id = $1')) {
       return ok(fields.filter((f) => f.sheet_id === s(0)).sort((a, b) => String(a.id).localeCompare(String(b.id))).map((f) => ({ id: f.id, updated_at: f.updated_at })))
