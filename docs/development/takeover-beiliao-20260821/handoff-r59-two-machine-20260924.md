@@ -73,3 +73,5 @@
 **待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部（清单与预检统一追加在 #6079）。另需手工：演示机现网 nginx.conf 同步 #6097 的 index.html no-cache 段；#6109 导出租户墙上线前跑预检看 `checks.carryTargetBinding.ownershipState`。
 
 - R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。
+
+> 2026-09-28 追加（同一 24h 窗口内并行的客户反馈线收尾，详见 `docs/development/autonomous-run-20260926-cf-outcome.md`）。该线合入 main 的 20 支与本节上方所述内容互不重叠（本节是开发机/运维接管线）。待上机增量与其上机后回归要点已（或将于窗口收尾前）追加到 #6079；复制数据表 S1（#6112 后端 / #6116 前端）不在 R60 之列——真库并发撤销用例在真实 PostgreSQL 上失败，诊断未完成，合入前不要在演示机演示该功能。
