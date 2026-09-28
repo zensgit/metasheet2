@@ -142,7 +142,7 @@ import {
 } from '../multitable/elearning-projection-constants'
 import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
 import { APPROVAL_PROJECTION_BASE_ID } from '../multitable/approval-projection-constants'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity, hashFieldRetypeConvertPlan, mintFieldRetypeConvertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
   enforceSheetRecoverySizeCeiling,
@@ -326,6 +326,25 @@ import { validateRecord, getDefaultValidationRules } from '../multitable/field-v
 import type { FieldValidationConfig } from '../multitable/field-validation'
 import { assertRichLongTextToggleAllowed, BATCH1_FIELD_TYPES, coerceBatch1Value, withLayer2VisibilityKeys, isPersonSingleRecord, isRichLongTextProperty, normalizeMultiSelectValue, richLongTextToPlainText, validateLongTextValue, validatePersonValue } from '../multitable/field-codecs'
 import { assertLosslessFieldRetype, FieldRetypeNotLosslessError, FIELD_RETYPE_NOT_LOSSLESS_CODE } from '../multitable/field-retype-whitelist'
+import {
+  canonicalFieldRetypeConvertPlanInput,
+  classifyFieldRetypeConvertPair,
+  FIELD_RETYPE_CONVERT_DISABLED_CODE,
+  FIELD_RETYPE_CONVERT_NOT_SUPPORTED_CODE,
+  FIELD_RETYPE_TRUST_REQUIRED_CODE,
+  isFieldRetypeConvertEnabled,
+  planFieldRetypeConvert,
+  toFieldRetypeConvertPreviewResponse,
+  type FieldRetypeConvertScopeReason,
+  type FieldRetypeConvertTargetType,
+} from '../multitable/field-retype-convert'
+import {
+  countFieldRetypeConvertScanRows,
+  loadFieldRetypeConvertLiveCells,
+  loadFieldRetypeConvertTrashCells,
+  resolveFieldRetypeConvertManagedSheetReason,
+} from '../multitable/field-retype-convert-preview'
+import { isLegacyWriteImpliesManageSchemaEnabled } from '../multitable/manage-schema-permission'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
 import { apiTokenAuth, requireScope } from '../middleware/api-token-auth'
@@ -14505,6 +14524,138 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] update field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to update field' } })
+    }
+  })
+
+  /**
+   * 字段类型转换（带值迁移）第 2 刀 —— **只读预览** `POST /fields/:fieldId/retype-preview`。
+   * 设计锁：docs/development/multitable-field-retype-first-batch-adr-20260926.md §2（门）/ §1（范围与托管表并集）/ §4（A 规则）。
+   *
+   * 与上面的 `PATCH /fields/:fieldId` 互不相干：PATCH 仍只做无损改类型，`string → select / multiSelect` 在那里照旧
+   * 400 FIELD_RETYPE_NOT_LOSSLESS（本路由不改它的任何一行）。本路由只读：`pool.query`、不开事务、不取栅栏、不写表；
+   * 执行与撤销在第 3 刀。
+   *
+   * 五门顺序固定、任一不过即停、在全部通过之前**不扫描**：
+   *   ① 本 flag `!== 'true'` ⇒ 403 FIELD_RETYPE_CONVERT_DISABLED（纯 env，先于任何读库）；
+   *   ② legacy manage-schema flag 生效 ⇒ 409 FIELD_RETYPE_TRUST_REQUIRED（reason legacy_manage_schema_flag）——用
+   *      `isLegacyWriteImpliesManageSchemaEnabled`，即真正放宽 canManageFields 的那一个判定（trim + 小写），
+   *      比字面 `=== 'true'` 更宽地拒绝：flag 以任何被当作「开」的写法存在都拒；
+   *   ③ capabilities.canManageFields（照抄 PATCH）⇒ 否则 403；
+   *   ④ sheetLiveness !== 'live' ⇒ 404（sendSheetNotLive）；
+   *   ⑤ capabilities.canRead && hasFullTableReadAccess ⇒ 否则整面 403，无 scoped 模式、无 undisclosed 标记。
+   *      `hasFullTableReadAccess` 本身**不看** canRead（只看行级 deny、字段遮罩、公式遮罩）；而 canManageFields 单凭
+   *      `multitable:manage-schema` 即可为真（manage-schema-permission.ts `deriveCanManageFields`），与 canRead 无关
+   *      （access.ts `deriveCapabilities`）。不补 canRead，一个只有改结构权、读不了本表的主体会过全部五门、拿到全部 recordId。
+   * 之后：范围校验（422，details.reason）→ 规模（live + 本表回收站 > 记录上限 ⇒ 413，不截断）→ 扫描。
+   * 响应 values-free：只有计数与 recordId，永不含单元格值或选项文本。
+   */
+  router.post('/fields/:fieldId/retype-preview', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    // ① flag — env only, before any DB work.
+    if (!isFieldRetypeConvertEnabled()) {
+      return res.status(403).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_CONVERT_DISABLED_CODE,
+          message: 'Field type conversion is disabled on this deployment.',
+        },
+      })
+    }
+    // ② legacy manage-schema transition flag — it lets multitable:write hold canManageFields, below the gate the
+    // owner approved for conversion. env only, values-free.
+    if (isLegacyWriteImpliesManageSchemaEnabled()) {
+      return res.status(409).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+          message: 'Field type conversion requires the tightened schema-management permission; it is refused while the legacy write-implies-manage-schema transition switch is on.',
+          details: { reason: 'legacy_manage_schema_flag' },
+        },
+      })
+    }
+
+    // The server derives every option from the cells — a client-supplied `property` is refused, not ignored.
+    const parsed = z.object({ targetType: z.string().min(1).max(64) }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+    const targetType = parsed.data.targetType
+
+    const sendNotSupported = (reason: FieldRetypeConvertScopeReason) => res.status(422).json({
+      ok: false,
+      error: {
+        code: FIELD_RETYPE_CONVERT_NOT_SUPPORTED_CODE,
+        message: 'This field type conversion is not supported here. The first batch converts a text field to single or multiple select, on a sheet that no plugin, system, pipeline or approval projection manages.',
+        details: { reason },
+      },
+    })
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown; type?: unknown; property?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+      // ③ schema authority — the PATCH /fields/:fieldId gate, verbatim.
+      if (!capabilities.canManageFields) return sendForbidden(res)
+      // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
+      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // ⑤ full-table read — whole-surface 403, no scoped counts, no undisclosed marker. canRead is checked HERE,
+      // explicitly: hasFullTableReadAccess never reads it, and canManageFields holds on multitable:manage-schema alone.
+      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
+        return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
+      }
+
+      // Scope (422, first hit): the pair, then the managed-sheet union (a)-(e).
+      const rawType = fieldRow.type
+      const pairRefusal = classifyFieldRetypeConvertPair(rawType, mapFieldType(String(rawType ?? '')), targetType)
+      if (pairRefusal) return sendNotSupported(pairRefusal)
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendNotSupported(managedReason)
+      const convertTarget = targetType as FieldRetypeConvertTargetType
+
+      // Size (413, never truncated): live rows + THIS sheet's recycle-bin rows, checked before and after the read.
+      const cap = resolveSheetRevertMaxRecords()
+      const tooLarge = (total: number) => res.status(413).json({
+        ok: false,
+        error: {
+          code: 'SHEET_TOO_LARGE',
+          message: `This sheet has ${total} records including its recycle bin, above the ${cap}-record ceiling for a field type conversion; a conversion of this size is refused.`,
+        },
+      })
+      const counted = await countFieldRetypeConvertScanRows(query, sheetId)
+      if (counted.live + counted.trash > cap) return tooLarge(counted.live + counted.trash)
+      const live = await loadFieldRetypeConvertLiveCells(query, sheetId, fieldId)
+      const trash = await loadFieldRetypeConvertTrashCells(query, sheetId, fieldId)
+      if (live.length + trash.length > cap) return tooLarge(live.length + trash.length)
+
+      const sourceProperty = normalizeJson(fieldRow.property)
+      const plan = planFieldRetypeConvert({ sourceProperty, targetType: convertTarget, live, trash })
+      let previewToken: string | undefined
+      if (plan.verdict === 'ok') {
+        const planHash = hashFieldRetypeConvertPlan(canonicalFieldRetypeConvertPlanInput({ sheetId, fieldId, sourceType: 'string', sourceProperty, plan }))
+        previewToken = mintFieldRetypeConvertPreviewIdentity({
+          sheetId,
+          fieldId,
+          actorId: access.userId,
+          sourceType: 'string',
+          targetType: convertTarget,
+          planHash,
+        })
+      }
+      return res.json({ ok: true, data: toFieldRetypeConvertPreviewResponse(plan, { recordCap: cap, previewToken }) })
+    } catch (err) {
+      const hint = getDbNotReadyMessage(err)
+      if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      console.error('[univer-meta] field retype preview failed:', err)
+      return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview the field type conversion' } })
     }
   })
 

@@ -213,7 +213,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
   - 三处配置里的沙箱 objectId 字符串完全一致(diff 一下三份配置文件里的这个值,不要靠肉眼扫);
   - **action 绑定里的 `sheetId` 等于这次 ensure 返回的那个**(再调一次 ensure,它是幂等的,把 `data.targetBinding.sheetId` 和配置里的值对一下;不一致说明 objectId 换了而绑定没重算);
   - Step 3-3 部署预检 `ready: true`、`blockers` 为空。**特别确认这两条不在里面**:
-    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒,按项目导出物料也会被拒(导出与结转走同一道租户墙);`detail.carryRouteCode` / `detail.exportRouteCode` 里写的就是两个点击各自会看到的 code。修法就是上面的 ensure。
+    - `STOCK_PREP_CARRY_TARGET_NOT_OWNED` —— 绑定的表不属于本部署的项目,结转每次点都会被拒,按项目导出物料和通知下一步也会被拒(三者走同一道租户墙);`detail.carryRouteCode` / `detail.exportRouteCode` / `detail.handoffRouteCode` 里写的就是三个点击各自会看到的 code。修法就是上面的 ensure。
     - `STOCK_PREP_CARRY_TARGET_HUMAN_FIELDS_UNBOUND` —— 人工列没绑全。
     (`posture.carryTargetBinding.state` 是 `not_derived` **不是**故障、也不拦任何操作,它只提示绑定两半指向不同的表;结转允不允许看 `checks.carryTargetBinding.ownershipState`。)
 - 失败处理:三处不一致 → 以 action 绑定里的 `target.objectId` 为准改另外两处(action 绑定是唯一决定"apply 写到哪"的配置,allowlist 和 pack 目标都要跟着它,不是反过来)。

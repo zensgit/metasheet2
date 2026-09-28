@@ -1087,6 +1087,56 @@ describe('项目备料页 — the operator project board', () => {
     expect(stockPreparationHandoffResendableStepKey({ configured: true, resendableStepKey: 'purchasing' })).toBe('purchasing')
   })
 
+  // Two guards inside notifyNext's 409 branch, neither of which has its own case above: the outer
+  // "only re-read on STEP_MISMATCH" test (line 590) always gives the re-read itself a 200, and the
+  // outer refusal-keeps-cursor shape is never crossed with "the refusal was something else".
+
+  it('B-19: a 409 STEP_MISMATCH whose own re-read ALSO fails still shows the STEP_MISMATCH refusal', async () => {
+    // The re-read after a 409 is allowed to fail on its own (a flaky GET, a brief outage) — the inner
+    // try/catch around it exists so THAT failure never displaces the refusal the operator pressed for.
+    routeHandoffPress({
+      handoff: [
+        () => ok(handoffCursor()),
+        () => new Response(JSON.stringify({ ok: false, error: { code: 'INTERNAL', message: 'x' } }), { status: 500 }),
+      ],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH', message: 'step mismatch' },
+      }), { status: 409 }),
+    })
+    const root = await mountBoard()
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    // The re-read WAS attempted (the mount's GET, then the post-409 retry)…
+    expect(handoffReadCount()).toBe(2)
+    // …but the re-read's own failure never reaches the screen: the STEP_MISMATCH refusal does.
+    const error = root.querySelector('[data-testid="stock-prep-project-board-error"]') as HTMLElement
+    expect(error).not.toBeNull()
+    expect(error.querySelector('code')?.textContent).toBe('STOCK_PREPARATION_HANDOFF_STEP_MISMATCH')
+    expect((error.textContent ?? '')).toContain(STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_HANDOFF_STEP_MISMATCH.zh)
+  })
+
+  it('B-19: a non-409 refusal (403 NOT_CURRENT_HANDLER) does not re-read the cursor', async () => {
+    // Only a 409 STEP_MISMATCH means the on-screen cursor is stale. Any other refusal leaves the
+    // chain exactly where the operator already saw it, so the re-read is skipped — a read the code
+    // would otherwise spend for nothing.
+    routeHandoffPress({
+      handoff: [() => ok(handoffCursor())],
+      advance: () => new Response(JSON.stringify({
+        ok: false,
+        error: { code: 'STOCK_PREPARATION_HANDOFF_NOT_CURRENT_HANDLER', message: 'not your turn' },
+      }), { status: 403 }),
+    })
+    const root = await mountBoard()
+    const readsBeforePress = handoffReadCount()
+    await pressNotifyNext(root)
+
+    expect(advanceBody().fromStepKey).toBe('purchasing')
+    expect(handoffReadCount()).toBe(readsBeforePress)
+    expect(root.querySelector('[data-testid="stock-prep-project-board-error"]')).not.toBeNull()
+  })
+
   // ---- B-03 the deep link ---------------------------------------------------------------------
 
   it('B-03: the fill link renders only when the server returned a handle, and routes to it', async () => {
