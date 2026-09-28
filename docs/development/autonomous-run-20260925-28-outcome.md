@@ -19,7 +19,7 @@
 | #6066 | /api/admin 挂载树全部 5xx 不回显错误原文（#5903 后续） | 八轮核验 + 终审（独立 AST 复核 51 个注册） |
 | #6067 | 备料定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 诊断 + R60 只读检查清单 Q0–Q6 | 三轮事实核对 |
 | #6070 | 运行详情溯源区截断披露（total/truncated/nextCursor）+ 加载更多（#5925 残余） | 三轮执行型核验 |
-| #6071 | 升级脚本识别 pm2-runtime 托管，restart not found 时按计划任务回退（R59 事故根治） | 终审按「R60 用它比不用更安全」裁可合；CI Windows 5.1/pwsh 60/60 |
+| #6071 | 升级脚本识别 pm2-runtime 托管，restart not found 时按计划任务回退（针对 R59 上机事故） | 终审按「R60 用它比不用更安全」裁可合；CI Windows 5.1/pwsh 60/60 |
 | #6096 | 备料演示 runner 改调用已发货批次模块、删过期口播 | 事实核对 |
 | #6097 | on-prem nginx 参考配置 index.html 加 no-cache | 单镜头 |
 | #6100 | R-02 schema 漂移契约补 lookupProjection 查找表列（读前 pin/compare 纵深防御） | 三轮 + 三次收窄声明 + 终审 |
