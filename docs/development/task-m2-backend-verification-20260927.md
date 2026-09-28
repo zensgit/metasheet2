@@ -138,11 +138,34 @@ Plugin System Tests run [36329710574](https://github.com/zensgit/metasheet2/acti
 
 `e54d5ccbf` 的 Plugin System Tests run [36362526968](https://github.com/zensgit/metasheet2/actions/runs/36362526968) 已结束，结论 success。job `test (20.x)` 里 `pnpm --filter @metasheet/core-backend test` 收集 18336（16722 passed，1614 skipped）。同 job 的 tasks auth gate 收集 8，8 passed。
 
-再下一笔补 reopen 的默认 `self`：非创建人 A 对已完成的 all 模式任务发 `{ scope: 'self' }` 和 `{}`，A 的 `completed_at` 清空、B 保留、事件是 `self_reopened`。非法 scope `'everyone'` 同样按 self。把路由改成一律 `'all'` 时这一格变红，随后用备份还原。`.task-probe-*.mts` 写在 `packages/core-backend/.gitignore` 的忽略规则里。展开后静态计数 = 普通 `it(` 44（p0a 13、read-path 8、rbac-trust 17、completion-grid 6）+ `it.each` 49 行 = 93。这一笔不声称 M2 退出。
+再下一笔补 reopen 的默认 `self`：非创建人 A 对已完成的 all 模式任务发 `{ scope: 'self' }` 和 `{}`，A 的 `completed_at` 清空、B 保留、事件是 `self_reopened`。非法 scope `'everyone'` 同样按 self。把路由改成一律 `'all'` 时这一格变红，随后用备份还原。`.task-probe-*.mts` 的忽略规则在仓库根 `.gitignore`（`packages/core-backend/.task-probe-*.mts`），不在 `packages/core-backend/.gitignore`。展开后静态计数 = 普通 `it(` 44（p0a 13、read-path 8、rbac-trust 17、completion-grid 6）+ `it.each` 49 行 = 93。这一笔不声称 M2 退出。
 
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 
-## 7. 未验证
+## 7. 门 1 的 §12.0 标注（评论 5862713615）
+
+锁 §12.0 要求每一格把 a–i 标成适用 / 故意否定 / 不适用。评论 5862713615 把「故意否定」写成「刻意取反」，两词同一件事。标注在 `packages/core-backend/tests/tasks-auth/tasks-auth-gate.ts` 各格上方，没有改断言，也没有改 `src/tasks` 或 `src/routes/tasks.ts`。
+
+| 格 | a | b | c | d | e | f | g | h | i |
+|---|---|---|---|---|---|---|---|---|---|
+| 无 claim 读 `org_missing` | 适用 | 刻意取反 | 适用 | 适用 | 不适用 | 适用 | 适用 | 适用 | 适用 |
+| 无 claim 写 POST / complete / reopen | 适用 | 刻意取反 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 |
+| 无 claim 同夹具补 org 后写 200 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 |
+| 跨 org 写 422 | 适用 | 刻意取反 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 |
+| 跨 org 同夹具 `tenantId=home` 写 200 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 |
+| 真隔离读 | 适用 | 适用 | 适用 | 适用 | 不适用 | 适用 | 适用 | 适用 | 适用 |
+| 无 admission 读 403 | 适用 | 适用 | 适用 | 适用 | 不适用 | 适用 | 适用 | 适用 | 适用 |
+| 门 16 判别读（context 与 `GET /:id`） | 适用 | 适用 | 适用 | 适用 | 不适用 | 适用 | 适用 | 适用 | 适用 |
+| 门 16 / 门 1 对照写 200（`beforeAll` + `token()`） | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 | 适用 |
+| 缺 Bearer 的 401（门 16 诊断①，不是门 1 格） | 不适用 | 不适用 | 不适用 | 不适用 | 不适用 | 适用 | 适用 | 不适用 | 不适用 |
+
+b 的刻意取反：无 claim 格没有 `tenantId`、也没有匹配的 `user_orgs`；跨 org 格的 `user_orgs` 是 home，token 的 `tenantId` 是另一个 org。
+
+门 4、门 5、门 19 的网格格直接调服务函数，不是 HTTP。锁的文字写的是 HTTP。HTTP 透传由 `tests/integration/task-rbac-trust.db.test.ts` 的路由行（约 193–231 与 273）和探针①覆盖。这是已声明的偏离。
+
+`a3b133477` 的 Plugin System Tests run [36367874038](https://github.com/zensgit/metasheet2/actions/runs/36367874038) 已成功。job `test (20.x)` 里 `pnpm --filter @metasheet/core-backend test` 收集 18339（16725 passed，1614 skipped）。同 job 的 tasks auth gate 收集 8，8 passed。那是 `a3b133477` 的数，不是后来 rebase 的 head。
+
+## 8. 未验证
 
 - **staging / 生产：NOT RUN。**
 - 共享库 `metasheet_v2` 没有迁移。

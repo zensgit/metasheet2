@@ -27,6 +27,10 @@ describe('tasks auth gate', () => {
   const roleId = `tasks_writer_${stamp}`
   const orgId = `org_tasks_auth_${stamp}`
 
+  // §12.0 shared control fixture. a–i 适用. 刻意取反 is the lock's 故意否定.
+  // a active+activated, role ≠ disabled; b user_orgs.is_active and org_id = token tenantId;
+  // c no sid; d not revoked; e applies on write cells; f TASKS_ENABLED=true in setup;
+  // g tasksRouter() mounts; h write body { title }; i must_change_password=false.
   beforeAll(async () => {
     const db = poolManager.get()
     await db.query(
@@ -84,6 +88,7 @@ describe('tasks auth gate', () => {
     await db.query('DELETE FROM roles WHERE id = $1', [roleId])
   })
 
+  // §12.0 token for the shared fixture: b 适用 (tenantId = user_orgs.org_id); c 适用 (no sid).
   function token(): string {
     return jwt.sign({
       userId,
@@ -105,6 +110,7 @@ describe('tasks auth gate', () => {
     return server
   }
 
+  // Gate 16 diagnostic ①, not a gate 1 cell. No token: a–e, h, i 不适用; f, g 适用 (else 404, not 401).
   it('mounts the read route and rejects a missing bearer', async () => {
     const response = await request(app()).get('/api/tasks/context')
     expect(response.status).toBe(401)
@@ -114,6 +120,7 @@ describe('tasks auth gate', () => {
     })
   })
 
+  // Gate 16 discriminant, read. §12.0: a–d, f–i 适用; e 不适用. Shared fixture and token().
   it('rejects a read route when the token claims tasks:read but the database only grants tasks:write', async () => {
     const response = await request(app())
       .get('/api/tasks/context')
@@ -122,6 +129,7 @@ describe('tasks auth gate', () => {
     expect(response.body).toEqual({ error: 'Insufficient permissions' })
   })
 
+  // Gate 16 discriminant on the detail read. §12.0: a–d, f–i 适用; e 不适用.
   it('rejects GET /api/tasks/:id when the database does not grant tasks:read', async () => {
     const response = await request(app())
       .get('/api/tasks/tsk_missing')
@@ -130,6 +138,9 @@ describe('tasks auth gate', () => {
     expect(response.body).toEqual({ error: 'Insufficient permissions' })
   })
 
+  // Gate 1, no claim. Read GET /api/tasks: a, c, d, f–i 适用; b 刻意取反 (no tenantId, no user_orgs); e 不适用.
+  // Writes POST /complete /reopen: a, c, d, f–i 适用; b 刻意取反; e 适用.
+  // After user_orgs + tenantId, the write 200 is the control: a–i 适用, including e.
   it('gate 1: a read with no tenant is org_missing and a write is 422', async () => {
     const bare = `usr_tasks_notenant_${stamp}`
     const bareRole = `tasks_both_${stamp}`
@@ -213,6 +224,7 @@ describe('tasks auth gate', () => {
     await db.query('DELETE FROM roles WHERE id = $1', [bareRole])
   })
 
+  // Gate 1 read, no admission, 403. §12.0: a–d, f–i 适用; e 不适用. b 适用 (user_orgs matches tenantId).
   it('returns 403 when the role has tasks:read but there is no namespace admission', async () => {
     const bare = `usr_tasks_noadmit_${stamp}`
     const bareRole = `tasks_noadmit_${stamp}`
@@ -258,6 +270,8 @@ describe('tasks auth gate', () => {
     await db.query('DELETE FROM roles WHERE id = $1', [bareRole])
   })
 
+  // Gate 1 cross-org write. §12.0: a 适用; b 刻意取反 (user_orgs is home, tenantId is other); c, d, f–i 适用; e 适用.
+  // The following write with tenantId=home is the control: a–i 适用, including e.
   it('gate 1: a write whose tenant claim is a different org is 422', async () => {
     const user = `usr_tasks_xorg_${stamp}`
     const role = `tasks_xorg_${stamp}`
@@ -317,6 +331,7 @@ describe('tasks auth gate', () => {
     await db.query('DELETE FROM roles WHERE id = $1', [role])
   })
 
+  // Gate 1 org-isolation read. §12.0: a–d, f–i 适用; e 不适用. b 适用 (user_orgs.org_id = token tenantId = org A).
   it('gate 1: a read stays inside the caller org until the org predicate is removed', async () => {
     const user = `usr_tasks_iso_${stamp}`
     const role = `tasks_iso_${stamp}`
@@ -434,6 +449,7 @@ describe('tasks auth gate', () => {
     }
   }, 180000)
 
+  // Gate 1 and gate 16 control, write 200. §12.0: a–i 适用, including e. Fixture is beforeAll and token().
   it('allows POST /api/tasks when the database grants tasks:write', async () => {
     const response = await request(app())
       .post('/api/tasks')
