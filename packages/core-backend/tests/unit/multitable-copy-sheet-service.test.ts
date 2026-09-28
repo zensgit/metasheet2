@@ -28,6 +28,13 @@
  *   E10 dry-run plan writes nothing (no INSERT / UPDATE / DELETE after the plan started).
  *   E11 property-hidden values copy when the copier holds canManageFields on the source.
  *   E12 write-own posture: source created_by survives per row (the write-own row policy keys on it).
+ *   E13 lock order (TX-2): every canonical fence BEFORE the source row FOR UPDATE; baseline BEFORE any record read;
+ *       row COUNT after the gates; fence set = {source, new, link foreign}; dedupe lock still statement #1.
+ *   E14 view.config frozenLeftColumnIds / columnWidths / aggregations remapped, unknown ids dropped (FE-1).
+ *   E15 '' is KEPT (only null/absent omitted) so a rule on that column denies identically on both sides (DATA-5).
+ *   E16 relation-aggregation formulas: quoted link/target/criteria ids remapped; formula_dependencies → new link (DATA-1).
+ *   E17 a copy of a plugin-managed snapshot stays 'plugin-managed'; the plugin-scope deny holds on the grandchild (SEC-1).
+ *   E18 intent lock not acquired within the bounded wait → 409 CONFLICT, no ledger read, no install (TX-4).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -50,6 +57,7 @@ import {
   SHEET_PERMISSION_HISTORY_KEYS,
   VIEW_CONFIG_HISTORY_KEYS,
   VIEW_PERMISSION_HISTORY_KEYS,
+  extractRelationAggregationLinkFieldId,
   fieldPermissionSnapshot,
   permissionConfigEntityId,
   sheetPermissionSnapshot,
@@ -57,6 +65,7 @@ import {
   viewPermissionSnapshot,
 } from '../../src/routes/univer-meta'
 import { deriveSheetAccessLevel } from '../../src/multitable/permission-service'
+import { COPY_SHEET_INTENT_KIND, buildIntentScopeDigest } from '../../src/multitable/template-install-dedupe'
 
 vi.mock('../../src/multitable/realtime-publish', () => ({
   publishMultitableSheetRealtime: vi.fn(),
@@ -84,7 +93,7 @@ const F = {
   hidden: 'fld_cs_hidden',
 }
 
-function seedFixture(pg: FakePg, opts: { autoStart?: number; rules?: unknown[]; managed?: boolean; brokenLink?: boolean } = {}) {
+function seedFixture(pg: FakePg, opts: { autoStart?: number; rules?: unknown[]; managed?: boolean; brokenLink?: boolean; relationAggregation?: boolean; viewPrefs?: boolean } = {}) {
   pg.seedBase(BASE, ADMIN)
   pg.seedSheet({ id: FOREIGN, baseId: BASE, name: 'Foreign' })
   pg.seedField({ id: 'fld_cs_fname', sheetId: FOREIGN, type: 'string' })
@@ -104,6 +113,22 @@ function seedFixture(pg: FakePg, opts: { autoStart?: number; rules?: unknown[]; 
 
   pg.seedView({ id: 'view_cs_1', sheetId: SRC, name: '默认视图', filterInfo: { conjunction: 'and', conditions: [{ fieldId: F.title, operator: 'contains', value: 'a' }, { fieldId: F.att, operator: 'is_not_empty' }] }, config: { publicForm: { enabled: true, publicToken: 'tok_cs_secret' }, kanban: { groupFieldId: F.status } } })
   pg.seedView({ id: 'view_cs_2', sheetId: SRC, name: '第二视图', hiddenFieldIds: [F.hidden] })
+  if (opts.relationAggregation) {
+    // a self-link (blanked in S1) + two relation-aggregation formulas: one over the FOREIGN link, one over the self-link
+    pg.seedField({ id: 'fld_cs_self', sheetId: SRC, type: 'link', property: { foreignSheetId: SRC, limitSingleRecord: false }, order: 9 })
+    pg.seedField({ id: 'fld_cs_relsum', sheetId: SRC, type: 'formula', property: { expression: `=RELSUMIF("${F.link}", "fld_cs_fname", "fld_cs_fname", "=", "F1")` }, order: 10 })
+    pg.seedField({ id: 'fld_cs_relcount', sheetId: SRC, type: 'formula', property: { expression: `=RELCOUNTIF("fld_cs_self", "${F.title}", "=", {${F.title}})` }, order: 11 })
+  }
+  if (opts.viewPrefs) {
+    // the three Web-written view.config keys whose field ids are NOT under a `*fieldId(s)` key (FE-1): a frozen prefix,
+    // per-column widths and per-column aggregations; the attachment column is blanked-but-built, so it stays.
+    pg.seedView({ id: 'view_cs_3', sheetId: SRC, name: '冻结视图', config: {
+      frozenLeftColumnIds: [F.title, F.status, 'fld_cs_unknown'],
+      columnWidths: { [F.title]: 240, [F.num]: 90, fld_cs_unknown: 50 },
+      aggregations: { [F.num]: 'sum', [F.att]: 'count', fld_cs_unknown: 'sum' },
+      rowDensity: 'compact',
+    } })
+  }
 
   const autoStart = opts.autoStart ?? 1
   const base = Date.parse('2026-09-01T00:00:00.000Z')
@@ -177,7 +202,7 @@ function deps(overrides: Partial<CopySheetDeps> = {}): CopySheetDeps & { emit: R
 
 const buildBody = (result: CopySheetResult) => ({ ok: true, data: { sheet: { id: result.sheetId, name: result.name }, summary: result.summary, batchId: result.batchId } })
 
-async function run(pg: FakePg, d = deps(), req = request, copierCanManageSourceFields = false) {
+async function run(pg: FakePg, d = deps(), req = request, copierCanManageSourceFields = false, dedupe: { lockWaitMs?: number; lockPollMs?: number } = {}) {
   return executeCopySheet({
     pool: { transaction: (h) => pg.transaction(h) },
     request: req,
@@ -186,7 +211,7 @@ async function run(pg: FakePg, d = deps(), req = request, copierCanManageSourceF
     targetBaseId: BASE,
     copierCanManageSourceFields,
     buildBody,
-    dedupe: { sleep: async () => {} },
+    dedupe: { sleep: async () => {}, ...dedupe },
   })
 }
 
@@ -264,7 +289,7 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(newRecords.map((r) => r.data)).toEqual([
       { [t]: 'A', [st]: 'open', [nm]: 1, [ln]: ['rec_f1'], [au]: 1 },
       { [t]: 'B', [st]: 'archived', [ln]: ['rec_f2', 'rec_f1'], [au]: 2 }, // null num omitted, out-of-set select kept
-      { [t]: 'C', [nm]: 3, [au]: 3 }, // '' select omitted
+      { [t]: 'C', [st]: '', [nm]: 3, [au]: 3 }, // '' select KEPT (DATA-5: the rule evaluator treats '' and absent differently)
       { [t]: 'D', [nm]: 4, [au]: 4 },
       { [t]: 'E', [nm]: 200, [au]: 5 },
     ])
@@ -272,9 +297,10 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(JSON.stringify(newRecords)).not.toContain('att_1')
     expect(JSON.stringify(newRecords)).not.toContain('h1')
     expect(result.summary.autoNumberRenumberedRows).toBe(0)
-    // omitted null/empty cells over the 4 value-copied columns (title/status/num/link):
-    // rec2 num(null); rec3 status('') + link([]); rec4 status(absent) + link([]); rec5 status(absent) + link([]) = 7
-    expect(result.summary.nullCellsOmitted).toBe(7)
+    // omitted NULL/absent cells over the 4 value-copied columns (title/status/num/link); '' and [] are kept:
+    // rec2 num(null); rec3 link(absent); rec4 status(absent) + link(absent); rec5 status(absent) + link(absent) = 6
+    expect(result.summary.nullCellsOmitted).toBe(6)
+    expect(result.summary.overLimit).toBe(false)
     // meta_links remapped onto the new record ids
     const newIds = new Set(newRecords.map((r) => String(r.id)))
     const newLinks = pg.rows('meta_links').filter((l) => newIds.has(String(l.record_id)))
@@ -399,16 +425,22 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(snapshotCounts(pg)).toEqual(before)
   })
 
-  it('E5: tripwire — a source record touched between baseline and re-read → 409 COPY_SOURCE_CHANGED, rolled back', async () => {
-    let recordBaselineReads = 0
+  it('E5: tripwire — a source record patched AFTER the baseline but BEFORE the copy reads the records → 409 COPY_SOURCE_CHANGED, rolled back', async () => {
+    // SEC-2 / TX-1 / DATA-6: the window that matters is between the baseline and the plan's record read. An unfenced
+    // writer (patchRecords with the fence flag off — neither the row lock nor the fence) commits there.
+    let baselineReads = 0
+    let recordReads = 0
+    let injectedAtStatement = -1
     const pg = new FakePg({
       beforeStatement: (statement, store) => {
-        if (statement.sql.startsWith('SELECT COUNT(*)::int AS n, MAX(updated_at)::text AS max_updated FROM meta_records WHERE sheet_id = $1') && statement.params[0] === SRC) {
-          recordBaselineReads += 1
-          if (recordBaselineReads === 2) {
-            // an unfenced writer (patchRecords with the fence flag off) bumps a source row's updated_at
+        if (statement.sql.startsWith('SELECT COUNT(*)::int AS n, MAX(updated_at)::text AS max_updated FROM meta_records WHERE sheet_id = $1') && statement.params[0] === SRC) baselineReads += 1
+        if (statement.sql.startsWith('SELECT id, data, created_by FROM meta_records WHERE sheet_id = $1') && statement.params[0] === SRC) {
+          recordReads += 1
+          if (recordReads === 1) {
+            expect(baselineReads).toBe(1) // the baseline is already taken when the first record read happens
             const row = store.rows('meta_records').find((r) => r.id === 'rec_cs_3')!
             row.updated_at = '2026-09-27T10:59:59.000000Z'
+            injectedAtStatement = store.statements.length
           }
         }
       },
@@ -416,7 +448,9 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     seedFixture(pg)
     const before = snapshotCounts(pg)
     await expectRefusal(run(pg), 409, COPY_SHEET_ERROR_CODES.sourceChanged)
-    expect(recordBaselineReads).toBe(2)
+    expect(recordReads).toBe(1)
+    expect(baselineReads).toBe(2) // baseline + the compare re-read
+    expect(injectedAtStatement).toBeGreaterThan(0)
     expect(snapshotCounts(pg)).toEqual(before)
     expect(pg.rows('meta_sheets').some((r) => r.copied_from_sheet_id === SRC)).toBe(false)
   })
@@ -464,13 +498,24 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     await expect(assertSheetNotCopiedFromPluginManaged(pg.query, { pluginName: 'plugin-attendance', sheetId: SRC })).resolves.toBeUndefined()
   })
 
-  it('E9: row cap → 413 COPY_TOO_LARGE { rowCount, limit } before any write', async () => {
+  it('E9: row cap — copy → 413 COPY_TOO_LARGE { rowCount, limit } before any write; dry-run → summary.overLimit=true without reading records', async () => {
     process.env.MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS = '3'
     const pg = new FakePg()
     seedFixture(pg)
     const before = snapshotCounts(pg)
     const err = await expectRefusal(run(pg), 413, COPY_SHEET_ERROR_CODES.tooLarge)
     expect(err.details).toEqual({ rowCount: 5, limit: 3 })
+    expect(snapshotCounts(pg)).toEqual(before)
+
+    // dry-run half (FE-2 / ADR §3「超限与否」): 'report' answers the structure + overLimit, records are NOT read
+    const mark = pg.statements.length
+    const plan = await planCopySheet(pg.query, request, actor, deps(), { copierCanManageSourceFields: false, overLimit: 'report' })
+    const issued = pg.statements.slice(mark).map((s) => s.sql)
+    expect(issued.some((sql) => sql.startsWith('SELECT id, data, created_by FROM meta_records'))).toBe(false)
+    expect(plan.summary).toMatchObject({ overLimit: true, rowCount: 5, fieldCount: 9, builtFieldCount: 9, limits: { maxRows: 3, maxFields: 500 } })
+    expect(plan.summary.disclosures).toEqual(expect.arrayContaining([{ fieldId: F.att, code: 'ATTACHMENT_BLANKED' }, { fieldId: F.btn, code: 'BUTTON_DISABLED' }]))
+    // the execute path never reports — 'refuse' is the default
+    await expectRefusal(planCopySheet(pg.query, request, actor, deps(), { copierCanManageSourceFields: false }), 413, COPY_SHEET_ERROR_CODES.tooLarge)
     expect(snapshotCounts(pg)).toEqual(before)
   })
 
@@ -509,5 +554,128 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     expect(mine).toHaveLength(2)
     const copier = pg.rows('meta_records').filter((r) => r.sheet_id === outcome.result.sheetId && r.created_by === ADMIN)
     expect(copier).toHaveLength(1) // only the row the copier had ALSO created on the source
+  })
+
+  it('E13: lock order — every canonical fence is taken BEFORE the source row FOR UPDATE, the baseline BEFORE any record read, and the fence set covers source + new + link foreign sheets', async () => {
+    // TX-2: fence → row lock is the direction every fenced writer uses (createRecord: fence → INSERT meta_records
+    // → FK KEY SHARE on meta_sheets(source)); row lock → fence would close a 40P01 cycle with each of them.
+    const pg = new FakePg()
+    seedFixture(pg)
+    const outcome = await run(pg)
+    const inTx = pg.statements.filter((s) => s.tx !== null)
+    const indexOf = (pred: (sql: string, params: unknown[]) => boolean) => inTx.findIndex((s) => pred(s.sql, s.params))
+    const firstFence = indexOf((sql) => sql.startsWith('SELECT pg_advisory_xact_lock(hashtext($1))'))
+    const lastFence = inTx.length - 1 - [...inTx].reverse().findIndex((s) => s.sql.startsWith('SELECT pg_advisory_xact_lock(hashtext($1))') && s.tx === inTx[firstFence]!.tx && inTx.indexOf(s) < indexOf((sql) => sql.includes('INSERT INTO meta_sheets')))
+    const rowLock = indexOf((sql, params) => sql === 'SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE' && params[0] === SRC)
+    const baseline = indexOf((sql, params) => sql.startsWith('SELECT COUNT(*)::int AS n, MAX(updated_at)::text AS max_updated FROM meta_records WHERE sheet_id = $1') && params[0] === SRC)
+    const recordRead = indexOf((sql, params) => sql.startsWith('SELECT id, data, created_by FROM meta_records WHERE sheet_id = $1') && params[0] === SRC)
+    const gate = indexOf((sql) => sql.startsWith('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1'))
+    expect(firstFence).toBeGreaterThanOrEqual(0)
+    expect(rowLock).toBeGreaterThan(firstFence)
+    expect(rowLock).toBeGreaterThan(lastFence) // no fence is taken AFTER the row lock (the whole set is taken first)
+    expect(baseline).toBeGreaterThan(rowLock)
+    expect(recordRead).toBeGreaterThan(baseline)
+    expect(gate).toBeGreaterThan(baseline) // the row COUNT (a 413 oracle) comes after the baseline, i.e. after the DB-fresh gates
+    // the fence set: source, the pre-minted new sheet, the FOREIGN link target — sorted, each exactly once before the row lock
+    const fenceKeys = inTx.slice(0, rowLock).filter((s) => s.sql.startsWith('SELECT pg_advisory_xact_lock(hashtext($1))')).map((s) => String(s.params[0]))
+    expect(fenceKeys).toEqual([FOREIGN, SRC, outcome.result.sheetId].sort().map((id) => `meta:auto-number:sheet:${id}`))
+    // the dedupe advisory lock is STILL the very first statement of the transaction (CS-16)
+    expect(inTx[0]!.sql.startsWith('SELECT pg_try_advisory_xact_lock(')).toBe(true)
+  })
+
+  it('E14: a grid view with frozenLeftColumnIds / columnWidths / aggregations copies with the keys remapped and unknown ids dropped', async () => {
+    const pg = new FakePg()
+    seedFixture(pg, { viewPrefs: true })
+    const outcome = await run(pg)
+    const NEW = outcome.result.sheetId
+    const fieldMap = new Map(pg.rows('meta_fields').filter((f) => f.sheet_id === NEW).map((f) => [String(f.name), String(f.id)]))
+    const view = pg.rows('meta_views').find((v) => v.sheet_id === NEW && v.name === '冻结视图')!
+    expect(view.config).toEqual({
+      frozenLeftColumnIds: [fieldMap.get(F.title), fieldMap.get(F.status)],
+      columnWidths: { [fieldMap.get(F.title)!]: 240, [fieldMap.get(F.num)!]: 90 },
+      aggregations: { [fieldMap.get(F.num)!]: 'sum', [fieldMap.get(F.att)!]: 'count' },
+      rowDensity: 'compact',
+    })
+    expect(JSON.stringify(view.config)).not.toContain('fld_cs_')
+    expect(outcome.result.summary.viewCount).toBe(3)
+  })
+
+  it('E15: a rule on a column where a row holds \'\' → the copy keeps \'\' and deny parity passes (DATA-5)', async () => {
+    const pg = new FakePg()
+    seedFixture(pg, { rules: [{ id: 'rule_status', fieldId: F.status, operator: 'eq', value: 'X', effect: 'deny_read' }] })
+    const outcome = await run(pg) // no COPY_PERMISSION_PARITY_FAILED
+    const NEW = outcome.result.sheetId
+    const status = pg.rows('meta_fields').find((f) => f.sheet_id === NEW && f.name === F.status)!
+    const copied = pg.rows('meta_records').filter((r) => r.sheet_id === NEW).map((r) => (r.data as Record<string, unknown>)[String(status.id)])
+    expect(copied.filter((v) => v === '')).toHaveLength(1) // rec_cs_3's '' survived
+    expect(copied.filter((v) => v === undefined)).toHaveLength(2) // rec_cs_4 / rec_cs_5 stay absent (null-omission only)
+    expect(outcome.result.summary.conditionalRuleCount).toBe(1)
+  })
+
+  it('E16: relation-aggregation formulas — the quoted link id is remapped (foreign target kept, self-link target remapped) and formula_dependencies points at the NEW link', async () => {
+    const pg = new FakePg()
+    seedFixture(pg, { relationAggregation: true })
+    const outcome = await run(pg, deps({ relationAggregationLinkFieldId: extractRelationAggregationLinkFieldId }))
+    const NEW = outcome.result.sheetId
+    const fieldMap = new Map(pg.rows('meta_fields').filter((f) => f.sheet_id === NEW).map((f) => [String(f.name), f]))
+    const newLink = String(fieldMap.get(F.link)!.id), newSelf = String(fieldMap.get('fld_cs_self')!.id), newTitle = String(fieldMap.get(F.title)!.id)
+    expect((fieldMap.get('fld_cs_relsum')!.property as Record<string, unknown>).expression).toBe(`=RELSUMIF("${newLink}", "fld_cs_fname", "fld_cs_fname", "=", "F1")`)
+    expect((fieldMap.get('fld_cs_relcount')!.property as Record<string, unknown>).expression).toBe(`=RELCOUNTIF("${newSelf}", "${newTitle}", "=", {${newTitle}})`)
+    const deps_ = pg.rows('formula_dependencies').filter((r) => r.sheet_id === NEW).map((r) => [r.field_id, r.depends_on_field_id])
+    expect(deps_).toEqual(expect.arrayContaining([
+      [fieldMap.get('fld_cs_relsum')!.id, newLink],
+      [fieldMap.get('fld_cs_relcount')!.id, newTitle],
+      [fieldMap.get('fld_cs_relcount')!.id, newSelf],
+    ]))
+    // no SOURCE-sheet field id survives in any copied property (the FOREIGN sheet's `fld_cs_fname` legitimately stays;
+    // field NAMES equal the source ids in this fixture, so scan properties only)
+    const properties = JSON.stringify(pg.rows('meta_fields').filter((f) => f.sheet_id === NEW).map((f) => f.property))
+    for (const sourceId of [...Object.values(F), 'fld_cs_self']) expect(properties).not.toContain(`"${sourceId}"`)
+    // the self-link is blanked in S1, so the formula over it is disclosed as depending on a blanked column
+    expect(outcome.result.summary.disclosures).toEqual(expect.arrayContaining([
+      { fieldId: 'fld_cs_self', code: 'SELF_LINK_BLANKED' }, { fieldId: 'fld_cs_relcount', code: 'DEPENDS_ON_BLANKED_COLUMN' },
+    ]))
+  })
+
+  it('E17: copying a plugin-managed SNAPSHOT keeps copied_from_kind=plugin-managed (no whitewash) and the plugin-scope deny holds on the grandchild', async () => {
+    const pg = new FakePg()
+    seedFixture(pg, { managed: true })
+    const first = await run(pg)
+    const child = first.result.sheetId
+    expect(pg.rows('plugin_multitable_object_registry').some((r) => r.sheet_id === child)).toBe(false) // no registry row on the child
+    const second = await run(pg, deps(), { ...request, sourceSheetId: child, name: 'grandchild' })
+    const grandchild = second.result.sheetId
+    expect(second.result.summary.copiedFromKind).toBe('plugin-managed')
+    expect(pg.rows('meta_sheets').find((r) => r.id === grandchild)!.copied_from_kind).toBe('plugin-managed')
+    await expect(assertSheetNotCopiedFromPluginManaged(pg.query, { pluginName: 'plugin-attendance', sheetId: grandchild })).rejects.toBeInstanceOf(MultitableSheetScopeError)
+    // control: a copy of a plain user sheet's copy stays 'user'
+    const plain = new FakePg()
+    seedFixture(plain)
+    const c1 = await run(plain)
+    const c2 = await run(plain, deps(), { ...request, sourceSheetId: c1.result.sheetId, name: 'plain-grandchild' })
+    expect(c2.result.summary.copiedFromKind).toBe('user')
+  })
+
+  it('E18: the intent lock held by another transaction past the bounded wait → 409 CONFLICT, install never runs, nothing written (TX-4)', async () => {
+    const pg = new FakePg()
+    seedFixture(pg)
+    const before = snapshotCounts(pg)
+    const digest = buildIntentScopeDigest({ tenantId: null, actorId: ADMIN, intentKind: COPY_SHEET_INTENT_KIND, intentKey: buildCopySheetIntentKey(request, BASE), workspaceId: null, baseName: null })
+    let release!: () => void
+    const released = new Promise<void>((resolve) => { release = resolve })
+    // another transaction holds the same intent lock and does not commit until we let it
+    const holder = pg.transaction(async ({ query }) => {
+      const res = await query('SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0)) AS locked', [digest])
+      expect(res.rows[0]).toEqual({ locked: true })
+      await released
+    })
+    const mark = pg.statements.length
+    const err = await expectRefusal(run(pg, deps(), request, false, { lockWaitMs: 1, lockPollMs: 1 }), 409, 'CONFLICT')
+    expect(err.details).toEqual({})
+    const issued = pg.statements.slice(mark).filter((s) => s.tx !== null).map((s) => s.sql)
+    expect(issued.every((sql) => sql.startsWith('SELECT pg_try_advisory_xact_lock('))).toBe(true) // only lock polls: no ledger read, no plan, no write
+    expect(snapshotCounts(pg)).toEqual(before)
+    release()
+    await holder
   })
 })

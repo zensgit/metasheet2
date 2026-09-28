@@ -18,7 +18,17 @@
  *   R7  rules: fieldId remapped; unbuilt/unknown → COPY_SOURCE_RULE_UNBUILDABLE (never dropped); autoNumber
  *       rule + renumbering → COPY_SOURCE_RULE_ON_RENUMBERED_FIELD; same rule without renumbering passes.
  *   R8  unknown field type → COPY_UNSUPPORTED_FIELD_TYPE; minted ids must keep the `fld_` prefix.
+ *   R6b view.config `frozenLeftColumnIds` (array) / `columnWidths` + `aggregations` (field-id OBJECT KEYS) remapped,
+ *       unbuilt/unknown dropped, values still scanned (FE-1).
+ *   R9  relation-aggregation formulas: the quoted link/target/criteria ids are remapped (target/criteria only for a
+ *       self-referential link); a quoted fld_ in a value slot or outside the family refuses; the function family is
+ *       pinned to univer-meta.ts's tables (DATA-1).
+ *   R10 rollup `filters` / `conditions` / `filterConditions` leaves: kept for a foreign link, remapped for a self link,
+ *       fld_ in a value refuses (DATA-4).
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -27,6 +37,9 @@ import {
   COPY_UNMAPPED_FIELD_REF,
   COPY_UNSUPPORTED_FIELD_TYPE,
   CopySheetRemapError,
+  RELATION_AGGREGATION_FUNCTIONS,
+  VIEW_CONFIG_FIELD_ID_KEYED_OBJECT_KEYS,
+  VIEW_CONFIG_FIELD_ID_LIST_KEYS,
   planFieldCopies,
   planViewCopies,
   remapConditionalRules,
@@ -269,5 +282,102 @@ describe('copy-sheet remap (§5.2)', () => {
       .toThrow(COPY_UNSUPPORTED_FIELD_TYPE)
     expect(() => planFieldCopies([field('fld_x', 'string')], SRC, NEW, () => 'col_1', { copierCanManageSourceFields: false }))
       .toThrow('COPY_FIELD_ID_PREFIX_INVALID')
+  })
+
+  it('R6b: view.config frozenLeftColumnIds / columnWidths / aggregations — ids remapped (array elements and OBJECT KEYS), unbuilt/unknown dropped, values still scanned', () => {
+    const { ctx } = planFieldCopies(BASE_FIELDS, SRC, NEW, mint(), { copierCanManageSourceFields: false })
+    const map = ctx.fieldIdMap
+    const view: SourceViewRow = {
+      id: 'view_prefs', name: 'Grid', type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [],
+      config: {
+        frozenLeftColumnIds: ['fld_title', 'fld_att', 'fld_mirror', 'fld_unknown'],
+        columnWidths: { fld_title: 240, fld_att: 120, fld_mirror: 80, fld_unknown: 50 },
+        aggregations: { fld_num: 'sum', fld_att: 'count', fld_mirror: 'sum', fld_unknown: 'avg' },
+        rowDensity: 'compact',
+      },
+    }
+    const [plan] = planViewCopies(ctx, [view], mint('view'))
+    expect(plan!.config).toEqual({
+      frozenLeftColumnIds: [map.get('fld_title'), map.get('fld_att')], // blanked-but-built stays; unbuilt mirror + unknown dropped
+      columnWidths: { [map.get('fld_title')!]: 240, [map.get('fld_att')!]: 120 },
+      aggregations: { [map.get('fld_num')!]: 'sum', [map.get('fld_att')!]: 'count' },
+      rowDensity: 'compact',
+    })
+    expect(JSON.stringify(plan!.config)).not.toMatch(/fld_(title|att|num|mirror|unknown)/)
+    // a VALUE under one of these keys that carries a fld_ string is still an unlisted reference
+    const rogue: SourceViewRow = { ...view, id: 'view_rogue', config: { aggregations: { fld_num: 'fld_title' } } }
+    const err = (() => { try { planViewCopies(ctx, [rogue], mint('view')); return null } catch (e) { return e } })()
+    expect((err as CopySheetRemapError).code).toBe(COPY_UNMAPPED_FIELD_REF)
+    expect((err as CopySheetRemapError).viewId).toBe('view_rogue')
+    // the allowlist is exactly the three Web-written keys
+    expect([...VIEW_CONFIG_FIELD_ID_LIST_KEYS]).toEqual(['frozenLeftColumnIds'])
+    expect([...VIEW_CONFIG_FIELD_ID_KEYED_OBJECT_KEYS].sort()).toEqual(['aggregations', 'columnWidths'])
+  })
+
+  it('R9: relation-aggregation formulas — quoted link id remapped; target/criteria remapped only for a self-referential link; quoted fld_ in a value slot or outside the family refuses; family pinned to the product table', () => {
+    const fields: SourceFieldRow[] = [
+      field('fld_title', 'string', {}, 0),
+      field('fld_num', 'number', {}, 1),
+      field('fld_link', 'link', { foreignSheetId: FOREIGN }, 2),
+      field('fld_self', 'link', { foreignSheetId: SRC }, 3),
+      field('fld_sum', 'formula', { expression: '=RELSUMIF("fld_link", "fld_far_amount", "fld_far_status", "=", "open")' }, 4),
+      field('fld_cnt', 'formula', { expression: '= RELCOUNTIF( "fld_self" , "fld_title", "=", {fld_title} )' }, 5),
+      field('fld_look', 'formula', { expression: '=RELLOOKUP("fld_self", "fld_num", "fld_title", "=", "x")' }, 6),
+      field('fld_vals', 'formula', { expression: '=RELVALUES("fld_link", "fld_far_amount", "fld_far_status", "<>", "")' }, 7),
+    ]
+    const { plans, ctx } = planFieldCopies(fields, SRC, NEW, mint(), { copierCanManageSourceFields: false })
+    const map = ctx.fieldIdMap
+    const expr = (id: string) => plans.find((p) => p.sourceFieldId === id)!.property.expression
+    // foreign link: only the link id changes, the foreign field ids stay verbatim
+    expect(expr('fld_sum')).toBe(`=RELSUMIF("${map.get('fld_link')}", "fld_far_amount", "fld_far_status", "=", "open")`)
+    expect(expr('fld_vals')).toBe(`=RELVALUES("${map.get('fld_link')}", "fld_far_amount", "fld_far_status", "<>", "")`)
+    // self-referential link: link + target + criteria all remapped; whitespace preserved; the {fld_} value too
+    expect(expr('fld_cnt')).toBe(`= RELCOUNTIF( "${map.get('fld_self')}" , "${map.get('fld_title')}", "=", {${map.get('fld_title')}} )`)
+    expect(expr('fld_look')).toBe(`=RELLOOKUP("${map.get('fld_self')}", "${map.get('fld_num')}", "${map.get('fld_title')}", "=", "x")`)
+    // the self-link formulas depend on a blanked column (S1 blanks self-links) → disclosed
+    expect(plans.find((p) => p.sourceFieldId === 'fld_cnt')!.disclosures).toEqual([{ fieldId: 'fld_cnt', code: 'DEPENDS_ON_BLANKED_COLUMN' }])
+    expect(plans.find((p) => p.sourceFieldId === 'fld_sum')!.disclosures).toEqual([])
+
+    const refuse = (expression: string) => {
+      const err = (() => { try { planFieldCopies([...fields.slice(0, 4), field('fld_bad', 'formula', { expression })], SRC, NEW, mint(), { copierCanManageSourceFields: false }); return null } catch (e) { return e } })()
+      expect(err).toBeInstanceOf(CopySheetRemapError)
+      expect((err as CopySheetRemapError).code).toBe(COPY_UNMAPPED_FIELD_REF)
+      expect((err as CopySheetRemapError).fieldId).toBe('fld_bad')
+    }
+    refuse('=RELSUMIF("fld_unknown", "fld_far_amount", "fld_far_status", "=", "open")') // unknown link
+    refuse('=RELSUMIF("fld_link", "fld_far_amount", "fld_far_status", "=", "fld_title")') // quoted fld_ in the VALUE slot
+    refuse('=CONCAT("fld_title", {fld_num})') // quoted fld_ outside the family
+    refuse('=RELSUMIF("fld_link", "fld_far_amount", "fld_far_status", "=", SUM({fld_num}))') // nested call + quoted ids → not parseable, refuse
+
+    // the family pinned against the product's own tables (univer-meta.ts) so a new function cannot silently bypass the remap
+    const source = readFileSync(join(__dirname, '../../src/routes/univer-meta.ts'), 'utf8')
+    const agg = [...source.match(/const RELATION_AGG_FUNCTIONS: Record<string, RollupAggregation> = \{([\s\S]*?)\}/)![1]!.matchAll(/^\s*([A-Z]+):/gm)].map((m) => m[1])
+    const lookup = [...source.match(/const RELATION_LOOKUP_FUNCTIONS = new Set<string>\(\[([^\]]*)\]\)/)![1]!.matchAll(/'([A-Z]+)'/g)].map((m) => m[1])
+    const array = [...source.match(/const RELATION_ARRAY_FUNCTIONS = new Set<string>\(\[([^\]]*)\]\)/)![1]!.matchAll(/'([A-Z]+)'/g)].map((m) => m[1])
+    expect([...RELATION_AGGREGATION_FUNCTIONS].sort()).toEqual([...agg, ...lookup, ...array].sort())
+  })
+
+  it('R10: rollup filters / conditions / filterConditions — leaf fieldId kept for a foreign link, remapped for a self link, fld_ in a value refuses', () => {
+    const fields: SourceFieldRow[] = [
+      field('fld_title', 'string', {}, 0),
+      field('fld_num', 'number', {}, 1),
+      field('fld_link', 'link', { foreignSheetId: FOREIGN }, 2),
+      field('fld_self', 'link', { foreignSheetId: SRC }, 3),
+      field('fld_r1', 'rollup', { linkFieldId: 'fld_link', targetFieldId: 'fld_far_amount', aggregation: 'sum', filters: [{ fieldId: 'fld_far_status', operator: 'eq', value: 'open' }] }, 4),
+      field('fld_r2', 'rollup', { linkFieldId: 'fld_self', targetFieldId: 'fld_num', aggregation: 'sum', conditions: [{ fieldId: 'fld_title', operator: 'contains', value: 'a' }], filterConditions: [] }, 5),
+    ]
+    const { plans, ctx } = planFieldCopies(fields, SRC, NEW, mint(), { copierCanManageSourceFields: false })
+    const map = ctx.fieldIdMap
+    const prop = (id: string) => plans.find((p) => p.sourceFieldId === id)!.property
+    expect(prop('fld_r1')).toMatchObject({ linkFieldId: map.get('fld_link'), targetFieldId: 'fld_far_amount', filters: [{ fieldId: 'fld_far_status', operator: 'eq', value: 'open' }] })
+    expect(prop('fld_r2')).toMatchObject({ linkFieldId: map.get('fld_self'), targetFieldId: map.get('fld_num'), conditions: [{ fieldId: map.get('fld_title'), operator: 'contains', value: 'a' }], filterConditions: [] })
+    const refuse = (property: Record<string, unknown>) => {
+      const err = (() => { try { planFieldCopies([...fields.slice(0, 4), field('fld_bad', 'rollup', property)], SRC, NEW, mint(), { copierCanManageSourceFields: false }); return null } catch (e) { return e } })()
+      expect((err as CopySheetRemapError).code).toBe(COPY_UNMAPPED_FIELD_REF)
+      expect((err as CopySheetRemapError).fieldId).toBe('fld_bad')
+    }
+    refuse({ linkFieldId: 'fld_self', targetFieldId: 'fld_num', filters: [{ fieldId: 'fld_unknown', operator: 'eq', value: 1 }] }) // self link, unknown leaf
+    refuse({ linkFieldId: 'fld_link', targetFieldId: 'fld_far_amount', filters: [{ fieldId: 'fld_far_status', operator: 'eq', value: 'fld_title' }] }) // fld_ in a value
+    refuse({ linkFieldId: 'fld_link', targetFieldId: 'fld_far_amount', filters: 'fld_title' }) // non-list shape carrying an id
   })
 })

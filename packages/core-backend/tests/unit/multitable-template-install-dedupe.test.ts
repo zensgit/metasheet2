@@ -67,6 +67,7 @@ import request from 'supertest'
 
 import {
   COPY_SHEET_INTENT_KIND,
+  DedupeLockTimeoutError,
   TemplateInstallLedgerUnavailableError,
   buildIntentScopeDigest,
   buildTemplateInstallScopeDigest,
@@ -1195,5 +1196,33 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
     // 分隔符不可伪造:把值拼在一起不会撞上另一组值的指纹。
     expect(buildTemplateInstallScopeDigest({ ...scope, actorId: 'a', templateId: 'bc' }))
       .not.toBe(buildTemplateInstallScopeDigest({ ...scope, actorId: 'ab', templateId: 'c' }))
+  })
+
+  it('D22: onLockTimeout=refuse —— 有界等待内拿不到锁 → 抛 DedupeLockTimeoutError,一条账本语句都不发、install 不调用;默认仍是 D16 的降级', async () => {
+    // 复制数据表(ADR CS-16 / TX-4):先到者未提交时账本读不到它,降级「照常做」会建出第二张表 —— 所以拒绝。
+    const statements: string[] = []
+    let installs = 0
+    const query = vi.fn(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      statements.push(normalized)
+      if (isLockSql(normalized)) return lockAnswer(false)
+      return { rows: [] as unknown[] }
+    })
+    const copyScope = { tenantId: null, actorId: 'user_1', intentKind: 'copy-sheet' as const, intentKey: '["sheet_a","base_1",null,true,"inherit"]', workspaceId: null, baseName: null }
+    const err = await runDeduplicatedIntent({
+      query, scope: copyScope, lockWaitMs: 20, lockPollMs: 1, sleep: async () => {}, onLockTimeout: 'refuse',
+      install: async () => { installs++; return freshResult('base_refused') },
+    }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(DedupeLockTimeoutError)
+    expect((err as Error).name).toBe('DedupeLockTimeoutError')
+    expect(installs).toBe(0)
+    expect(statements.every((sql) => isLockSql(sql))).toBe(true) // only lock polls: no ledger SELECT / INSERT / DELETE
+    // the same input WITHOUT the option keeps the template-install degradation (lockHeld=false, install runs)
+    const degraded = await runDeduplicatedIntent({
+      query, scope: copyScope, lockWaitMs: 20, lockPollMs: 1, sleep: async () => {},
+      install: async () => { installs++; return freshResult('base_degraded') },
+    })
+    expect(degraded.lockHeld).toBe(false)
+    expect(installs).toBe(1)
   })
 })

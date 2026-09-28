@@ -17,7 +17,9 @@
  *       replays with `Idempotent-Replayed: true`, a byte-identical body, and no second sheet.
  *   H7  a row failure answers 422 COPY_ROW_VALIDATION_FAILED with `{ rowIndex, fieldId, code }` only — the response
  *       bytes contain no cell value and no missing-link id — and nothing was written.
- *   H8  session only: the two routes are registered without apiTokenAuth / oapiScopeGuard (source pin, CS-1).
+ *   H8  session only: the two routes are registered without the token-auth / OAPI-scope middleware (source pin, CS-1).
+ *   H9  over the row cap: dry-run 200 + `summary.overLimit: true` (records not read), copy 413 COPY_TOO_LARGE (FE-2).
+ *   H10 a PG lock SQLSTATE (40P01 / 55P03 / 40001) surfacing from the transaction → 409 CONFLICT, nothing written (TX-2).
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -248,6 +250,51 @@ describe('copy-sheet routes (ADR #6094 S1)', () => {
     expect(emit).not.toHaveBeenCalledWith('multitable.sheet.copied', expect.anything())
     // the refusal is audited once (outside any transaction)
     expect(pg.rows('operation_audit_logs').filter((a) => (a.metadata as { errorCode?: string }).errorCode === 'COPY_ROW_VALIDATION_FAILED')).toHaveLength(1)
+  })
+
+  it('H9: over the row cap — dry-run answers 200 with summary.overLimit=true (records not read, structure disclosed); copy answers 413 COPY_TOO_LARGE', async () => {
+    process.env.MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS = '1'
+    try {
+      const pg = new FakePg()
+      seed(pg)
+      const { app } = await createApp(pg, ADMIN_ID)
+      pinned.setApp(app)
+      const mark = pg.statements.length
+      const dry = await post(`/sheets/${SRC}/copy/dry-run`)
+      expect(dry.status, JSON.stringify(dry.body)).toBe(200)
+      expect(dry.body.data.summary).toMatchObject({ overLimit: true, rowCount: 2, fieldCount: 5, limits: { maxRows: 1, maxFields: 500 }, disclosures: [{ fieldId: F.att, code: 'ATTACHMENT_BLANKED' }] })
+      expect(pg.statements.slice(mark).some((s) => s.sql.startsWith('SELECT id, data, created_by FROM meta_records'))).toBe(false)
+      expect(writes(pg, mark)).toHaveLength(0)
+      const res = await post(`/sheets/${SRC}/copy`)
+      expect(res.status).toBe(413)
+      expect(res.body.error.code).toBe('COPY_TOO_LARGE')
+      expect(res.body.error.details).toEqual({ rowCount: 2, limit: 1 })
+      expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
+    } finally {
+      delete process.env.MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS
+    }
+  })
+
+  it('H10: a Postgres lock SQLSTATE (40P01 / 55P03 / 40001) out of the copy transaction answers 409 CONFLICT, never 500, and nothing is written', async () => {
+    for (const code of ['40P01', '55P03', '40001']) {
+      const pg = new FakePg({
+        beforeStatement: (statement) => {
+          if (statement.sql.startsWith('SELECT pg_advisory_xact_lock(hashtext($1))')) {
+            const err = new Error('deadlock detected') as Error & { code: string }
+            err.code = code
+            throw err
+          }
+        },
+      })
+      seed(pg)
+      const { app } = await createApp(pg, ADMIN_ID)
+      pinned.setApp(app)
+      const res = await post(`/sheets/${SRC}/copy`)
+      expect(res.status, code).toBe(409)
+      expect(res.body.error.code).toBe('CONFLICT')
+      expect(JSON.stringify(res.body)).not.toContain('deadlock')
+      expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
+    }
   })
 
   it('H8: session-only registration — no apiTokenAuth / oapiScopeGuard on either route (CS-1)', () => {
