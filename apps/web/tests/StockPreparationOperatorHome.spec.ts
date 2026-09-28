@@ -1131,6 +1131,76 @@ describe('卡片上的导出 — 租户墙拒绝有自己的话,不是「稍后�
     }
   })
 
+  // The envelopes below are what the route's sendError actually writes for each wall refusal
+  // (plugin-integration-core http-routes.cjs: HttpRouteError -> { ok:false, error:{ code, message,
+  // details } }, JSON), status and values-free details included — not a hand-trimmed stand-in.
+  const WALL_REFUSALS = [
+    {
+      status: 409,
+      code: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+      message: 'the sheet this deployment is bound to is not registered to the project of this caller, and its id is not the one derived for that project either',
+      details: { objectId: 'plm_stock_preparation_main' },
+    },
+    {
+      status: 409,
+      code: 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN',
+      message: 'the bound sheet is not registered to this project and this host exposes no id derivation to fall back on, so its owner cannot be established',
+      details: { objectId: 'plm_stock_preparation_main' },
+    },
+    {
+      status: 501,
+      code: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
+      message: 'the prep-line export tenant check requires multitable.provisioning.isSheetOwnedByProject',
+      details: { requiredMethods: ['isSheetOwnedByProject'] },
+    },
+  ] as const
+
+  function wallRefusalResponse(refusal: (typeof WALL_REFUSALS)[number]): Response {
+    return new Response(
+      JSON.stringify({ ok: false, error: { code: refusal.code, message: refusal.message, details: refusal.details } }),
+      { status: refusal.status, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+
+  it('a 409 PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN says the owner cannot be established and sends the person to an administrator, not a retry', async () => {
+    const refusal = WALL_REFUSALS.find((entry) => entry.code === 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN')!
+    h.apiFetch.mockImplementation(async () => wallRefusalResponse(refusal))
+    const { root, unmount } = readyCard()
+    try {
+      ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+      await flushTurns()
+      const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+      expect(notice, 'the refusal is visible on the card').not.toBeNull()
+      // PINNED AS LITERALS: what happened, that nothing happened, and who to go to.
+      expect(notice.textContent).toContain('没法确认这台系统绑定的备料主表属于哪家工厂')
+      expect(notice.textContent).toContain('文件没有下载,数据也没有变化')
+      expect(notice.textContent).toContain('管理员')
+      expect(notice.textContent, 'its own sentence, not the MISMATCH one').not.toContain('不属于您的工厂')
+      expect(notice.textContent, 'retrying cannot change a tenant-wall refusal').not.toContain('稍后再点一次')
+    } finally {
+      unmount()
+    }
+  })
+
+  it('every tenant-wall refusal on the card says, in these literal words, that nothing was exported and nothing changed', async () => {
+    for (const refusal of WALL_REFUSALS) {
+      h.apiFetch.mockReset()
+      h.apiFetch.mockImplementation(async () => wallRefusalResponse(refusal))
+      const { root, unmount } = readyCard()
+      try {
+        ;(root.querySelector('[data-testid="stock-prep-operator-home-card-action"]') as HTMLButtonElement).click()
+        await flushTurns()
+        const notice = root.querySelector('[data-testid="stock-prep-operator-home-card-error"]') as HTMLElement
+        expect(notice, `${refusal.code}: the refusal is visible on the card`).not.toBeNull()
+        expect(notice.textContent, `${refusal.code}: says the export was withheld`).toContain('为保护数据没有导出')
+        expect(notice.textContent, `${refusal.code}: says no file came and nothing changed`).toContain('文件没有下载,数据也没有变化')
+        expect(notice.textContent, `${refusal.code}: not the generic retry line`).not.toContain('稍后再点一次')
+      } finally {
+        unmount()
+      }
+    }
+  })
+
   it('any OTHER failure keeps the pre-existing generic line, byte for byte', async () => {
     h.apiFetch.mockImplementation(async () => new Response('upstream exploded', { status: 500, headers: { 'Content-Type': 'text/plain' } }))
     const { root, unmount } = readyCard()
