@@ -416,6 +416,12 @@ async function testUnlistedCodes() {
     'toString',
     // an arbitrary coded error from a dependency
     'ECONNREFUSED',
+    // #6125 verifier survivors: an all-caps same-prefix word (kills a `^(CONNECTION_|…)[A-Z_]+$`
+    // shape check), a full-width listed word (kills NFKC normalisation before the lookup) and a
+    // listed word with a zero-width space (kills stripping U+200B–U+200D/U+FEFF before the lookup).
+    'CONNECTION_ACME_PLANT_DB',
+    'ＣＯＮＮＥＣＴＩＯＮ＿ＩＤ＿ＲＥＱＵＩＲＥＤ',
+    'CONNECTION_ID_REQUIRED​',
   ]
   for (const code of cases) {
     const label = `unlisted ${JSON.stringify(code)}`
