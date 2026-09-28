@@ -140,6 +140,10 @@ export const ATTENDANCE_LEGACY_PLAN_FAILURE_REASON_CODES_V1 = Object.freeze([
   'ATTENDANCE_IMPORT_LEGACY_PLAN_IDENTITY_MISMATCH',
   'ATTENDANCE_IMPORT_LEGACY_PLAN_AUTHORIZATION_REJECTED',
   'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
+  // Write-time roster rejection. error is NOT NULL (index details JSON).
+  // Existing plan reasons stay error IS NULL. The historical trigger's
+  // plan-reason list does not include this code.
+  'USER_NOT_IN_ORG',
 ] as const)
 export type AttendanceLegacyPlanFailureReasonCodeV1 =
   (typeof ATTENDANCE_LEGACY_PLAN_FAILURE_REASON_CODES_V1)[number]

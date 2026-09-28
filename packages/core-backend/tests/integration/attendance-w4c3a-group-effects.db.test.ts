@@ -105,6 +105,18 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
         updated_at timestamptz DEFAULT now(),
         UNIQUE (org_id, group_id, user_id)
       )`)
+    await pool.query(`
+      CREATE TABLE users (
+        id text PRIMARY KEY,
+        is_active boolean NOT NULL DEFAULT true
+      )`)
+    await pool.query(`
+      CREATE TABLE user_orgs (
+        user_id text NOT NULL,
+        org_id text NOT NULL,
+        is_active boolean NOT NULL DEFAULT true,
+        PRIMARY KEY (user_id, org_id)
+      )`)
   }, 60_000)
 
   afterAll(async () => {
@@ -170,6 +182,14 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
        VALUES ($1, $2, $3)`,
       [orgId, groupId, userId],
     )
+    await pool.query(
+      `INSERT INTO users (id, is_active) VALUES ($1, true)`,
+      [userId],
+    )
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
@@ -202,6 +222,119 @@ describeIfDatabase('W4C-3a group effect SQL counts (real PostgreSQL)', () => {
       await client.query('ROLLBACK')
     } finally {
       client.release()
+    }
+  })
+
+  it('enqueue then deactivate does not insert ensure_member', async () => {
+    const groupId = crypto.randomUUID()
+    const memberId = crypto.randomUUID()
+    const userId = `queued-${run}`
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone)
+       VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, orgId, `Queued ${run}`],
+    )
+    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [userId])
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
+    await pool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [userId, orgId],
+    )
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await expect(applyAttendanceLegacyGroupEffectsV1(
+        trx(client),
+        plan(orgId, [{
+          kind: 'ensure_member',
+          memberId,
+          groupRef: groupId,
+          userId,
+          membershipExistedAtPrepare: false,
+        }]),
+      )).rejects.toThrow('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG')
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+    const written = await pool.query(
+      `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    )
+    expect(written.rows).toHaveLength(0)
+  })
+
+  it('holds FOR SHARE on user_orgs and users until the member insert commits', async () => {
+    const groupId = crypto.randomUUID()
+    const memberId = crypto.randomUUID()
+    const userId = `share-${run}`
+    await pool.query(
+      `INSERT INTO attendance_groups (id, org_id, name, timezone)
+       VALUES ($1, $2, $3, 'UTC')`,
+      [groupId, orgId, `Share ${run}`],
+    )
+    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [userId])
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
+      [userId, orgId],
+    )
+    const writer = await pool.connect()
+    const deactivator = await pool.connect()
+    try {
+      await writer.query('BEGIN')
+      const inserted = await applyAttendanceLegacyGroupEffectsV1(
+        trx(writer),
+        plan(orgId, [{
+          kind: 'ensure_member',
+          memberId,
+          groupRef: groupId,
+          userId,
+          membershipExistedAtPrepare: false,
+        }]),
+      )
+      expect(inserted.groupMembersAdded).toBe(1)
+      const deactivation = (async () => {
+        await deactivator.query('BEGIN')
+        await deactivator.query(
+          `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+          [userId, orgId],
+        )
+        await deactivator.query('COMMIT')
+      })()
+      const pid = Number((await deactivator.query('SELECT pg_backend_pid() AS pid')).rows[0].pid)
+      let blocked = false
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        const state = await pool.query(
+          `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
+          [pid],
+        )
+        if (state.rows[0]?.wait_event_type === 'Lock') {
+          blocked = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(blocked).toBe(true)
+      const stillActive = await writer.query(
+        `SELECT is_active FROM user_orgs WHERE user_id = $1 AND org_id = $2`,
+        [userId, orgId],
+      )
+      expect(stillActive.rows[0]?.is_active).toBe(true)
+      const member = await writer.query(
+        `SELECT 1 FROM attendance_group_members WHERE org_id = $1 AND user_id = $2`,
+        [orgId, userId],
+      )
+      expect(member.rows).toHaveLength(1)
+      await writer.query('COMMIT')
+      await deactivation
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined)
+      await deactivator.query('ROLLBACK').catch(() => undefined)
+      writer.release()
+      deactivator.release()
     }
   })
 })

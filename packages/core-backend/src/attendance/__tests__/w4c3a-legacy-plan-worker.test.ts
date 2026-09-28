@@ -7,6 +7,7 @@ import {
   sha256HexOfCanonicalJsonV1,
   type LegacyImportExecutionPlanManifestV1,
 } from '../w4c3a-legacy-execution-plan'
+import { AttendanceLegacyGroupEffectError } from '../w4c3a-legacy-plan-group-effects'
 import {
   createAttendanceLegacyPlanWorkerV1,
   type AttendanceLegacyPlanWorkerCallbacksV1,
@@ -390,6 +391,81 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
     expect(base.calls).not.toContain('effect')
     expect(base.calls).not.toContain('terminal')
     expect(base.calls).not.toContain('11')
+  })
+
+  it('fails a queued plan when the write-time roster gate rejects a member', async () => {
+    const replay = packageReplayPlan()
+    const details = [{
+      code: 'USER_NOT_IN_ORG',
+      rejectedCount: 1,
+      indexes: [0],
+    }]
+    const rosterError = Object.assign(
+      new Error('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG'),
+      { status: 404, details },
+    )
+    const captured: Array<{ reason: string; detail?: string }> = []
+    const base = await callbacks(
+      {
+        executeVerifiedPlan: vi.fn(async () => {
+          throw rosterError
+        }),
+        markPlanFailed: vi.fn(async (_trx, _jobId, _orgId, reason, errorDetail) => {
+          captured.push({ reason, detail: errorDetail })
+        }),
+      },
+      replay,
+    )
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({
+      kind: 'failed',
+      reason: 'USER_NOT_IN_ORG',
+    })
+    expect(captured).toEqual([{
+      reason: 'USER_NOT_IN_ORG',
+      detail: JSON.stringify({
+        code: 'USER_NOT_IN_ORG',
+        message: 'Target user is not an active member of this org',
+        details,
+      }),
+    }])
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
+  })
+
+  it('records USER_NOT_IN_ORG when the precondition recheck hits an org-membership miss', async () => {
+    const details = [{
+      code: 'USER_NOT_IN_ORG',
+      rejectedCount: 1,
+      indexes: [0],
+    }]
+    const captured: Array<{ reason: string; detail?: string }> = []
+    const base = await callbacks({
+      recheckPreconditions: vi.fn(async () => {
+        throw new AttendanceLegacyGroupEffectError('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG', {
+          status: 404,
+          details,
+        })
+      }),
+      markPlanFailed: vi.fn(async (_trx, _jobId, _orgId, reason, errorDetail) => {
+        captured.push({ reason, detail: errorDetail })
+      }),
+    })
+    await expect(
+      createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID),
+    ).resolves.toEqual({
+      kind: 'failed',
+      reason: 'USER_NOT_IN_ORG',
+    })
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
+    expect(captured).toEqual([{
+      reason: 'USER_NOT_IN_ORG',
+      detail: JSON.stringify({
+        code: 'USER_NOT_IN_ORG',
+        message: 'Target user is not an active member of this org',
+        details,
+      }),
+    }])
   })
 
   it('fails closed when a frozen record timezone is substituted in the persisted chunk', async () => {

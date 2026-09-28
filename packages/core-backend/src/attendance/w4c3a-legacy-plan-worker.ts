@@ -176,6 +176,7 @@ export type AttendanceLegacyPlanWorkerCallbacksV1<TTransaction> = Readonly<{
     jobId: string,
     orgId: string,
     reason: AttendanceLegacyPlanFailureReasonCodeV1,
+    errorDetail?: string,
   ): Promise<void>
 }>
 
@@ -185,6 +186,28 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function fail(reason: AttendanceLegacyPlanFailureReasonCodeV1): never {
   throw new AttendanceLegacyPlanWorkerFailure(reason)
+}
+
+function rosterOrgMembershipFailureDetail(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null
+  const candidate = error as {
+    code?: unknown
+    status?: unknown
+    message?: unknown
+    details?: unknown
+  }
+  if (
+    candidate.message !== 'W4C3A_MEMBER_NOT_ACTIVE_IN_ORG' ||
+    candidate.status !== 404 ||
+    !Array.isArray(candidate.details)
+  ) {
+    return null
+  }
+  return JSON.stringify({
+    code: 'USER_NOT_IN_ORG',
+    message: 'Target user is not an active member of this org',
+    details: candidate.details,
+  })
 }
 
 class AttendanceLegacyPlanWorkerFailure extends Error {
@@ -310,12 +333,31 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
     trx: TTransaction,
     job: AttendanceLegacyPlanWorkerJobV1,
     reason: AttendanceLegacyPlanFailureReasonCodeV1,
+    errorDetail?: string,
   ): Promise<AttendanceLegacyPlanWorkerResultV1> => {
     if (job.status === 'queued' || job.status === 'running') {
-      await callbacks.markPlanFailed(trx, job.jobId, job.orgId, reason)
+      await callbacks.markPlanFailed(trx, job.jobId, job.orgId, reason, errorDetail)
       return { kind: 'failed', reason }
     }
     return { kind: 'not_found' }
+  }
+
+  const executeVerifiedPlanOrRosterFailure = async (
+    trx: TTransaction,
+    job: AttendanceLegacyPlanWorkerJobV1,
+    plan: VerifiedAttendanceLegacyPlanV1,
+    registryClaim: unknown,
+  ): Promise<{ ok: true; value: unknown } | { ok: false; detail: string }> => {
+    try {
+      return {
+        ok: true,
+        value: await callbacks.executeVerifiedPlan(trx, job, plan, registryClaim),
+      }
+    } catch (error) {
+      const detail = rosterOrgMembershipFailureDetail(error)
+      if (detail !== null) return { ok: false, detail }
+      throw error
+    }
   }
 
   return Object.freeze({
@@ -488,9 +530,18 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
               'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED',
             )
           }
-          const response = parseLegacyImportAsyncJobSummaryV1(
-            await callbacks.executeVerifiedPlan(trx, rechecked, plan, null),
+          const replayExecuted = await executeVerifiedPlanOrRosterFailure(
+            trx,
+            rechecked,
+            plan,
+            null,
           )
+          // `in` narrowing: tsconfig.cache.tests.json sets strict:false, and
+          // `!result.ok` does not narrow this union there.
+          if ('detail' in replayExecuted) {
+            return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', replayExecuted.detail)
+          }
+          const response = parseLegacyImportAsyncJobSummaryV1(replayExecuted.value)
           await callbacks.storeCompletedResponseAndTerminalize(
             trx,
             rechecked,
@@ -508,7 +559,17 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_IDENTITY_MISMATCH')
         }
         await callbacks.acquireClass11(trx, plan, targets)
-        if (!(await callbacks.recheckPreconditions(trx, plan))) {
+        let preconditionsHold = false
+        try {
+          preconditionsHold = await callbacks.recheckPreconditions(trx, plan)
+        } catch (error) {
+          const detail = rosterOrgMembershipFailureDetail(error)
+          if (detail !== null) {
+            return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', detail)
+          }
+          throw error
+        }
+        if (!preconditionsHold) {
           return failClosed(trx, rechecked, 'ATTENDANCE_IMPORT_LEGACY_PLAN_PRECONDITION_CHANGED')
         }
         const registryClaim = await callbacks.claimOperationRows(
@@ -517,9 +578,16 @@ export function createAttendanceLegacyPlanWorkerV1<TTransaction>(
           plan,
           reservation,
         )
-        const response = parseLegacyImportAsyncJobSummaryV1(
-          await callbacks.executeVerifiedPlan(trx, rechecked, plan, registryClaim),
+        const executed = await executeVerifiedPlanOrRosterFailure(
+          trx,
+          rechecked,
+          plan,
+          registryClaim,
         )
+        if ('detail' in executed) {
+          return failClosed(trx, rechecked, 'USER_NOT_IN_ORG', executed.detail)
+        }
+        const response = parseLegacyImportAsyncJobSummaryV1(executed.value)
         await callbacks.storeCompletedResponseAndTerminalize(
           trx,
           rechecked,
