@@ -3,7 +3,10 @@ import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { query } from '../../src/db/pg'
 import { executeApprovalTemplateGroupBackfill } from '../../src/routes/approvals'
-import { rollbackApprovalTemplateGroupBackfillBatch } from '../../src/services/ApprovalTemplateGroupService'
+import {
+  ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL,
+  rollbackApprovalTemplateGroupBackfillBatch,
+} from '../../src/services/ApprovalTemplateGroupService'
 import type { ApprovalTemplateVisibilityActor } from '../../src/services/ApprovalProductService'
 
 /**
@@ -435,6 +438,75 @@ describeIfDatabase('approval template groups — phase 2 backfill rollback (W9, 
       statusCode: 404,
       code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND',
     })
+  })
+
+  // Q3b ("approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" §3.3 / R4 — a
+  // private review record, not tracked in this repository): the §4.2 unlink text now carries a
+  // redundant `AND b.org_id = $2`. Through the SERVICE it is unobservable — the `(id, org_id) FOR
+  // UPDATE` batch-head pre-lock 404s a foreign org before the unlink runs (the case above), and
+  // `atgbbl_batch_fk` pins every `b.org_id` under one `batch_id` to that head's org — so the only
+  // assertion with discriminating power runs the exported statement text DIRECTLY, with a pair
+  // the service can never hand it: org A's batch, org B's id.
+  it("Q3b: the §4.2 unlink text run standalone with (batchId of org A, org B) touches 0 rows; with (batchId, org A) it unlinks only org A's batch link and leaves org B's same-template link alone", async () => {
+    const orgA = trackOrg(`atgr-q3b-a-${TS}`)
+    const orgB = trackOrg(`atgr-q3b-b-${TS}`)
+    const tpl = await createTemplate(`atgr-q3b-tpl-${TS}`, 'HR')
+    await sinkForeignTemplates(orgA, [tpl])
+    const executed = await executeApprovalTemplateGroupBackfill(orgA, managerActor, 'probe-actor')
+    expect(executed.batchId).not.toBeNull()
+    const batchIdA = executed.batchId as string
+
+    // Org B: its own group and an ACTIVE link for the SAME template_id (links are keyed
+    // (org_id, template_id), so two orgs may each link one template). Same template, same token
+    // shape, different org — exactly the row an org-blind join would have to be kept away from.
+    const groupB = `atg_q3b_b_${TS}`
+    await query(
+      `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by) VALUES ($1, $2, 'HR', 1, 'q3b')`,
+      [groupB, orgB],
+    )
+    await query(
+      `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at) VALUES ($1, $2, $3, 'q3b', now())`,
+      [orgB, tpl, groupB],
+    )
+
+    async function linkState(org: string): Promise<{ group_id: string | null; unlinked: boolean }> {
+      const row = await query<{ group_id: string | null; unlinked_at: string | null }>(
+        `SELECT group_id, unlinked_at FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+        [org, tpl],
+      )
+      expect(row.rowCount).toBe(1)
+      return { group_id: row.rows[0].group_id, unlinked: row.rows[0].unlinked_at !== null }
+    }
+    const groupA = (await linkState(orgA)).group_id
+    expect(groupA).not.toBeNull()
+    expect(await linkState(orgB)).toEqual({ group_id: groupB, unlinked: false })
+
+    // Service layer, stated honestly: org B asking to roll back org A's batch is rejected by the
+    // (id, org_id) pre-lock — 404 — before the §4.2 statement runs at all. The predicate is NOT
+    // what stops this; it sits behind that check and the FK as defence in depth.
+    await expect(rollbackApprovalTemplateGroupBackfillBatch(orgB, batchIdA)).rejects.toMatchObject({
+      statusCode: 404,
+      code: 'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND',
+    })
+    expect(await linkState(orgA)).toEqual({ group_id: groupA, unlinked: false })
+    expect(await linkState(orgB)).toEqual({ group_id: groupB, unlinked: false })
+
+    // The statement text, standalone, with the pair the service cannot produce. Discriminating:
+    // with `AND b.org_id = $2` removed or neutralised this SAME call unlinks org A's row
+    // (rowCount 1) — batch A's `..._batch_links` rows join org A's link on template_id + token no
+    // matter which org the caller named.
+    const cross = await query(ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL, [batchIdA, orgB])
+    expect(cross.rowCount).toBe(0)
+    expect(await linkState(orgA)).toEqual({ group_id: groupA, unlinked: false })
+    expect(await linkState(orgB)).toEqual({ group_id: groupB, unlinked: false })
+
+    // Positive control — the predicate must not have narrowed the legitimate pair: org A's batch
+    // link is unlinked; org B's same-template link is untouched (already excluded by
+    // `b.org_id = l.org_id`; this pins that the new predicate changed nothing there either).
+    const own = await query(ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL, [batchIdA, orgA])
+    expect(own.rowCount).toBe(1)
+    expect(await linkState(orgA)).toEqual({ group_id: null, unlinked: true })
+    expect(await linkState(orgB)).toEqual({ group_id: groupB, unlinked: false })
   })
 
   describe('route wiring: POST /api/approval-template-groups/backfill/batches/:batchId/rollback (real HTTP, real guard)', () => {

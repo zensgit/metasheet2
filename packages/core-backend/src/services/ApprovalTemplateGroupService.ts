@@ -846,6 +846,29 @@ export interface ApprovalTemplateGroupBackfillRollbackResult {
 }
 
 /**
+ * §4.2's unlink statement, exported as SQL TEXT (the same convention `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL`
+ * above uses) so the rollback real-DB suite can execute it STANDALONE with a deliberately
+ * mismatched `(batchId, orgId)` pair — the only way the org predicate below is observable at all.
+ *
+ * Binds `$1 = batchId`, `$2 = orgId`. `AND b.org_id = $2` is REDUNDANT by construction; it was
+ * added on the Q3b ruling recorded in
+ * "approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" §3.3 / R4 (a private
+ * review record, not tracked in this repository). Before it, org scoping of this statement rested
+ * on ONE load-bearing point: `atgbbl_batch_fk` (`(batch_id, org_id)` → `..._batches (id, org_id)`)
+ * pins every `b.org_id` under `b.batch_id = $1` to the batch head's org, and
+ * `rollbackApprovalTemplateGroupBackfillWithClient` has already proven that head belongs to `$2`
+ * via its `WHERE id = $1 AND org_id = $2 FOR UPDATE` pre-lock (404 otherwise). Through that
+ * caller this predicate therefore can never change the affected row set — it is defence in depth
+ * against a future edit loosening either the FK or the pre-lock, NOT an observable behaviour
+ * change, and the suite proves it the only way it can be proven: by running this text directly.
+ */
+export const ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL = `UPDATE approval_template_group_links l
+    SET group_id = NULL, unlinked_at = now()
+   FROM approval_template_group_backfill_batch_links b
+  WHERE b.batch_id = $1 AND b.org_id = $2 AND b.org_id = l.org_id AND b.template_id = l.template_id
+    AND l.group_id = b.group_id AND l.linked_at = b.linked_at`
+
+/**
  * §4's transaction skeleton (§13 changesRequired #1 — the pseudocode's original two independent
  * code blocks, §4.2 and §4.3, had no shared skeleton naming ONE lock order across both; that gap
  * is exactly what design-gate M3 found deadlocking).
@@ -936,15 +959,9 @@ export async function rollbackApprovalTemplateGroupBackfillWithClient(
   // JS on either the write side (execute, already fixed) or here on the compare side. A batch-link
   // row whose `(group_id, linked_at)` no longer BOTH match the live `approval_template_group_links`
   // row has been touched by something else since `execute` ran and is left exactly as that other
-  // action left it.
-  await client.query(
-    `UPDATE approval_template_group_links l
-        SET group_id = NULL, unlinked_at = now()
-       FROM approval_template_group_backfill_batch_links b
-      WHERE b.batch_id = $1 AND b.org_id = l.org_id AND b.template_id = l.template_id
-        AND l.group_id = b.group_id AND l.linked_at = b.linked_at`,
-    [batchId],
-  )
+  // action left it. Text lives in `ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL` (with its Q3b redundant
+  // `AND b.org_id = $2` — see that constant's note for why it is unobservable from here).
+  await client.query(ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL, [batchId, orgId])
 
   // §4.3: `remaining` is computed AFTER the §4.2 unlink above (so this batch's own now-undone
   // members never count toward it), for every group this batch marked `created_new = true` only.
