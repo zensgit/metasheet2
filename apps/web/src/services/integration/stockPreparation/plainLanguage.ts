@@ -703,6 +703,35 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '过一会儿再试一次;还是不行就把报错代码给管理员。',
     enNext: 'Try again shortly; if it persists, give an administrator the code below.',
   }),
+  // 通知下一步's TENANT WALL (#6121). Before it checks that the project exists, the advance now
+  // checks that the 备料主表 this deployment is bound to belongs to the caller's own factory — the same
+  // check 结转 and 按项目导出物料 run, so these three mirror the PREP_LINE_EXPORT_TARGET_* rows above in
+  // tone and remedy. None of them is fixed by retrying and none is the operator's doing: the binding is
+  // deployment configuration. Without a row here they fell through to the generic write sentence and
+  // its 「过一会儿再点一次」, which is the one instruction that is wrong for all three. Each says what
+  // happened to the CHAIN — the turn did not move, nobody was told — and that no prep row changed.
+  // The admin's first step is 「看看还缺什么」 (the preflight on 数据来源与体检): the preflight asks the
+  // same ownership question (blocker STOCK_PREP_CARRY_TARGET_NOT_OWNED, whose detail quotes this
+  // route's code), so the admin checks the fact the operator was refused on.
+  // Values-free: no table id, no factory id.
+  STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH: Object.freeze({
+    zh: '这台系统绑定的备料主表不属于您的工厂,为保护数据没有通知下一步;交接没有发生,备料数据也没有变化。',
+    en: 'The stock-preparation table this system is bound to does not belong to your factory, so the next person was not notified, to protect the data; the turn did not move and nothing in your prep data changed.',
+    zhNext: '这不是您操作的问题,再点也一样 —— 请把这条报错代码给管理员,请他们核对备料主表的绑定(先在「数据来源与体检」里跑一次「看看还缺什么」)。',
+    enNext: 'This is not something you did, and pressing again will not change it — give an administrator this error code and ask them to check the stock-preparation table binding (run "See what is missing" under Sources & Health Check first).',
+  }),
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNER_UNKNOWN: Object.freeze({
+    zh: '系统没法确认这台系统绑定的备料主表属于哪家工厂,为保护数据没有通知下一步;交接没有发生,备料数据也没有变化。',
+    en: 'The system could not establish which factory the bound stock-preparation table belongs to, so the next person was not notified, to protect the data; the turn did not move and nothing in your prep data changed.',
+    zhNext: '再点也一样 —— 请把这条报错代码给管理员,请他们重新核对并登记备料主表的归属(先在「数据来源与体检」里跑一次「看看还缺什么」)。',
+    enNext: 'Pressing again will not change it — give an administrator this error code and ask them to re-check and register who owns the stock-preparation table (run "See what is missing" under Sources & Health Check first).',
+  }),
+  STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE: Object.freeze({
+    zh: '这台服务器缺少核对备料主表归属的功能,为保护数据没有通知下一步;交接没有发生,备料数据也没有变化。',
+    en: 'This server lacks the check that confirms who owns the stock-preparation table, so the next person was not notified, to protect the data; the turn did not move and nothing in your prep data changed.',
+    zhNext: '这要平台管理员升级服务端,不是您这边能解决的;请把这条报错代码给管理员。',
+    enNext: 'A platform administrator has to upgrade the server — this is not something you can fix; give an administrator this error code.',
+  }),
   // H13 — THE TENANCY REFUSALS, WHICH BOTH PLANES CAN RAISE AND NEITHER HAD WORDS FOR.
   //
   // These reach the queue AND the board, so they live in the shared table and are worded to claim
