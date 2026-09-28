@@ -134,7 +134,11 @@ Plugin System Tests run [36329710574](https://github.com/zensgit/metasheet2/acti
 
 `d1b76c711` 的 Plugin System Tests run [36333266243](https://github.com/zensgit/metasheet2/actions/runs/36333266243) 已结束，结论 success。job `test (20.x)` 也是 success。这一 job 里 `pnpm --filter @metasheet/core-backend test` 收集 18200（16590 passed，1610 skipped）。同 job 的 tasks auth gate 收集 8，8 passed。同一 head 的 `tasks-realdb` run [36333265859](https://github.com/zensgit/metasheet2/actions/runs/36333265859) 成功：4 个文件，89 个测试。这两次运行都在 `d1b76c711`，不在记录它们的后续文档提交上。评论 5858154058 的裁决是 APPROVE-with-hardening（0 P1 / 1 P2）。
 
-评论 5858154058 的 P2 与两条 P3 在随后的提交里补上。探针①②改打 `GET /api/tasks?view=assigned`、`GET /api/tasks/pending`、`GET /api/tasks/pending-count`，探针②的写端点改打 `POST /api/tasks/:id/complete`。另外两格经 HTTP：`POST /complete` 断言执行人行已写入；`POST /reopen` 带 `scope:'all'` 断言两个执行人的 `completed_at` 都被清空。无租户的 `/complete` 与 `/reopen` 断言 422 `ORG_MISSING`。本地四个真库文件 91 通过。展开后静态计数 = 普通 `it(` 42（p0a 13、read-path 8、rbac-trust 15、completion-grid 6）+ `it.each` 49 行 = 91。tasks-auth 仍是 8，无租户的两格加在原有用例里。新的 CI run id 写在 PR body。这一笔不声称 M2 退出。
+评论 5858154058 的 P2 与两条 P3 在随后的提交里补上。探针①②改打 `GET /api/tasks?view=assigned`、`GET /api/tasks/pending`、`GET /api/tasks/pending-count`，探针②的写端点改打 `POST /api/tasks/:id/complete`。另外两格经 HTTP：`POST /complete` 断言执行人行已写入；`POST /reopen` 带 `scope:'all'` 断言两个执行人的 `completed_at` 都被清空。无租户的 `/complete` 与 `/reopen` 断言 422 `ORG_MISSING`。那一版本地四个真库文件 91 通过。
+
+`e54d5ccbf` 的 Plugin System Tests run [36362526968](https://github.com/zensgit/metasheet2/actions/runs/36362526968) 已结束，结论 success。job `test (20.x)` 里 `pnpm --filter @metasheet/core-backend test` 收集 18336（16722 passed，1614 skipped）。同 job 的 tasks auth gate 收集 8，8 passed。
+
+再下一笔补 reopen 的默认 `self`：非创建人 A 对已完成的 all 模式任务发 `{ scope: 'self' }` 和 `{}`，A 的 `completed_at` 清空、B 保留、事件是 `self_reopened`。非法 scope `'everyone'` 同样按 self。把路由改成一律 `'all'` 时这一格变红，随后用备份还原。`.task-probe-*.mts` 写在 `packages/core-backend/.gitignore` 的忽略规则里。展开后静态计数 = 普通 `it(` 44（p0a 13、read-path 8、rbac-trust 17、completion-grid 6）+ `it.each` 49 行 = 93。这一笔不声称 M2 退出。
 
 门 17③（把 `tasks-realdb` 加进 main required checks）是合并后的 owner 步骤，本 PR 不做。
 

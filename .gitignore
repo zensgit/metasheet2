@@ -37,6 +37,8 @@ yarn-error.log*
 # Testing
 coverage/
 .nyc_output/
+# Short-lived vitest mutant children written beside core-backend during task probes.
+packages/core-backend/.task-probe-*.mts
 
 # Temporary files
 *.tmp

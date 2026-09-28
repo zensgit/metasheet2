@@ -420,6 +420,48 @@ describe('gate 2 and gate 13 under token trust', () => {
     )
     expect(status.rows[0]?.status).toBe('open')
   })
+
+  async function reopenOnlyCaller(label: string, body: Record<string, unknown>): Promise<void> {
+    const actor = await userWith({ label, codes: ['tasks:read', 'tasks:write'], admission: true })
+    const other = `usr_other_${label}_${stamp}`
+    const created = await createTask({
+      orgId,
+      creatorId: `usr_creator_${label}_${stamp}`,
+      title: '备料复核',
+      assignees: [actor.userId, other],
+      completionMode: 'all',
+    })
+    await completeTask({ orgId, actorId: actor.userId, taskId: created.id })
+    await completeTask({ orgId, actorId: other, taskId: created.id })
+    const response = await request(app())
+      .post(`/api/tasks/${created.id}/reopen`)
+      .set('Authorization', `Bearer ${actor.bearer}`)
+      .send(body)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ ok: true })
+    const rows = await poolManager.get().query<{ user_id: string; stamped: boolean }>(
+      'SELECT user_id, completed_at IS NOT NULL AS stamped FROM task_assignees WHERE task_id = $1',
+      [created.id],
+    )
+    const stamped = new Map(rows.rows.map((row) => [row.user_id, row.stamped]))
+    expect(stamped.get(actor.userId)).toBe(false)
+    expect(stamped.get(other)).toBe(true)
+    const events = await poolManager.get().query<{ event_type: string; actor_id: string }>(
+      `SELECT event_type, actor_id FROM task_events
+       WHERE task_id = $1 AND event_type IN ('self_reopened', 'reopened')`,
+      [created.id],
+    )
+    expect(events.rows).toEqual([{ event_type: 'self_reopened', actor_id: actor.userId }])
+  }
+
+  it('POST /reopen scope self and an empty body clear only the caller', async () => {
+    await reopenOnlyCaller('selfbody', { scope: 'self' })
+    await reopenOnlyCaller('emptybody', {})
+  })
+
+  it('POST /reopen treats an unknown scope as self', async () => {
+    await reopenOnlyCaller('badscope', { scope: 'everyone' })
+  })
 })
 
 function httpCount(server: express.Express, bearer: string, header?: string): Promise<number> {
