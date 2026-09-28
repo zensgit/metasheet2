@@ -51,6 +51,7 @@ import { FakePg } from '../utils/copy-sheet-fake-pg'
 import {
   COPY_SHEET_ERROR_CODES,
   CopySheetError,
+  CopySheetLedgerUnavailableError,
   buildCopySheetIntentKey,
   executeCopySheet,
   planCopySheet,
@@ -742,6 +743,9 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
       expect(err.statusCode).toBe(503)
       expect(err.code).toBe(COPY_SHEET_ERROR_CODES.temporarilyUnavailable)
       expect(err.details).toEqual({})
+      // the SQLSTATE travels to the route's warn (not into details / the response): column missing
+      expect(err).toBeInstanceOf(CopySheetLedgerUnavailableError)
+      expect((err as CopySheetLedgerUnavailableError).ledgerSqlState).toBe('42703')
     }
     expect(pg.rows('meta_sheets').filter((r) => r.copied_from_sheet_id === SRC)).toHaveLength(0)
     expect(snapshotCounts(pg)).toEqual(before)
@@ -761,6 +765,7 @@ describe('copy-sheet service on the fake Postgres (ADR §7.2)', () => {
     const before = snapshotCounts(pg)
     const err = await expectRefusal(run(pg), 503, COPY_SHEET_ERROR_CODES.temporarilyUnavailable)
     expect(err.details).toEqual({})
+    expect((err as CopySheetLedgerUnavailableError).ledgerSqlState).toBe('42P01') // table missing, not column missing
     expect(snapshotCounts(pg)).toEqual(before)
     expect(pg.statements.filter((s) => s.tx !== null && /^(INSERT|UPDATE|DELETE)/i.test(s.sql))).toHaveLength(0)
   })

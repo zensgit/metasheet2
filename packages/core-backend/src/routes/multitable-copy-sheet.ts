@@ -18,8 +18,8 @@
  *      e-learning 投影拒绝（对管理员同样拒）→ 403 `FORBIDDEN`（CS-3 / §4.2，2026-09-28 修订；三处门共用这一个谓词）。
  *   4. 系统表拒绝作为源（门后才回）→ 422 `COPY_SOURCE_SYSTEM_SHEET`（CS-14 / §6）。
  *   5. dry-run：`planCopySheet`（零写）→ 200 summary；execute：`executeCopySheet`（§7.2 单事务，事务内 DB-fresh
- *      重跑 2/3 两门）→ 201。去重账本未迁移 → 503 `COPY_TEMPORARILY_UNAVAILABLE`（fail-closed，CS-16；一条点名
- *      缺失迁移的 values-free warn），不降级成无去重复制。
+ *      重跑 2/3 两门）→ 201。去重账本不可用 → 503 `COPY_TEMPORARILY_UNAVAILABLE`（fail-closed，CS-16，决策登记册
+ *      R-20；一条带 SQLSTATE 分诊、点名待查迁移的 values-free warn），不降级成无去重复制。
  *   6. 提交后（execute）：chunked formula 重算（状态进 201 body，失败不 500）、缓存失效、至多一条 values-free
  *      `multitable.sheet.copied`、结构化日志 `[multitable.sheet.copy]`（重放走 `[multitable.sheet.copy.replayed]`）。
  *
@@ -41,8 +41,10 @@ import { sendForbidden, sendSheetNotLive } from '../multitable/sheet-refusals'
 import { loadFieldsForSheet, loadSheetRow } from '../multitable/loaders'
 import {
   COPY_SHEET_ERROR_CODES,
+  COPY_SHEET_LEDGER_DIAGNOSIS,
   COPY_SHEET_LEDGER_MIGRATIONS,
   CopySheetError,
+  CopySheetLedgerUnavailableError,
   assertSourceIsNotSystemSheet,
   executeCopySheet,
   planCopySheet,
@@ -413,12 +415,16 @@ export function createMultitableCopySheetRoutes(): Router {
     } catch (err) {
       const statusCode = err instanceof CopySheetError ? err.statusCode : err instanceof SheetWriterBlockedError ? 409 : null
       const errorCode = err instanceof CopySheetError ? err.code : err instanceof SheetWriterBlockedError ? 'RECOVERY_IN_PROGRESS' : null
-      if (errorCode === COPY_SHEET_ERROR_CODES.temporarilyUnavailable) {
-        // 去重账本未迁移 → 复制 fail-closed（CS-16；copy-sheet-service.ts executeCopySheet）。只点名要跑的迁移，
-        // values-free：无单元格值、无驱动散文、无主机信息。
-        logger.warn('[multitable.sheet.copy] dedupe ledger not migrated; copy refused (fail-closed, CS-16)', {
+      if (err instanceof CopySheetLedgerUnavailableError) {
+        // 去重账本不可用 → 复制 fail-closed（CS-16，决策登记册 R-20；copy-sheet-service.ts executeCopySheet）。
+        // 带 SQLSTATE 分诊：42P01 缺表 = 迁移没跑；42703 缺列 = 通常是 intent_kind 迁移没跑，迁移已跑仍出现则是
+        // 代码缺陷——不能一律报成「去跑迁移」。values-free：固定文案 + 迁移名，无单元格值、无驱动散文、无主机信息。
+        const triage = COPY_SHEET_LEDGER_DIAGNOSIS[err.ledgerSqlState]
+        logger.warn('[multitable.sheet.copy] dedupe ledger unavailable; copy refused (fail-closed, CS-16)', {
           sourceSheetId: sheetId,
-          requiredMigrations: [...COPY_SHEET_LEDGER_MIGRATIONS],
+          sqlState: err.ledgerSqlState,
+          diagnosis: triage?.diagnosis ?? 'unknown ledger failure',
+          checkMigrations: [...(triage?.checkMigrations ?? COPY_SHEET_LEDGER_MIGRATIONS)],
         })
       }
       if (statusCode && errorCode) {

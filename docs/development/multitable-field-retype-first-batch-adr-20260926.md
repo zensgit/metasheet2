@@ -113,7 +113,7 @@
 
     行 1–33 覆盖 88 个 TS 调用点 + 1 个会话级条件持有点 + 3 处 SQL 函数调用无遗漏（行 6 / 9 / 10 共用 `automation-executor.ts:3594` 一处；行 13 的 4 个调用方 + 行 14 的 2 个调用方 + 行 18 / 29 的 `recovery-archive-async-restore.ts:150` 经二阶入口计入；行 30 / 31 今日零调用点，登记的是入口本身）。必接 7 行（1–7）+ 行 13 非 scoped 路径的派生型变体；免检 15 行；非数据写入者 11 行。
 
-    （2026-09-28 增补，不改上表：main 在 `c5dd857b2` 之后新增持栅栏者「复制数据表」事务，分类为行 34 免检，见文末「增补 A」。）
+    （2026-09-28 增补，不改上表：main 在 `c5dd857b2` 之后新增两个持栅栏者——「复制数据表」事务（行 34 免检）与托管表显示名重命名（行 35 非数据写入者），见文末「增补 A」。）
 
 12. **自动化写入者的选项校验（r3 S4，取 (a)；r4 更正范围）**：今日**两处**写入绕过全部记录写校验器、直接 jsonb 合并——自动化 `update_record`（`automation-executor.ts:3143-3148` 注释自陈「this bare UPDATE bypasses the 5 record-write validators」，写 `:3216-3223`）、`create_record`（`:3715-3717`）。转换后它们会把未校验的纯字符串 / 任意形状写进选项列，**不会被拒**（首版 §7「自动化会被选项校验拒」的说法错了，已改）。**审批 `resultWriteback` 不在此列**（r4 更正 r3 的「三处」）：同库（`automation-service.ts:4160`）与跨库（`:4230`）两条路径都先过 `assertResultWritebackFields`（`:4436-4467`）→ `resultWritebackFieldTypeError`（`:772-805`）——statusField 目标只许 `string` / `longText` / `select`（`:485-486`、`:781-782`，`multiSelect` 目标一律拒），`select` 目标的解析值须在选项内否则抛（`:784-789`），approverField 只许 `string` / `longText`（`:485`、`:793-799`），completedAtField 只许 `string` / `longText` / `dateTime`（`:801-803`；r5 N4 补，select / multiSelect 目标同拒）。它的缺口不是缺校验，是**校验在栅栏之前**：`:4447` 经 `this.queryFn` 在事务外读字段，写入却在其后的 `withTransaction`（`:4276-4278` 取栅栏）里 `:4372-4378`——排队等我们提交的 writeback 按旧 `string` 类型过检后照写，正是 §3.11 的同一竞态，由 §3.11 的助手（表行 7）封住，不另加选项校验。审批表单回写 FWB 两条缝已在栅栏后 `FOR SHARE` 复核类型与选项（§3.11 表行 9），亦不在此列。二选一：(a) 首批给两处加选项 / 形状校验；(b) 记录缺口，表有启用规则含同库 update / create 动作指向该字段时拒绝转换。**取 (a)**：(b) 靠解析规则配置，管不住转换之后新建的规则，让「拒绝转换」的判定在转换时刻之后失效（r3 给的第二条理由「`resultWriteback` 不在自动化规则表里」是错的——它声明在规则 `start_approval` 动作的 config 里，`:4134-4135`，保存时校验按此遍历 `:4489-4490`；该理由已撤）；(a) 与 §3.11 合并成一次动作——两处在栅栏之后（`withTransaction` 缝之后、UPDATE / INSERT 之前）`FOR SHARE` 实读目标字段，目标 `select` 按 `record-service.ts:1398-1408` 同口径（非字符串拒、`''` 放行、其余须在选项内），`multiSelect` 走 `normalizeMultiSelectValue`（`field-codecs.ts:1041-1061`）；不符 ⇒ 自动化步 `failed` 进执行日志，零写入，values-free。先例：`update_record` 已对 rich-longText 按目标字段配置无条件消毒（`:3143-3148`），本校验是同一位置的同类守卫。**不受本 flag 门控**（T 层默认值：这是既有缺陷的修正——今日就能把非选项值写进未转换的选项列；owner 可否决为「仅本 flag 开时启用」）。已知行为变化：写非选项值的既有 `update_record` / `create_record` 规则从静默落库变为步失败，写进 §7 告知；`resultWriteback` 非并发路径无行为变化（今日已拒）。其余字段类型不加校验，非本 ADR 范围。单测：两写入者各一组（选项内成功 / 选项外拒 / 非字符串拒 / 多选 trim + 去重）；真库见 §6 ⑦ ⑪。
 
@@ -276,18 +276,19 @@ git grep -n -E 'meta_recovery_archive_legal_hold_release_authorize|meta_recovery
 
 `c5dd857b2` 与 `6adc99fd0` 上的输出摘要（逐段相同）：stage 1 = 6 文件 13 行；stage 1b = 9 行；stage 2 = 88 处 / 20 文件（新增 10 处全在 `recovery-archive-restore-jobs.ts`）；stage 3 = 18 处调用、1 处传选项（r6 N1 修正过滤后；修正前 21 含 3 行 import）；stage 4 = 3 处。
 
-## 增补 A（2026-09-28，PR #6112 终审后续 2）：§3.11 普查的新持栅栏者——复制数据表事务
+## 增补 A（2026-09-28，PR #6112 终审后续 2）：§3.11 普查的新持栅栏者——复制数据表事务、托管表显示名重命名
 
 **本增补不改 §3.11 正文、行 1–33 与上面的普查脚本**，它们仍冻结在 `c5dd857b2`。「复制数据表（含数据）」S1（PR #6112，合并提交 `0185b00a5`；设计锁 PR #6094）在 main 上新增了一个持栅栏者。用上面的脚本原文在 `14e52a6e5`（写作时的 main）上重跑：stage 1 = 6 文件 13 行、stage 1b = 9 行、stage 3 = 18 / 1、stage 4 = 3 处，与 `c5dd857b2` 除行号外逐段相同；stage 2 = 90 处 / 22 文件（原 88 / 20）。按「文件 + 行文本」比对（行号移位不计），新增两处：
 
 - `multitable/copy-sheet-service.ts:738`（`acquireCanonicalSheetFencesInOrder`）：本增补分类，记为下表行 34；
-- `multitable/object-display-name-relabel.ts:316`（`args.apply` 时的 `fenceWriterEntry`）：**不在本增补范围**，本文未读、未分类，留给该持有者的作者或结构守卫落地时登记。
+- `multitable/object-display-name-relabel.ts:316`（`args.apply` 时的 `fenceWriterEntry`；PR #6113 引入，同样晚于 `c5dd857b2`）：本增补分类，记为下表行 35（对抗评审 nit 5 补登）。
 
-以后在更新的 ref 上重跑，行 34 的调用点应当继续出现。本增补同 PR 的代码改动在它上方加了 13 行，所以在包含该 PR 的 ref 上它位于 `:751`。如果不再出现，说明持有方式变了，须重新分类。
+以后在更新的 ref 上重跑，行 34、35 的调用点应当继续出现。本增补同 PR（#6136）的代码改动在行 34 上方加了若干行，所以在包含该 PR 的 ref 上它位于 `:778`（行 35 的 `:316` 不受影响）。任一不再出现，说明持有方式变了，须重新分类。
 
 | # | 持栅栏者 | 栅栏位置（`14e52a6e5`） | 写 `meta_records` | 分类 |
 |---|---|---|---|---|
 | 34 | 复制数据表的单事务 `copyInsideTransaction`（`copy-sheet-service.ts:720`；路由 `POST /api/multitable/sheets/:sheetId/copy`，`routes/multitable-copy-sheet.ts`） | `:738` 按排序一次取全三类表的栅栏：源表 S、新表 N（`:736` 预 mint）、源表全部 link 字段的外表 F。之后才是源表行 `FOR UPDATE`（`:744`）、tripwire 基线（`:748`）和计划里的源字段读（`:776` → `loadSourceFields` `:257-259`）。这个入口无条件取锁，不受 writer-fence flag 门控（`canonical-sheet-fence.ts:91-100`），flag 只门控 `:739-741` 的写块检查 | 只写 N：`:879` 逐行 `RecordService.createRecord({ sheetId: N, … })` → `record-service.ts:864`（复制扩展的 `INSERT meta_records`）与 `:889`（`INSERT meta_links`）。对 S、F 的 `meta_records` 零写入；F 只被 `SELECT id` 核对外表记录存在（`record-service.ts:765`） | **免检** |
+| 35 | 托管表对象显示名重命名 `relabelObjectDisplayNames`（`object-display-name-relabel.ts:303`；导出包装 `runRelabelObjectDisplayNamesWith` `:520`，宿主插件端口 `index.ts:1083`；写腿另受 `MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED` 精确 `'true'` 门控，`:165-167`、`:311`） | `:316`：仅 `args.apply`（写腿）时 `fenceWriterEntry`（writer-fence flag 门控；dry run 不取栅栏）；之后 `meta_sheets` 行 `FOR UPDATE`（`:329-330`）与该表全部 `meta_fields` 行 `FOR UPDATE`（`:351`） | 无：只写 `meta_fields.name`（`:429` `UPDATE meta_fields SET name = $3, updated_at = now()`）与 `meta_sheets.name`（`:472` `UPDATE meta_sheets SET name = $2, …`），外加配置修订（`recordConfigRevision` `:450` field / `:484` sheet_config）；全文件零 `meta_records` 写语句 | **非数据写入者**：只改显示名，不改 `type` / `property`，转换助手比对的类型与选项集不受影响。另外它只作用于有 `plugin_multitable_object_registry` 登记行的表（`:320-325`，无行即 `MultitableRelabelScopeError`），这种表在 §1 (a) 被转换整表拒绝（422），两者在同一张表上不会相遇（同行 22 的口径） |
 
 **分类理由**（为什么是免检，而不是必接或非数据写入者）：
 
@@ -299,4 +300,4 @@ git grep -n -E 'meta_recovery_archive_legal_hold_release_authorize|meta_recovery
 
 **要不要调用转换助手 `assertFieldSchemaUnchangedAfterFence`**：不需要。助手比较的是「调用方在栅栏**之前**拿到的 `fieldById` 快照」和「栅栏之后的 `meta_fields`」。本事务对 N 没有栅栏前快照（N 的字段在栅栏之后才建）；对 S 的快照本身就是在 fence(S) 之后取的。两处调用都只会恒等通过，是空断言。结构守卫落地时，应按行 8 的口径把本行登记为免检（理由：栅栏后实读，且只写同事务新建的表），而不是要求它接助手。F 只被读（记录存在性）和引用（`meta_links`），不写其 `meta_records.data`，同样不需要。
 
-**计数**：登记范围变为行 1–33 + 行 34；免检 16 行。`object-display-name-relabel.ts:316` 分类之前，`14e52a6e5` 上的普查不能再称「无遗漏」（stage 2 的 90 处里有 1 处待分类）。
+**计数**：登记范围变为行 1–35：必接 7 行（不变）、免检 16 行（+行 34）、非数据写入者 12 行（+行 35）。`14e52a6e5` 上 stage 2 的 90 处 = `c5dd857b2` 的 88 处（按「文件 + 行文本」比对逐条仍在，行号漂移不计）+ 行 34、行 35 各 1 处；stage 1 / 1b / 3 / 4 除行号外与 `c5dd857b2` 相同。所以 `14e52a6e5` 上的普查**无遗漏**。这是文本比对的结论：88 处旧调用点没有逐条重读，结构守卫落地时以守卫结论为准。
