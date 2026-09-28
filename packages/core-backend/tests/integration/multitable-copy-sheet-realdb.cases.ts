@@ -133,7 +133,8 @@ export function defineCopySheetRealDbCases(): void {
   let app: Express
   let currentUserId = ADMIN
   let currentRoles: string[] = ['admin']
-  let emitSpy: ReturnType<typeof vi.spyOn>
+  const spyOnEmit = () => vi.spyOn(eventBus, 'emit')
+  let emitSpy: ReturnType<typeof spyOnEmit>
 
   const as = (userId: string, roles: string[] = []) => { currentUserId = userId; currentRoles = roles }
   const copy = (sheetId: string, body: Record<string, unknown> = { withData: true, permissionMode: 'inherit' }) =>
@@ -183,7 +184,7 @@ export function defineCopySheetRealDbCases(): void {
       // The feature's own migrations, applied idempotently — proves the DDL runs on a real server, not just reads well.
       await addProvenance(db as never)
       await addIntentKind(db as never)
-      emitSpy = vi.spyOn(eventBus, 'emit')
+      emitSpy = spyOnEmit()
 
       app = express()
       app.use(express.json())
