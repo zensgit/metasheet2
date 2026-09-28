@@ -1840,6 +1840,10 @@ export default defineConfig({
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
       'tests/integration/elearning-media-quota.db.test.ts',
+      'tests/integration/task-p0a.db.test.ts',
+      'tests/integration/task-read-path.db.test.ts',
+      'tests/integration/task-completion-grid.db.test.ts',
+      'tests/integration/task-rbac-trust.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
