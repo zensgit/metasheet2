@@ -372,7 +372,9 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
   }
 
   async function mountBoard(): Promise<HTMLElement> {
-    app = createApp(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: PROJECT_NO })
+    // Props by variable: an inline object here reads to vue/one-component-per-file as a component.
+    const props = { scope: SCOPE, projectNo: PROJECT_NO }
+    app = createApp(StockPreparationProjectBoardView, props)
     app.mount(container!)
     await flush()
     return container!
@@ -696,7 +698,8 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     const memoryOnly = `${PROJECT_NO}-M`
     recordStockPrepProjectVisit(memoryOnly, 'ready', SCOPE)
     // No project open: the home page and the picker are on ONE screen, so the two can be compared.
-    app = createApp(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: '' })
+    const props = { scope: SCOPE, projectNo: '' }
+    app = createApp(StockPreparationProjectBoardView, props)
     app.mount(container!)
     await flush()
     const root = container!
