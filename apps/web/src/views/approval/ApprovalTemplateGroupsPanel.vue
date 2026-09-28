@@ -92,6 +92,15 @@ defineProps<{
   tr: (en: string, zh: string) => string
 }>()
 
+// A-2 x A-4 merge convergence (2026-09-20) — this panel is the group MANAGEMENT entry; A-4's
+// TemplateGroupSections is the surface that renders the org's groups and owns their order. The
+// two do not share a reactive store (the sections view fetches its own list on mount, which its
+// spec pins), so a mutation here has to tell the parent to re-read rather than mutate the other
+// component's state: `changed` fires only after a mutation the server accepted, and
+// TemplateCenterView re-runs the sections view's own `loadAll()`. Nothing is emitted on load or
+// on a failed submit.
+const emit = defineEmits<{ changed: [] }>()
+
 const {
   orgs,
   // `selectedOrgId` (not the raw `currentOrgId`) — the composable already normalizes `null` to
@@ -151,6 +160,7 @@ async function onCreate(): Promise<void> {
     groups.value = [...groups.value, group]
     newGroupName.value = ''
     showSessionOrgSwitcher.value = false
+    emit('changed')
   } catch (err) {
     if (err instanceof ApprovalApiError && err.code === 'SESSION_ORG_REQUIRED') {
       handleSessionOrgRequired(() => onCreate())

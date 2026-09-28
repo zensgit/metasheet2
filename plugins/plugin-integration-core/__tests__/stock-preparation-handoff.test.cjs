@@ -209,6 +209,22 @@ function makeMemoryDb() {
 // is ever read by the handoff, which is the point of the existence check being `limit: 1`.
 const HANDOFF_SHEET = 'sheet_handoff_main'
 
+/**
+ * #6121 — the host provisioning surface the advance's target tenant wall asks before its existence
+ * probe. The bound sheet is registered to `${ownerTenantId}:integration-core`: a correctly provisioned
+ * deployment, which is what every witness in this file was written against. The wall's own witnesses
+ * (foreign sheet, claimless shape, missing port) live in
+ * stock-preparation-handoff-advance-tenant-wall.test.cjs.
+ */
+function ownedProvisioning(ownerTenantId = TENANT_ID) {
+  return {
+    ...inertService(['resolveFieldIds']),
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return sheetId === HANDOFF_SHEET && projectId === `${ownerTenantId}:integration-core`
+    },
+  }
+}
+
 /** The deploy-time table-action binding the advance route's existence check resolves through. */
 function tableActionConfig() {
   return {
@@ -322,6 +338,9 @@ function mount({
   auditProbe = async () => ({ supported: true, reason: 'check_constraint_accepts' }),
   // G3: `null` is the no-SQL-db deployment.
   handoffStore,
+  // #6121: who the bound sheet is registered to (see ownedProvisioning). Default: the tenant the chain
+  // is bound to.
+  sheetOwnerTenantId = (config && config[HANDOFF_CONFIG_KEY] && config[HANDOFF_CONFIG_KEY].tenantId) || TENANT_ID,
 } = {}) {
   const routes = new Map()
   const auditAppends = []
@@ -336,7 +355,7 @@ function mount({
         },
       },
       multitable: {
-        provisioning: inertService(['resolveFieldIds']),
+        provisioning: ownedProvisioning(sheetOwnerTenantId),
         records,
       },
     },
@@ -694,7 +713,7 @@ async function g4AuditFailureStopsTheNotification() {
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -839,7 +858,7 @@ async function g5NoNotifierInjectedStillMovesTheTurn() {
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1613,7 +1632,7 @@ async function f6TheStoreCommitsBeforeTheAuditAppend() {
     const context = {
       api: {
         http: { addRoute(method, routePath, handler) { routeMap.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-        multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+        multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
       },
       storage: new Map(),
       config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1877,7 +1896,7 @@ async function rc1AnAuditFailureLeavesTheClaimUnspentAndTheHopRecoverable() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1951,7 +1970,7 @@ async function rc1AMissingAuditVocabularyIsANamed503BeforeAnyWrite() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -3063,7 +3082,7 @@ async function driveASupersededLostHop() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -3153,7 +3172,7 @@ async function j1PressingAgainInTheResendableStateActuallySendsIt() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -3199,7 +3218,7 @@ async function j1TheInvitationIsOnlyShownToTheHandlerWhoCanAct() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },

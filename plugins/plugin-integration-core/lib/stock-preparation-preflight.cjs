@@ -56,6 +56,7 @@ const {
 const {
   CARRY_TARGET_OWNERSHIP_STATES,
   PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
   decideCarryTargetOwnership,
   SANDBOX_OBJECT_ID_NAMESPACE,
   inspectStockPreparationCanonicalTarget,
@@ -681,13 +682,14 @@ async function computeStockPreparationPreflight({
       : null,
   })
   if (carryBinding.ownership && !carryBinding.ownership.ok) {
-    // The materials export asks the SAME ownership question through the same wall (http-routes.cjs
-    // assertStockPreparationTargetBelongsToTenant), answering in its own vocabulary — so the one
-    // verdict is quoted in both routes' codes.
+    // The materials export and the handoff advance ask the SAME ownership question through the same
+    // wall (http-routes.cjs assertStockPreparationTargetBelongsToTenant), each answering in its own
+    // vocabulary — so the one verdict is quoted in all three routes' codes.
     const exportRefusalCode = PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
+    const handoffRefusalCode = STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES[carryBinding.ownership.state] || null
     blockers.push(blocker({
       code: PREFLIGHT_BLOCKER_CODES.CARRY_TARGET_NOT_OWNED,
-      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode} and every 按项目导出物料 (materials export) with ${exportRefusalCode}. Apply and dry-run do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
+      what: `the bound table action target cannot be attributed to this deployment's own project, so every 结转 (carry) confirm will be refused with ${carryBinding.ownership.refusalCode}, every 按项目导出物料 (materials export) with ${exportRefusalCode} and every 通知下一步 (handoff advance) with ${handoffRefusalCode}. Apply and dry-run do not ask this question and will keep working, which is exactly why it has to be caught here instead of on the first click. Re-run the sandbox target ensure so the platform provisions the sheet under this project and records the registry row, then paste the target it returns into the action config`,
       fix: httpFix({
         method: 'POST',
         path: '/api/integration/stock-preparation/sandbox-target/ensure',
@@ -699,6 +701,7 @@ async function computeStockPreparationPreflight({
         // operator saw" are the same token rather than two descriptions of one thing.
         carryRouteCode: carryBinding.ownership.refusalCode,
         exportRouteCode: exportRefusalCode,
+        handoffRouteCode: handoffRefusalCode,
       },
     }))
   }

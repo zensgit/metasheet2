@@ -470,6 +470,23 @@ const CROSS_FILE_ENUMERATORS: Record<string, {
       'A COUNT for the field-delete flow (how many stored cells a delete would tombstone). A number, not '
       + 'row identity -- the same reason a pure COUNT(*) is not enumeration in the inline rule above.',
   },
+  countFieldRetypeConvertScanRows: {
+    module: 'multitable/field-retype-convert-preview.ts',
+    returns: 'Promise<{ live: number; trash: number }>',
+    binds: false,
+    reason:
+      'Two COUNTs (live rows + this sheet\'s recycle-bin rows) for the field-retype-convert preview\'s 413 size '
+      + 'gate. Numbers, not row identity; reached only after canManageFields, liveness and the full-table-read gate.',
+  },
+  loadFieldRetypeConvertLiveCells: {
+    module: 'multitable/field-retype-convert-preview.ts',
+    returns: 'Promise<FieldRetypeConvertLiveCell[]>',
+    binds: false,
+    reason:
+      'Field-retype-convert PREVIEW scan under canManageFields + the full-table-read gate: it reads ONE column of '
+      + 'every live row to plan a conversion, and the route answers counts and record ids only, never a cell value '
+      + 'or a page of rows. A read window would make the conversion plan silently partial, which the design lock forbids.',
+  },
   insertFieldValueTombstones: {
     module: 'multitable/tombstone-capture.ts',
     returns: 'Promise<void>',
