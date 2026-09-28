@@ -1105,28 +1105,90 @@ describe('routes — listing, re-seal and the unchanged 404 surface', () => {
     expect(again.body.error).toMatchObject({ code: DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE, details: { loadState: 'load_failed' } })
   })
 
-  it('every OTHER id route still answers the uniform 404 for a load-failed id — even to its owner', async () => {
-    const id = 'rt-routes'
-    const nf = notFoundBody(id)
-    const cases: Array<[string, () => request.Test]> = [
-      ['GET /:id', () => as(OWNER).get(`/api/data-sources/${id}`)],
-      ['PUT /:id', () => as(OWNER).put(`/api/data-sources/${id}`).send({ name: 'renamed' })],
-      ['DELETE /:id', () => as(OWNER).delete(`/api/data-sources/${id}`)],
-      ['GET /:id/test', () => as(OWNER).get(`/api/data-sources/${id}/test`)],
+  // Design item 4: apart from PUT /:id/credentials, a load-failed id must be indistinguishable from
+  // a nonexistent id on EVERY id route, for EVERY caller — its owner and a platform admin included.
+  // The case table is checked against the router's own stack, so an id route added later cannot
+  // escape this equivalence by not being listed here.
+  const LOAD_FAILED_ID = 'rt-routes'
+  const NONEXISTENT_ID = 'rt-absent' // same length as LOAD_FAILED_ID, so content-length is comparable
+  const RESEAL_ROUTE = 'PUT /api/data-sources/:id/credentials'
+  type Agent = ReturnType<typeof as>
+  const ID_ROUTE_CASES: Record<string, (agent: Agent, id: string) => request.Test> = {
+    'GET /api/data-sources/:id': (a, id) => a.get(`/api/data-sources/${id}`),
+    'PUT /api/data-sources/:id': (a, id) => a.put(`/api/data-sources/${id}`).send({ name: 'renamed' }),
+    'DELETE /api/data-sources/:id': (a, id) => a.delete(`/api/data-sources/${id}`),
+    'POST /api/data-sources/:id/connect': (a, id) => a.post(`/api/data-sources/${id}/connect`),
+    'POST /api/data-sources/:id/disconnect': (a, id) => a.post(`/api/data-sources/${id}/disconnect`),
+    'GET /api/data-sources/:id/test': (a, id) => a.get(`/api/data-sources/${id}/test`),
+    'POST /api/data-sources/:id/query': (a, id) => a.post(`/api/data-sources/${id}/query`).send({ sql: 'select 1' }),
+    'POST /api/data-sources/:id/select': (a, id) => a.post(`/api/data-sources/${id}/select`).send({ table: 't' }),
+    'GET /api/data-sources/:id/schema': (a, id) => a.get(`/api/data-sources/${id}/schema`),
+    'GET /api/data-sources/:id/tables/:table': (a, id) => a.get(`/api/data-sources/${id}/tables/t1`),
+  }
+
+  /** Every `METHOD path` the data-sources router serves under an `:id` segment. */
+  function sweptIdRoutes(): string[] {
+    type Layer = { route?: { path: string; methods: Record<string, boolean> } }
+    const stack = (dataSourcesRouter() as unknown as { stack: Layer[] }).stack
+    return stack
+      .flatMap((layer) => {
+        const route = layer.route
+        return route ? Object.keys(route.methods).map((method) => `${method.toUpperCase()} ${route.path}`) : []
+      })
+      .filter((key) => key.includes('/:id'))
+      .sort()
+  }
+
+  /** Headers minus the two whose VALUE legitimately differs (clock; a hash of the id-bearing body). */
+  function comparableHeaders(headers: Record<string, string>): Record<string, string> {
+    return Object.fromEntries(
+      Object.keys(headers)
+        .sort()
+        .map((name) => [name, name === 'date' || name === 'etag' ? '<present>' : headers[name]]),
+    )
+  }
+
+  it('the id-route case table covers EVERY id route the router serves (sweep of the router stack)', () => {
+    const swept = sweptIdRoutes()
+    expect(swept).toContain(RESEAL_ROUTE)
+    expect(swept).toEqual([...Object.keys(ID_ROUTE_CASES), RESEAL_ROUTE].sort())
+  })
+
+  it('every OTHER id route: a load-failed id ≡ a nonexistent id (status, full body, headers), no DB statement, no audit — for its owner, a platform admin and another user', async () => {
+    const rowBefore = clone(routeFake.rows.get(LOAD_FAILED_ID) as Row)
+    const actors: Array<[string, Record<string, unknown>]> = [['owner', OWNER], ['admin', ADMIN], ['other', OTHER]]
+    const cases = Object.entries(ID_ROUTE_CASES)
+    // A non-owner non-admin must not tell the two ids apart on the re-seal route either.
+    const otherOnly: Array<[string, (agent: Agent, id: string) => request.Test]> = [
+      [RESEAL_ROUTE, (a, id) => a.put(`/api/data-sources/${id}/credentials`).send({ credentials: { password: 'x1' } })],
     ]
-    for (const [label, send] of cases) {
-      const res = await send()
-      expect(res.status, label).toBe(404)
-      expect(res.body, label).toEqual(nf)
+    let compared = 0
+    for (const [actorLabel, actor] of actors) {
+      for (const [routeKey, send] of actorLabel === 'other' ? [...cases, ...otherOnly] : cases) {
+        const label = `${actorLabel} ${routeKey}`
+        auditMock.mockClear()
+        const logBefore = routeFake.log.length
+        const failed = await send(as(actor), LOAD_FAILED_ID)
+        const missing = await send(as(actor), NONEXISTENT_ID)
+        expect(failed.status, label).toBe(404)
+        expect(missing.status, label).toBe(404)
+        expect(failed.body, label).toEqual(notFoundBody(LOAD_FAILED_ID))
+        expect(missing.body, label).toEqual(notFoundBody(NONEXISTENT_ID))
+        // Byte-identical once the id itself is factored out.
+        expect(failed.text.split(LOAD_FAILED_ID).join('<id>'), label)
+          .toBe(missing.text.split(NONEXISTENT_ID).join('<id>'))
+        expect(comparableHeaders(failed.headers), label).toEqual(comparableHeaders(missing.headers))
+        // Neither path did database or audit work (equal cost; no existence trail).
+        expect(routeFake.log.length, label).toBe(logBefore)
+        expect(auditMock, label).not.toHaveBeenCalled()
+        compared += 1
+      }
     }
-    for (const [label, send] of [
-      ['GET /:id/schema', () => as(OWNER).get(`/api/data-sources/${id}/schema`)],
-      ['POST /:id/query', () => as(OWNER).post(`/api/data-sources/${id}/query`).send({ sql: 'select 1' })],
-      ['POST /:id/select', () => as(OWNER).post(`/api/data-sources/${id}/select`).send({ table: 't' })],
-    ] as Array<[string, () => request.Test]>) {
-      expect((await send()).status, label).toBe(404)
-    }
-    expect((routeFake.rows.get(id) as Row).config).toEqual(row(id).config)
+    expect(compared).toBe(actors.length * cases.length + otherOnly.length)
+    // No side effect: still load-failed, still re-sealable, the row untouched.
+    expect(getDataSourceManager().listLoadFailedDataSources({ actor: { platformAdmin: true } })
+      .find((f) => f.id === LOAD_FAILED_ID)).toMatchObject({ loadState: 'credentials_unreadable', ownerId: OWNER_ID })
+    expect(routeFake.rows.get(LOAD_FAILED_ID)).toEqual(rowBefore)
   })
 
   it('POST create with a load-failed id → 409 CONFLICT, the row keeps its owner/tenant/scope', async () => {
