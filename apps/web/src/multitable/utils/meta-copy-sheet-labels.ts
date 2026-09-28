@@ -215,7 +215,8 @@ export function copySheetDisclosureText(reason: string, fieldNames: string[], is
 /**
  * ADR CS-12: autoNumber is renumbered 1..N on copy — disclose how many numbers change. The backend's
  * `autoNumberRenumberedRows` counts once per auto-number COLUMN per row (copy-sheet-service.ts, the
- * `for (plan of autoNumberPlans) records.forEach(...)` loop), i.e. changed CELLS, so the copy says
+ * `for (plan of autoNumberPlans) records.forEach(...)` loop — unchanged at the #6112 fix head 6410ea0c4),
+ * i.e. changed CELLS, so the copy says
  * 「N 处编号」 (N numbers), not 「N 行」 — a sheet with two auto-number columns would otherwise double the rows.
  */
 export function copySheetAutoNumberText(changedNumbers: number, isZh: boolean): string {

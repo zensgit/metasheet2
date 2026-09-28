@@ -148,6 +148,22 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     })
   })
 
+  it('reads the #6112 fix-head over-cap dry-run: 200, summary.overLimit true, real rowCount, disclosures kept', async () => {
+    // planCopySheet(overLimit: 'report'): records not read -> autoNumberRenumberedRows / nullCellsOmitted 0,
+    // rowCount = the counted source rows, structural disclosures + limits unchanged.
+    const overCap = { ...ROUTE_SUMMARY, overLimit: true, rowCount: 2400, autoNumberRenumberedRows: 0, nullCellsOmitted: 0 }
+    const client = new MultitableApiClient({ fetchFn: vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, data: { summary: overCap } })) })
+    expect(await client.dryRunCopySheet('s', { withData: true, permissionMode: 'inherit' })).toEqual<CopySheetDryRunResult>({
+      rowCount: 2400,
+      fieldCount: 5,
+      overLimit: true,
+      rowLimit: 2000,
+      fieldDisclosures: [{ fieldId: 'fld_m', reason: 'MIRROR_NOT_BUILT' }],
+      viewFilterLeavesDropped: [{ viewId: 'view_b', count: 1 }],
+      autoNumberRenumberedRows: 0,
+    })
+  })
+
   it('reads the route refusals: nested details, the outer code wins, and no extras outside their own code', () => {
     // Row failure: fail(422, 'COPY_ROW_VALIDATION_FAILED', { rowIndex, fieldId, code: <record code> }).
     const row = buildCopySheetError(422, { ok: false, error: { code: 'COPY_ROW_VALIDATION_FAILED', message: 'x', details: { rowIndex: 7, fieldId: 'fld_qty', code: 'VALIDATION_ERROR' } } }, true)
@@ -612,6 +628,8 @@ describe('MetaCopySheetDialog', () => {
     { code: 'SHEET_NOT_LIVE', status: 404, zh: '源数据表不存在或已被删除。' },
     { code: 'FORBIDDEN', status: 403, zh: '你没有在当前工作区新建数据表的权限。' },
     { code: 'RECOVERY_IN_PROGRESS', status: 409, zh: '数据表正被其他操作占用，请稍后重试。' },
+    // #6112 fix head: dedupe-lock timeout / retryable lock SQLSTATE (40P01, 55P03, 40001) -> 409 CONFLICT
+    { code: 'CONFLICT', status: 409, zh: '数据表正被其他操作占用，请稍后重试。' },
     { code: 'SOMETHING_NEW', status: 500, zh: '复制失败，请稍后重试。' },
   ]
 

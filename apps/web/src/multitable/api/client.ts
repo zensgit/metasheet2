@@ -343,12 +343,15 @@ export function isRecordApprovalInFlightError(value: unknown): value is RecordAp
 // (§3/§8) and `buildCopySheetError` (§8). If the merged backend spells a key differently, the fix is a
 // one-line change in one of these, never a hunt through components.
 //
-// Aligned (2026-09-28) to the backend PR #6112, branch feat/multitable-copy-sheet-s1 @ 2b95e1f70:
-//   routes/multitable-copy-sheet.ts — dry-run 200 `{ ok, data: { summary: CopySheetPlanSummary } }`;
-//   copy 201 `{ ok, data: { sheet: { id, baseId, name, copiedFrom }, summary, batchId, formulaRecompute? } }`
-//   (+ `Idempotent-Replayed: true` on replay); refusals `{ ok:false, error: { code, message, details? } }`
-//   with position/count extras under `details`; 404 / 403 from sheet-refusals.ts; 400 NAME_INVALID_CHARACTERS
-//   from display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
+// Aligned (2026-09-28) to the backend PR #6112 fix head, branch feat/multitable-copy-sheet-s1 @ 6410ea0c4:
+//   routes/multitable-copy-sheet.ts — dry-run 200 `{ ok, data: { summary: CopySheetPlanSummary } }`, where a
+//   with-data probe over the row cap answers `summary.overLimit: true` (records not read; `rowCount` is the
+//   source's real row count; structural disclosures present); copy 201 `{ ok, data: { sheet: { id, baseId,
+//   name, copiedFrom }, summary, batchId, formulaRecompute? } }` (+ `Idempotent-Replayed: true` on replay);
+//   refusals `{ ok:false, error: { code, message, details? } }` with position/count extras under `details`
+//   (422 structural: `details.fieldId` / `details.viewId`); 409 CONFLICT for a dedupe-lock timeout or a
+//   retryable lock SQLSTATE; 404 / 403 from sheet-refusals.ts; 400 NAME_INVALID_CHARACTERS from
+//   display-name-hygiene.ts. /context `canCopySheet` + `copiedFrom` from univer-meta.ts.
 // -------------------------------------------------------------------------------------------------
 
 export const COPY_SHEET_ERROR_NAME = 'MultitableCopySheetError'
@@ -436,8 +439,9 @@ export function buildCopySheetRequestBody(input: CopySheetInput): { name?: strin
  * [{ viewId, count }], autoNumberRenumberedRows, limits: { maxRows } }` (a bare summary is read too). ADR
  * spellings are still accepted (`reason`, `fieldDisclosures`, `viewFilterLeavesDropped`, `rowLimit`).
  * Row cap: the #6112 fix answers a with-data dry-run over the cap with 200 + `summary.overLimit: true`
- * (records not read, structural disclosures still present); an older backend answers 413 COPY_TOO_LARGE
- * instead, which the dialog handles with a structure-only re-probe. Malformed items are skipped.
+ * (records not read, `rowCount` = the source's real row count, structural disclosures still present); an
+ * older backend answers 413 COPY_TOO_LARGE instead, which the dialog handles with a structure-only re-probe.
+ * The copy route itself still answers 413 over the cap. Malformed items are skipped.
  */
 export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
   const outer = isPlainObject(body) ? body : {}
