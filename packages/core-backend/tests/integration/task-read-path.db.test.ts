@@ -1,11 +1,15 @@
 import '../helpers/assert-rbac-optional-off'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
+import express from 'express'
+import jwt from 'jsonwebtoken'
+import request from 'supertest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { completeTask, countPending, createTask, listPending, listTasks } from '../../src/services/task-records'
+import { tasksRouter } from '../../src/routes/tasks'
 import { isOverdueOrToday, resolveViewerTimeZone } from '../../src/tasks/task-dates'
 import { taskMatchesView, type TaskView } from '../../src/tasks/task-access'
 
@@ -266,17 +270,18 @@ function packageRoot(file: string): string {
 
 function runSourceMutant(file: string, needle: string, replacement: string, body: string): void {
   const backup = `/tmp/task-mutant-${randomUUID()}.bak`
-  const script = `/tmp/task-probe-${randomUUID()}.mts`
+  const root = packageRoot(file)
+  const script = `${root}/.task-probe-${randomUUID()}.mts`
   copyFileSync(file, backup)
   const original = readFileSync(file, 'utf8')
+  expect(original.includes(needle)).toBe(true)
   let failed: unknown
   try {
-    expect(original.includes(needle)).toBe(true)
     writeFileSync(file, original.replace(needle, replacement))
     writeFileSync(script, body)
     const tsx = createRequire(import.meta.url).resolve('tsx/cli')
     execFileSync(process.execPath, [tsx, script], {
-      cwd: packageRoot(file), env: process.env, stdio: 'inherit', timeout: 120000,
+      cwd: root, env: process.env, stdio: 'inherit', timeout: 120000,
     })
   } catch (err) {
     failed = err
@@ -290,9 +295,75 @@ function runSourceMutant(file: string, needle: string, replacement: string, body
   if (failed) throw failed
 }
 
+function tasksApp(): express.Express {
+  const router = tasksRouter()
+  if (!router) throw new Error('probe HTTP requires TASKS_ENABLED=true')
+  const server = express()
+  server.use(express.json())
+  server.use(router)
+  return server
+}
+
+async function grantProbeActor(label: string): Promise<{
+  orgId: string
+  creator: string
+  me: string
+  roleId: string
+  bearer: string
+}> {
+  const secret = process.env.JWT_SECRET
+  if (!secret || secret.length < 32) throw new Error('probe HTTP requires JWT_SECRET')
+  const stamp = randomUUID().replace(/-/g, '')
+  const orgId = `org${label}${stamp}`
+  const me = `usrM${label}${stamp}`
+  const creator = `usrC${label}${stamp}`
+  const roleId = `role${label}${stamp}`
+  const db = poolManager.get()
+  await db.query(
+    `INSERT INTO permissions (code, name, description) VALUES
+       ('tasks:read', 'Tasks Read', 'read'),
+       ('tasks:write', 'Tasks Write', 'write')
+     ON CONFLICT (code) DO NOTHING`,
+  )
+  await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [roleId, roleId])
+  await db.query(
+    `INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')`,
+    [roleId],
+  )
+  await db.query(
+    `INSERT INTO users (
+       id, email, name, password_hash, role, permissions,
+       is_active, activation_status, local_password_set, must_change_password
+     ) VALUES ($1, $2, $3, 'x', 'user', '[]'::jsonb, TRUE, 'activated', TRUE, FALSE)`,
+    [me, `${me}@probe.test`, label],
+  )
+  await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [me, roleId])
+  await db.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [me, orgId])
+  await db.query(
+    `INSERT INTO user_namespace_admissions (
+       user_id, namespace, enabled, source, created_at, updated_at
+     ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
+    [me],
+  )
+  const bearer = jwt.sign({
+    userId: me, sub: me, email: `${me}@probe.test`, role: 'user', roles: [roleId], tenantId: orgId,
+  }, secret, { expiresIn: '1h' })
+  return { orgId, creator, me, roleId, bearer }
+}
+
+async function dropProbeActor(actor: { orgId: string; me: string; roleId: string }): Promise<void> {
+  const db = poolManager.get()
+  await db.query('DELETE FROM tasks WHERE org_id = $1', [actor.orgId])
+  await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [actor.me])
+  await db.query('DELETE FROM user_roles WHERE user_id = $1', [actor.me])
+  await db.query('DELETE FROM user_orgs WHERE user_id = $1', [actor.me])
+  await db.query('DELETE FROM users WHERE id = $1', [actor.me])
+  await db.query('DELETE FROM role_permissions WHERE role_id = $1', [actor.roleId])
+  await db.query('DELETE FROM roles WHERE id = $1', [actor.roleId])
+}
+
 describe('gate 19 probes', () => {
   const file = ACCESS.pathname
-  const cwd = packageRoot(file)
 
   afterAll(() => {
     const live = readFileSync(file, 'utf8')
@@ -300,74 +371,150 @@ describe('gate 19 probes', () => {
   })
 
   it('probe 1: replacing the assigned arm with FALSE drops assigned, pending, and the count', async () => {
-    const { orgId, creator, me } = ids('probe1green')
-    const created = await createTask({
-      orgId, creatorId: creator, title: '备料复核', assignees: [me], completionMode: 'all',
-    })
-    await seedPastDue(created.id)
-    expect((await listTasks({ orgId, actorId: me, view: 'assigned' })).map((row) => row.id)).toContain(created.id)
-    expect((await listPending({ orgId, actorId: me, viewerTz: null })).map((row) => row.id)).toContain(created.id)
-    expect(await countPending({ orgId, actorId: me, viewerTz: null })).toBe(1)
-    await poolManager.get().query('DELETE FROM tasks WHERE org_id = $1', [orgId])
+    const actor = await grantProbeActor('p1g')
+    try {
+      const created = await createTask({
+        orgId: actor.orgId, creatorId: actor.creator, title: '备料复核', assignees: [actor.me], completionMode: 'all',
+      })
+      await seedPastDue(created.id)
+      const server = tasksApp()
+      const assigned = await request(server).get('/api/tasks').query({ view: 'assigned' }).set('Authorization', `Bearer ${actor.bearer}`)
+      const pending = await request(server).get('/api/tasks/pending').set('Authorization', `Bearer ${actor.bearer}`)
+      const count = await request(server).get('/api/tasks/pending-count').set('Authorization', `Bearer ${actor.bearer}`)
+      expect(assigned.status).toBe(200)
+      expect(pending.status).toBe(200)
+      expect(count.status).toBe(200)
+      expect((assigned.body.items as { id: string }[]).map((row) => row.id)).toContain(created.id)
+      expect((pending.body.items as { id: string }[]).map((row) => row.id)).toContain(created.id)
+      expect(count.body).toEqual({ count: 1 })
+    } finally {
+      await dropProbeActor(actor)
+    }
 
     const needle = "case 'assigned':\n      return `EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = tasks.id AND ta.user_id = ${ME_PLACEHOLDER})`"
+    const routesFile = new URL('../../src/routes/tasks.ts', import.meta.url).pathname
+    const poolFile = new URL('../../src/integration/db/connection-pool.ts', import.meta.url).pathname
+    const recordsFile = new URL('../../src/services/task-records.ts', import.meta.url).pathname
     runSourceMutant(file, needle, "case 'assigned':\n      return 'FALSE'", `
-      const { createTask, listTasks, listPending, countPending } = await import(${JSON.stringify(cwd + '/src/services/task-records.ts')})
-      const { poolManager } = await import(${JSON.stringify(cwd + '/src/integration/db/connection-pool.ts')})
-      const orgId = 'org_probe1_' + Date.now()
-      const creator = 'usrC_probe1'
-      const me = 'usrM_probe1'
+      process.env.TASKS_ENABLED = 'true'
+      const express = (await import('express')).default
+      const jwt = (await import('jsonwebtoken')).default
+      const request = (await import('supertest')).default
+      const { tasksRouter } = await import(${JSON.stringify(routesFile)})
+      const { poolManager } = await import(${JSON.stringify(poolFile)})
+      const { createTask } = await import(${JSON.stringify(recordsFile)})
+      const stamp = Date.now().toString()
+      const orgId = 'orgp1' + stamp
+      const me = 'usrMp1' + stamp
+      const creator = 'usrCp1' + stamp
+      const roleId = 'rolep1' + stamp
+      const db = poolManager.get()
+      await db.query("INSERT INTO permissions (code, name, description) VALUES ('tasks:read','Tasks Read','read'), ('tasks:write','Tasks Write','write') ON CONFLICT (code) DO NOTHING")
+      await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [roleId, roleId])
+      await db.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')", [roleId])
+      await db.query("INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, activation_status, local_password_set, must_change_password) VALUES ($1, $2, 'p1', 'x', 'user', '[]'::jsonb, TRUE, 'activated', TRUE, FALSE)", [me, me + '@probe.test'])
+      await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [me, roleId])
+      await db.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [me, orgId])
+      await db.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source, created_at, updated_at) VALUES ($1, 'tasks', TRUE, 'test', now(), now())", [me])
+      const bearer = jwt.sign({ userId: me, sub: me, email: me + '@probe.test', role: 'user', roles: [roleId], tenantId: orgId }, process.env.JWT_SECRET, { expiresIn: '1h' })
       const created = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [me], completionMode: 'all' })
-      await poolManager.get().query("UPDATE tasks SET due_at = now() - interval '2 hours', due_time = TIME '12:00', time_zone = 'UTC', due_date = (now() AT TIME ZONE 'UTC')::date - 1 WHERE id = $1", [created.id])
-      let assignedRed = false
-      try {
-        const assigned = (await listTasks({ orgId, actorId: me, view: 'assigned' })).map((row) => row.id)
-        assignedRed = !assigned.includes(created.id)
-      } catch (err) {
-        const code = err && typeof err === 'object' && 'code' in err ? String(err.code) : ''
-        assignedRed = code === '42P18'
-      }
-      const pending = (await listPending({ orgId, actorId: me, viewerTz: null })).map((row) => row.id)
-      const count = await countPending({ orgId, actorId: me, viewerTz: null })
-      await poolManager.get().query('DELETE FROM tasks WHERE org_id = $1', [orgId])
-      console.log(JSON.stringify({ gate19probe1: 'red', assignedRed, pendingHasRow: pending.includes(created.id), count }))
-      if (!assignedRed || pending.includes(created.id) || count !== 0) process.exit(1)
+      await db.query("UPDATE tasks SET due_at = now() - interval '2 hours', due_time = TIME '12:00', time_zone = 'UTC', due_date = (now() AT TIME ZONE 'UTC')::date - 1 WHERE id = $1", [created.id])
+      const router = tasksRouter()
+      if (!router) process.exit(2)
+      const server = express()
+      server.use(express.json())
+      server.use(router)
+      const assigned = await request(server).get('/api/tasks').query({ view: 'assigned' }).set('Authorization', 'Bearer ' + bearer)
+      const pending = await request(server).get('/api/tasks/pending').set('Authorization', 'Bearer ' + bearer)
+      const count = await request(server).get('/api/tasks/pending-count').set('Authorization', 'Bearer ' + bearer)
+      const assignedIds = (assigned.body.items ?? []).map((row) => row.id)
+      const pendingIds = (pending.body.items ?? []).map((row) => row.id)
+      const assignedRed = assigned.status !== 200 || !assignedIds.includes(created.id)
+      await db.query('DELETE FROM tasks WHERE org_id = $1', [orgId])
+      await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [me])
+      await db.query('DELETE FROM user_roles WHERE user_id = $1', [me])
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [me])
+      await db.query('DELETE FROM users WHERE id = $1', [me])
+      await db.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId])
+      await db.query('DELETE FROM roles WHERE id = $1', [roleId])
+      console.log(JSON.stringify({ gate19probe1: 'red', assignedStatus: assigned.status, assignedRed, pendingHasRow: pendingIds.includes(created.id), count: count.body.count }))
+      if (!assignedRed || pending.status !== 200 || pendingIds.includes(created.id) || count.status !== 200 || count.body.count !== 0) process.exit(1)
       process.exit(0)
     `)
   }, 180000)
 
   it('probe 2: flipping assignee complete makes complete fail and leaves the list row', async () => {
-    const { orgId, creator, me } = ids('probe2green')
-    const created = await createTask({
-      orgId, creatorId: creator, title: '备料复核', assignees: [me], completionMode: 'all',
-    })
-    await seedPastDue(created.id)
-    expect((await listTasks({ orgId, actorId: me, view: 'assigned' })).map((row) => row.id)).toContain(created.id)
-    expect((await listPending({ orgId, actorId: me, viewerTz: null })).map((row) => row.id)).toContain(created.id)
-    expect(await countPending({ orgId, actorId: me, viewerTz: null })).toBe(1)
-    await completeTask({ orgId, actorId: me, taskId: created.id })
-    await poolManager.get().query('DELETE FROM tasks WHERE org_id = $1', [orgId])
+    const actor = await grantProbeActor('p2g')
+    try {
+      const created = await createTask({
+        orgId: actor.orgId, creatorId: actor.creator, title: '备料复核', assignees: [actor.me], completionMode: 'all',
+      })
+      await seedPastDue(created.id)
+      const server = tasksApp()
+      const before = await request(server).get('/api/tasks/pending-count').set('Authorization', `Bearer ${actor.bearer}`)
+      expect(before.body).toEqual({ count: 1 })
+      const completed = await request(server)
+        .post('/api/tasks/' + created.id + '/complete')
+        .set('Authorization', `Bearer ${actor.bearer}`)
+        .send({})
+      expect(completed.status).toBe(200)
+      expect(completed.body).toEqual({ done: true })
+    } finally {
+      await dropProbeActor(actor)
+    }
 
     const needle = `  assignee: {
     view: true,
     edit: true,
     complete: true,`
+    const routesFile = new URL('../../src/routes/tasks.ts', import.meta.url).pathname
+    const poolFile = new URL('../../src/integration/db/connection-pool.ts', import.meta.url).pathname
+    const recordsFile = new URL('../../src/services/task-records.ts', import.meta.url).pathname
     runSourceMutant(file, needle, needle.replace('complete: true', 'complete: false'), `
-      const { createTask, completeTask, listTasks, listPending, countPending } = await import(${JSON.stringify(cwd + '/src/services/task-records.ts')})
-      const { poolManager } = await import(${JSON.stringify(cwd + '/src/integration/db/connection-pool.ts')})
-      const orgId = 'org_probe2_' + Date.now()
-      const creator = 'usrC_probe2'
-      const me = 'usrM_probe2'
+      process.env.TASKS_ENABLED = 'true'
+      const express = (await import('express')).default
+      const jwt = (await import('jsonwebtoken')).default
+      const request = (await import('supertest')).default
+      const { tasksRouter } = await import(${JSON.stringify(routesFile)})
+      const { poolManager } = await import(${JSON.stringify(poolFile)})
+      const { createTask } = await import(${JSON.stringify(recordsFile)})
+      const stamp = Date.now().toString()
+      const orgId = 'orgp2' + stamp
+      const me = 'usrMp2' + stamp
+      const creator = 'usrCp2' + stamp
+      const roleId = 'rolep2' + stamp
+      const db = poolManager.get()
+      await db.query("INSERT INTO permissions (code, name, description) VALUES ('tasks:read','Tasks Read','read'), ('tasks:write','Tasks Write','write') ON CONFLICT (code) DO NOTHING")
+      await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [roleId, roleId])
+      await db.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')", [roleId])
+      await db.query("INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, activation_status, local_password_set, must_change_password) VALUES ($1, $2, 'p2', 'x', 'user', '[]'::jsonb, TRUE, 'activated', TRUE, FALSE)", [me, me + '@probe.test'])
+      await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [me, roleId])
+      await db.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [me, orgId])
+      await db.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source, created_at, updated_at) VALUES ($1, 'tasks', TRUE, 'test', now(), now())", [me])
+      const bearer = jwt.sign({ userId: me, sub: me, email: me + '@probe.test', role: 'user', roles: [roleId], tenantId: orgId }, process.env.JWT_SECRET, { expiresIn: '1h' })
       const created = await createTask({ orgId, creatorId: creator, title: '备料复核', assignees: [me], completionMode: 'all' })
-      await poolManager.get().query("UPDATE tasks SET due_at = now() - interval '2 hours', due_time = TIME '12:00', time_zone = 'UTC', due_date = (now() AT TIME ZONE 'UTC')::date - 1 WHERE id = $1", [created.id])
-      let failed = false
-      try { await completeTask({ orgId, actorId: me, taskId: created.id }) } catch { failed = true }
-      const assigned = (await listTasks({ orgId, actorId: me, view: 'assigned' })).map((row) => row.id)
-      const pending = (await listPending({ orgId, actorId: me, viewerTz: null })).map((row) => row.id)
-      const count = await countPending({ orgId, actorId: me, viewerTz: null })
-      await poolManager.get().query('DELETE FROM tasks WHERE org_id = $1', [orgId])
-      console.log(JSON.stringify({ gate19probe2: 'red', failed, assigned: assigned.includes(created.id), pending: pending.includes(created.id), count }))
-      if (!failed || !assigned.includes(created.id) || !pending.includes(created.id) || count !== 1) process.exit(1)
+      await db.query("UPDATE tasks SET due_at = now() - interval '2 hours', due_time = TIME '12:00', time_zone = 'UTC', due_date = (now() AT TIME ZONE 'UTC')::date - 1 WHERE id = $1", [created.id])
+      const router = tasksRouter()
+      if (!router) process.exit(2)
+      const server = express()
+      server.use(express.json())
+      server.use(router)
+      const auth = { Authorization: 'Bearer ' + bearer }
+      const completed = await request(server).post('/api/tasks/' + created.id + '/complete').set(auth).send({})
+      const assigned = await request(server).get('/api/tasks').query({ view: 'assigned' }).set(auth)
+      const pending = await request(server).get('/api/tasks/pending').set(auth)
+      const count = await request(server).get('/api/tasks/pending-count').set(auth)
+      const assignedIds = (assigned.body.items ?? []).map((row) => row.id)
+      const pendingIds = (pending.body.items ?? []).map((row) => row.id)
+      await db.query('DELETE FROM tasks WHERE org_id = $1', [orgId])
+      await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [me])
+      await db.query('DELETE FROM user_roles WHERE user_id = $1', [me])
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [me])
+      await db.query('DELETE FROM users WHERE id = $1', [me])
+      await db.query('DELETE FROM role_permissions WHERE role_id = $1', [roleId])
+      await db.query('DELETE FROM roles WHERE id = $1', [roleId])
+      console.log(JSON.stringify({ gate19probe2: 'red', status: completed.status, assigned: assignedIds.includes(created.id), pending: pendingIds.includes(created.id), count: count.body.count }))
+      if (completed.status !== 404 || completed.body?.error?.code !== 'NOT_FOUND' || !assignedIds.includes(created.id) || !pendingIds.includes(created.id) || count.body.count !== 1) process.exit(1)
       process.exit(0)
     `)
   }, 180000)

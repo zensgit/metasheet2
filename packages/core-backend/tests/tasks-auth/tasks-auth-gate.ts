@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import express from 'express'
 import jwt from 'jsonwebtoken'
@@ -175,6 +175,18 @@ describe('tasks auth gate', () => {
       .send({ title: '备料复核' })
     expect(write.status).toBe(422)
     expect(write.body).toEqual({ error: { code: 'ORG_MISSING' } })
+    const complete = await request(app())
+      .post('/api/tasks/tsk_missing/complete')
+      .set('Authorization', `Bearer ${bareToken}`)
+      .send({})
+    expect(complete.status).toBe(422)
+    expect(complete.body).toEqual({ error: { code: 'ORG_MISSING' } })
+    const reopen = await request(app())
+      .post('/api/tasks/tsk_missing/reopen')
+      .set('Authorization', `Bearer ${bareToken}`)
+      .send({ scope: 'all' })
+    expect(reopen.status).toBe(422)
+    expect(reopen.body).toEqual({ error: { code: 'ORG_MISSING' } })
     await db.query(
       'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)',
       [bare, orgId],
@@ -382,13 +394,14 @@ describe('tasks auth gate', () => {
     const original = readFileSync(accessFile, 'utf8')
     expect(original.includes(needle)).toBe(true)
     const backup = `/tmp/task-access-org-${stamp}.bak`
+    const recordsFile = new URL('../../src/services/task-records.ts', import.meta.url).pathname
+    const script = `/tmp/task-org-mutant-${stamp}.mts`
     copyFileSync(accessFile, backup)
+    try {
     writeFileSync(accessFile, original.replace(
       needle,
       '(${ORG_PLACEHOLDER}::text IS NOT NULL) AND ',
     ))
-    const recordsFile = new URL('../../src/services/task-records.ts', import.meta.url).pathname
-    const script = `/tmp/task-org-mutant-${stamp}.mts`
     writeFileSync(script, `
       const { listTasks, listPending } = await import(${JSON.stringify(recordsFile)})
       const listed = await listTasks({ orgId: ${JSON.stringify(orgA)}, actorId: ${JSON.stringify(user)}, view: 'any_role' })
@@ -400,7 +413,6 @@ describe('tasks auth gate', () => {
       process.exit(0)
     `)
     const tsx = createRequire(import.meta.url).resolve('tsx/cli')
-    try {
       execFileSync(process.execPath, [tsx, script], {
         cwd: accessFile.slice(0, accessFile.indexOf('/src/tasks/')),
         env: process.env,
@@ -409,6 +421,8 @@ describe('tasks auth gate', () => {
       })
     } finally {
       copyFileSync(backup, accessFile)
+      try { unlinkSync(script) } catch { /* script was not written */ }
+      try { unlinkSync(backup) } catch { /* backup was not written */ }
       expect(readFileSync(accessFile, 'utf8')).toBe(original)
       await db.query('DELETE FROM tasks WHERE id = ANY($1::text[])', [[taskA, taskB]])
       await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [user])

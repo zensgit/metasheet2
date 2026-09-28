@@ -13,7 +13,7 @@ import request from 'supertest'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { MetaSheetServer } from '../../src/index'
-import { countPending, createTask } from '../../src/services/task-records'
+import { completeTask, countPending, createTask } from '../../src/services/task-records'
 import { tasksRouter } from '../../src/routes/tasks'
 
 if (process.env.EXPECT_DB !== '1') {
@@ -368,6 +368,57 @@ describe('gate 2 and gate 13 under token trust', () => {
       .set('Authorization', `Bearer ${actor.bearer}`)
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ orgId })
+  })
+
+  it('POST /complete persists the assignee completion', async () => {
+    const actor = await userWith({ label: 'httpdone', codes: ['tasks:read', 'tasks:write'], admission: true })
+    const created = await createTask({
+      orgId, creatorId: `usr_creator_httpdone_${stamp}`, title: '备料复核',
+      assignees: [actor.userId], completionMode: 'all',
+    })
+    const response = await request(app())
+      .post(`/api/tasks/${created.id}/complete`)
+      .set('Authorization', `Bearer ${actor.bearer}`)
+      .send({})
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ done: true })
+    const row = await poolManager.get().query<{ status: string; stamped: boolean }>(
+      `SELECT t.status, a.completed_at IS NOT NULL AS stamped
+       FROM tasks t JOIN task_assignees a ON a.task_id = t.id
+       WHERE t.id = $1 AND a.user_id = $2`,
+      [created.id, actor.userId],
+    )
+    expect(row.rows[0]).toEqual({ status: 'done', stamped: true })
+  })
+
+  it('POST /reopen with scope all clears every assignee', async () => {
+    const actor = await userWith({ label: 'httpreopen', codes: ['tasks:read', 'tasks:write'], admission: true })
+    const other = `usr_other_httpreopen_${stamp}`
+    const created = await createTask({
+      orgId, creatorId: actor.userId, title: '备料复核',
+      assignees: [actor.userId, other], completionMode: 'all',
+    })
+    await completeTask({ orgId, actorId: actor.userId, taskId: created.id })
+    await completeTask({ orgId, actorId: other, taskId: created.id })
+    const response = await request(app())
+      .post(`/api/tasks/${created.id}/reopen`)
+      .set('Authorization', `Bearer ${actor.bearer}`)
+      .send({ scope: 'all' })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ ok: true })
+    const rows = await poolManager.get().query<{ user_id: string; stamped: boolean }>(
+      `SELECT user_id, completed_at IS NOT NULL AS stamped FROM task_assignees WHERE task_id = $1 ORDER BY user_id`,
+      [created.id],
+    )
+    expect(rows.rows).toEqual([
+      { user_id: actor.userId, stamped: false },
+      { user_id: other, stamped: false },
+    ])
+    const status = await poolManager.get().query<{ status: string }>(
+      'SELECT status FROM tasks WHERE id = $1',
+      [created.id],
+    )
+    expect(status.rows[0]?.status).toBe('open')
   })
 })
 
