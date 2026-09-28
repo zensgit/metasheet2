@@ -88,7 +88,10 @@
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
 //        7. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
-//           the advance itself: a WRITE (see below).
+//           the advance itself: a WRITE (see below). Before it writes it probes the DEPLOY-GLOBAL
+//           table-action target for "does this project have rows", so the scope resolved here is
+//           first checked against that sheet's registry ownership — the same wall as (2) and (8), in
+//           its own STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary (#6121).
 //        8. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
