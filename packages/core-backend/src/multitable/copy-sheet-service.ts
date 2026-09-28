@@ -752,6 +752,9 @@ async function copyInsideTransaction(
   if (!source) throw new CopySheetError(404, 'NOT_FOUND')
   const fresh = await resolveSheetCapabilitiesForAccess(query, source.id, actor.access)
   const baseCaps = deriveCapabilities(actor.access.permissions, actor.access.isAdminRole)
+  // 纵深防御：路由调用者过了 rbacGuard('multitable','write')，而 deriveCapabilities 让 multitable:write ⇒ canRead
+  // （access.ts:109-112），所以撤销复制者自己的表级授权到不了这里的 403（真库 G14a/G14b 的结构说明）。留着是为了
+  // 非路由调用方与 liveness 重读；对路由调用者，事务内能收紧的只有下面 hasFullTableReadAccess 的三轴。
   if (fresh.sheetLiveness !== 'live' || !canReadWithSheetGrant(baseCaps, fresh.sheetScope, actor.access.isAdminRole)) {
     throw new CopySheetError(403, COPY_SHEET_ERROR_CODES.forbidden)
   }

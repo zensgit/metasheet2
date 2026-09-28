@@ -53,9 +53,12 @@
  *       PARTY's sheet grant and commits → the copy commits with NO grant row for that subject (post-revoke snapshot).
  *   G14b CONCURRENT TIGHTENING ON THE COPIER: same orchestration, the holder turns the row-level read switch ON →
  *       the non-admin copier's in-transaction DB-fresh gate answers 403 COPY_SOURCE_NOT_FULLY_READABLE, nothing
- *       written, one refusal audit row. (A sheet-grant revoke alone cannot remove a GLOBAL multitable:read holder's
- *       canRead — canReadWithSheetGrant keeps the global capability — which is why the first CI execution of the
- *       original G14 saw 201: fixture, not code.)
+ *       written, one refusal audit row. STRUCTURAL NOTE (why there is no "own grant revoked → 403" case): an own-grant
+ *       revoke cannot refuse on this route — the copy requires global multitable:write (rbacGuard), and
+ *       deriveCapabilities makes multitable:write imply canRead (access.ts:109-112), so canReadWithSheetGrant stays
+ *       true without any sheet grant; the canReadWithSheetGrant refusal in copy-sheet-service.ts (in-tx step ⑤) is
+ *       defense in depth, unreachable for route callers. The only in-transaction tightening a route caller can hit is
+ *       axis 1/2/3 of hasFullTableReadAccess (G14b) — do not reintroduce a G14 that revokes the copier's own grant.
  *   G15 TRIPWIRE (§7.2 step 6, flag off): a source record's updated_at bumped by another connection AFTER the copy took
  *       its baseline (between structure writes) → 409 COPY_SOURCE_CHANGED, zero rows for the copy, no ledger row.
  *
@@ -733,9 +736,10 @@ export function defineCopySheetRealDbCases(): void {
     })
 
     test('G14b concurrent tightening on the COPIER (in-transaction DB-fresh gate): the row-level read switch is turned on under the source row lock while a non-admin copy is parked on it → 403 COPY_SOURCE_NOT_FULLY_READABLE, nothing written', async () => {
-      // REVOKED keeps GLOBAL multitable:read/write + base:write (a sheet-grant revoke alone cannot remove his canRead —
-      // canReadWithSheetGrant keeps the global capability; permission-service.ts). The switch is the tightening that the
-      // out-of-transaction gate cannot see and the in-transaction gate MUST: axis 1 of hasFullTableReadAccess.
+      // An own-grant revoke cannot refuse on this route: the copy requires global multitable:write ⇒ canRead
+      // (access.ts:109-112), so canReadWithSheetGrant stays true without any sheet grant and the in-tx refusal at
+      // copy-sheet-service.ts step ⑤ is defense in depth. The switch is the tightening that the out-of-transaction gate
+      // cannot see and the in-transaction gate MUST: axis 1 of hasFullTableReadAccess.
       as(REVOKED)
       const probe = await dryRun(SRC_V)
       expect(probe.status, JSON.stringify(probe.body)).toBe(200) // control: the fast gate passes on the pre-mutation state
