@@ -84,6 +84,12 @@ describe('gate 20 — src/tasks has no I/O (behavioural)', () => {
     await expect(pg.query('SELECT 1')).rejects.toMatchObject({ code: STUB_CODE })
   })
 
+  it('positive control: acquireTaskStructureLock(pg.query) reaches the stub', async () => {
+    const pg = await import('../../src/db/pg')
+    const { acquireTaskStructureLock } = await import('../../src/db/task-advisory-locks')
+    await expect(acquireTaskStructureLock(pg.query, 'org-1')).rejects.toMatchObject({ code: STUB_CODE })
+  })
+
   it('positive control: an executor-taking function fed the stub query reaches the stub', async () => {
     const probe = async (query: (sql: string) => Promise<unknown>) => query('SELECT 1')
     expect(await callAndClassify(probe as (...args: unknown[]) => unknown)).toBe('stub')
