@@ -3,50 +3,69 @@
 // 「把系统表的英文表头改成中文」 — THROUGH THE REAL ROUTE TABLE (客户反馈 2026-09-24 #4a).
 //
 // The host primitive's own guarantees (compare-and-set in SQL, registry triple, config revision per
-// rename, field ids / permissions untouched, fence first) are proven against a SQL-honouring fake in
+// rename, field ids / permissions untouched, fence and row locks first, the switch and the digest
+// re-checked under the locks) are proven against a SQL-honouring fake in
 // packages/core-backend/tests/unit/multitable-object-display-name-relabel.test.ts. This suite proves
 // the PLUGIN half: who may call it, which tenant's project it acts on, which tables and which target
-// names it asks for, that the dry run is the default, and that what comes back is values-free.
+// names it asks for, that the dry run is the default, that an apply is bound to its preview, that the
+// write is default OFF, and that what comes back is values-free.
 //
 //   L1  non-admin tiers (integration:write, the stock-prep operator, stock-prep:read, a bare user)
 //       => 403 with ZERO host calls; no principal => 401.
 //   L2  stock-prep:admin and platform admin both pass the gate.
-//   L3  DRY RUN IS THE DEFAULT: `{}` => mode dry_run, every host call carried apply:false, the fake
-//       table is unchanged; `{ apply: true }` => apply, renamed, revisions counted.
-//   L4  the request cannot steer or smuggle: apply:"true" / apply:1, any other body key (tenantId,
-//       projectId, objectId, fields, baseId, locale) and ANY query key => 400 with zero host calls.
+//   L3  DRY RUN IS THE DEFAULT and the apply is BOUND TO IT: `{}` => mode dry_run + planDigest, every
+//       host call carried apply:false, nothing changed; `{ apply: true, planDigest }` => apply,
+//       renamed, revisions counted, each host write carried the table's expectedPlanDigest.
+//   L4  the request cannot steer or smuggle: apply:"true" / apply:1, apply without a digest, a
+//       malformed digest, a digest without apply, any other body key and ANY query key => 400 with
+//       zero host calls.
 //   L5  tenancy: the project is `${verifiedClaim}:integration-core` on EVERY host call; a claimless
 //       token => 403 TENANT_CLAIM_REQUIRED even for platform admin; a header-filled user.tenantId
 //       that contradicts the claim => 403; zero host calls in both refusals.
-//   L6  targets: the main table and the ledger always, plus exactly the SANDBOX objectIds the
-//       configured customer packs declare — never an objectId from the request. Target names are
-//       pickTemplateLabel(…, 'zh-CN'); the ledger asks for the 16 agreed names.
-//   L7  per-table outcomes: an absent table is `absent`; a table the registry does not bind to this
-//       project is `scope_unavailable` and the host's refusal message (which names the project id)
-//       never reaches the response or the log.
+//   L6  targets: main + ledger, plus exactly the SANDBOX objectIds server config names (customer-pack
+//       declarations AND the sandbox write allowlist, namespace-filtered) — never an objectId from the
+//       request. Target names are pickTemplateLabel(…, 'zh-CN'); the ledger asks for the 16 agreed
+//       names; the nine MVP tables are reported `outOfScope` (no agreed Chinese names).
+//   L7  per-table outcomes: absent => `absent`; unregistered => `scope_unavailable`, and the host's
+//       refusal message (which names the project id) never reaches the response or the log.
 //   L8  hand-renamed / taken columns are reported and untouched; second run => all already_target,
 //       hasPendingRenames false, zero revisions.
 //   L9  values-free: no tenant id, project id, sheet id, physical field id or current (hand-typed)
 //       name anywhere in the response.
 //   L10 an old host (no relabelObjectDisplayNames) => 501 MANAGED_TABLE_RELABEL_API_UNAVAILABLE.
-//   L11 a host answering an unknown status => 502, never passed through to the admin's screen.
+//   L11 a host answering an unknown status or no digest => 502, never passed through.
 //   L12 the route table names the route exactly once, and its handler's gate is STOCK_PREP_ADMIN.
-//   L13 the MODULE's own contract: anything but `apply === true` is a dry run (undefined / null /
-//       'true' / 1 / {}), independent of the route's boolean normalizer.
+//   L13 the MODULE's own contract: anything but `apply === true` is a dry run, independent of the
+//       route's boolean normalizer.
+//   S3  THE OPERATOR SWITCH (default OFF): unset / 'TRUE' / '1' => the dry run answers
+//       applyEnabled:false and the apply answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED with ZERO
+//       host calls; exactly 'true' => applies. The switch name is one string in three places.
+//   S1  PREVIEW == APPLY: a stale digest (the tables moved after the preview) => 409
+//       MANAGED_TABLE_RELABEL_PLAN_CHANGED (stage preview, zero writes); a move between the plugin's
+//       re-plan and the host's locked write => 409 (stage apply, tablesApplied says how many
+//       committed); two sandboxes with the same default name => the SECOND previews as
+//       skipped_name_taken and is never renamed onto the first one's name.
+//   N2  a recovery holding the sheet => 409 RECOVERY_IN_PROGRESS; N6 a PG deadlock (40P01) => 409
+//       MANAGED_TABLE_RELABEL_CONCURRENT_CHANGE — never an opaque 500.
 
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
+const REPO = path.join(__dirname, '..', '..', '..')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   pickTemplateLabel,
 } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { sandboxStockPreparationTemplate } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
 const {
+  MANAGED_TABLE_RELABEL_ENABLED_ENV,
+  PLAN_DIGEST_PATTERN,
   buildRelabelRequests,
   listManagedTableRelabelTargets,
   runStockPreparationManagedTableRelabel,
@@ -60,6 +79,7 @@ const STAGING_PROJECT_ID = `${TENANT_ID}:integration-core`
 const MAIN = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 const LEDGER = STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId
 const SANDBOX = 'plm_stock_preparation_sandbox_factory_a'
+const SANDBOX_2 = 'plm_stock_preparation_sandbox_rehearsal'
 
 const USERS = Object.freeze({
   platformAdmin: { id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: [] },
@@ -102,6 +122,11 @@ function templateFor(objectId) {
   return sandboxStockPreparationTemplate({ objectId })
 }
 
+function setSwitch(value) {
+  if (value === undefined) delete process.env[MANAGED_TABLE_RELABEL_ENABLED_ENV]
+  else process.env[MANAGED_TABLE_RELABEL_ENABLED_ENV] = value
+}
+
 // The host's OWN refusal shape for an unclaimed object: no status, and a message that NAMES the
 // project id (packages/core-backend/src/multitable/plugin-scope.ts MultitableObjectScopeError).
 function hostObjectScopeError(projectId, objectId) {
@@ -111,13 +136,20 @@ function hostObjectScopeError(projectId, objectId) {
   )
 }
 
+function digestOf(objectId, renames) {
+  const canonical = JSON.stringify([`sheet_${objectId}`, renames.map((entry) => [entry.entity, entry.from, entry.to])])
+  return `sha256:${crypto.createHash('sha256').update(canonical, 'utf8').digest('hex')}`
+}
+
 /**
- * A host with English-named managed tables. `tables` lists which objectIds exist; `unregistered`
- * ones exist but have no registry row. The relabel primitive follows the host contract: a column is
- * renamed only while its current name equals expectedName, a target held by another column is
- * `skipped_name_taken`, apply !== true writes nothing.
+ * A host with English-named managed tables, behaving like the real primitive: a column is renamed
+ * only while its current name equals expectedName; a target another column holds is
+ * `skipped_name_taken`; a sheet target another sheet (all tables share one base here) holds OR that
+ * `takenSheetNames` lists is `skipped_name_taken`; a dry run answers a digest over its would-be
+ * renames; the write leg refuses without the switch, refuses a digest that differs from its own
+ * re-plan, and otherwise writes.
  */
-function createHost({ tables = [MAIN, LEDGER], unregistered = [], withRelabel = true, badStatus = false, deletedAfterFind = [] } = {}) {
+function createHost({ tables = [MAIN, LEDGER], unregistered = [], withRelabel = true, badStatus = false, noDigest = false, deletedAfterFind = [] } = {}) {
   const state = new Map()
   for (const objectId of tables) {
     const template = templateFor(objectId)
@@ -129,6 +161,8 @@ function createHost({ tables = [MAIN, LEDGER], unregistered = [], withRelabel = 
   }
   const calls = { findObjectSheet: [], relabel: [], other: [] }
   let revisions = 0
+  let beforeApply = null
+  let applyFailure = null
   const provisioning = {
     async findObjectSheet({ projectId, objectId }) {
       calls.findObjectSheet.push({ projectId, objectId })
@@ -141,46 +175,78 @@ function createHost({ tables = [MAIN, LEDGER], unregistered = [], withRelabel = 
   if (withRelabel) {
     provisioning.relabelObjectDisplayNames = async (input) => {
       calls.relabel.push(clone(input))
-      // Faithful to the real stack: an object that was never provisioned has no registry row, so the
-      // plugin-scope object check refuses it BEFORE the host primitive runs — exactly like an
-      // explicitly unregistered (hand-made / dump-restored) sheet.
+      const apply = input.apply === true
+      if (apply && beforeApply) {
+        const hook = beforeApply
+        beforeApply = null
+        hook()
+      }
+      if (apply && applyFailure) {
+        const failure = applyFailure
+        applyFailure = null
+        throw failure
+      }
+      if (apply && process.env[MANAGED_TABLE_RELABEL_ENABLED_ENV] !== 'true') {
+        throw Object.assign(new Error('disabled'), { name: 'MultitableRelabelDisabledError', code: 'MULTITABLE_RELABEL_APPLY_DISABLED' })
+      }
       if (unregistered.includes(input.objectId) || !state.has(input.objectId)) throw hostObjectScopeError(input.projectId, input.objectId)
-      // Registered, but the sheet was deleted between the plugin's find and the host's transaction.
       if (deletedAfterFind.includes(input.objectId)) {
-        return { present: false, applied: input.apply === true, sheetId: 'sheet_x', sheetName: null, fields: [], revisionCount: 0, batchId: null }
+        return { present: false, applied: apply, sheetId: 'sheet_x', sheetName: null, fields: [], planDigest: digestOf(input.objectId, []), revisionCount: 0, batchId: null }
       }
       const table = state.get(input.objectId)
-      const apply = input.apply === true
-      const allNames = () => [...table.columns.values(), ...table.extraNames]
-      const decide = (current, request, takenBy) => {
+      const otherSheetNames = [...state.entries()].filter(([id]) => id !== input.objectId).map(([, other]) => other.sheetName)
+      const classify = (current, request, taken) => {
         if (current === undefined) return 'missing'
         if (current === request.nextName) return 'already_target'
         if (current !== request.expectedName) return 'skipped_name_changed'
-        if (takenBy) return 'skipped_name_taken'
-        return apply ? 'renamed' : 'would_rename'
+        if (taken) return 'skipped_name_taken'
+        return 'would_rename'
+      }
+      const allNames = () => [...table.columns.values(), ...table.extraNames]
+      const fieldPlan = input.fields.map((request) => {
+        const current = table.columns.get(request.fieldId)
+        const taken = allNames().some((name) => name === request.nextName) && current !== request.nextName
+        return { request, status: classify(current, request, taken) }
+      })
+      const takenSheet = Boolean(input.sheetName)
+        && (otherSheetNames.includes(input.sheetName.nextName) || (input.takenSheetNames || []).includes(input.sheetName.nextName))
+      const sheetStatus = input.sheetName ? classify(table.sheetName, input.sheetName, takenSheet) : null
+      const renames = []
+      if (sheetStatus === 'would_rename') renames.push({ entity: 'sheet', from: input.sheetName.expectedName, to: input.sheetName.nextName })
+      for (const item of fieldPlan) {
+        if (item.status === 'would_rename') renames.push({ entity: `field:${item.request.fieldId}`, from: item.request.expectedName, to: item.request.nextName })
+      }
+      const planDigest = noDigest ? undefined : digestOf(input.objectId, renames)
+      if (!apply) {
+        return {
+          present: true,
+          applied: false,
+          sheetId: `sheet_${input.objectId}`,
+          sheetName: sheetStatus ? { status: badStatus ? 'overwritten' : sheetStatus } : null,
+          fields: fieldPlan.map((item) => ({ fieldId: item.request.fieldId, status: badStatus ? 'overwritten' : item.status })),
+          planDigest,
+          revisionCount: 0,
+          batchId: null,
+        }
+      }
+      if (input.expectedPlanDigest !== planDigest) {
+        throw Object.assign(new Error('plan changed'), { name: 'MultitableRelabelPlanChangedError', code: 'MULTITABLE_RELABEL_PLAN_CHANGED' })
       }
       let revisionCount = 0
-      const fields = input.fields.map((request) => {
-        const current = table.columns.get(request.fieldId)
-        const takenBy = allNames().filter((name) => name === request.nextName).length > 0 && current !== request.nextName
-        const status = decide(current, request, takenBy)
-        if (status === 'renamed') {
-          table.columns.set(request.fieldId, request.nextName)
-          revisionCount += 1
-        }
-        return { fieldId: request.fieldId, status: badStatus ? 'overwritten' : status }
+      const fields = fieldPlan.map((item) => {
+        if (item.status !== 'would_rename') return { fieldId: item.request.fieldId, status: item.status }
+        table.columns.set(item.request.fieldId, item.request.nextName)
+        revisionCount += 1
+        return { fieldId: item.request.fieldId, status: 'renamed' }
       })
-      let sheetName = null
-      if (input.sheetName) {
-        const status = decide(table.sheetName, input.sheetName, false)
-        if (status === 'renamed') {
-          table.sheetName = input.sheetName.nextName
-          revisionCount += 1
-        }
-        sheetName = { status }
+      let sheetName = sheetStatus ? { status: sheetStatus } : null
+      if (sheetStatus === 'would_rename') {
+        table.sheetName = input.sheetName.nextName
+        revisionCount += 1
+        sheetName = { status: 'renamed' }
       }
       revisions += revisionCount
-      return { present: true, applied: apply, sheetId: `sheet_${input.objectId}`, sheetName, fields, revisionCount, batchId: revisionCount ? 'batch_1' : null }
+      return { present: true, applied: true, sheetId: `sheet_${input.objectId}`, sheetName, fields, planDigest, revisionCount, batchId: revisionCount ? 'batch_1' : null }
     }
   }
   return {
@@ -188,9 +254,12 @@ function createHost({ tables = [MAIN, LEDGER], unregistered = [], withRelabel = 
     calls,
     state,
     revisions: () => revisions,
+    applyCalls: () => calls.relabel.filter((call) => call.apply === true),
     hostCallCount: () => calls.findObjectSheet.length + calls.relabel.length + calls.other.length,
     rename(objectId, fieldId, name) { state.get(objectId).columns.set(fieldId, name) },
     addColumnNamed(objectId, name) { state.get(objectId).extraNames.push(name) },
+    onNextApply(hook) { beforeApply = hook },
+    failNextApply(error) { applyFailure = error },
   }
 }
 
@@ -219,10 +288,13 @@ function sandboxPack() {
   return { ...clone(FACTORY_A_SAMPLE_PACK), targetObjectId: SANDBOX }
 }
 
-function mount(hostOptions = {}, { packs } = {}) {
+function mount(hostOptions = {}, { packs, sandboxAllowlist } = {}) {
   const routes = new Map()
   const host = createHost(hostOptions)
   const logLines = []
+  const config = {}
+  if (packs) config.stockPreparationCustomerPacks = packs
+  if (sandboxAllowlist) config.stockPrepApplySandbox = { enabled: true, allowedTargetObjectIds: sandboxAllowlist }
   const context = {
     api: {
       http: {
@@ -235,7 +307,7 @@ function mount(hostOptions = {}, { packs } = {}) {
       multitable: { provisioning: host.provisioning, records: {} },
     },
     storage: Object.assign(new Map(), { durable: true }),
-    config: packs ? { stockPreparationCustomerPacks: packs } : {},
+    config,
   }
   httpRoutes.registerIntegrationRoutes({
     context,
@@ -271,15 +343,23 @@ async function relabel(harness, options = {}) {
   return res
 }
 
+/** The only legal way to write: preview, then apply exactly that preview's digest. */
+async function previewThenApply(harness, options = {}) {
+  const preview = await relabel(harness, options)
+  assert.equal(preview.statusCode, 200, JSON.stringify(preview.body))
+  const applied = await relabel(harness, { ...options, body: { apply: true, planDigest: preview.body.data.planDigest } })
+  return { preview, applied }
+}
+
 function assertValuesFree(payload, label, extra = []) {
   const text = JSON.stringify(payload)
-  for (const token of [TENANT_ID, 'integration-core', 'sheet_', 'fld_', SANDBOX, ...extra]) {
+  for (const token of [TENANT_ID, 'integration-core', 'sheet_', 'fld_', SANDBOX, SANDBOX_2, ...extra]) {
     assert.equal(text.includes(token), false, `${label} must not carry "${token}"`)
   }
 }
 
-function tableOf(res, kind) {
-  return res.body.data.tables.find((table) => table.kind === kind)
+function tableOf(res, kind, index = 0) {
+  return res.body.data.tables.filter((table) => table.kind === kind)[index]
 }
 
 // ── L1 / L2 ───────────────────────────────────────────────────────────────────────────────────
@@ -287,7 +367,7 @@ function tableOf(res, kind) {
 async function l1NonAdminTiersAreRefusedBeforeAnyHostCall() {
   for (const name of ['integrationWriter', 'operator', 'reader', 'bare']) {
     const harness = mount()
-    const res = await relabel(harness, { user: USERS[name], body: { apply: true } })
+    const res = await relabel(harness, { user: USERS[name], body: { apply: true, planDigest: `sha256:${'0'.repeat(64)}` } })
     assert.equal(res.statusCode, 403, `L1: ${name} must be refused, got ${res.statusCode} ${JSON.stringify(res.body)}`)
     assert.equal(res.body.error.code, 'FORBIDDEN')
     assert.equal(harness.host.hostCallCount(), 0, `L1: ${name} reached the host`)
@@ -308,11 +388,14 @@ async function l2AdminTiersPassTheGate() {
 
 // ── L3 ────────────────────────────────────────────────────────────────────────────────────────
 
-async function l3DryRunIsTheDefaultAndApplyWrites() {
+async function l3DryRunIsTheDefaultAndApplyIsBoundToIt() {
+  setSwitch('true')
   const harness = mount()
   const dry = await relabel(harness)
   assert.equal(dry.statusCode, 200)
   assert.equal(dry.body.data.mode, 'dry_run')
+  assert.match(dry.body.data.planDigest, /^sha256:[0-9a-f]{64}$/)
+  assert.equal(dry.body.data.applyEnabled, true)
   assert.ok(harness.host.calls.relabel.length === 2, 'L3: main + ledger were evaluated')
   assert.ok(harness.host.calls.relabel.every((call) => call.apply === false), 'L3: every host call of the dry run carried apply:false')
   assert.equal(harness.host.revisions(), 0, 'L3: the dry run wrote nothing')
@@ -323,11 +406,15 @@ async function l3DryRunIsTheDefaultAndApplyWrites() {
   assert.ok(ledger.fields.every((field) => field.status === 'would_rename'))
   assert.deepEqual(ledger.sheetName, { from: 'Stock Preparation Confirmation Decision', to: '备料确认账本', status: 'would_rename' })
 
-  const applied = await relabel(harness, { body: { apply: true } })
-  assert.equal(applied.statusCode, 200)
+  const applied = await relabel(harness, { body: { apply: true, planDigest: dry.body.data.planDigest } })
+  assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
   assert.equal(applied.body.data.mode, 'apply')
-  assert.ok(harness.host.calls.relabel.slice(2).every((call) => call.apply === true), 'L3: apply reached the host as apply:true')
-  assert.ok(harness.host.calls.relabel.every((call) => call.actorId === USERS.stockPrepAdmin.id), 'L3: the caller is the attributed actor')
+  const writes = harness.host.applyCalls()
+  assert.equal(writes.length, 2, 'L3: one host write per table with renames')
+  for (const write of writes) {
+    assert.match(write.expectedPlanDigest, /^sha256:[0-9a-f]{64}$/, 'L3: every host write carried the table digest')
+    assert.equal(write.actorId, USERS.stockPrepAdmin.id, 'L3: the caller is the attributed actor')
+  }
   const ledgerApplied = tableOf(applied, 'ledger')
   assert.ok(ledgerApplied.fields.every((field) => field.status === 'renamed'))
   assert.equal(harness.host.state.get(LEDGER).columns.get('status'), '状态')
@@ -340,21 +427,33 @@ async function l3DryRunIsTheDefaultAndApplyWrites() {
   // The message carries the plugin's own [plugin-integration-core] tag; the DETAIL is what must be values-free.
   assertValuesFree(log[2], 'L3 log detail')
   assert.deepEqual(Object.keys(log[2]).sort(), ['renamed', 'revisionCount', 'skippedNameChanged', 'skippedNameTaken', 'tableCount'])
-  return harness
 }
 
 // ── L4 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l4TheRequestCannotSteerOrSmuggle() {
+  setSwitch('true')
+  const goodDigest = `sha256:${'a'.repeat(64)}`
   const bodies = [
+    // Without a digest these are refused ONLY by the boolean check (a coerced apply:'true' would
+    // otherwise silently become a dry run) — with a digest the digest rule would mask it.
     { apply: 'true' },
     { apply: 1 },
+    { apply: 'true', planDigest: goodDigest },
+    { apply: 1, planDigest: goodDigest },
+    { apply: true },
+    { apply: true, planDigest: 'sha256:short' },
+    { apply: true, planDigest: `SHA256:${'a'.repeat(64)}` },
+    { apply: true, planDigest: 42 },
+    { planDigest: goodDigest },
+    { apply: false, planDigest: goodDigest },
     { tenantId: TENANT_ID },
     { projectId: STAGING_PROJECT_ID },
     { objectId: SANDBOX },
     { fields: [{ fieldId: 'status', nextName: 'x' }] },
     { baseId: 'base_x' },
     { locale: 'en' },
+    { takenSheetNames: ['x'] },
   ]
   for (const body of bodies) {
     const harness = mount()
@@ -369,16 +468,21 @@ async function l4TheRequestCannotSteerOrSmuggle() {
     assert.equal(res.statusCode, 400, `L4: query ${JSON.stringify(query)} must be refused`)
     assert.equal(harness.host.hostCallCount(), 0)
   }
+  // `{ apply: false }` alone is a legal dry run.
+  const harness = mount()
+  const dry = await relabel(harness, { body: { apply: false } })
+  assert.equal(dry.statusCode, 200)
+  assert.equal(dry.body.data.mode, 'dry_run')
 }
 
 // ── L5 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l5TheProjectIsTheVerifiedTenantsStagingProject() {
-  const harness = mount({}, { packs: { 'factory-a': sandboxPack() } })
-  harness.host.state.set(SANDBOX, { sheetName: 'PLM Stock Preparation Sandbox', columns: new Map(), extraNames: [] })
-  await relabel(harness, { body: { apply: true } })
+  setSwitch('true')
+  const harness = mount({ tables: [MAIN, LEDGER, SANDBOX] }, { packs: { 'factory-a': sandboxPack() } })
+  await previewThenApply(harness)
   const projects = [...harness.host.calls.findObjectSheet, ...harness.host.calls.relabel].map((call) => call.projectId)
-  assert.ok(projects.length >= 5)
+  assert.ok(projects.length >= 6)
   assert.deepEqual([...new Set(projects)], [STAGING_PROJECT_ID], 'L5: every host call named the verified tenant\'s staging project')
 
   const second = mount()
@@ -407,7 +511,7 @@ async function l5TheProjectIsTheVerifiedTenantsStagingProject() {
 // ── L6 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l6TargetsAreServerHeldAndTemplateNamed() {
-  // Without packs: exactly main + ledger.
+  // Without config: exactly main + ledger.
   assert.deepEqual(listManagedTableRelabelTargets({}).map((target) => target.objectId), [MAIN, LEDGER])
 
   // The ledger asks for the 16 agreed names, from its English template labels.
@@ -424,11 +528,11 @@ async function l6TargetsAreServerHeldAndTemplateNamed() {
   assert.equal(mainRequests.fields.length, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.length)
   assert.deepEqual(mainRequests.sheetName, { expectedName: 'PLM Stock Preparation Main', nextName: '备料主表' })
 
-  // With a pack declaring a sandbox: exactly that one sandbox, with the sandbox's own names.
-  const harness = mount({ tables: [MAIN, LEDGER, SANDBOX] }, { packs: { 'factory-a': sandboxPack() } })
+  // A pack-declared sandbox AND an allowlisted sandbox are both relabelled, each with the sandbox's own names.
+  const harness = mount({ tables: [MAIN, LEDGER, SANDBOX, SANDBOX_2] }, { packs: { 'factory-a': sandboxPack() }, sandboxAllowlist: [SANDBOX_2, MAIN, 'not_a_sandbox'] })
   const res = await relabel(harness)
   assert.equal(res.statusCode, 200, JSON.stringify(res.body))
-  assert.deepEqual(harness.host.calls.relabel.map((call) => call.objectId), [MAIN, LEDGER, SANDBOX])
+  assert.deepEqual(harness.host.calls.relabel.map((call) => call.objectId), [MAIN, LEDGER, SANDBOX, SANDBOX_2], 'L6: pack sandbox then allowlist sandbox; canonical/foreign allowlist entries dropped')
   const sandboxCall = harness.host.calls.relabel[2]
   assert.deepEqual(sandboxCall.sheetName, { expectedName: 'PLM Stock Preparation Sandbox', nextName: '备料主表(沙箱)' })
   const sandbox = tableOf(res, 'sandbox')
@@ -439,55 +543,48 @@ async function l6TargetsAreServerHeldAndTemplateNamed() {
     listManagedTableRelabelTargets({ packCatalog: { packIds: ['p'], get: () => ({ targetObjectId: MAIN }) } }).map((target) => target.objectId),
     [MAIN, LEDGER],
   )
+  // S4a: the nine MVP tables carry no agreed Chinese names — reported, not silently skipped.
+  const outOfScope = res.body.data.outOfScope
+  assert.deepEqual(outOfScope.map((entry) => entry.objectId), STOCK_PREPARATION_MVP_TABLE_TEMPLATES.map((template) => template.objectId))
+  assert.ok(outOfScope.some((entry) => entry.label === 'PLM BOM Snapshot Line'))
 }
 
 // ── L7 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l7AbsentAndUnregisteredTablesAreReportedNotGuessed() {
+  setSwitch('true')
   const harness = mount({ tables: [MAIN, LEDGER], unregistered: [LEDGER] })
   harness.host.state.delete(MAIN)
-  const res = await relabel(harness, { body: { apply: true } })
-  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
-  assert.equal(tableOf(res, 'main').status, 'absent')
-  assert.equal(tableOf(res, 'ledger').status, 'scope_unavailable')
-  assert.deepEqual(tableOf(res, 'ledger').fields, [])
+  const { preview, applied } = await previewThenApply(harness)
+  assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+  for (const res of [preview, applied]) {
+    assert.equal(tableOf(res, 'main').status, 'absent')
+    assert.equal(tableOf(res, 'ledger').status, 'scope_unavailable')
+    assert.deepEqual(tableOf(res, 'ledger').fields, [])
+    assertValuesFree(res.body, 'L7 response')
+  }
   assert.equal(harness.host.revisions(), 0)
-  assert.deepEqual(harness.host.calls.relabel.map((call) => call.objectId), [LEDGER], 'L7: an absent table is never handed to the host')
-  assertValuesFree(res.body, 'L7 response')
+  assert.deepEqual(harness.host.applyCalls(), [], 'L7: nothing to write, so no host write at all')
+  assert.ok(harness.host.calls.relabel.every((call) => call.objectId === LEDGER), 'L7: an absent table is never handed to the host')
   for (const line of harness.logLines) assertValuesFree(line[2] || {}, 'L7 log detail')
 
-  // Found by the plugin, then gone by the time the host's transaction looked: reported absent, and
-  // the (empty) host answer is never projected as if it were a plan.
+  // Found by the plugin, then gone by the time the host looked: reported absent, never projected.
   const raced = mount({ deletedAfterFind: [LEDGER] })
-  const racedRes = await relabel(raced, { body: { apply: true } })
+  const racedRes = await relabel(raced)
   assert.equal(racedRes.statusCode, 200, JSON.stringify(racedRes.body))
   assert.equal(tableOf(racedRes, 'ledger').status, 'absent')
   assert.deepEqual(tableOf(racedRes, 'ledger').fields, [])
 }
 
-// ── L13 — the MODULE's own dry-run contract, independent of the route's boolean normalizer ─────
-
-async function l13TheModuleWritesOnlyOnExactlyTrue() {
-  for (const apply of [undefined, null, 'true', 1, {}]) {
-    const host = createHost()
-    const result = await runStockPreparationManagedTableRelabel({ provisioning: host.provisioning, projectId: STAGING_PROJECT_ID, apply })
-    assert.equal(result.mode, 'dry_run', `L13: apply=${JSON.stringify(apply)} is a dry run`)
-    assert.ok(host.calls.relabel.every((call) => call.apply === false), `L13: apply=${JSON.stringify(apply)} reached the host as apply:false`)
-    assert.equal(host.revisions(), 0)
-  }
-  const host = createHost()
-  const result = await runStockPreparationManagedTableRelabel({ provisioning: host.provisioning, projectId: STAGING_PROJECT_ID, apply: true })
-  assert.equal(result.mode, 'apply')
-  assert.ok(host.revisions() > 0)
-}
-
 // ── L8 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l8HandRenamedAndTakenAreLeftAloneAndTheSecondRunIsANoOp() {
+  setSwitch('true')
   const harness = mount()
   harness.host.rename(LEDGER, 'status', '处理状态')
   harness.host.addColumnNamed(LEDGER, '备注')
-  const first = await relabel(harness, { body: { apply: true } })
+  const { preview, applied: first } = await previewThenApply(harness)
+  assert.equal(tableOf(preview, 'ledger').fields.find((field) => field.fieldId === 'status').status, 'skipped_name_changed', 'L8: the PREVIEW already says so')
   const ledger = tableOf(first, 'ledger')
   assert.equal(ledger.fields.find((field) => field.fieldId === 'status').status, 'skipped_name_changed')
   assert.equal(ledger.fields.find((field) => field.fieldId === 'notes').status, 'skipped_name_taken')
@@ -497,7 +594,7 @@ async function l8HandRenamedAndTakenAreLeftAloneAndTheSecondRunIsANoOp() {
   assert.equal(ledger.counts.skipped_name_taken, 1)
   assertValuesFree(first.body, 'L8 response', ['处理状态'])
 
-  const second = await relabel(harness, { body: { apply: true } })
+  const { applied: second } = await previewThenApply(harness)
   const again = tableOf(second, 'ledger')
   assert.equal(second.body.data.revisionCount, 0, 'L8: the second run wrote nothing')
   assert.equal(second.body.data.totals.renamed, 0)
@@ -514,10 +611,10 @@ async function l8HandRenamedAndTakenAreLeftAloneAndTheSecondRunIsANoOp() {
 // ── L9 ────────────────────────────────────────────────────────────────────────────────────────
 
 async function l9ResponsesAreValuesFree() {
+  setSwitch('true')
   const harness = mount({ tables: [MAIN, LEDGER, SANDBOX] }, { packs: { 'factory-a': sandboxPack() } })
-  const dry = await relabel(harness)
-  assertValuesFree(dry.body, 'L9 dry run')
-  const applied = await relabel(harness, { body: { apply: true } })
+  const { preview, applied } = await previewThenApply(harness)
+  assertValuesFree(preview.body, 'L9 dry run')
   assertValuesFree(applied.body, 'L9 apply')
 }
 
@@ -525,17 +622,19 @@ async function l9ResponsesAreValuesFree() {
 
 async function l10AnOldHostIsNotImplemented() {
   const harness = mount({ withRelabel: false })
-  const res = await relabel(harness, { body: { apply: true } })
+  const res = await relabel(harness)
   assert.equal(res.statusCode, 501)
   assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_API_UNAVAILABLE')
   assert.equal(harness.host.hostCallCount(), 0)
 }
 
-async function l11AnUnknownHostStatusIsRefused() {
-  const harness = mount({ badStatus: true })
-  const res = await relabel(harness)
-  assert.equal(res.statusCode, 502)
-  assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_HOST_ANSWER_INVALID')
+async function l11AnUnknownHostAnswerIsRefused() {
+  for (const options of [{ badStatus: true }, { noDigest: true }]) {
+    const harness = mount(options)
+    const res = await relabel(harness)
+    assert.equal(res.statusCode, 502, JSON.stringify(options))
+    assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_HOST_ANSWER_INVALID')
+  }
 }
 
 // ── L12 ───────────────────────────────────────────────────────────────────────────────────────
@@ -551,20 +650,178 @@ function l12TheRouteIsRegisteredOnceAndGatedOnStockPrepAdmin() {
   assert.match(body, /resolveVerifiedClaimTenantId\(req, \{\}\)/, 'L12: the tenant is the verified claim')
 }
 
+// ── L13 ───────────────────────────────────────────────────────────────────────────────────────
+
+async function l13TheModuleWritesOnlyOnExactlyTrue() {
+  const env = { [MANAGED_TABLE_RELABEL_ENABLED_ENV]: 'true' }
+  for (const apply of [undefined, null, 'true', 1, {}]) {
+    const host = createHost()
+    const result = await runStockPreparationManagedTableRelabel({ provisioning: host.provisioning, projectId: STAGING_PROJECT_ID, apply, planDigest: `sha256:${'a'.repeat(64)}`, env })
+    assert.equal(result.mode, 'dry_run', `L13: apply=${JSON.stringify(apply)} is a dry run`)
+    assert.ok(host.calls.relabel.every((call) => call.apply === false), `L13: apply=${JSON.stringify(apply)} reached the host as apply:false`)
+    assert.equal(host.revisions(), 0)
+  }
+  setSwitch('true')
+  const host = createHost()
+  const plan = await runStockPreparationManagedTableRelabel({ provisioning: host.provisioning, projectId: STAGING_PROJECT_ID, env })
+  const result = await runStockPreparationManagedTableRelabel({ provisioning: host.provisioning, projectId: STAGING_PROJECT_ID, apply: true, planDigest: plan.planDigest, env })
+  assert.equal(result.mode, 'apply')
+  assert.ok(host.revisions() > 0)
+}
+
+// ── S3 — THE OPERATOR SWITCH ──────────────────────────────────────────────────────────────────
+
+async function s3TheWriteIsDefaultOff() {
+  for (const value of [undefined, 'TRUE', '1', ' true', 'yes']) {
+    setSwitch(value)
+    const harness = mount()
+    const dry = await relabel(harness)
+    assert.equal(dry.statusCode, 200, `S3: the dry run works with the switch at ${JSON.stringify(value)}`)
+    assert.equal(dry.body.data.applyEnabled, false, `S3: switch ${JSON.stringify(value)} reports applyEnabled:false`)
+    assert.equal(dry.body.data.enableWith, 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED')
+    const callsBefore = harness.host.hostCallCount()
+    const res = await relabel(harness, { body: { apply: true, planDigest: dry.body.data.planDigest } })
+    assert.equal(res.statusCode, 409, `S3: apply with switch ${JSON.stringify(value)} is refused`)
+    assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_APPLY_DISABLED')
+    assert.equal(harness.host.hostCallCount(), callsBefore, 'S3: a disabled server asks the host NOTHING on apply')
+    assert.equal(harness.host.revisions(), 0)
+    assert.equal(harness.host.state.get(LEDGER).columns.get('status'), 'Status')
+    assertValuesFree(res.body, 'S3 refusal')
+  }
+  setSwitch('true')
+  const harness = mount()
+  const { applied } = await previewThenApply(harness)
+  assert.equal(applied.statusCode, 200, 'S3: exactly "true" applies')
+  assert.equal(harness.host.state.get(LEDGER).columns.get('status'), '状态')
+}
+
+function s3TheSwitchIsOneNameInThreePlaces() {
+  assert.equal(MANAGED_TABLE_RELABEL_ENABLED_ENV, 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED')
+  const hostSource = fs.readFileSync(path.join(REPO, 'packages', 'core-backend', 'src', 'multitable', 'object-display-name-relabel.ts'), 'utf8')
+  assert.ok(hostSource.includes(`MANAGED_TABLE_RELABEL_ENABLED_ENV = '${MANAGED_TABLE_RELABEL_ENABLED_ENV}'`), 'S3: the host reads the same switch')
+  assert.ok(hostSource.includes(`=== 'true'`), 'S3: the host compares against the exact literal')
+  const manifest = fs.readFileSync(path.join(REPO, 'scripts', 'ops', 'global-history-flag-manifest.mjs'), 'utf8')
+  assert.ok(manifest.includes(`key: '${MANAGED_TABLE_RELABEL_ENABLED_ENV}'`), 'S3: the switch is registered in the flag manifest')
+}
+
+// The plan-digest SHAPE lives once on the plugin side (the route imports the module's constant — no
+// second literal in http-routes.cjs) and once in the host, which a CJS plugin cannot import; the host
+// copy is pinned byte-equal here so the two can never accept different digests.
+function s1TheDigestShapeIsOneConstant() {
+  assert.equal(String(PLAN_DIGEST_PATTERN), '/^sha256:[0-9a-f]{64}$/')
+  const routes = fs.readFileSync(path.join(LIB, 'http-routes.cjs'), 'utf8')
+  assert.equal(routes.includes('sha256:[0-9a-f]{64}'), false, 'S1: http-routes.cjs carries no private copy of the digest pattern')
+  assert.ok(routes.includes('PLAN_DIGEST_PATTERN: MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN'), 'S1: the route imports the module constant')
+  const hostSource = fs.readFileSync(path.join(REPO, 'packages', 'core-backend', 'src', 'multitable', 'object-display-name-relabel.ts'), 'utf8')
+  assert.ok(hostSource.includes(`RELABEL_PLAN_DIGEST_PATTERN = ${String(PLAN_DIGEST_PATTERN)}`), 'S1: the host pattern is byte-equal to the plugin one')
+}
+
+// ── S1 — PREVIEW == APPLY ─────────────────────────────────────────────────────────────────────
+
+async function s1AStaleDigestIsRefusedBeforeAnyWrite() {
+  setSwitch('true')
+  const harness = mount()
+  const preview = await relabel(harness)
+  // After the preview a person renames a column back to English: the apply would now do MORE.
+  harness.host.rename(LEDGER, 'status', '随手改的')
+  const stalePreview = await relabel(harness)
+  assert.notEqual(stalePreview.body.data.planDigest, preview.body.data.planDigest, 'S1: the digest moves when what would be written moves')
+  const res = await relabel(harness, { body: { apply: true, planDigest: preview.body.data.planDigest } })
+  assert.equal(res.statusCode, 409)
+  assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_PLAN_CHANGED')
+  assert.equal(res.body.error.details.stage, 'preview')
+  assert.equal(res.body.error.details.tablesApplied, 0)
+  assert.deepEqual(harness.host.applyCalls(), [], 'S1: not one host write')
+  assert.equal(harness.host.revisions(), 0)
+}
+
+async function s1AMoveBetweenRePlanAndLockedWriteIsRefusedByTheHost() {
+  setSwitch('true')
+  const harness = mount()
+  const preview = await relabel(harness)
+  // MAIN is applied first; just before the LEDGER's locked write, the ledger moves.
+  let applies = 0
+  const original = harness.host.provisioning.relabelObjectDisplayNames
+  harness.host.provisioning.relabelObjectDisplayNames = async (input) => {
+    if (input.apply === true) {
+      applies += 1
+      if (applies === 2) harness.host.rename(LEDGER, 'notes', '别人刚改的')
+    }
+    return original(input)
+  }
+  const res = await relabel(harness, { body: { apply: true, planDigest: preview.body.data.planDigest } })
+  assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+  assert.equal(res.body.error.code, 'MANAGED_TABLE_RELABEL_PLAN_CHANGED')
+  assert.equal(res.body.error.details.stage, 'apply')
+  assert.equal(res.body.error.details.tablesApplied, 1, 'S1: the admin is told one table was already committed')
+  assert.equal(harness.host.state.get(LEDGER).columns.get('status'), 'Status', 'S1: the moved table was not written at all')
+  assertValuesFree(res.body, 'S1 refusal')
+}
+
+async function s1TwoSandboxesWithTheSameDefaultNameCannotBothTakeIt() {
+  setSwitch('true')
+  const harness = mount({ tables: [MAIN, LEDGER, SANDBOX, SANDBOX_2] }, { sandboxAllowlist: [SANDBOX, SANDBOX_2] })
+  const { preview, applied } = await previewThenApply(harness)
+  assert.equal(tableOf(preview, 'sandbox', 0).sheetName.status, 'would_rename')
+  assert.equal(tableOf(preview, 'sandbox', 1).sheetName.status, 'skipped_name_taken', 'S1: the PREVIEW already shows the second sandbox skipped')
+  const secondCall = harness.host.calls.relabel.find((call) => call.objectId === SANDBOX_2 && call.apply === false)
+  // Every sheet name an EARLIER table of the same base is about to take — main, ledger and the first
+  // sandbox — so no later table can preview a rename onto any of them.
+  assert.deepEqual(secondCall.takenSheetNames, ['备料主表', '备料确认账本', '备料主表(沙箱)'], 'S1: the second sandbox was told what the earlier tables take')
+  assert.equal(applied.statusCode, 200, JSON.stringify(applied.body))
+  assert.equal(tableOf(applied, 'sandbox', 1).sheetName.status, 'skipped_name_taken')
+  assert.equal(harness.host.state.get(SANDBOX).sheetName, '备料主表(沙箱)')
+  assert.equal(harness.host.state.get(SANDBOX_2).sheetName, 'PLM Stock Preparation Sandbox', 'S1: never two tables with one name')
+  // …while the second sandbox's COLUMNS still went through.
+  assert.equal(harness.host.state.get(SANDBOX_2).columns.get('projectNo'), '项目号')
+}
+
+// ── N2 / N6 — write-leg conflicts are stable 409s, never an opaque 500 ────────────────────────
+
+async function n2n6WriteLegConflictsAreStable409s() {
+  setSwitch('true')
+  const cases = [
+    { error: Object.assign(new Error('Sheet is temporarily locked for writes by a recovery operation'), { name: 'SheetWriterBlockedError', code: 'SHEET_WRITER_BLOCKED' }), code: 'RECOVERY_IN_PROGRESS' },
+    { error: Object.assign(new Error('deadlock detected'), { code: '40P01' }), code: 'MANAGED_TABLE_RELABEL_CONCURRENT_CHANGE' },
+  ]
+  for (const entry of cases) {
+    const harness = mount()
+    const preview = await relabel(harness)
+    harness.host.failNextApply(entry.error)
+    const res = await relabel(harness, { body: { apply: true, planDigest: preview.body.data.planDigest } })
+    assert.equal(res.statusCode, 409, `${entry.code}: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, entry.code)
+    assert.equal(res.body.error.details.tablesApplied, 0)
+    assertValuesFree(res.body, `${entry.code} refusal`)
+  }
+}
+
 async function main() {
-  await l1NonAdminTiersAreRefusedBeforeAnyHostCall()
-  await l2AdminTiersPassTheGate()
-  await l3DryRunIsTheDefaultAndApplyWrites()
-  await l4TheRequestCannotSteerOrSmuggle()
-  await l5TheProjectIsTheVerifiedTenantsStagingProject()
-  await l6TargetsAreServerHeldAndTemplateNamed()
-  await l7AbsentAndUnregisteredTablesAreReportedNotGuessed()
-  await l8HandRenamedAndTakenAreLeftAloneAndTheSecondRunIsANoOp()
-  await l9ResponsesAreValuesFree()
-  await l10AnOldHostIsNotImplemented()
-  await l11AnUnknownHostStatusIsRefused()
-  l12TheRouteIsRegisteredOnceAndGatedOnStockPrepAdmin()
-  await l13TheModuleWritesOnlyOnExactlyTrue()
+  const snapshot = process.env[MANAGED_TABLE_RELABEL_ENABLED_ENV]
+  try {
+    await l1NonAdminTiersAreRefusedBeforeAnyHostCall()
+    await l2AdminTiersPassTheGate()
+    await l3DryRunIsTheDefaultAndApplyIsBoundToIt()
+    await l4TheRequestCannotSteerOrSmuggle()
+    await l5TheProjectIsTheVerifiedTenantsStagingProject()
+    await l6TargetsAreServerHeldAndTemplateNamed()
+    await l7AbsentAndUnregisteredTablesAreReportedNotGuessed()
+    await l8HandRenamedAndTakenAreLeftAloneAndTheSecondRunIsANoOp()
+    await l9ResponsesAreValuesFree()
+    await l10AnOldHostIsNotImplemented()
+    await l11AnUnknownHostAnswerIsRefused()
+    l12TheRouteIsRegisteredOnceAndGatedOnStockPrepAdmin()
+    await l13TheModuleWritesOnlyOnExactlyTrue()
+    await s3TheWriteIsDefaultOff()
+    s3TheSwitchIsOneNameInThreePlaces()
+    s1TheDigestShapeIsOneConstant()
+    await s1AStaleDigestIsRefusedBeforeAnyWrite()
+    await s1AMoveBetweenRePlanAndLockedWriteIsRefusedByTheHost()
+    await s1TwoSandboxesWithTheSameDefaultNameCannotBothTakeIt()
+    await n2n6WriteLegConflictsAreStable409s()
+  } finally {
+    setSwitch(snapshot)
+  }
   console.log('stock-preparation-managed-table-relabel tests passed')
 }
 

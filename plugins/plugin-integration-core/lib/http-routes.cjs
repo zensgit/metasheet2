@@ -116,9 +116,10 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
   // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): relabel the managed tables that ALREADY
-  // exist from their English template labels to the Chinese ones — dry run unless `apply: true`,
-  // compare-and-set, one config-history row per rename. stock-prep:admin (platform admin passes too);
-  // tenant from the VERIFIED claim only. See stock-preparation-managed-table-relabel.cjs.
+  // exist from their English template labels to the Chinese ones — dry run unless `apply: true` +
+  // the preview's `planDigest`, compare-and-set, one config-history row per rename; the write leg is
+  // default OFF (MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED). stock-prep:admin (platform admin passes
+  // too); tenant from the VERIFIED claim only. See stock-preparation-managed-table-relabel.cjs.
   ['POST', '/api/integration/stock-preparation/managed-tables/relabel-zh', 'stockPreparationManagedTableRelabel'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
@@ -476,6 +477,8 @@ const {
 // 「把系统表的英文表头改成中文」: the compare-and-set relabel of the managed tables that already exist.
 const {
   runStockPreparationManagedTableRelabel,
+  // The ONE plan-digest shape, shared with the module rather than copied here.
+  PLAN_DIGEST_PATTERN: MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN,
 } = require('./stock-preparation-managed-table-relabel.cjs')
 // SOURCE PREFLIGHT + TOPOLOGY SELF-TEST: the other half of "is this ready" — the CUSTOMER'S source
 // rather than this deployment. It measures reachability, business-data presence, WHICH bridge the
@@ -2261,12 +2264,16 @@ function stockPreparationTargetWriteInput(req, rawInput = {}) {
   }
 }
 
-// 「把系统表的英文表头改成中文」 — the relabel request carries ONE optional key, `apply`, and it must be
-// a real boolean: a string "true" or a 1 is refused rather than coerced, so the one bit that decides
-// whether anything is written cannot be produced by accident. The tables, the target names and the
-// project are all server-derived, so any other body key and ANY query key is a steering attempt and
-// is refused before the host is asked anything.
-const VALID_MANAGED_TABLE_RELABEL_BODY_KEYS = new Set(['apply'])
+// 「把系统表的英文表头改成中文」 — the relabel request has exactly TWO legal shapes:
+//   {}                                  the dry run (also `{ apply: false }`)
+//   { apply: true, planDigest: 'sha256:<64 hex>' }   the apply of THAT preview
+// `apply` must be a real boolean (a string "true" or a 1 is refused rather than coerced), a digest
+// without `apply: true` is refused, and `apply: true` without a well-formed digest is refused — so
+// the one bit that decides whether anything is written cannot be produced by accident, and cannot be
+// produced at all without having looked at a preview. The tables, the target names and the project
+// are all server-derived, so any other body key and ANY query key is a steering attempt and is
+// refused before the host is asked anything.
+const VALID_MANAGED_TABLE_RELABEL_BODY_KEYS = new Set(['apply', 'planDigest'])
 
 function normalizeManagedTableRelabelRequest(req) {
   const body = requestBody(req)
@@ -2285,7 +2292,15 @@ function normalizeManagedTableRelabelRequest(req) {
   if (Object.prototype.hasOwnProperty.call(body, 'apply') && typeof body.apply !== 'boolean') {
     throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply must be a boolean', { field: 'apply' })
   }
-  return { apply: body.apply === true }
+  const apply = body.apply === true
+  const hasDigest = Object.prototype.hasOwnProperty.call(body, 'planDigest')
+  if (hasDigest && !apply) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'planDigest is only accepted together with apply: true', { field: 'planDigest' })
+  }
+  if (apply && (typeof body.planDigest !== 'string' || !MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN.test(body.planDigest))) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply requires the planDigest of the preview being confirmed', { field: 'planDigest' })
+  }
+  return { apply, planDigest: apply ? body.planDigest : null }
 }
 
 function stockPreparationTargetInput(req, rawInput = {}) {
@@ -7113,9 +7128,12 @@ function requireStockPreparationAudit() {
     },
 
     // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a). DRY RUN unless the body says
-    // `apply: true`; either way the host evaluates the SAME compare-and-set plan against the live
-    // tables, and on apply writes one config-history row per rename (the audit trail lives in the
-    // sheet's own config history, revertible there).
+    // `apply: true` AND carries the `planDigest` of the preview being confirmed; the apply recomputes
+    // the plan and refuses (409 MANAGED_TABLE_RELABEL_PLAN_CHANGED) if it moved. The write leg is
+    // DEFAULT OFF behind MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED (exactly 'true'); off, it answers
+    // 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED before asking the host anything, and the dry run keeps
+    // working and says `applyEnabled: false`. Every rename writes one config-history row: FIELD
+    // renames are revertible there, SHEET renames are recorded but not revertible there.
     //
     // GATE: stock-prep:admin — the workbench-scoped ceiling the 数据来源与体检 page this control
     // lives on is already gated on (canOpenStockPrepInstallView); platform admin passes inside that
@@ -7132,11 +7150,17 @@ function requireStockPreparationAudit() {
       const tenantId = resolveVerifiedClaimTenantId(req, {})
       const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const provisioning = context && context.api && context.api.multitable ? context.api.multitable.provisioning : null
+      // The sandbox write allowlist (server config, else env) names sandbox tables too — server-held,
+      // never request-supplied, and namespace-filtered again inside the module.
+      const sandboxPolicy = resolveStockPrepApplySandboxPolicy(context && context.config)
       const result = await runStockPreparationManagedTableRelabel({
         provisioning,
         projectId,
         packCatalog: customerPackCatalog,
+        sandboxObjectIds: sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds) ? sandboxPolicy.allowedTargetObjectIds : [],
         apply: input.apply,
+        planDigest: input.planDigest,
+        env: process.env,
         // Attribution for the config-history rows (who pressed 确认). Stringified: an auth provider may
         // carry a numeric id, and dropping it to null would lose the actor on every revision.
         actorId: user && user.id !== undefined && user.id !== null && String(user.id).trim() ? String(user.id) : null,

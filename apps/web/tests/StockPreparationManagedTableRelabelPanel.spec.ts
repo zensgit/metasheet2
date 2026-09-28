@@ -8,16 +8,22 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //
 //   RL-01 R-11: the panel renders for stock-prep:admin and for a platform admin — the route's own
 //         gate — and renders NOTHING (and calls nothing) for the read / operator / integration:write
-//         tiers or a bare user
-//   RL-02 preview is a DRY RUN: it POSTs `{}` (no `apply`) with NO query string, renders the plan's
-//         English → Chinese rows, and says nothing has been changed yet
+//         tiers or a bare user; RL-01b the parent's card class falls through onto its single root
+//   RL-02 preview is a DRY RUN: it POSTs `{}` with NO query string, renders the plan's English →
+//         Chinese rows, and says nothing has been changed yet
 //   RL-03 PREVIEW → CONFIRM → APPLY: 「确认改成中文」 appears only under a dry-run plan with pending
-//         renames, and pressing it POSTs exactly `{ apply: true }` once; the applied summary replaces
-//         the confirm bar
-//   RL-04 a plan with nothing to do offers no confirm control; cancel discards a plan without applying
+//         renames AND the server switch on, and sends exactly `{ apply: true, planDigest }` of THAT
+//         preview; the applied summary replaces the confirm bar and states revertibility exactly
+//         (column renames revertible from the config history, table renames not)
+//   RL-04 nothing to do → no confirm control; cancel discards a plan without applying
 //   RL-05 a refusal renders plain words plus the error CODE — never the server message
 //   RL-06 zh and en copy both exist (the same panel under each locale)
-//   RL-07 absent / unregistered tables render their plain-language status instead of rows
+//   RL-07 absent / unregistered tables render their plain-language status instead of rows, and
+//         "absent" no longer claims there is nothing to do
+//   RL-08 SWITCH OFF: the preview renders, no confirm button, and the operator switch is named
+//   RL-09 an APPLY failure drops the stale plan — the only way on is a fresh preview (N5)
+//   RL-10 a SHEET-name clash reads differently from a COLUMN-name clash (N4)
+//   RL-11 the out-of-scope tables and the sandbox coverage are named on the page (S4)
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -50,12 +56,14 @@ import StockPreparationManagedTableRelabelPanel from '../src/components/integrat
 import { STOCK_PREPARATION_MANAGED_TABLE_RELABEL_ROUTE } from '../src/services/integration/stockPreparation/managedTableRelabel'
 
 const SERVER_MESSAGE = 'refused for tenant_secret:integration-core'
+const DIGEST = `sha256:${'d'.repeat(64)}`
+const ENABLE_WITH = 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED'
 
 function counts(overrides: Record<string, number> = {}): Record<string, number> {
   return { renamed: 0, would_rename: 0, already_target: 0, skipped_name_changed: 0, skipped_name_taken: 0, missing: 0, ...overrides }
 }
 
-function planPayload(mode: 'dry_run' | 'apply', options: { pending?: boolean } = {}): Record<string, unknown> {
+function planPayload(mode: 'dry_run' | 'apply', options: { pending?: boolean; applyEnabled?: boolean; sheetTaken?: boolean } = {}): Record<string, unknown> {
   const pending = options.pending !== false
   const live = mode === 'apply' ? 'renamed' : (pending ? 'would_rename' : 'already_target')
   const ledgerFields = [
@@ -68,13 +76,16 @@ function planPayload(mode: 'dry_run' | 'apply', options: { pending?: boolean } =
   return {
     mode,
     locale: 'zh-CN',
+    applyEnabled: options.applyEnabled !== false,
+    enableWith: ENABLE_WITH,
+    planDigest: DIGEST,
     tables: [
       { kind: 'main', objectId: 'plm_stock_preparation_main', status: 'absent', sheetName: null, fields: [], counts: counts(), revisionCount: 0 },
       {
         kind: 'ledger',
         objectId: 'plm_stock_preparation_confirmation_decision',
         status: 'present',
-        sheetName: { from: 'Stock Preparation Confirmation Decision', to: '备料确认账本', status: live },
+        sheetName: { from: 'Stock Preparation Confirmation Decision', to: '备料确认账本', status: options.sheetTaken ? 'skipped_name_taken' : live },
         fields: ledgerFields,
         counts: counts(),
         revisionCount: mode === 'apply' ? 2 : 0,
@@ -84,6 +95,10 @@ function planPayload(mode: 'dry_run' | 'apply', options: { pending?: boolean } =
     totals: counts(pending ? { [totalsKey]: 2, skipped_name_changed: 1, skipped_name_taken: 1, already_target: 1 } : { already_target: 5 }),
     revisionCount: mode === 'apply' ? 2 : 0,
     hasPendingRenames: mode === 'dry_run' && pending,
+    outOfScope: [
+      { objectId: 'plm_stock_preparation_bom_snapshot_batch', label: 'PLM BOM Snapshot Batch' },
+      { objectId: 'plm_stock_preparation_bom_snapshot_line', label: 'PLM BOM Snapshot Line' },
+    ],
   }
 }
 
@@ -200,18 +215,20 @@ describe('「把系统表的英文表头改成中文」 panel', () => {
     expect(rows.some((row) => row.includes('Conflict Type'))).toBe(false)
     expect(node(root, 'stock-prep-relabel-already')!.textContent).toContain('1')
     expect(node(root, 'stock-prep-relabel-confirm-bar')).not.toBeNull()
+    expect(node(root, 'stock-prep-relabel-apply-disabled')).toBeNull()
   })
 
-  it('RL-03 preview → confirm → apply sends exactly one {apply:true} and shows the applied summary', async () => {
+  it('RL-03 preview → confirm → apply sends exactly {apply:true, planDigest} of that preview and states revertibility exactly', async () => {
     const root = await mountPanel()
     await click(root, 'stock-prep-relabel-preview')
     await click(root, 'stock-prep-relabel-apply')
-    expect(calls.map((call) => call.body)).toEqual([{}, { apply: true }])
+    expect(calls.map((call) => call.body)).toEqual([{}, { apply: true, planDigest: DIGEST }])
     expect(calls.every((call) => call.url === STOCK_PREPARATION_MANAGED_TABLE_RELABEL_ROUTE && call.method === 'POST')).toBe(true)
     const summary = node(root, 'stock-prep-relabel-summary')!
     expect(summary.dataset.mode).toBe('apply')
     expect(summary.textContent).toContain('已改好 2 处')
-    expect(summary.textContent).toContain('配置历史')
+    expect(summary.textContent).toContain('列名改动可以在那里撤回')
+    expect(summary.textContent).toContain('表名改动会记录,但不能从那里撤回')
     expect(node(root, 'stock-prep-relabel-confirm-bar')).toBeNull()
     expect(node(root, 'stock-prep-relabel-apply')).toBeNull()
   })
@@ -243,15 +260,6 @@ describe('「把系统表的英文表头改成中文」 panel', () => {
     expect(root.innerHTML).not.toContain(SERVER_MESSAGE)
     expect(root.innerHTML).not.toContain('tenant_secret')
     expect(node(root, 'stock-prep-relabel-apply')).toBeNull()
-
-    app!.unmount()
-    app = null
-    installRoutes({ apply: () => refusal(500, 'INTERNAL_ERROR') })
-    const partial = await mountPanel()
-    await click(partial, 'stock-prep-relabel-preview')
-    await click(partial, 'stock-prep-relabel-apply')
-    expect(node(partial, 'stock-prep-relabel-error')!.textContent).toContain('不会被重复改动')
-    expect(partial.innerHTML).not.toContain(SERVER_MESSAGE)
   })
 
   it('RL-06 the same panel speaks English under the en locale', async () => {
@@ -264,15 +272,74 @@ describe('「把系统表的英文表头改成中文」 panel', () => {
     expect(root.textContent).not.toContain('将改成中文')
   })
 
-  it('RL-07 absent and unregistered tables say so in words instead of listing rows', async () => {
+  it('RL-07 absent and unregistered tables say so in words instead of listing rows — and "absent" does not claim nothing is needed', async () => {
     const root = await mountPanel()
     await click(root, 'stock-prep-relabel-preview')
     const main = root.querySelector('[data-testid="stock-prep-relabel-table"][data-kind="main"]') as HTMLElement
     expect(main.dataset.status).toBe('absent')
-    expect(main.textContent).toContain('还没有这张表')
+    expect(main.textContent).toContain('当前登录的租户下没有找到这张表')
+    expect(main.textContent).not.toContain('无需处理')
     const sandbox = root.querySelector('[data-testid="stock-prep-relabel-table"][data-kind="sandbox"]') as HTMLElement
     expect(sandbox.dataset.status).toBe('scope_unavailable')
     expect(sandbox.textContent).toContain('为安全起见不动它')
     expect(sandbox.querySelector('[data-testid="stock-prep-relabel-row"]')).toBeNull()
+  })
+
+  it('RL-08 SWITCH OFF: the preview renders, no confirm button is offered, and the operator switch is named', async () => {
+    installRoutes({ preview: () => envelope(planPayload('dry_run', { applyEnabled: false })) })
+    const root = await mountPanel()
+    expect(node(root, 'stock-prep-relabel-switch-note')!.textContent).toContain('运维')
+    await click(root, 'stock-prep-relabel-preview')
+    expect(node(root, 'stock-prep-relabel-summary')!.textContent).toContain('还没有改动任何东西')
+    expect(node(root, 'stock-prep-relabel-apply')).toBeNull()
+    expect(node(root, 'stock-prep-relabel-confirm-bar')).toBeNull()
+    const disabled = node(root, 'stock-prep-relabel-apply-disabled')!
+    expect(disabled.textContent).toContain('改名开关还没有打开')
+    expect(node(root, 'stock-prep-relabel-enable-with')!.textContent).toBe(`${ENABLE_WITH}=true`)
+    expect(calls.map((call) => call.body)).toEqual([{}])
+  })
+
+  it('RL-09 an APPLY failure drops the stale plan — only a fresh preview can lead to another apply', async () => {
+    for (const [status, code, words] of [
+      [409, 'MANAGED_TABLE_RELABEL_PLAN_CHANGED', '请重新预览'],
+      [409, 'MANAGED_TABLE_RELABEL_APPLY_DISABLED', '改名开关没有打开'],
+      [409, 'RECOVERY_IN_PROGRESS', '正被其他操作占用'],
+      [500, 'INTERNAL_ERROR', '不会被重复改动'],
+    ] as const) {
+      installRoutes({ apply: () => refusal(status, code) })
+      const root = await mountPanel()
+      await click(root, 'stock-prep-relabel-preview')
+      await click(root, 'stock-prep-relabel-apply')
+      expect(node(root, 'stock-prep-relabel-error')!.textContent, code).toContain(words)
+      expect(node(root, 'stock-prep-relabel-error')!.textContent).toContain(code)
+      expect(node(root, 'stock-prep-relabel-summary'), `${code}: the stale plan is gone`).toBeNull()
+      expect(node(root, 'stock-prep-relabel-apply'), `${code}: no confirm without a fresh preview`).toBeNull()
+      expect(root.innerHTML).not.toContain(SERVER_MESSAGE)
+      app!.unmount()
+      app = null
+    }
+  })
+
+  it('RL-10 a SHEET-name clash reads differently from a COLUMN-name clash', async () => {
+    installRoutes({ preview: () => envelope(planPayload('dry_run', { sheetTaken: true })) })
+    const root = await mountPanel()
+    await click(root, 'stock-prep-relabel-preview')
+    const sheetRow = root.querySelector('[data-testid="stock-prep-relabel-row"][data-entity="sheet"]') as HTMLElement
+    const columnRow = [...root.querySelectorAll('[data-testid="stock-prep-relabel-row"][data-entity="field"]')]
+      .find((row) => row.getAttribute('data-status') === 'skipped_name_taken') as HTMLElement
+    expect(sheetRow.dataset.status).toBe('skipped_name_taken')
+    expect(sheetRow.textContent).toContain('同名的表')
+    expect(columnRow.textContent).toContain('同名列')
+    expect(sheetRow.textContent).not.toContain('同名列')
+  })
+
+  it('RL-11 the out-of-scope tables and the sandbox coverage are named on the page', async () => {
+    const root = await mountPanel()
+    await click(root, 'stock-prep-relabel-preview')
+    const scope = node(root, 'stock-prep-relabel-out-of-scope')!
+    expect(scope.textContent).toContain('还没有约定的中文名')
+    const labels = [...root.querySelectorAll('[data-testid="stock-prep-relabel-out-of-scope-row"]')].map((row) => row.textContent)
+    expect(labels).toEqual(['PLM BOM Snapshot Batch', 'PLM BOM Snapshot Line'])
+    expect(node(root, 'stock-prep-relabel-sandbox-coverage')!.textContent).toContain('沙箱写入白名单')
   })
 })

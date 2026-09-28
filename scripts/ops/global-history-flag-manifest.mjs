@@ -622,6 +622,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "客户反馈 2026-09-24 #4c (ruling PR #6074): the instance business timezone multitable date-times are DISPLAYED and PARSED in on the web — never the browser's local zone. Storage is unchanged (UTC instants); only the wall clock a person sees/types changes. Echoed as `businessTimezone` on GET /api/multitable/context and /form-context; a dateTime field's own non-UTC property.timezone still wins. Not a gate: nothing turns on or off, and the default (Asia/Shanghai) is the intended state for a China deployment, so leaving it unset needs no action. An invalid value is logged once (without echoing it) and falls back to the default.",
     source: 'packages/core-backend/src/multitable/business-timezone.ts#resolveMultitableBusinessTimezone',
   },
+  {
+    key: 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "客户反馈 2026-09-24 #4a: operator switch for the WRITE leg of the managed-table display-name relabel (「把系统表的英文表头改成中文」, stock-prep 数据来源与体检). Default OFF; exact literal 'true' only (no trim, no case folding). Off: the dry run still works (it writes nothing), the plugin route answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED, and the host primitive itself refuses the write leg (409 MULTITABLE_RELABEL_APPLY_DISABLED) before any statement — enforced at the one place that writes, not only in the route. On: stock-prep:admin (or platform admin) may rename still-English managed-table columns and sheet names to their template Chinese names, compare-and-set, only after a preview whose planDigest the apply must match. Danger=medium: it renames the customer's production managed tables (field renames are revertible from the config history; sheet renames are recorded but not revertible there), and while an apply runs, record inserts to that sheet wait for it to commit.",
+    source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
+  },
 ])
 
 /** Flat lookup by key, built once. */

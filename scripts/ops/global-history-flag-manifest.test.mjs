@@ -131,6 +131,13 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
+  // 客户反馈 2026-09-24 #4a (managed-table zh relabel, multitable/object-display-name-relabel.ts): four
+  // ERROR CODES of the relabel primitive's typed refusals. Nobody reads them from process.env. The one
+  // real flag of that module, MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED, is registered in the manifest.
+  'MULTITABLE_RELABEL_INPUT_INVALID', // malformed relabel request (400), not a flag
+  'MULTITABLE_RELABEL_SCOPE_FORBIDDEN', // object not bound to the caller's project in the registry (403), not a flag
+  'MULTITABLE_RELABEL_APPLY_DISABLED', // write leg refused because the operator switch is off (409), not a flag
+  'MULTITABLE_RELABEL_PLAN_CHANGED', // write leg refused because the plan differs from the preview (409), not a flag
   // DingTalk todo-mirror (plan B, #5772/#5768): the CHECK-constraint status vocabulary constant
   // (migration zzzz20260916120000), not an env var — nobody reads it from process.env. The two real
   // flags, DINGTALK_TODO_MIRROR_ENABLED and DINGTALK_TODO_MIRROR_INTERVAL_MS, are registered in the

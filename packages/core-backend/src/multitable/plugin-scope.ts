@@ -493,7 +493,9 @@ export function createPluginScopedMultitableApi(
                 objectId,
                 sheetName: input.sheetName,
                 fields: input.fields,
+                takenSheetNames: input.takenSheetNames,
                 apply: input.apply,
+                expectedPlanDigest: input.expectedPlanDigest,
                 actorId: input.actorId,
               })
             },

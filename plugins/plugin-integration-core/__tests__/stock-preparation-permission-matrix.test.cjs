@@ -1032,6 +1032,26 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   for (const code of STOCK_PREP_PERMISSION_CODES) {
     assert.ok(migration.includes(`'${code}'`), `M-08: the migration seeds ${code}`)
   }
+  // The ADMIN description gained the relabel write scope; the seed is ON CONFLICT DO NOTHING, so a
+  // compare-and-set migration carries it to existing rows. Its AFTER text must be the descriptor's,
+  // byte for byte, and its BEFORE text must be exactly what the seed wrote — otherwise the CAS would
+  // match nothing and the role editor would keep describing a read-only tier.
+  const adminDescriptor = STOCK_PREP_PERMISSION_DESCRIPTORS.find((descriptor) => descriptor.code === STOCK_PREP_ADMIN)
+  const descriptionMigration = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'packages', 'core-backend', 'src', 'db', 'migrations', 'zzzz20260927120000_update_stock_prep_admin_permission_description.ts'),
+    'utf8',
+  )
+  assert.ok(
+    descriptionMigration.includes(`'${adminDescriptor.description}'`),
+    'M-08: the description migration writes exactly the ADMIN descriptor text',
+  )
+  const seededAdminDescription = (migration.match(/\('stock-prep:admin', 'Stock Prep Admin', '([^']+)'\)/) || [])[1]
+  assert.ok(seededAdminDescription, 'M-08: the seed row for stock-prep:admin is readable')
+  assert.ok(
+    descriptionMigration.includes(`'${seededAdminDescription}'`),
+    'M-08: the description migration compare-and-sets FROM exactly the seeded text',
+  )
+  assert.match(adminDescriptor.description, /relabel/, 'M-08: the ADMIN description names the relabel write scope')
   // R-11: zero holders. The migration must NOT bind any role to these codes.
   assert.ok(
     !/INSERT INTO role_permissions/.test(migration),

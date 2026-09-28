@@ -598,9 +598,15 @@ export interface MultitableProvisioningAPI {
    *
    * Renames a field (or the sheet) ONLY while its current name equals `expectedName`; a name a
    * person already changed is reported `skipped_name_changed` and left alone, and a target another
-   * field on the sheet already carries is `skipped_name_taken`. Nothing but `name` is written: the
-   * field id, type, property, order and permissions are untouched. `apply` must be exactly `true`
-   * to write; anything else is a dry run that writes nothing.
+   * field on the sheet already carries is `skipped_name_taken` (for the sheet: a sibling sheet in
+   * the same base, or a name in `takenSheetNames`). Nothing but `name` is written: the field id,
+   * type, property, order and permissions are untouched.
+   *
+   * `apply` must be exactly `true` to write; anything else is a dry run that writes nothing and
+   * answers a `planDigest`. The write leg is DEFAULT OFF — it refuses (409
+   * MULTITABLE_RELABEL_APPLY_DISABLED) unless `MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED` is exactly
+   * 'true' — and it REQUIRES `expectedPlanDigest` equal to the plan it recomputes under its own
+   * locks (409 MULTITABLE_RELABEL_PLAN_CHANGED otherwise), so nothing un-previewed is written.
    *
    * Scoped like every other write here — project namespace, then object scope — and the host
    * additionally refuses unless the plugin object registry binds the derived sheet to this very
@@ -611,7 +617,9 @@ export interface MultitableProvisioningAPI {
     objectId: string
     sheetName?: { expectedName: string; nextName: string } | null
     fields: Array<{ fieldId: string; expectedName: string; nextName: string }>
+    takenSheetNames?: string[] | null
     apply?: boolean
+    expectedPlanDigest?: string | null
     actorId?: string | null
   }): Promise<{
     present: boolean
@@ -619,6 +627,7 @@ export interface MultitableProvisioningAPI {
     sheetId: string
     sheetName: { status: MultitableRelabelDisplayNameStatus } | null
     fields: Array<{ fieldId: string; status: MultitableRelabelDisplayNameStatus }>
+    planDigest: string
     revisionCount: number
     batchId: string | null
   }>
