@@ -251,6 +251,9 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // whole-sheet delete authority (mirrors DELETE /sheets/:sheetId): a reader has none
       canDeleteSheet: false,
+      // copy-sheet S1 (ADR #6094 §3): hasFullTableReadAccess ∧ resolveBaseWritable, fail-closed like
+      // canDeleteSheet — this mock pool answers no base-write lookup, so the probe throws and the entry hides.
+      canCopySheet: false,
     })
     expect(response.body.data.capabilityOrigin).toEqual({
       source: 'global-rbac',
@@ -452,6 +455,9 @@ describe('Multitable context API', () => {
       personalViewsEnabled: false,
       // admin role = global schema authority => may delete the selected sheet
       canDeleteSheet: true,
+      // copy-sheet S1: the target gate is resolveBaseWritable (multitable:base:write OR base owner — admin
+      // ROLE alone is not consulted, ADR CS-3), and this mock pool answers no base-write lookup ⇒ false.
+      canCopySheet: false,
     })
     // Route-level contract lock for the new FE signal: flag ON + sheet-admin → pitResetEnabled true (its only true source).
     // The flag-off cases (false for both admin and non-admin) are locked by the two capabilities exact-matches above.
