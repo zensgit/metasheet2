@@ -315,6 +315,7 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.unstubAllEnvs()
   })
 
@@ -571,6 +572,7 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   it('freezes and registers over-threshold effective writes before returning an executable async token', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(new Date(EXPIRES_AT).getTime() - 60_000)
     const largeTarget = new Map(
       Array.from({ length: 5001 }, (_, index) => [
         `record-${index}`,
@@ -635,6 +637,27 @@ describe('Time Machine recovery archive preview authority', () => {
         },
       }),
     )
+
+    now.mockReturnValue(new Date(EXPIRES_AT).getTime() + 1_000)
+    dependencies.prepareMaterializedArchiveRecoveryPreviewScopeInternal.mockReturnValueOnce({
+      ok: true,
+      anchorTarget: largeTarget,
+      targetRecords,
+      liveById,
+    })
+    dependencies.buildPreviewPlanDetails.mockReturnValueOnce({
+      summary: summary({ effectiveWriteCount: 5001 }),
+      plan: { reverts: [], resurrects: [], createdAfterAnchor: [], deletedAtAnchorLiveNow: [] },
+      revertWrites: [],
+      deleteRecordIds: [],
+    })
+    await expect(previewRecoveryArchive(
+      makeTransaction(fixture.query, { inTransaction: false }),
+      fixture.query,
+      runtime,
+      makeInput(),
+    )).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND' })
+    expect(dependencies.prepareRecoveryArchiveRestorePlan).toHaveBeenCalledTimes(1)
   })
 
   it('keeps a 5001-record scope on sync when only one record is an effective write', async () => {
