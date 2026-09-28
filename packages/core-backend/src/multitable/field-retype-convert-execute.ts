@@ -36,7 +36,8 @@ import {
   type FieldRetypeConvertTargetType,
   type FieldRetypeConvertTrashCell,
 } from './field-retype-convert'
-import { resolveFieldRetypeConvertManagedSheetReason } from './field-retype-convert-preview'
+import type { FieldRetypeConvertGateRefusal } from './field-retype-convert-gates'
+import { FIELD_RETYPE_CONVERT_CELL_COLUMNS, resolveFieldRetypeConvertManagedSheetReason } from './field-retype-convert-preview'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevisionsBatch, type RecordRevisionInput } from './record-history-service'
 import { resolveSheetRevertMaxRecords } from './restore-caps'
@@ -81,6 +82,21 @@ export interface FieldRetypeConvertFailure {
   message: string
   details?: Record<string, unknown>
 }
+
+/**
+ * 事务内的权限复核（ADR 增补 B）。调用方给出的回调必须**从数据库**重新解析请求者此刻的能力、用事务自己的 `query`，
+ * 再过门 ③ ④ ⑤ 的同一个判定（field-retype-convert-gates.ts）。返回 null = 通过。
+ *
+ * 为什么要有：事务外的门读的是请求里带的能力（凭证里有权限 claim 时不问库）。对只读的预览这可以接受；对改写一整列的
+ * 执行 / 撤销不行——权限在库里被收回之后，一张没过期的凭证不该还能改数据。复核排在栅栏之后、第一把行锁之前：
+ * 栅栏把本事务与同表的其它写入者串行，复核读到的就是提交时刻生效的授权。
+ */
+export type FieldRetypeConvertAuthorize = (query: FieldRetypeConvertQuery) => Promise<FieldRetypeConvertGateRefusal | null>
+
+/** 三种结局：成功；门拒绝（由路由用与事务外同一个应答函数发出）；其它拒绝。后两种都是零写入。 */
+export type FieldRetypeConvertRefused =
+  | { ok: false; gate: FieldRetypeConvertGateRefusal; failure?: undefined }
+  | { ok: false; failure: FieldRetypeConvertFailure; gate?: undefined }
 
 const MESSAGES = {
   fieldNotFound: 'Field not found',
@@ -180,6 +196,7 @@ interface LockedLiveRow {
   recordId: string
   version: number
   data: Record<string, unknown>
+  dataIsObject: boolean
   hasKey: boolean
   value: unknown
 }
@@ -230,18 +247,20 @@ async function countScanRows(query: FieldRetypeConvertQuery, sheetId: string): P
 }
 
 /**
- * 范围内 live 行 `FOR UPDATE`。`has_key` / `cell` 两个表达式与预览的读法逐字相同（field-retype-convert-preview.ts），
- * 所以同一行在预览与执行里得到同一个单元格哈希；另取整行 `data`，写后快照要用。无 `ORDER BY`：次序由码元比较器在内存里定。
+ * 范围内 live 行 `FOR UPDATE`。三个按行表达式（is_object / has_key / cell）**就是**预览用的那一份文本
+ * （FIELD_RETYPE_CONVERT_CELL_COLUMNS，field-retype-convert-preview.ts），所以同一行在预览与执行里读出同一个结果、
+ * 得到同一个单元格哈希；另取整行 `data`，写后快照要用。无 `ORDER BY`：次序由码元比较器在内存里定。
  */
 async function lockLiveRows(query: FieldRetypeConvertQuery, sheetId: string, fieldId: string): Promise<LockedLiveRow[]> {
   const res = await query(
-    'SELECT id, version, data, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records WHERE sheet_id = $1 FOR UPDATE',
+    `SELECT id, version, data, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR UPDATE`,
     [sheetId, fieldId],
   )
-  return (res.rows as Array<{ id?: unknown; version?: unknown; data?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
+  return (res.rows as Array<{ id?: unknown; version?: unknown; data?: unknown; is_object?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
     recordId: String(row.id),
     version: Number(row.version ?? 0),
     data: asObject(row.data),
+    dataIsObject: toBool(row.is_object),
     hasKey: toBool(row.has_key),
     value: row.cell === undefined ? null : row.cell,
   }))
@@ -277,6 +296,8 @@ export interface ExecuteFieldRetypeConvertInput {
   /** 路由的 `mapFieldType` / `normalizeJson`：与预览用同一份实现，planHash 才可比。 */
   mapFieldType: (rawStoredType: string) => string
   normalizeProperty: (rawStoredProperty: unknown) => Record<string, unknown>
+  /** 栅栏之后、从数据库重新解析的门 ③ ④ ⑤。 */
+  authorize: FieldRetypeConvertAuthorize
   env?: NodeJS.ProcessEnv
 }
 
@@ -296,7 +317,7 @@ export interface ExecuteFieldRetypeConvertResult {
 
 export type ExecuteFieldRetypeConvertOutcome =
   | { ok: true; result: ExecuteFieldRetypeConvertResult }
-  | { ok: false; failure: FieldRetypeConvertFailure }
+  | FieldRetypeConvertRefused
 
 /**
  * 一次转换，一个事务。次序锁定（ADR §3.4-3.7）：
@@ -312,6 +333,10 @@ export async function executeFieldRetypeConvert(
   const env = input.env ?? process.env
 
   await enterFence(query, sheetId)
+
+  // 门 ③ ④ ⑤，从数据库重新解析（增补 B）：栅栏之后、第一把行锁之前。
+  const gate = await input.authorize(query)
+  if (gate) return { ok: false, gate }
 
   const fieldRes = await query(
     'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1 FOR UPDATE',
@@ -335,11 +360,12 @@ export async function executeFieldRetypeConvert(
 
   const liveRows = await lockLiveRows(query, sheetId, fieldId)
   const trashRes = await query(
-    'SELECT record_id, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records_trash WHERE sheet_id = $1 FOR UPDATE',
+    `SELECT record_id, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records_trash WHERE sheet_id = $1 FOR UPDATE`,
     [sheetId, fieldId],
   )
-  const trash: FieldRetypeConvertTrashCell[] = (trashRes.rows as Array<{ record_id?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
+  const trash: FieldRetypeConvertTrashCell[] = (trashRes.rows as Array<{ record_id?: unknown; is_object?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
     recordId: String(row.record_id),
+    dataIsObject: toBool(row.is_object),
     hasKey: toBool(row.has_key),
     value: row.cell === undefined ? null : row.cell,
   }))
@@ -347,7 +373,7 @@ export async function executeFieldRetypeConvert(
 
   // 重算计划与 planHash（栅栏与行锁之下），再把凭证整体校验一遍：claims 与事务外那次相同，planHash 是新的。
   const sourceProperty = input.normalizeProperty(fieldRow.property)
-  const live: FieldRetypeConvertLiveCell[] = liveRows.map((row) => ({ recordId: row.recordId, version: row.version, hasKey: row.hasKey, value: row.value }))
+  const live: FieldRetypeConvertLiveCell[] = liveRows.map((row) => ({ recordId: row.recordId, version: row.version, dataIsObject: row.dataIsObject, hasKey: row.hasKey, value: row.value }))
   const plan = planFieldRetypeConvert({ sourceProperty, targetType, live, trash })
   const planHash = hashFieldRetypeConvertPlan(
     canonicalFieldRetypeConvertPlanInput({ sheetId, fieldId, sourceType: 'string', sourceProperty, plan }),
@@ -364,7 +390,9 @@ export async function executeFieldRetypeConvert(
     if (verdict.reason === 'plan_drift') return { ok: false, failure: { status: 409, code: FIELD_RETYPE_PLAN_DRIFT_CODE, message: MESSAGES.planDrift } }
     return { ok: false, failure: fieldRetypeConvertIdentityInvalid(verdict.reason) }
   }
-  // 凭证只为 verdict=ok 的计划签发。哈希相同即输入相同，这里不该到得了；到了就按漂移拒，绝不执行一份被拒的计划。
+  // 凭证只为 verdict=ok 的计划签发，但**哈希相同不等于计划仍然可执行**：行的 `data` 从 `{}` 变成 `[]`（不再是 JSON 对象）时，
+  // 单元格照样读成「缺键」、哈希不变，而计划已是 rejected（record_data_not_object）。绝不执行一份被拒的计划——按漂移拒，
+  // 重新预览会列出是哪些行。
   if (plan.verdict !== 'ok') return { ok: false, failure: { status: 409, code: FIELD_RETYPE_PLAN_DRIFT_CODE, message: MESSAGES.planDrift } }
 
   // ── 以下开始写 ──────────────────────────────────────────────────────────────────────────────────────
@@ -505,6 +533,8 @@ export interface UndoFieldRetypeConvertInput {
   fieldId: string
   convertRevisionId: string
   historyActorId: string | null
+  /** 栅栏之后、从数据库重新解析的门 ③ ④ ⑤。 */
+  authorize: FieldRetypeConvertAuthorize
   env?: NodeJS.ProcessEnv
 }
 
@@ -521,7 +551,7 @@ export interface UndoFieldRetypeConvertResult {
 
 export type UndoFieldRetypeConvertOutcome =
   | { ok: true; result: UndoFieldRetypeConvertResult }
-  | { ok: false; failure: FieldRetypeConvertFailure }
+  | FieldRetypeConvertRefused
 
 function sortedIds(ids: Iterable<string>): string[] {
   return [...new Set(ids)].sort(compareCodeUnits)
@@ -557,6 +587,10 @@ export async function undoFieldRetypeConvert(
   const env = input.env ?? process.env
 
   await enterFence(query, sheetId)
+
+  // 门 ③ ④ ⑤，从数据库重新解析（增补 B）：栅栏之后、第一把行锁之前。
+  const gate = await input.authorize(query)
+  if (gate) return { ok: false, gate }
 
   // 表级的两条先行（都不读任何记录、不取行锁），判定表 0-③ 随后连续执行：
   //   托管表并集（栅栏下复核）——转换之后表被插件登记 / 成了管线 staging 表，撤销同样不碰它；

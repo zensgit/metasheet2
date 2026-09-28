@@ -104,23 +104,36 @@ export async function countFieldRetypeConvertScanRows(
   return { live, trash }
 }
 
+/**
+ * 每一行读的三个表达式，预览与执行事务**共用这一份文本**（field-retype-convert-execute.ts 直接拼它），所以同一行在两处
+ * 读出同一个结果、得到同一个单元格哈希：
+ *   - `is_object`：`jsonb_typeof(data) = 'object'`。不是对象的行让整次转换被拒（fail-closed），不当空格读；
+ *   - `has_key`：`data ? F`；
+ *   - `cell`：`data -> F`。
+ * `$2` 是字段 id。
+ */
+export const FIELD_RETYPE_CONVERT_CELL_COLUMNS =
+  "(jsonb_typeof(data) = 'object') AS is_object, (data ? $2::text) AS has_key, data -> $2::text AS cell"
+
 function toBool(value: unknown): boolean {
   return value === true || value === 't' || value === 'true'
 }
 
-/** 本表 live 行的目标列：只取 `data ? F` 与 `data -> F`（不取整行 data），外加 version。无 `ORDER BY`（见文件头）。 */
+/** 本表 live 行的目标列：只取 FIELD_RETYPE_CONVERT_CELL_COLUMNS 的三个表达式（不取整行 data），外加 version。无 `ORDER BY`（见文件头）。 */
 export async function loadFieldRetypeConvertLiveCells(
   query: FieldRetypeConvertQueryFn,
   sheetId: string,
   fieldId: string,
 ): Promise<FieldRetypeConvertLiveCell[]> {
   const res = await query(
-    'SELECT id, version, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records WHERE sheet_id = $1',
+    `SELECT id, version, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1`,
     [sheetId, fieldId],
   )
-  return (res.rows as Array<{ id?: unknown; version?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
+  return (res.rows as Array<{ id?: unknown; version?: unknown; is_object?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
     recordId: String(row.id),
     version: Number(row.version ?? 0),
+    // a row that does not SAY it is an object is not treated as one
+    dataIsObject: toBool(row.is_object),
     hasKey: toBool(row.has_key),
     value: row.cell === undefined ? null : row.cell,
   }))
@@ -135,15 +148,16 @@ export async function loadFieldRetypeConvertTrashCells(
   let res: { rows: unknown[] }
   try {
     res = await query(
-      'SELECT record_id, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records_trash WHERE sheet_id = $1',
+      `SELECT record_id, ${FIELD_RETYPE_CONVERT_CELL_COLUMNS} FROM meta_records_trash WHERE sheet_id = $1`,
       [sheetId, fieldId],
     )
   } catch (err) {
     if (!isUndefinedTableError(err, 'meta_records_trash')) throw err
     return []
   }
-  return (res.rows as Array<{ record_id?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
+  return (res.rows as Array<{ record_id?: unknown; is_object?: unknown; has_key?: unknown; cell?: unknown }>).map((row) => ({
     recordId: String(row.record_id),
+    dataIsObject: toBool(row.is_object),
     hasKey: toBool(row.has_key),
     value: row.cell === undefined ? null : row.cell,
   }))

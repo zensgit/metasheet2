@@ -1,20 +1,29 @@
 /**
  * A TABLE-AWARE in-memory Postgres double for the field retype CONVERT execute / undo path
- * (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §3).
+ * (ADR docs/development/multitable-field-retype-first-batch-adr-20260926.md §3 + addendum B).
  *
  * Why it exists: the unit lane has no database, and the guarantees of this path — every refusal before the first
- * write, pre-image before rewrite, all-or-nothing, the locked order of the undo — are only provable by RUNNING the
- * transaction. The real-DB cases (tests/integration/multitable-field-retype-convert-realdb.cases.ts) execute in CI
- * only; this double lets the unit lane run the SAME product code and lets the removal of any guard turn a test red.
+ * write, pre-image before rewrite, all-or-nothing, the locked order of the undo, authority re-read from the database
+ * under the fence — are only provable by RUNNING the transaction. The real-DB cases
+ * (tests/integration/multitable-field-retype-convert-realdb.cases.ts) execute in CI only; this double lets the unit
+ * lane run the SAME product code and lets the removal of any guard turn a test red.
  *
  * What it is NOT: a SQL engine. Each statement the product issues is matched by SHAPE (substring on the
  * whitespace-normalised text) and evaluated against plain row arrays.
  *   - Inside a transaction an unrecognised statement THROWS (`Unhandled SQL in fake`), so a new statement in the
  *     product cannot pass by accident.
- *   - On the pool (the gates' capability / permission probes) an unrecognised statement answers zero rows — those
- *     probes belong to modules this double does not model, and "no grant, no mask, no rule" is the plain world.
+ *   - On the pool an unrecognised statement answers zero rows: those are probes of modules this double does not
+ *     model, and "no grant, no mask, no rule" is the plain world.
  * A predicate is evaluated only where the product's SQL writes it: the double never adds a filter the statement did
- * not ask for.
+ * not ask for. A row read REQUIRES the sheet filter in the text AND the sheet id in `params[0]`; without both it
+ * answers nothing, so a statement that lost its `WHERE sheet_id = $1` cannot be fed another sheet's rows.
+ *
+ * jsonb semantics are Postgres's, not JavaScript's: `data ? k` is "a top-level key of an object, an element of an
+ * array, or the string scalar itself"; `data -> k` is NULL unless `data` is an object that has the key; `jsonb_set`
+ * on anything but an object raises.
+ *
+ * Two authorities, kept apart on purpose: the permissions a REQUEST carries (the test's `req.user.perms`) and the
+ * permissions the DATABASE holds (`dbUsers`). A test revokes in the database and keeps the token.
  *
  * Transactions: `transaction(handler)` snapshots every table, runs the handler, and RESTORES the snapshot when the
  * handler throws — a rollback exactly as strong as the assertion that uses it.
@@ -33,8 +42,9 @@ export interface FakeSheet {
   recovery_writer_state: string | null
 }
 export interface FakeField { id: string; sheet_id: string; name: string; type: string; property: unknown; order: number }
-export interface FakeRecord { id: string; sheet_id: string; version: number; data: Record<string, unknown> }
-export interface FakeTrash { record_id: string; sheet_id: string; data: Record<string, unknown> }
+/** `data` is ANY json value: a row whose data is an array or a scalar is a case the product must refuse. */
+export interface FakeRecord { id: string; sheet_id: string; version: number; data: unknown }
+export interface FakeTrash { record_id: string; sheet_id: string; data: unknown }
 export interface FakeTombstone { sheet_id: string; field_id: string; record_id: string; value: unknown; reason: string; config_revision_id: string; operation_id: null }
 export interface FakeConversion {
   convert_revision_id: string
@@ -49,6 +59,9 @@ export interface FakeConversion {
   undone_at: string | null
   undo_revision_id: string | null
 }
+/** What the DATABASE says about a user — independent of whatever the request's token claims. */
+export interface FakeDbUser { role: string; is_active: boolean; permissions: string[]; roleIds: string[] }
+export interface FakeFieldPermission { sheet_id: string; field_id: string; subject_type: 'user' | 'role' | 'member-group'; subject_id: string; visible: boolean; read_only: boolean }
 
 export interface FakeWorld {
   sheets: FakeSheet[]
@@ -67,6 +80,9 @@ export interface FakeWorld {
   approvalProjection: Set<string>
   /** the conversions table exists (migration applied) */
   conversionsTable: boolean
+  /** database-side authority, keyed by user id; a user absent here does not exist in the database */
+  dbUsers: Record<string, FakeDbUser>
+  fieldPermissions: FakeFieldPermission[]
 }
 
 export interface FakePgOptions {
@@ -82,11 +98,25 @@ export function emptyWorld(): FakeWorld {
     recordRevisions: [], configRevisions: [], audit: [], operations: [],
     pluginRegistry: new Set(), pipelineStaging: new Set(), approvalProjection: new Set(),
     conversionsTable: true,
+    dbUsers: {},
+    fieldPermissions: [],
   }
 }
 
+/** A database user holding `permissions` directly (user_permissions rows), active, no role. */
+export function dbUser(permissions: string[], over: Partial<FakeDbUser> = {}): FakeDbUser {
+  return { role: 'user', is_active: true, permissions: [...permissions], roleIds: [], ...over }
+}
+
 const normalize = (sql: string): string => sql.replace(/\s+/g, ' ').trim()
-const has = (data: Record<string, unknown>, key: string): boolean => Object.prototype.hasOwnProperty.call(data, key)
+const hasOwn = (data: object, key: string): boolean => Object.prototype.hasOwnProperty.call(data, key)
+
+const isJsonObject = (data: unknown): data is Record<string, unknown> => data !== null && typeof data === 'object' && !Array.isArray(data)
+/** jsonb `data ? key` */
+const jsonbExists = (data: unknown, key: string): boolean =>
+  isJsonObject(data) ? hasOwn(data, key) : Array.isArray(data) ? data.includes(key) : data === key
+/** jsonb `data -> key` with a text key; `undefined` stands for SQL NULL */
+const jsonbGet = (data: unknown, key: string): unknown => (isJsonObject(data) && hasOwn(data, key) ? data[key] : undefined)
 
 /** jsonb `=`: key order irrelevant, arrays ordered, scalars by value. */
 export function jsonbEquals(a: unknown, b: unknown): boolean {
@@ -110,6 +140,7 @@ function jsonbTypeof(value: unknown): string {
 
 function clone<T>(value: T): T {
   if (value instanceof Set) return new Set(value) as unknown as T
+  if (value === undefined) return value
   return JSON.parse(JSON.stringify(value)) as T
 }
 
@@ -120,14 +151,27 @@ function snapshotWorld(world: FakeWorld): FakeWorld {
     configRevisions: clone(world.configRevisions), audit: clone(world.audit), operations: clone(world.operations),
     pluginRegistry: clone(world.pluginRegistry), pipelineStaging: clone(world.pipelineStaging), approvalProjection: clone(world.approvalProjection),
     conversionsTable: world.conversionsTable,
+    dbUsers: clone(world.dbUsers),
+    fieldPermissions: clone(world.fieldPermissions),
   }
 }
+
+/**
+ * Tables the capability resolvers probe and this double does not model: they are EMPTY here (no sheet grant, no view
+ * or record permission, no formula dependency, no member group), in a transaction as on the pool.
+ */
+const EMPTY_AUTHORITY_TABLES = [
+  'spreadsheet_permissions', 'view_permissions', 'meta_view_permissions', 'record_permissions',
+  'formula_dependencies', 'platform_member_group_members', 'meta_views',
+]
+
+const CELL_COLUMNS = "(jsonb_typeof(data) = 'object') AS is_object, (data ? $2::text) AS has_key, data -> $2::text AS cell"
 
 export class FieldRetypeConvertFakePg {
   world: FakeWorld
   /** every statement, in order */
   readonly statements: FakeStatement[] = []
-  /** advisory-lock keys taken, per transaction */
+  /** advisory-lock keys taken */
   readonly fences: string[] = []
   transactions = 0
   committed = 0
@@ -174,6 +218,11 @@ export class FieldRetypeConvertFakePg {
     return { rows, rowCount: rows.length }
   }
 
+  private cellRow(data: unknown, key: string): FakeRow {
+    const value = jsonbGet(data, key)
+    return { is_object: isJsonObject(data), has_key: jsonbExists(data, key), cell: value === undefined ? null : clone(value) }
+  }
+
   private evaluate(sql: string, p: unknown[], inTransaction: boolean): FakeRow[] {
     const w = this.world
 
@@ -187,6 +236,31 @@ export class FieldRetypeConvertFakePg {
       return w.sheets.filter((s) => s.id === p[0]).map((s) => ({ recovery_writer_state: s.recovery_writer_state }))
     }
     if (sql.includes("to_regclass('meta_field_retype_conversions')")) return [{ present: w.conversionsTable }]
+
+    // ── database-side authority (recovery-authorization-stability.ts loadDatabaseFreshRecoveryAccess) ────
+    if (sql.startsWith('SELECT role, permissions, COALESCE(is_active, TRUE) AS is_active') && sql.includes('FROM users WHERE id = $1')) {
+      const user = w.dbUsers[String(p[0])]
+      if (!user) return []
+      return [{ role: user.role, permissions: [], is_active: user.is_active, rbac_admin: user.roleIds.includes('admin') }]
+    }
+    if (sql.startsWith('SELECT DISTINCT permission_code AS code FROM') && sql.includes('FROM user_permissions WHERE user_id = $1')) {
+      const user = w.dbUsers[String(p[0])]
+      return user ? [...new Set(user.permissions)].map((code) => ({ code })) : []
+    }
+    if (sql.includes('FROM field_permissions fp') && sql.includes('WHERE fp.sheet_id = $2')) {
+      const user = w.dbUsers[String(p[0])]
+      return w.fieldPermissions
+        .filter((fp) => fp.sheet_id === p[1])
+        .filter((fp) => (fp.subject_type === 'user' && fp.subject_id === p[0]) || (fp.subject_type === 'role' && (user?.roleIds ?? []).includes(fp.subject_id)))
+        .map((fp) => ({ field_id: fp.field_id, visible: fp.visible, read_only: fp.read_only }))
+    }
+    for (const table of EMPTY_AUTHORITY_TABLES) {
+      if (new RegExp(`\\bFROM ${table}\\b`).test(sql)) return []
+    }
+    if (/\bFROM user_roles\b/.test(sql)) {
+      const user = w.dbUsers[String(p[0])]
+      return (user?.roleIds ?? []).map((role_id) => ({ role_id }))
+    }
 
     // ── managed-sheet union ────────────────────────────────────────────────────────────────────────────
     if (sql.includes('FROM plugin_multitable_object_registry')) return w.pluginRegistry.has(String(p[0])) ? [{ '?column?': 1 }] : []
@@ -228,7 +302,7 @@ export class FieldRetypeConvertFakePg {
       }
       return payload.map((item) => ({ record_id: item.record_id }))
     }
-    if (sql.startsWith('SELECT record_id, value FROM meta_field_value_tombstones WHERE config_revision_id = $1::uuid AND reason = \'retype_convert\' AND field_id = $2 AND sheet_id = $3 FOR UPDATE')) {
+    if (sql.startsWith("SELECT record_id, value FROM meta_field_value_tombstones WHERE config_revision_id = $1::uuid AND reason = 'retype_convert' AND field_id = $2 AND sheet_id = $3 FOR UPDATE")) {
       return this.preImages(p[0], p[1], p[2]).map((t) => ({ record_id: t.record_id, value: clone(t.value) }))
     }
 
@@ -269,35 +343,45 @@ export class FieldRetypeConvertFakePg {
         system_kind: s.system_kind,
       }))
     }
+    if (sql.includes('FROM meta_sheets WHERE id = ANY($1::text[])')) {
+      const ids = Array.isArray(p[0]) ? p[0].map(String) : []
+      return w.sheets
+        .filter((s) => ids.includes(s.id))
+        .filter((s) => (sql.includes('AND base_id = $2') ? s.base_id === p[1] : true))
+        .map((s) => ({ id: s.id, deleted_at: s.deleted_at, base_id: s.base_id }))
+    }
 
-    // ── recycle bin ────────────────────────────────────────────────────────────────────────────────────
-    if (sql.startsWith('SELECT count(*)::int AS c FROM meta_records_trash WHERE sheet_id = $1')) {
-      return [{ c: w.trash.filter((t) => t.sheet_id === p[0]).length }]
-    }
-    if (sql.includes('FROM meta_records_trash WHERE sheet_id = $1') && sql.includes('AS blocking')) {
+    // ── recycle bin — every shape REQUIRES the sheet filter and the sheet id in params[0] ────────────────
+    if (sql.includes('FROM meta_records_trash')) {
+      if (!sql.includes('FROM meta_records_trash WHERE sheet_id = $1') || typeof p[0] !== 'string') return this.unhandled(sql, inTransaction)
+      const rows = w.trash.filter((t) => t.sheet_id === p[0])
+      if (sql.startsWith('SELECT count(*)::int AS c FROM meta_records_trash WHERE sheet_id = $1')) return [{ c: rows.length }]
       const key = String(p[1])
-      return w.trash.filter((t) => t.sheet_id === p[0]).map((t) => {
-        const value = t.data[key]
-        const blocking = has(t.data, key) && !['string', 'null'].includes(jsonbTypeof(value)) && !jsonbEquals(value, [])
-        return { record_id: t.record_id, blocking }
-      })
-    }
-    if (sql.includes('FROM meta_records_trash WHERE sheet_id = $1') && sql.includes('AS has_key')) {
-      const key = String(p[1])
-      return w.trash.filter((t) => t.sheet_id === p[0]).map((t) => ({ record_id: t.record_id, has_key: has(t.data, key), cell: has(t.data, key) ? clone(t.data[key]) : null }))
+      if (sql.includes('AS blocking')) {
+        return rows.map((t) => {
+          const value = jsonbGet(t.data, key)
+          // `data -> key` NULL makes the whole conjunction NULL, which the product reads as "not blocking"
+          const blocking = jsonbExists(t.data, key) && value !== undefined && !['string', 'null'].includes(jsonbTypeof(value)) && !jsonbEquals(value, [])
+          return { record_id: t.record_id, blocking }
+        })
+      }
+      if (sql.startsWith(`SELECT record_id, ${CELL_COLUMNS} FROM meta_records_trash WHERE sheet_id = $1`)) {
+        return rows.map((t) => ({ record_id: t.record_id, ...this.cellRow(t.data, key) }))
+      }
+      return this.unhandled(sql, inTransaction)
     }
 
     // ── records ────────────────────────────────────────────────────────────────────────────────────────
     if (sql.startsWith('SELECT count(*)::int AS c FROM meta_records WHERE sheet_id = $1')) {
       return [{ c: w.records.filter((r) => r.sheet_id === p[0]).length }]
     }
-    if (sql.startsWith('SELECT id, version, data, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records WHERE sheet_id = $1 FOR UPDATE')) {
+    if (sql.startsWith(`SELECT id, version, data, ${CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1 FOR UPDATE`)) {
       const key = String(p[1])
-      return w.records.filter((r) => r.sheet_id === p[0]).map((r) => ({ id: r.id, version: r.version, data: clone(r.data), has_key: has(r.data, key), cell: has(r.data, key) ? clone(r.data[key]) : null }))
+      return w.records.filter((r) => r.sheet_id === p[0]).map((r) => ({ id: r.id, version: r.version, data: clone(r.data), ...this.cellRow(r.data, key) }))
     }
-    if (sql.startsWith('SELECT id, version, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records WHERE sheet_id = $1')) {
+    if (sql.startsWith(`SELECT id, version, ${CELL_COLUMNS} FROM meta_records WHERE sheet_id = $1`)) {
       const key = String(p[1])
-      return w.records.filter((r) => r.sheet_id === p[0]).map((r) => ({ id: r.id, version: r.version, has_key: has(r.data, key), cell: has(r.data, key) ? clone(r.data[key]) : null }))
+      return w.records.filter((r) => r.sheet_id === p[0]).map((r) => ({ id: r.id, version: r.version, ...this.cellRow(r.data, key) }))
     }
     if (sql.startsWith('UPDATE meta_records AS m SET data = jsonb_set(m.data, ARRAY[$2::text], item.post, true)') && sql.includes('jsonb_to_recordset($3::jsonb) AS item(record_id text, post jsonb)')) {
       const key = String(p[1])
@@ -307,7 +391,9 @@ export class FieldRetypeConvertFakePg {
       for (const item of payload) {
         const record = w.records.find((r) => r.sheet_id === p[0] && r.id === item.record_id)
         if (!record) continue
-        if (guarded && has(record.data, key) && jsonbEquals(record.data[key], item.post)) continue
+        const current = jsonbGet(record.data, key)
+        if (guarded && current !== undefined && jsonbEquals(current, item.post)) continue
+        if (!isJsonObject(record.data)) throw Object.assign(new Error('cannot set path in scalar'), { code: '22023' })
         record.data = { ...record.data, [key]: clone(item.post) }
         record.version += 1
         out.push({ id: record.id, version: record.version, data: clone(record.data) })
@@ -320,13 +406,13 @@ export class FieldRetypeConvertFakePg {
       for (const t of this.preImages(p[1], p[2], p[0])) {
         const record = w.records.find((r) => r.sheet_id === p[0] && r.id === t.record_id)
         if (!record) continue
+        const current = jsonbGet(record.data, key)
         const post = (t.value as { post?: unknown }).post
-        const same = has(record.data, key) && jsonbEquals(record.data[key], post)
-        if (!same) out.push({ id: record.id })
+        if (!(current !== undefined && jsonbEquals(current, post))) out.push({ id: record.id })
       }
       return out
     }
-    if (sql.startsWith('UPDATE meta_records AS m SET data = CASE WHEN (t.value -> \'k\') = \'true\'::jsonb') && sql.includes('FROM meta_field_value_tombstones t')) {
+    if (sql.startsWith("UPDATE meta_records AS m SET data = CASE WHEN (t.value -> 'k') = 'true'::jsonb") && sql.includes('FROM meta_field_value_tombstones t')) {
       const key = String(p[2])
       const guarded = sql.includes("AND NOT ((t.value -> 'k') = 'true'::jsonb AND (t.value -> 'v') = (t.value -> 'post'))")
       const out: FakeRow[] = []
@@ -336,6 +422,7 @@ export class FieldRetypeConvertFakePg {
         if (guarded && hadKey && jsonbEquals(envelope.v, envelope.post)) continue
         const record = w.records.find((r) => r.sheet_id === p[0] && r.id === t.record_id)
         if (!record) continue
+        if (!isJsonObject(record.data)) throw Object.assign(new Error('cannot set path in scalar'), { code: '22023' })
         const next = { ...record.data }
         if (hadKey) next[key] = clone(envelope.v ?? null)
         else delete next[key]
@@ -383,6 +470,10 @@ export class FieldRetypeConvertFakePg {
       return []
     }
 
+    return this.unhandled(sql, inTransaction)
+  }
+
+  private unhandled(sql: string, inTransaction: boolean): FakeRow[] {
     if (inTransaction && !this.options.permissiveTransaction) throw new Error(`Unhandled SQL in fake: ${sql}`)
     return []
   }

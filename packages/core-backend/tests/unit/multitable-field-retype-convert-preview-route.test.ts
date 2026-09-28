@@ -19,8 +19,9 @@ const FIELD = 'fld_convert_1'
 const SECRET = 'retype-preview-secret-0123456789abcdef'
 
 type FieldRow = { id: string; sheet_id: string; name: string; type: string; property: unknown; order: number }
-type RecordRow = { id: string; version: number; data: Record<string, unknown> }
-type TrashRow = { record_id: string; data: Record<string, unknown> }
+type RecordRow = { id: string; version: number; data: unknown }
+/** `sheet_id` defaults to the sheet under test; `data` may be ANY json value (a non-object row must be refused). */
+type TrashRow = { record_id: string; data: unknown; sheet_id?: string }
 
 interface World {
   sheet: { deleted_at: string | null; row_level_read_permissions_enabled: boolean; base_id: string; system_kind: string | null; description: string | null } | null
@@ -43,10 +44,22 @@ const world = (over: Partial<World> = {}): World => ({
   ...over,
 })
 
-const cellOf = (data: Record<string, unknown>, fieldId: string) => ({
-  has_key: Object.prototype.hasOwnProperty.call(data, fieldId),
-  cell: Object.prototype.hasOwnProperty.call(data, fieldId) ? data[fieldId] : null,
-})
+/**
+ * The three per-row expressions, with POSTGRES semantics rather than JavaScript ones: `data ? k` is a top-level key
+ * of an object, an element of an array, or the string scalar itself; `data -> k` is NULL unless `data` is an object
+ * holding the key.
+ */
+const cellOf = (data: unknown, fieldId: string) => {
+  const isObject = data !== null && typeof data === 'object' && !Array.isArray(data)
+  const hasKey = isObject
+    ? Object.prototype.hasOwnProperty.call(data, fieldId)
+    : Array.isArray(data) ? data.includes(fieldId) : data === fieldId
+  return {
+    is_object: isObject,
+    has_key: hasKey,
+    cell: isObject && hasKey ? (data as Record<string, unknown>)[fieldId] : null,
+  }
+}
 
 function createStore(w: World) {
   const log: string[] = []
@@ -76,8 +89,12 @@ function createStore(w: World) {
         const err = Object.assign(new Error('relation "meta_records_trash" does not exist'), { code: '42P01' })
         throw err
       }
-      if (sql.includes('count(*)')) return { rows: [{ c: w.trash.length }] }
-      return { rows: w.trash.map((t) => ({ record_id: t.record_id, ...cellOf(t.data, String(params[1])) })) }
+      // The recycle bin is answered ONLY to a statement that filters by sheet and binds the sheet id first. A reader
+      // that lost its `WHERE sheet_id = $1` — or binds something else there — gets nothing, never another sheet's rows.
+      if (!sql.includes('FROM meta_records_trash WHERE sheet_id = $1') || typeof params[0] !== 'string') return { rows: [] }
+      const mine = w.trash.filter((t) => (t.sheet_id ?? SHEET) === params[0])
+      if (sql.includes('count(*)')) return { rows: [{ c: mine.length }] }
+      return { rows: mine.map((t) => ({ record_id: t.record_id, ...cellOf(t.data, String(params[1])) })) }
     }
     if (sql.includes('FROM meta_records WHERE sheet_id = $1')) {
       if (sql.includes('count(*)')) return { rows: [{ c: w.records.length }] }
@@ -101,7 +118,9 @@ const ADMIN_PERMS = ['multitable:read', 'multitable:write', 'multitable:manage-s
  */
 type Handler = (sql: string, params?: unknown[]) => { rows: any[]; rowCount?: number }
 /** `seen` is EVERY statement the route issued (including the permission probes the handler never sees). */
-const state: { handler: Handler; perms: string[]; seen: string[] } = { handler: () => ({ rows: [] }), perms: ADMIN_PERMS, seen: [] }
+const state: { handler: Handler; perms: string[]; seen: string[]; fieldPermissions: Array<{ sheet_id: string; subject_id: string; field_id: string; visible: boolean; read_only: boolean }> } = {
+  handler: () => ({ rows: [] }), perms: ADMIN_PERMS, seen: [], fieldPermissions: [],
+}
 let transaction: ReturnType<typeof vi.fn>
 
 const pinned = usePinnedServer()
@@ -119,6 +138,13 @@ beforeAll(async () => {
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     state.seen.push(sql)
+    // per-subject field permissions of the actor on a sheet: `$1` = user id, `$2` = sheet id
+    if (sql.includes('FROM field_permissions fp') && sql.includes('WHERE fp.sheet_id = $2')) {
+      const rows = state.fieldPermissions
+        .filter((fp) => fp.sheet_id === params?.[1] && fp.subject_id === params?.[0])
+        .map((fp) => ({ field_id: fp.field_id, visible: fp.visible, read_only: fp.read_only }))
+      return { rows, rowCount: rows.length }
+    }
     if (
       sql.includes('FROM spreadsheet_permissions')
       || sql.includes('FROM field_permissions')
@@ -162,6 +188,7 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
     state.handler = () => ({ rows: [] })
     state.perms = ADMIN_PERMS
     state.seen = []
+    state.fieldPermissions = []
   })
   afterEach(() => {
     vi.unstubAllEnvs()
@@ -256,6 +283,101 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
     const withRead = await preview(w(), undefined, ['multitable:manage-schema', 'multitable:read'])
     expect(withRead.res.status).toBe(200)
     expect(withRead.res.body.data.rejections).toEqual([{ reason: 'leading_trailing_whitespace', recordCount: 1, recordIds: ['rec_trail'] }])
+  })
+
+  test('gate ORDER ③ → ④ → ⑤: a dead sheet answers 404 to a principal who would also fail ⑤, and 403 to one who fails ③', async () => {
+    const dead = () => world({
+      sheet: { deleted_at: '2026-09-01T00:00:00Z', row_level_read_permissions_enabled: true, base_id: 'base_1', system_kind: null, description: null },
+      records: [{ id: 'rec_1', version: 1, data: { [FIELD]: 'A' } }],
+    })
+    // fails ⑤ twice over (no canRead, row-level deny on) but holds ③: the answer is ④
+    const fourth = await preview(dead(), undefined, ['multitable:manage-schema'])
+    expect([fourth.res.status, fourth.res.body.error.code]).toEqual([404, 'SHEET_DELETED'])
+    // a full-permission principal on the same dead sheet: ④ as well
+    const full = await preview(dead())
+    expect([full.res.status, full.res.body.error.code]).toEqual([404, 'SHEET_DELETED'])
+    // fails ③: told nothing about the sheet being gone
+    const third = await preview(dead(), undefined, ['multitable:read', 'multitable:write'])
+    expect([third.res.status, third.res.body.error.code]).toEqual([403, 'FORBIDDEN'])
+    for (const { log, transaction } of [fourth, full, third]) {
+      expect(log.filter((sql) => SCOPE_OR_SCAN_RE.test(sql))).toEqual([])
+      expectNoWrites(log, transaction)
+    }
+  })
+
+  test('⑤ field-mask axis: a field_permissions row with visible=false for this actor ⇒ 403 FULL_TABLE_READ_REQUIRED, no scope/scan query', async () => {
+    const w = () => world({ records: [{ id: 'rec_1', version: 1, data: { [FIELD]: 'A' } }] })
+    const masked = async (fieldPermissions: typeof state.fieldPermissions) => {
+      const store = createStore(w())
+      state.handler = store.handler
+      state.perms = ADMIN_PERMS
+      state.seen = []
+      state.fieldPermissions = fieldPermissions
+      const res = await request(pinned.url()).post(`/api/multitable/fields/${FIELD}/retype-preview`).send({ targetType: 'select' })
+      return { res, log: store.log }
+    }
+    // the converted column itself is hidden from the actor
+    let { res, log } = await masked([{ sheet_id: SHEET, subject_id: 'user_convert', field_id: FIELD, visible: false, read_only: false }])
+    expect([res.status, res.body.error.code]).toEqual([403, 'FULL_TABLE_READ_REQUIRED'])
+    expect(JSON.stringify(res.body)).not.toMatch(/recordIds|cells|scanned|rec_1/)
+    expect(log.filter((sql) => SCOPE_OR_SCAN_RE.test(sql))).toEqual([])
+    expectNoWrites(log, transaction)
+    // controls: a read-only (still visible) row, a row for ANOTHER actor, a row on ANOTHER sheet — none of them masks
+    for (const row of [
+      { sheet_id: SHEET, subject_id: 'user_convert', field_id: FIELD, visible: true, read_only: true },
+      { sheet_id: SHEET, subject_id: 'user_someone_else', field_id: FIELD, visible: false, read_only: false },
+      { sheet_id: 'sheet_elsewhere', subject_id: 'user_convert', field_id: FIELD, visible: false, read_only: false },
+    ]) {
+      ;({ res, log } = await masked([row]))
+      expect([JSON.stringify(row), res.status]).toEqual([JSON.stringify(row), 200])
+    }
+  })
+
+  test('a recycle-bin row of ANOTHER sheet is not part of this sheet\'s scan: not counted, not blocking, not in the plan hash', async () => {
+    const records: RecordRow[] = [{ id: 'r1', version: 1, data: { [FIELD]: 'A' } }]
+    const hashOf = (res: request.Response) => String((jwt.verify(res.body.data.previewToken, SECRET) as Record<string, unknown>).planHash)
+    const alone = await preview(world({ records }))
+    const withForeign = await preview(world({ records, trash: [{ record_id: 't_foreign', sheet_id: 'sheet_elsewhere', data: { [FIELD]: 'a value that would block' } }] }))
+    for (const { res } of [alone, withForeign]) {
+      expect(res.status).toBe(200)
+      expect(res.body.data).toMatchObject({ verdict: 'ok', trash: { scanned: 0, blocking: 0 }, rejections: [] })
+    }
+    expect(hashOf(withForeign.res)).toBe(hashOf(alone.res))
+    expect(JSON.stringify(withForeign.res.body)).not.toContain('t_foreign')
+    // control: the same row on THIS sheet blocks
+    const own = await preview(world({ records, trash: [{ record_id: 't_own', data: { [FIELD]: 'a value that would block' } }] }))
+    expect(own.res.body.data).toMatchObject({ verdict: 'rejected', trash: { scanned: 1, blocking: 1 } })
+  })
+
+  test('a row whose data is not a JSON object rejects the whole run (record_data_not_object): listed by id, no token, values-free', async () => {
+    const shapes: unknown[] = [[], [FIELD], ["VAL-IN-ARRAY"], "VAL-SCALAR", FIELD, 7, true, null]
+    for (const shape of shapes) {
+      const { res, log, transaction } = await preview(world({
+        records: [{ id: 'r_ok', version: 1, data: { [FIELD]: 'VAL-OK' } }, { id: 'r_bad', version: 1, data: shape }],
+        trash: [{ record_id: 't_bad', data: shape }, { record_id: 't_ok', data: {} }],
+      }))
+      expect([JSON.stringify(shape), res.status]).toEqual([JSON.stringify(shape), 200])
+      expect(res.body.data).toMatchObject({
+        verdict: 'rejected', scannedRecordCount: 2, cells: { empty: 0, converted: 1, rejected: 1 }, trash: { scanned: 2, blocking: 1 },
+        rejections: [{ reason: 'record_data_not_object', recordCount: 2, recordIds: ['r_bad', 't_bad'] }],
+      })
+      expect(res.body.data.previewToken).toBeUndefined()
+      expect(JSON.stringify(res.body)).not.toMatch(/VAL-/)
+      expectNoWrites(log, transaction)
+    }
+  })
+
+  test('the fake answers the recycle bin only to a sheet-filtered statement that binds the sheet id first', () => {
+    const store = createStore(world({ trash: [{ record_id: 't1', data: { [FIELD]: 'A' } }] }))
+    const cells = 'SELECT record_id, (data ? $2::text) AS has_key FROM meta_records_trash'
+    expect(store.handler(`${cells} WHERE sheet_id = $1`, [SHEET, FIELD]).rows).toHaveLength(1)
+    expect(store.handler('SELECT count(*)::int AS c FROM meta_records_trash WHERE sheet_id = $1', [SHEET]).rows).toEqual([{ c: 1 }])
+    // no sheet filter, another sheet, the field id bound first, nothing bound
+    expect(store.handler(cells, [SHEET, FIELD]).rows).toEqual([])
+    expect(store.handler(`${cells} WHERE sheet_id = $1`, ['sheet_elsewhere', FIELD]).rows).toEqual([])
+    expect(store.handler(`${cells} WHERE sheet_id = $1`, [FIELD, SHEET]).rows).toEqual([])
+    expect(store.handler(`${cells} WHERE sheet_id = $1`, []).rows).toEqual([])
+    expect(store.handler('SELECT count(*)::int AS c FROM meta_records_trash', [SHEET]).rows).toEqual([])
   })
 
   test('unknown field ⇒ 404, values-free (the requested id is not echoed)', async () => {

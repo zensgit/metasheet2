@@ -359,6 +359,12 @@ import {
   type FieldRetypeConvertFailure,
   type FieldRetypeConvertQuery,
 } from '../multitable/field-retype-convert-execute'
+import {
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE,
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE,
+  judgeFieldRetypeConvertGates,
+  type FieldRetypeConvertGateRefusal,
+} from '../multitable/field-retype-convert-gates'
 import { isLegacyWriteImpliesManageSchemaEnabled } from '../multitable/manage-schema-permission'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
@@ -7479,6 +7485,68 @@ export async function hasFullTableReadAccess(
   // Keep the adjudicated snapshot through foreign-field/base checks; never reconstruct JWT claims.
   const masked = await maskStoredRecordFieldIds(req, query, sheetId, undefined, scoped, access)
   return masked.size === scoped.size
+}
+
+/**
+ * 字段类型转换 —— 门 ③ ④ ⑤ 的**应答**。判定在 multitable/field-retype-convert-gates.ts（只此一处），这里只把判定结果
+ * 翻成 HTTP：③ ⇒ 403 FORBIDDEN，④ ⇒ 404（SHEET_DELETED / NOT_FOUND），⑤ ⇒ 403 FULL_TABLE_READ_REQUIRED。
+ * 事务外的拒绝与事务内（数据库重新解析之后）的拒绝都从这里发出，字节相同。
+ */
+function sendFieldRetypeConvertGateRefusal(res: Response, refusal: FieldRetypeConvertGateRefusal): Response {
+  if (refusal.kind === 'forbidden') return sendForbidden(res)
+  if (refusal.kind === 'not_live') return sendSheetNotLive(res, refusal.sheetLiveness)
+  return res.status(403).json({
+    ok: false,
+    error: { code: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE, message: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE },
+  })
+}
+
+/**
+ * 字段类型转换 —— 三个端点（预览 / 执行 / 撤销）**共用**的门 ③ ④ ⑤。一个函数，三处调用，没有第二份。
+ *
+ * 它自己解析本表的能力与存活，交给 `judgeFieldRetypeConvertGates` 判（③ canManageFields → ④ 存活 → ⑤ canRead **且**
+ * 全表读），不过就**自己应答**并返回 null；调用方只需要 `if (!gate) return`。⑤ 里的 `canRead` 不能省：
+ * `hasFullTableReadAccess` 从不读它，而 `canManageFields` 单凭 `multitable:manage-schema` 即可为真。
+ *
+ * 凭的是**请求里**的能力（凭证带权限 claim 时不问库）。对预览这就是全部；执行与撤销另在事务内、栅栏之后用
+ * `authorizeFieldRetypeConvertInTransaction` 从数据库重新判一次。
+ */
+async function gateFieldRetypeConvert(
+  req: Request,
+  res: Response,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities } | null> {
+  const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+  const refusal = await judgeFieldRetypeConvertGates({
+    capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, access, capabilities),
+  })
+  if (refusal) {
+    sendFieldRetypeConvertGateRefusal(res, refusal)
+    return null
+  }
+  return { access, capabilities }
+}
+
+/**
+ * 执行 / 撤销事务内的权限复核（ADR 增补 B）：栅栏之后，用**事务自己的** `query`，从数据库重新解析请求者此刻的能力，
+ * 再过同一个判定。能力取「请求 claim ∩ 数据库」（`resolveRecoverySheetAuthority`，与精确锚点恢复同一个解析器）：
+ * 库里已收回的权限不会因为凭证还没过期而留着，凭证里没有的权限也不会因为库里有而多出来。存活同样在事务内重读。
+ */
+async function authorizeFieldRetypeConvertInTransaction(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<FieldRetypeConvertGateRefusal | null> {
+  const authority = await resolveRecoverySheetAuthority(req, query, sheetId)
+  const sheetLiveness = await loadSheetLiveness(query, sheetId)
+  return judgeFieldRetypeConvertGates({
+    capabilities: authority.capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, authority.access, authority.capabilities),
+  })
 }
 
 /** One APPLIED revert's internal post-commit facts; patch never serializes into HTTP. */
@@ -14637,16 +14705,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
       }
       const sheetId = String(fieldRow.sheet_id ?? '')
-      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
-      // ③ schema authority — the PATCH /fields/:fieldId gate, verbatim.
-      if (!capabilities.canManageFields) return sendForbidden(res)
-      // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
-      // ⑤ full-table read — whole-surface 403, no scoped counts, no undisclosed marker. canRead is checked HERE,
-      // explicitly: hasFullTableReadAccess never reads it, and canManageFields holds on multitable:manage-schema alone.
-      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
-        return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
-      }
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
 
       // Scope (422, first hit): the pair, then the managed-sheet union (a)-(e).
       const rawType = fieldRow.type
@@ -14802,16 +14865,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
       }
       const sheetId = String(fieldRow.sheet_id ?? '')
-      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
-      // ③ schema authority — the PATCH /fields/:fieldId gate, verbatim.
-      if (!capabilities.canManageFields) return sendForbidden(res)
-      // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
-      // ⑤ full-table read — canRead is checked HERE, explicitly: hasFullTableReadAccess never reads it, and
-      // canManageFields holds on multitable:manage-schema alone.
-      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
-        return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
-      }
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
       // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
       const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
       if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
@@ -14839,8 +14897,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         targetType,
         mapFieldType,
         normalizeProperty: normalizeJson,
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
       }))
-      if (outcome.ok === false) return sendFieldRetypeConvertFailure(res, outcome.failure)
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
 
       const { result } = outcome
       invalidateFieldCache(sheetId)
@@ -14886,16 +14947,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
       }
       const sheetId = String(fieldRow.sheet_id ?? '')
-      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
-      // ③ schema authority — the PATCH /fields/:fieldId gate, verbatim.
-      if (!capabilities.canManageFields) return sendForbidden(res)
-      // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
-      // ⑤ full-table read — canRead is checked HERE, explicitly: hasFullTableReadAccess never reads it, and
-      // canManageFields holds on multitable:manage-schema alone.
-      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
-        return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
-      }
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
       // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
       const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
       if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
@@ -14910,8 +14965,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         fieldId,
         convertRevisionId: parsed.data.convertRevisionId.toLowerCase(),
         historyActorId: getRequestActorId(req),
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
       }))
-      if (outcome.ok === false) return sendFieldRetypeConvertFailure(res, outcome.failure)
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
 
       const { result } = outcome
       invalidateFieldCache(sheetId)

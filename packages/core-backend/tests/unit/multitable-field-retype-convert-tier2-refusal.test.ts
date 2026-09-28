@@ -18,7 +18,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { emptyWorld, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
+import { dbUser, emptyWorld, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET = 'sheet_tier2_1'
@@ -38,6 +38,7 @@ function world(): FakeWorld {
       { id: URL_FIELD, sheet_id: SHEET, name: 'Link', type: 'url', property: {}, order: 1 },
     ],
     records: [{ id: 'r1', sheet_id: SHEET, version: 1, data: { [FIELD]: '机密-ALPHA' } }],
+    dbUsers: { [ACTOR]: dbUser(PERMS) },
   }
 }
 

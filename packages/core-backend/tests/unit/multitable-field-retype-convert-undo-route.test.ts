@@ -13,7 +13,7 @@ import express from 'express'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
+import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET = 'sheet_undo_1'
@@ -42,6 +42,8 @@ function world(records: Array<[string, Record<string, unknown>]> = SEED, over: P
       { id: OTHER_FIELD, sheet_id: SHEET, name: 'Other', type: 'string', property: {}, order: 1 },
     ],
     records: records.map(([id, data]) => ({ id, sheet_id: SHEET, version: 1, data })),
+    // the DATABASE agrees with the token unless a test says otherwise
+    dbUsers: { [ACTOR]: dbUser(ADMIN_PERMS) },
     ...over,
   }
 }
@@ -205,6 +207,76 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     await expectRefused(arranged, () => undo(body), { status: 404, code: 'SHEET_DELETED', newTransactions: 0 })
     arranged.pg.world.sheets[0].deleted_at = null
     expect((await undo(body)).status).toBe(200)
+  })
+
+  test('gate ORDER ③ → ④ → ⑤: a dead sheet answers 404 to a principal who would also fail ⑤, and 403 to one who fails ③', async () => {
+    const arranged = await converted()
+    const body = { convertRevisionId: arranged.id, confirm: CONFIRM }
+    arranged.pg.world.sheets[0].deleted_at = '2026-09-01T00:00:00Z'
+    arranged.pg.world.sheets[0].row_level_read_permissions_enabled = true
+    state.perms = ['multitable:manage-schema']
+    await expectRefused(arranged, () => undo(body), { status: 404, code: 'SHEET_DELETED', newTransactions: 0 })
+    state.perms = ['multitable:read', 'multitable:write']
+    await expectRefused(arranged, () => undo(body), { status: 403, code: 'FORBIDDEN', newTransactions: 0 })
+  })
+
+  test('⑤ field-mask axis: a field_permissions row hiding a column from this actor ⇒ 403 FULL_TABLE_READ_REQUIRED, no transaction', async () => {
+    const arranged = await converted()
+    arranged.pg.world.fieldPermissions.push({ sheet_id: SHEET, field_id: OTHER_FIELD, subject_type: 'user', subject_id: ACTOR, visible: false, read_only: false })
+    await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status: 403, code: 'FULL_TABLE_READ_REQUIRED', newTransactions: 0 })
+    arranged.pg.world.fieldPermissions = [{ sheet_id: SHEET, field_id: OTHER_FIELD, subject_type: 'user', subject_id: ACTOR, visible: true, read_only: true }]
+    expect((await undo({ convertRevisionId: arranged.id, confirm: CONFIRM })).status).toBe(200)
+  })
+
+  // ── authority freshness (ADR addendum B): re-read from the DATABASE, in the transaction, after the fence ──
+  test('a permission revoked in the database after the conversion ⇒ the undo refuses in the transaction, zero writes, the job row never locked', async () => {
+    const revocations: Array<[string, (w: FakeWorld) => void, number, string]> = [
+      ['manage-schema revoked', (w) => { w.dbUsers[ACTOR] = dbUser(['multitable:read', 'multitable:write']) }, 403, 'FORBIDDEN'],
+      ['read and write revoked, manage-schema kept', (w) => { w.dbUsers[ACTOR] = dbUser(['multitable:manage-schema']) }, 403, 'FULL_TABLE_READ_REQUIRED'],
+      ['the account deactivated', (w) => { w.dbUsers[ACTOR] = dbUser(ADMIN_PERMS, { is_active: false }) }, 403, 'FORBIDDEN'],
+      ['the account removed', (w) => { delete w.dbUsers[ACTOR] }, 403, 'FORBIDDEN'],
+    ]
+    for (const [label, revoke, status, code] of revocations) {
+      const arranged = await converted()
+      revoke(arranged.pg.world)
+      const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status, code, newTransactions: 1 })
+      expect(state.perms).toEqual(ADMIN_PERMS)
+      expect([label, issued[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
+      expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      // granted again ⇒ the same request undoes
+      arranged.pg.world.dbUsers[ACTOR] = dbUser(ADMIN_PERMS)
+      expect([label, (await undo({ convertRevisionId: arranged.id, confirm: CONFIRM })).status]).toEqual([label, 200])
+      yjsInvalidated.length = 0
+    }
+  })
+
+  test('revoked, deleted or masked while the request is already past its pool-side gates ⇒ refused under the fence', async () => {
+    const changes: Array<[string, (w: FakeWorld) => void, number, string]> = [
+      ['manage-schema revoked', (w) => { w.dbUsers[ACTOR] = dbUser(['multitable:read', 'multitable:write']) }, 403, 'FORBIDDEN'],
+      ['the sheet was deleted', (w) => { w.sheets[0].deleted_at = '2026-09-28T00:00:00Z' }, 404, 'SHEET_DELETED'],
+      ['row-level read deny was switched on', (w) => { w.sheets[0].row_level_read_permissions_enabled = true }, 403, 'FULL_TABLE_READ_REQUIRED'],
+    ]
+    for (const [label, change, status, code] of changes) {
+      const arranged = await converted()
+      const from = arranged.pg.statements.length
+      state.hook = (statement, w) => {
+        if (statement.inTransaction && statement.sql.includes('pg_advisory_xact_lock') && arranged.pg.statements.length >= from) change(w)
+      }
+      const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), { status, code, newTransactions: 1 })
+      state.hook = undefined
+      expect([label, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+    }
+  })
+
+  test('a live row that is no longer a JSON object reads as a changed cell: refused, never restored into', async () => {
+    for (const shape of [[], [FIELD], 'text', 7, null]) {
+      const arranged = await converted()
+      arranged.pg.world.records[2].data = shape
+      await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), {
+        status: 409, code: 'UNDO_PRECONDITION_FAILED', newTransactions: 1,
+        details: { reason: 'cells_changed', recordCount: 1, recordIds: ['r3'] },
+      })
+    }
   })
 
   test('managed-sheet union ⇒ 422 before the confirm is looked at, no transaction', async () => {

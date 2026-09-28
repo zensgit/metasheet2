@@ -13,7 +13,7 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
-import { emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
+import { dbUser, emptyWorld, FAKE_LOCK_RE, FAKE_WRITE_RE, FieldRetypeConvertFakePg, type FakePgOptions, type FakeWorld } from '../utils/field-retype-convert-fake-pg'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const SHEET = 'sheet_exec_1'
@@ -37,6 +37,8 @@ function world(records: Array<[string, Record<string, unknown>, number?]> = [['r
       { id: OTHER_FIELD, sheet_id: SHEET, name: 'Other', type: 'string', property: {}, order: 1 },
     ],
     records: records.map(([id, data, version]) => ({ id, sheet_id: SHEET, version: version ?? 1, data })),
+    // the DATABASE agrees with the token unless a test says otherwise
+    dbUsers: { [ACTOR]: dbUser(ADMIN_PERMS), user_other: dbUser(ADMIN_PERMS) },
     ...over,
   }
 }
@@ -224,6 +226,137 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status: 403, code: 'FULL_TABLE_READ_REQUIRED', transactions: 0 }, {
       between: (pg) => { pg.world.sheets[0].row_level_read_permissions_enabled = true },
     })
+  })
+
+  test('gate ORDER ③ → ④ → ⑤: a dead sheet answers 404 to a principal who would also fail ⑤, and 403 to one who fails ③', async () => {
+    const kill = (pg: FieldRetypeConvertFakePg) => {
+      pg.world.sheets[0].deleted_at = '2026-09-01T00:00:00Z'
+      pg.world.sheets[0].row_level_read_permissions_enabled = true
+    }
+    await expectRefused(world(), async (token) => {
+      state.perms = ['multitable:manage-schema'] // holds ③, fails ⑤ twice over (no canRead, row-level deny)
+      return execute({ previewToken: token, confirm: CONFIRM })
+    }, { status: 404, code: 'SHEET_DELETED', transactions: 0 }, { between: kill })
+    state.perms = ADMIN_PERMS // the token of the next case is minted by a full-permission preview
+    await expectRefused(world(), async (token) => {
+      state.perms = ['multitable:read', 'multitable:write'] // fails ③: told nothing about the sheet being gone
+      return execute({ previewToken: token, confirm: CONFIRM })
+    }, { status: 403, code: 'FORBIDDEN', transactions: 0 }, { between: kill })
+  })
+
+  test('⑤ field-mask axis: a field_permissions row hiding a column from this actor ⇒ 403 FULL_TABLE_READ_REQUIRED, no transaction', async () => {
+    for (const fieldId of [FIELD, OTHER_FIELD]) {
+      await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status: 403, code: 'FULL_TABLE_READ_REQUIRED', transactions: 0 }, {
+        between: (pg) => { pg.world.fieldPermissions.push({ sheet_id: SHEET, field_id: fieldId, subject_type: 'user', subject_id: ACTOR, visible: false, read_only: false }) },
+      })
+    }
+    // controls: read-only but visible, another actor's mask, another sheet's mask — none of them masks this actor here
+    for (const row of [
+      { sheet_id: SHEET, field_id: FIELD, subject_type: 'user' as const, subject_id: ACTOR, visible: true, read_only: true },
+      { sheet_id: SHEET, field_id: FIELD, subject_type: 'user' as const, subject_id: 'user_other', visible: false, read_only: false },
+      { sheet_id: 'sheet_elsewhere', field_id: FIELD, subject_type: 'user' as const, subject_id: ACTOR, visible: false, read_only: false },
+    ]) {
+      const pg = use(world())
+      pg.world.fieldPermissions.push(row)
+      expect([JSON.stringify(row), (await execute({ previewToken: await tokenFor(), confirm: CONFIRM })).status]).toEqual([JSON.stringify(row), 200])
+    }
+  })
+
+  // ── authority freshness (ADR addendum B): re-read from the DATABASE, in the transaction, after the fence ──
+  /** Apply `change` at the moment the transaction takes the fence — i.e. AFTER every pool-side gate has passed. */
+  const atTheFence = (change: (w: FakeWorld) => void): FakePgOptions => ({
+    beforeStatement: (statement, w) => {
+      if (statement.inTransaction && statement.sql.includes('pg_advisory_xact_lock')) change(w)
+    },
+  })
+
+  test('a permission revoked in the database after the preview ⇒ the execute refuses in the transaction, zero writes, no row lock — the token still claims it', async () => {
+    const revocations: Array<[string, (w: FakeWorld) => void, number, string]> = [
+      ['manage-schema revoked', (w) => { w.dbUsers[ACTOR] = dbUser(['multitable:read', 'multitable:write']) }, 403, 'FORBIDDEN'],
+      ['every permission revoked', (w) => { w.dbUsers[ACTOR] = dbUser([]) }, 403, 'FORBIDDEN'],
+      ['read and write revoked, manage-schema kept', (w) => { w.dbUsers[ACTOR] = dbUser(['multitable:manage-schema']) }, 403, 'FULL_TABLE_READ_REQUIRED'],
+      ['the account deactivated', (w) => { w.dbUsers[ACTOR] = dbUser(ADMIN_PERMS, { is_active: false }) }, 403, 'FORBIDDEN'],
+      ['the account disabled by role', (w) => { w.dbUsers[ACTOR] = dbUser(ADMIN_PERMS, { role: 'disabled' }) }, 403, 'FORBIDDEN'],
+      ['the account removed', (w) => { delete w.dbUsers[ACTOR] }, 403, 'FORBIDDEN'],
+    ]
+    for (const [label, revoke, status, code] of revocations) {
+      // (a) revoked between the preview and the execute request
+      let { pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { between: (p) => revoke(p.world) })
+      // the token's claims are untouched — the pool-side gates PASSED, the refusal is the database's
+      expect(state.perms).toEqual(ADMIN_PERMS)
+      expect([label, pg.transactionStatements[0]]).toEqual([label, 'SELECT pg_advisory_xact_lock(hashtext($1))'])
+      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+      // (b) revoked while the request is already past its pool-side gates
+      ;({ pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(revoke) }))
+      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+    }
+    // control: the same request with the database unchanged converts
+    const pg = use(world())
+    expect((await execute({ previewToken: await tokenFor(), confirm: CONFIRM })).status).toBe(200)
+    expect(pg.world.fields[0].type).toBe('select')
+  })
+
+  test('the authority is the INTERSECTION: what the database holds but the token does not claim is not granted', async () => {
+    await expectRefused(world(), async (token) => {
+      state.perms = ['multitable:read', 'multitable:write'] // the database still holds manage-schema
+      return execute({ previewToken: token, confirm: CONFIRM })
+    }, { status: 403, code: 'FORBIDDEN', transactions: 0 })
+  })
+
+  test('liveness, the row-level switch and the field mask are re-read under the fence too', async () => {
+    const changes: Array<[string, (w: FakeWorld) => void, number, string]> = [
+      ['the sheet was deleted', (w) => { w.sheets[0].deleted_at = '2026-09-28T00:00:00Z' }, 404, 'SHEET_DELETED'],
+      ['the sheet is gone', (w) => { w.sheets = [] }, 404, 'NOT_FOUND'],
+      ['row-level read deny was switched on', (w) => { w.sheets[0].row_level_read_permissions_enabled = true }, 403, 'FULL_TABLE_READ_REQUIRED'],
+      ['a column was hidden from the actor', (w) => { w.fieldPermissions.push({ sheet_id: SHEET, field_id: OTHER_FIELD, subject_type: 'user', subject_id: ACTOR, visible: false, read_only: false }) }, 403, 'FULL_TABLE_READ_REQUIRED'],
+    ]
+    for (const [label, change, status, code] of changes) {
+      const { pg } = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status, code, transactions: 1 }, { pgOptions: atTheFence(change) })
+      expect([label, pg.transactionStatements.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([label, []])
+    }
+  })
+
+  test('the in-transaction refusal is byte-identical to the pool-side one', async () => {
+    const revoke = (w: FakeWorld) => { w.dbUsers[ACTOR] = dbUser(['multitable:manage-schema']) }
+    const inTransaction = await expectRefused(world(), (token) => execute({ previewToken: token, confirm: CONFIRM }), { status: 403, code: 'FULL_TABLE_READ_REQUIRED', transactions: 1 }, { between: (p) => revoke(p.world) })
+    const poolSide = await expectRefused(world(), async (token) => {
+      state.perms = ['multitable:manage-schema']
+      return execute({ previewToken: token, confirm: CONFIRM })
+    }, { status: 403, code: 'FULL_TABLE_READ_REQUIRED', transactions: 0 })
+    expect(inTransaction.res.body).toEqual(poolSide.res.body)
+  })
+
+  // ── rows whose data is not a JSON object (ADR addendum B) ──────────────────────────────────────────────
+  test('a row that stopped being a JSON object after the preview ⇒ 409 PLAN_DRIFT, zero writes — even when its cell hash did not move', async () => {
+    const records: Array<[string, Record<string, unknown>]> = [['r1', { [FIELD]: 'A' }], ['r2', {}]]
+    const shapes: Array<[string, unknown]> = [
+      // r2 read as "key missing" before, and reads as "key missing" after: the plan hash is UNCHANGED
+      ['{} → []', []], ['{} → a number', 7], ['{} → JSON null', null], ['{} → a string', 'text'],
+      // these read differently, so the hash moves as well
+      ['{} → an array holding the field id', [FIELD]], ['{} → the field id as a scalar', FIELD],
+    ]
+    for (const [label, shape] of shapes) {
+      for (const where of ['live', 'trash'] as const) {
+        const base = world(records, { trash: [{ record_id: 't1', sheet_id: SHEET, data: {} }] })
+        const { res, pg } = await expectRefused(base, (token) => execute({ previewToken: token, confirm: CONFIRM }), { status: 409, code: 'PLAN_DRIFT', transactions: 1 }, {
+          between: (p) => {
+            if (where === 'live') p.world.records[1].data = shape
+            else p.world.trash[0].data = shape
+          },
+        })
+        expect([label, where, res.body.error.details]).toEqual([label, where, undefined])
+        expect([label, where, pg.transactionStatements.filter((sql) => FAKE_WRITE_RE.test(sql))]).toEqual([label, where, []])
+      }
+    }
+  })
+
+  test('the preview of such a sheet mints no token, so there is nothing to execute', async () => {
+    use(world([['r1', { [FIELD]: 'A' }]]))
+    state.pg.world.records.push({ id: 'r2', sheet_id: SHEET, version: 1, data: [] })
+    const res = await preview()
+    expect(res.status).toBe(200)
+    expect(res.body.data).toMatchObject({ verdict: 'rejected', rejections: [{ reason: 'record_data_not_object', recordCount: 1, recordIds: ['r2'] }] })
+    expect(res.body.data.previewToken).toBeUndefined()
   })
 
   // ── scope: the managed-sheet union is answered BEFORE the token is looked at ───────────────────────

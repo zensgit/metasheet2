@@ -100,6 +100,12 @@ export function defineFieldRetypeConvertRealDbCases(): void {
     return column
   }
 
+  /** Database-side grants (user_permissions). The request's own `perms` are a separate thing and stay as they are. */
+  const grant = async (userId: string, codes: string[]) => {
+    for (const code of codes) await q('INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [userId, code])
+  }
+  const revoke = (userId: string, codes: string[]) => q('DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = ANY($2::text[])', [userId, codes])
+
   const preview = (fieldId: string, targetType: string) => request(app).post(`/api/multitable/fields/${fieldId}/retype-preview`).send({ targetType })
   const execute = (fieldId: string, body: Record<string, unknown>) => request(app).post(`/api/multitable/fields/${fieldId}/retype-execute`).send(body)
   const undo = (fieldId: string, body: Record<string, unknown>) => request(app).post(`/api/multitable/fields/${fieldId}/retype-undo`).send(body)
@@ -181,7 +187,20 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       })
       app.use('/api/multitable', univerMetaRouter())
 
-      for (const id of [ACTOR, OTHER_ACTOR]) await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [id])
+      // Execute and undo re-read the caller's authority FROM THE DATABASE inside their transaction (ADR addendum B),
+      // so the actors need real rows: an active user and its permission grants. The request carries the same codes.
+      for (const code of PERMS) {
+        await q(`INSERT INTO permissions (code, name, description) VALUES ($1, $1, 'FRC test') ON CONFLICT (code) DO NOTHING`, [code])
+      }
+      for (const id of [ACTOR, OTHER_ACTOR]) {
+        await q(
+          `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin)
+           VALUES ($1, $2, $1, 'x', 'user', '[]'::jsonb, TRUE, FALSE)
+           ON CONFLICT (id) DO UPDATE SET is_active = TRUE, is_admin = FALSE, role = 'user'`,
+          [id, `${id}@example.test`],
+        )
+        await grant(id, PERMS)
+      }
       await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'FRC Base'])
     })
 
@@ -198,7 +217,10 @@ export function defineFieldRetypeConvertRealDbCases(): void {
         await q('DELETE FROM meta_sheets WHERE id = $1', [sheetId]).catch(() => {})
       }
       await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
-      for (const id of [ACTOR, OTHER_ACTOR]) await q('DELETE FROM users WHERE id = $1', [id]).catch(() => {})
+      for (const id of [ACTOR, OTHER_ACTOR]) {
+        await q('DELETE FROM user_permissions WHERE user_id = $1', [id]).catch(() => {})
+        await q('DELETE FROM users WHERE id = $1', [id]).catch(() => {})
+      }
     })
 
     beforeEach(() => {
@@ -827,6 +849,146 @@ export function defineFieldRetypeConvertRealDbCases(): void {
         expect(JSON.stringify(res.body)).not.toMatch(/VAL-|recordIds|previewToken/)
       }
       expect(await snapshot(column)).toEqual(before)
+    })
+
+    // ── review entry conditions (ADR addendum B) ───────────────────────────────────────────────────────
+    test('authority freshness: a permission revoked IN THE DATABASE after the preview ⇒ execute and undo refuse, zero writes — the request still claims it', async () => {
+      const column = await seedColumn([])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(1), column.sheetId, JSON.stringify({ [column.fieldId]: 'VAL-ALPHA' })])
+      const token = await previewToken(column.fieldId, 'select')
+      const cases: Array<[string, string[], number, string]> = [
+        ['manage-schema revoked', ['multitable:manage-schema'], 403, 'FORBIDDEN'],
+        ['read and write revoked', ['multitable:read', 'multitable:write'], 403, 'FULL_TABLE_READ_REQUIRED'],
+        ['everything revoked', PERMS, 403, 'FORBIDDEN'],
+      ]
+      try {
+        for (const [label, codes, status, code] of cases) {
+          await revoke(ACTOR, codes)
+          const before = await snapshot(column)
+          const res = await execute(column.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM })
+          expect([label, res.status, res.body.error?.code]).toEqual([label, status, code])
+          expect([label, await snapshot(column)]).toEqual([label, before])
+          // the preview is a read: it keeps answering from the request's claims
+          expect([label, (await preview(column.fieldId, 'select')).status]).toEqual([label, 200])
+          await grant(ACTOR, PERMS)
+        }
+        // an account deactivated in the database
+        await q('UPDATE users SET is_active = FALSE WHERE id = $1', [ACTOR])
+        const before = await snapshot(column)
+        const deactivated = await execute(column.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM })
+        expect([deactivated.status, deactivated.body.error?.code]).toEqual([403, 'FORBIDDEN'])
+        expect(await snapshot(column)).toEqual(before)
+        await q('UPDATE users SET is_active = TRUE WHERE id = $1', [ACTOR])
+
+        // granted again: the SAME token converts, and the undo is refused the same way once revoked
+        const converted = await execute(column.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM })
+        expect(converted.status).toBe(200)
+        const id = String(converted.body.data.convertRevisionId)
+        await revoke(ACTOR, ['multitable:manage-schema'])
+        const beforeUndo = await snapshot(column)
+        const refused = await undo(column.fieldId, { convertRevisionId: id, confirm: UNDO_CONFIRM })
+        expect([refused.status, refused.body.error?.code]).toEqual([403, 'FORBIDDEN'])
+        expect(await snapshot(column)).toEqual(beforeUndo)
+        await grant(ACTOR, PERMS)
+        expect((await undo(column.fieldId, { convertRevisionId: id, confirm: UNDO_CONFIRM })).status).toBe(200)
+      } finally {
+        await q('UPDATE users SET is_active = TRUE WHERE id = $1', [ACTOR]).catch(() => {})
+        await grant(ACTOR, PERMS)
+      }
+    })
+
+    test('the preview SQL on a real server: four cell states, a recycle-bin row of ANOTHER sheet left out, and a plan hash the execute agrees with', async () => {
+      const column = await seedColumn([])
+      const other = await seedColumn([])
+      const F = column.fieldId
+      const seed: Array<[number, Record<string, unknown>]> = [[1, {}], [2, { [F]: null }], [3, { [F]: '' }], [4, { [F]: 'VAL-ALPHA' }]]
+      for (const [n, data] of seed) await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(n), column.sheetId, JSON.stringify(data)])
+      // what the preview's own expressions read for each state
+      const read = (await q(
+        `SELECT id, (jsonb_typeof(data) = 'object') AS is_object, (data ? $2::text) AS has_key, data -> $2::text AS cell FROM meta_records WHERE sheet_id = $1 ORDER BY id`,
+        [column.sheetId, F],
+      )).rows
+      expect(read).toEqual([
+        { id: column.rec(1), is_object: true, has_key: false, cell: null },
+        { id: column.rec(2), is_object: true, has_key: true, cell: null },
+        { id: column.rec(3), is_object: true, has_key: true, cell: '' },
+        { id: column.rec(4), is_object: true, has_key: true, cell: 'VAL-ALPHA' },
+      ])
+
+      // recycle-bin rows of ANOTHER sheet — one of them naming THIS sheet's field id with a value that would block
+      await q('INSERT INTO meta_records_trash (record_id, sheet_id, data) VALUES ($1,$2,$3::jsonb)', [other.rec(1), other.sheetId, JSON.stringify({ [F]: 'VAL-FOREIGN' })])
+      await q('INSERT INTO meta_records_trash (record_id, sheet_id, data) VALUES ($1,$2,$3::jsonb)', [other.rec(2), other.sheetId, JSON.stringify({ [other.fieldId]: 'VAL-FOREIGN' })])
+      // …and one empty-shaped row of THIS sheet
+      await q('INSERT INTO meta_records_trash (record_id, sheet_id, data) VALUES ($1,$2,$3::jsonb)', [column.rec(9), column.sheetId, JSON.stringify({ [F]: null })])
+
+      const first = await preview(F, 'multiSelect')
+      expect(first.status).toBe(200)
+      expect(first.body.data).toMatchObject({
+        verdict: 'ok', scannedRecordCount: 4, trash: { scanned: 1, blocking: 0 }, cells: { empty: 3, converted: 1, rejected: 0 },
+        options: { new: 1, final: 1 }, rejections: [],
+      })
+      expect(JSON.stringify(first.body)).not.toMatch(/VAL-/)
+      const hashOf = (token: string) => String((jwt.decode(token) as Record<string, unknown>).planHash)
+      const planHash = hashOf(String(first.body.data.previewToken))
+      expect(planHash).toMatch(/^[0-9a-f]{64}$/)
+
+      // the hash is a function of THIS sheet's rows only: more recycle-bin rows elsewhere do not move it
+      await q('INSERT INTO meta_records_trash (record_id, sheet_id, data) VALUES ($1,$2,$3::jsonb)', [other.rec(3), other.sheetId, JSON.stringify({ [F]: ['VAL-FOREIGN'] })])
+      const second = await preview(F, 'multiSelect')
+      expect(hashOf(String(second.body.data.previewToken))).toBe(planHash)
+
+      // the execute re-computes the hash from rows it locks itself, and accepts the FIRST token
+      const executed = await execute(F, { previewToken: String(first.body.data.previewToken), confirm: CONVERT_CONFIRM })
+      expect(executed.status).toBe(200)
+      expect(executed.body.data).toMatchObject({ recordCount: 4, cells: { rewritten: 4, unchanged: 0 }, options: { final: 1 } })
+      // the other sheet's recycle bin was not read into the plan and was not written
+      expect((await q('SELECT record_id, data FROM meta_records_trash WHERE sheet_id = $1 ORDER BY record_id', [other.sheetId])).rows).toEqual([
+        { record_id: other.rec(1), data: { [F]: 'VAL-FOREIGN' } },
+        { record_id: other.rec(2), data: { [other.fieldId]: 'VAL-FOREIGN' } },
+        { record_id: other.rec(3), data: { [F]: ['VAL-FOREIGN'] } },
+      ])
+
+      // undo: the other sheet's ["VAL-FOREIGN"] row is not this sheet's recycle bin either
+      const undone = await undo(F, { convertRevisionId: String(executed.body.data.convertRevisionId), confirm: UNDO_CONFIRM })
+      expect(undone.status).toBe(200)
+      expect(await cellState(column.rec(1), F)).toMatchObject({ has_key: false })
+      expect(await cellState(column.rec(2), F)).toMatchObject({ has_key: true, kind: 'null' })
+      expect(await cellState(column.rec(3), F)).toMatchObject({ has_key: true, kind: 'string', value: '' })
+      expect(await cellState(column.rec(4), F)).toMatchObject({ has_key: true, kind: 'string', value: 'VAL-ALPHA' })
+    })
+
+    test('a row whose data is not a JSON object: the preview rejects the whole run by id; the execute refuses 409 when a row stopped being one — zero writes', async () => {
+      const shapes: Array<[string, unknown]> = [['array', []], ['array naming the field', ['placeholder']], ['string', 'VAL-SCALAR'], ['number', 7], ['json null', null]]
+      for (const [label, raw] of shapes) {
+        const column = await seedColumn([])
+        const shape = label === 'array naming the field' ? [column.fieldId] : raw
+        await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(1), column.sheetId, JSON.stringify({ [column.fieldId]: 'VAL-ALPHA' })])
+        await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [column.rec(2), column.sheetId, JSON.stringify({})])
+        await q('INSERT INTO meta_records_trash (record_id, sheet_id, data) VALUES ($1,$2,$3::jsonb)', [column.rec(8), column.sheetId, JSON.stringify({})])
+        const token = await previewToken(column.fieldId, 'select')
+
+        for (const where of ['live', 'trash'] as const) {
+          if (where === 'live') await q('UPDATE meta_records SET data = $2::jsonb WHERE id = $1', [column.rec(2), JSON.stringify(shape)])
+          else await q('UPDATE meta_records_trash SET data = $2::jsonb WHERE record_id = $1', [column.rec(8), JSON.stringify(shape)])
+          const rejected = await preview(column.fieldId, 'select')
+          expect([label, where, rejected.status]).toEqual([label, where, 200])
+          expect([label, where, rejected.body.data.verdict, rejected.body.data.rejections]).toEqual([
+            label, where, 'rejected', [{ reason: 'record_data_not_object', recordCount: 1, recordIds: [where === 'live' ? column.rec(2) : column.rec(8)] }],
+          ])
+          expect(rejected.body.data.previewToken).toBeUndefined()
+          expect(JSON.stringify(rejected.body)).not.toMatch(/VAL-/)
+
+          const before = await snapshot(column)
+          const res = await execute(column.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM })
+          expect([label, where, res.status, res.body.error?.code]).toEqual([label, where, 409, 'PLAN_DRIFT'])
+          expect([label, where, await snapshot(column)]).toEqual([label, where, before])
+
+          if (where === 'live') await q('UPDATE meta_records SET data = $2::jsonb WHERE id = $1', [column.rec(2), JSON.stringify({})])
+          else await q('UPDATE meta_records_trash SET data = $2::jsonb WHERE record_id = $1', [column.rec(8), JSON.stringify({})])
+        }
+        // back to objects: the token minted before is good again
+        expect([label, (await execute(column.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM })).status]).toEqual([label, 200])
+      }
     })
 
     // ── the pre-image is unconditional, and capped ─────────────────────────────────────────────────────
