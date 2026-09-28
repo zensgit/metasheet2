@@ -36,7 +36,7 @@
  *   D11 install() 抛错 → 账本一个字都没写(失败后重试是真的重试)。
  *   D12 ★ 语句顺序:咨询锁是事务里的**第一条**语句,排在读账本之前,且带 `$1::text`。
  *   D2b ★ 两个并发调用共享一个账本 → install() 只被调用一次。
- *   D13 账本缺表 → TemplateInstallLedgerUnavailableError。
+ *   D13 账本缺表 → TemplateInstallLedgerUnavailableError,`sqlState='42P01'`(D13b 缺列 → `'42703'`;调用方日志据此分诊)。
  *   D14 指纹把每一段作用域都编进去。
  *   D15 账本里存的 body 不是对象 → 不重放。
  *   D16 有界等待内始终拿不到锁 → **不抛、不 500**,退回「读账本 → 照常安装」(= 改动前行为),
@@ -1084,11 +1084,13 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
       return { rows: [] as unknown[] }
     })
 
-    await expect(runDeduplicatedTemplateInstall({
+    const err = await runDeduplicatedTemplateInstall({
       query,
       scope,
       install: async () => freshResult('base_module'),
-    })).rejects.toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+    }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+    expect((err as TemplateInstallLedgerUnavailableError).sqlState).toBe('42P01')
   })
 
   it('D13b: 账本缺 intent_kind 列(一般化迁移未跑,42703)→ TemplateInstallLedgerUnavailableError(fail-open,同 42P01)', async () => {
@@ -1104,11 +1106,13 @@ describe('#5861 — runDeduplicatedTemplateInstall(模块级)', () => {
       return { rows: [] as unknown[] }
     })
 
-    await expect(runDeduplicatedTemplateInstall({
+    const err = await runDeduplicatedTemplateInstall({
       query,
       scope,
       install: async () => freshResult('base_module'),
-    })).rejects.toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+    }).then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(TemplateInstallLedgerUnavailableError)
+    expect((err as TemplateInstallLedgerUnavailableError).sqlState).toBe('42703')
   })
 
   it('D13c: 别的表缺列(42703 不是账本自己的)照常上抛,不伪装成「去重不可用」', async () => {
