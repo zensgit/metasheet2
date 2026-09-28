@@ -1198,6 +1198,9 @@ const COVERED: Record<string, CoveredFile> = {
     },
   },
   'routes/multitable-button.ts': { minHandlers: 1, minInScope: 1, exempt: {} },
+  // Copy-sheet S1 (ADR #6094): POST /sheets/:sheetId/copy + /copy/dry-run — both run the resolver →
+  // canRead 403 → sendSheetNotLive pair inline, before any gate or read, so the scan proves them GUARDED.
+  'routes/multitable-copy-sheet.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
   'routes/multitable-record-approvals.ts': { minHandlers: 2, minInScope: 2, exempt: {} },
   'routes/recovery-archive-restore-owner.ts': { minHandlers: 11, minInScope: 11, exempt: {} },
   // #5829 CLOSED: all three legacy grant-table routes now run the same capability/liveness PAIR as
