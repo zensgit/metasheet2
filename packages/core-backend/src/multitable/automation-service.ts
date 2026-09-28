@@ -63,6 +63,7 @@ import {
   assertFieldSchemaUnchangedAfterFence,
   fieldSchemaSnapshotFromRows,
   type FieldSchemaSnapshot,
+  type FieldSchemaSnapshotEntry,
 } from './field-schema-fence-recheck'
 import {
   AUTOMATION_CONDITION_VALUE_INVALID_CODE,
@@ -4175,7 +4176,8 @@ export class AutomationService {
     }
 
     // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
-    const schemaSnapshot = await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4246,7 +4248,8 @@ export class AutomationService {
     if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
-    const schemaSnapshot = await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4466,11 +4469,13 @@ export class AutomationService {
     sheetId: string,
     writeback: Record<string, unknown>,
     outcome: string,
-  ): Promise<FieldSchemaSnapshot | null> {
+    /** Field retype slice 3a: filled with what this check validated against, for the post-fence re-check. */
+    schemaSnapshotOut?: Map<string, FieldSchemaSnapshotEntry>,
+  ): Promise<void> {
     const mapped = RESULT_WRITEBACK_FIELDS
       .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
       .filter((entry): entry is { field: ResultWritebackField; id: string } => !!entry.id)
-    if (mapped.length === 0) return null
+    if (mapped.length === 0) return
 
     const uniqueIds = Array.from(new Set(mapped.map((entry) => entry.id)))
     const res = await this.queryFn(
@@ -4494,7 +4499,7 @@ export class AutomationService {
       if (typeError) throw new Error(typeError)
     }
     // Field retype slice 3a: what the check above validated against — re-compared after the fence.
-    return fieldSchemaSnapshotFromRows(res.rows)
+    if (schemaSnapshotOut) for (const [id, entry] of fieldSchemaSnapshotFromRows(res.rows)) schemaSnapshotOut.set(id, entry)
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
