@@ -3639,7 +3639,19 @@ test('end-to-end (acid fixture, R60 review #6079): a -BackupPaths without packag
     const result = spawnSync(PWSH, ['-NoProfile', '-NonInteractive', '-File', wrapperPath], { encoding: 'utf8' })
     const combined = result.stderr + result.stdout
     assert.notEqual(result.status, 0, combined)
-    assert.match(combined, /RESTORE_PATH_NOT_BACKED_UP: packages\/core-backend\/migrations would be replaced or overlaid/, combined)
+    // The refusal is an uncaught error, and both shells wrap its message: pwsh 7
+    // (ConciseView) adds colour codes and wraps at word breaks behind a "     | " gutter;
+    // Windows PowerShell 5.1 hard-wraps at the buffer width, mid-word. So the message is
+    // compared with colour codes, the gutter and ALL whitespace taken out of both sides.
+    const compact = (text) =>
+      text
+        .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+        .replace(/\r?\n[ \t]*\|/g, '')
+        .replace(/\s+/g, '')
+    assert.ok(
+      compact(combined).includes(compact('RESTORE_PATH_NOT_BACKED_UP: packages/core-backend/migrations would be replaced or overlaid by this upgrade but is not in -BackupPaths')),
+      combined,
+    )
     assert.ok(!fs.existsSync(pm2LogPath), 'pm2 must never be invoked')
     assert.ok(!fs.existsSync(backupRoot), 'no backup may be started')
     assert.deepEqual(readPm2FlagWitness(witness.pm2FlagWitnessPath), [])
