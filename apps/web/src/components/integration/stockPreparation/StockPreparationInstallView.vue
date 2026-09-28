@@ -905,6 +905,13 @@
       </StockPrepTechnicalDetails>
     </section>
 
+    <!-- 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): tables installed before the Chinese
+         labels existed keep their English headers, because names are only chosen at creation. This
+         card previews, then (on confirm) renames the still-English columns — compare-and-set, audited
+         in each table's config history. Self-gated on the route's own tier (stock-prep:admin+); the
+         card class falls through onto the panel's own root, so a gated-off panel leaves no empty card. -->
+    <StockPreparationManagedTableRelabelPanel class="stock-prep-install__card" />
+
     <!-- 列映射副驾: the first AI feature on the governed AI boundary. It PROPOSES what each opaque
          source column means; a human confirms; the confirmed result becomes a deterministic preset.
          Advisory-only, fail-open, admin-gated server-side. Signals come from a source discovery. -->
@@ -975,6 +982,7 @@ import type { StockPrepGettingStartedBinding } from '../../../services/integrati
 import StockPreparationGettingStarted from './StockPreparationGettingStarted.vue'
 import SchemaMappingCopilotPanel from './SchemaMappingCopilotPanel.vue'
 import StockPreparationCodeHelpPanel from './StockPreparationCodeHelpPanel.vue'
+import StockPreparationManagedTableRelabelPanel from './StockPreparationManagedTableRelabelPanel.vue'
 import type { SchemaMappingColumnInput, SchemaMappingSignalsInput } from '../../../services/integration/stockPreparation/schemaMappingCopilot'
 import {
   buildStockPreparationInstallDefaults,

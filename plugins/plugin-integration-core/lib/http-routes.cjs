@@ -115,6 +115,12 @@ const ROUTES = [
   ['POST', '/api/integration/stock-preparation/target/ensure', 'stockPreparationTargetEnsure'],
   ['GET', '/api/integration/stock-preparation/sandbox-target/readiness', 'stockPreparationSandboxTargetReadiness'],
   ['POST', '/api/integration/stock-preparation/sandbox-target/ensure', 'stockPreparationSandboxTargetEnsure'],
+  // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a): relabel the managed tables that ALREADY
+  // exist from their English template labels to the Chinese ones — dry run unless `apply: true` +
+  // the preview's `planDigest`, compare-and-set, one config-history row per rename; the write leg is
+  // default OFF (MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED). stock-prep:admin (platform admin passes
+  // too); tenant from the VERIFIED claim only. See stock-preparation-managed-table-relabel.cjs.
+  ['POST', '/api/integration/stock-preparation/managed-tables/relabel-zh', 'stockPreparationManagedTableRelabel'],
   ['POST', '/api/integration/stock-preparation/options/sync', 'stockPreparationOptionsSync'],
   // #3751 MVP: provision the 9 frozen MVP tables (readonly-internal, structure-only, admin-gated).
   ['GET', '/api/integration/stock-preparation/mvp/readiness', 'stockPreparationMvpReadiness'],
@@ -454,6 +460,7 @@ const {
 // verbatim with the front end (the web alignment suite imports this same module), so the FE control
 // set and the BE gate set cannot drift.
 const {
+  STOCK_PREP_ADMIN,
   STOCK_PREP_OPERATE,
   STOCK_PREP_OPERATOR_PULL_ACTION_ID,
   STOCK_PREP_READ,
@@ -467,6 +474,12 @@ const {
 const {
   computeStockPreparationPreflight,
 } = require('./stock-preparation-preflight.cjs')
+// 「把系统表的英文表头改成中文」: the compare-and-set relabel of the managed tables that already exist.
+const {
+  runStockPreparationManagedTableRelabel,
+  // The ONE plan-digest shape, shared with the module rather than copied here.
+  PLAN_DIGEST_PATTERN: MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN,
+} = require('./stock-preparation-managed-table-relabel.cjs')
 // SOURCE PREFLIGHT + TOPOLOGY SELF-TEST: the other half of "is this ready" — the CUSTOMER'S source
 // rather than this deployment. It measures reachability, business-data presence, WHICH bridge the
 // source uses (order module vs DesignBom) and WHICH generic slot carries the BOM quantity, then
@@ -889,6 +902,73 @@ function inferErrorCode(error) {
   const dataSourceCode = inferDataSourceBridgeErrorCode(error)
   if (dataSourceCode) return dataSourceCode
   return error.code || error.name || 'INTERNAL_ERROR'
+}
+
+// R2 — THE ONE WORD A ROUTE-FAILURE LOG LINE MAY CARRY.
+// (docs/development/takeover-beiliao-20260821/stock-prep-connection-canonical-unavailable-diagnosis-20260925.md §5 R2)
+// The route wrapper's warn used to carry only method + route template, so a 400 from the connection
+// layer and a 500 from a bug read the same in the server log. It now also names the response's own
+// code (`inferErrorCode`) — but only when that code is EXACTLY one of the words below; anything else
+// is logged as ROUTE_FAILURE_UNLISTED_CODE. `error.code` is free text on an arbitrary thrown error (a
+// driver, a dependency, a wrapped facade message, a code someone built by interpolating a value), and
+// `inferErrorCode` itself passes any `DATA_SOURCE_*` code through verbatim, so admitting a code by
+// PREFIX would let a value ride into the log behind a familiar prefix. Membership is exact-string only:
+// no prefix, no case folding, no trimming.
+// The response is untouched: `sendError` still answers with `inferErrorCode(error)` exactly as before.
+const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
+  // connection-resolver.cjs — every code a `new ConnectionResolutionError(...)` there can carry.
+  // __tests__/route-failure-log-closed-code.test.cjs scans that file and fails if one is missing here.
+  'CONNECTION_RESOLUTION_INVALID_BINDING',
+  'CONNECTION_RESOLUTION_UNAVAILABLE',
+  'CONNECTION_REGISTRATION_INVALID',
+  'CONNECTION_ID_MISMATCH',
+  'CONNECTION_ID_REQUIRED',
+  'CONNECTION_TENANT_MISMATCH',
+  'CONNECTION_TYPE_UNSUPPORTED',
+  'CONNECTION_CANONICAL_UNAVAILABLE',
+  'CONNECTION_BINDING_MISMATCH',
+  'CONNECTION_LEGACY_FALLBACK_DENIED',
+  'CONNECTION_LEGACY_POINTER_REQUIRED',
+  'CONNECTION_LEGACY_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_UNAVAILABLE',
+  'CONNECTION_SEALED_SNAPSHOT_KIND_UNSUPPORTED',
+  'CONNECTION_SEALED_SNAPSHOT_USER_REQUIRED',
+  'CONNECTION_SEALED_SNAPSHOT_INVALID',
+  // external-systems.cjs — its fallback when the resolver threw something without a string code.
+  'CONNECTION_RESOLUTION_FAILED',
+  // The host data-source facade's and DataSourceManager's coded refusals
+  // (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts, DataSourceManager.ts).
+  'DATA_SOURCE_PRINCIPAL_REQUIRED',
+  'DATA_SOURCE_NOT_FOUND',
+  'DATA_SOURCE_NOT_READ_ONLY',
+  'DATA_SOURCE_NOT_WRITABLE',
+  'DATA_SOURCE_NOT_C6_WRITE_TARGET',
+  'DATA_SOURCE_QUERY_INVALID',
+  'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED',
+  'DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID',
+  'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED',
+  'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED',
+  'SOURCE_UNAVAILABLE',
+  // `inferErrorCode` falls back to the error's class name when it carries no code.
+  'ExternalSystemValidationError',
+  'ExternalSystemNotFoundError',
+  'ExternalSystemConflictError',
+  'INTERNAL_ERROR',
+])
+const ROUTE_FAILURE_LOGGABLE_CODE_SET = new Set(ROUTE_FAILURE_LOGGABLE_CODES)
+const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
+
+// The code a route-failure log line carries: the response's own code when it is in the closed list
+// above, the fixed placeholder otherwise. Synchronous, no I/O, never throws — a thrown `null` or a
+// throwing getter costs the word, never the `sendError` call that follows it (which then behaves
+// exactly as it did before this line existed).
+function loggableRouteFailureCode(error) {
+  try {
+    const code = inferErrorCode(error)
+    return typeof code === 'string' && ROUTE_FAILURE_LOGGABLE_CODE_SET.has(code) ? code : ROUTE_FAILURE_UNLISTED_CODE
+  } catch {
+    return ROUTE_FAILURE_UNLISTED_CODE
+  }
 }
 
 function inferHttpStatus(error) {
@@ -2249,6 +2329,45 @@ function stockPreparationTargetWriteInput(req, rawInput = {}) {
     workspaceId: input.workspaceId,
     projectId,
   }
+}
+
+// 「把系统表的英文表头改成中文」 — the relabel request has exactly TWO legal shapes:
+//   {}                                  the dry run (also `{ apply: false }`)
+//   { apply: true, planDigest: 'sha256:<64 hex>' }   the apply of THAT preview
+// `apply` must be a real boolean (a string "true" or a 1 is refused rather than coerced), a digest
+// without `apply: true` is refused, and `apply: true` without a well-formed digest is refused — so
+// the one bit that decides whether anything is written cannot be produced by accident, and cannot be
+// produced at all without having looked at a preview. The tables, the target names and the project
+// are all server-derived, so any other body key and ANY query key is a steering attempt and is
+// refused before the host is asked anything.
+const VALID_MANAGED_TABLE_RELABEL_BODY_KEYS = new Set(['apply', 'planDigest'])
+
+function normalizeManagedTableRelabelRequest(req) {
+  const body = requestBody(req)
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'request must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!VALID_MANAGED_TABLE_RELABEL_BODY_KEYS.has(key)) {
+      throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  const queryKeys = Object.keys(requestQuery(req))
+  if (queryKeys.length > 0) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', `unsupported query field: ${queryKeys[0]}`, { field: queryKeys[0] })
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'apply') && typeof body.apply !== 'boolean') {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply must be a boolean', { field: 'apply' })
+  }
+  const apply = body.apply === true
+  const hasDigest = Object.prototype.hasOwnProperty.call(body, 'planDigest')
+  if (hasDigest && !apply) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'planDigest is only accepted together with apply: true', { field: 'planDigest' })
+  }
+  if (apply && (typeof body.planDigest !== 'string' || !MANAGED_TABLE_RELABEL_PLAN_DIGEST_PATTERN.test(body.planDigest))) {
+    throw new HttpRouteError(400, 'MANAGED_TABLE_RELABEL_REQUEST_INVALID', 'apply requires the planDigest of the preview being confirmed', { field: 'planDigest' })
+  }
+  return { apply, planDigest: apply ? body.planDigest : null }
 }
 
 function stockPreparationTargetInput(req, rawInput = {}) {
@@ -7075,6 +7194,57 @@ function requireStockPreparationAudit() {
       }
     },
 
+    // 「把系统表的英文表头改成中文」(客户反馈 2026-09-24 #4a). DRY RUN unless the body says
+    // `apply: true` AND carries the `planDigest` of the preview being confirmed; the apply recomputes
+    // the plan and refuses (409 MANAGED_TABLE_RELABEL_PLAN_CHANGED) if it moved. The write leg is
+    // DEFAULT OFF behind MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED (exactly 'true'); off, it answers
+    // 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED before asking the host anything, and the dry run keeps
+    // working and says `applyEnabled: false`. Every rename writes one config-history row: FIELD
+    // renames are revertible there, SHEET renames are recorded but not revertible there.
+    //
+    // GATE: stock-prep:admin — the workbench-scoped ceiling the 数据来源与体检 page this control
+    // lives on is already gated on (canOpenStockPrepInstallView); platform admin passes inside that
+    // decision. What it opens is narrow by construction: no table, no name and no project comes from
+    // the request, and a column a person already renamed is never touched.
+    //
+    // TENANT: the VERIFIED token claim only (`resolveVerifiedClaimTenantId`), never `user.tenantId`,
+    // which the host fills from the `x-tenant-id` header for a claimless token — a header must not
+    // choose whose tables get renamed. The dry run uses the same resolver so it rehearses exactly the
+    // tables the apply would act on.
+    async stockPreparationManagedTableRelabel(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      const input = normalizeManagedTableRelabelRequest(req)
+      const tenantId = resolveVerifiedClaimTenantId(req, {})
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const provisioning = context && context.api && context.api.multitable ? context.api.multitable.provisioning : null
+      // The sandbox write allowlist (server config, else env) names sandbox tables too — server-held,
+      // never request-supplied, and namespace-filtered again inside the module.
+      const sandboxPolicy = resolveStockPrepApplySandboxPolicy(context && context.config)
+      const result = await runStockPreparationManagedTableRelabel({
+        provisioning,
+        projectId,
+        packCatalog: customerPackCatalog,
+        sandboxObjectIds: sandboxPolicy && Array.isArray(sandboxPolicy.allowedTargetObjectIds) ? sandboxPolicy.allowedTargetObjectIds : [],
+        apply: input.apply,
+        planDigest: input.planDigest,
+        env: process.env,
+        // Attribution for the config-history rows (who pressed 确认). Stringified: an auth provider may
+        // carry a numeric id, and dropping it to null would lose the actor on every revision.
+        actorId: user && user.id !== undefined && user.id !== null && String(user.id).trim() ? String(user.id) : null,
+      })
+      if (input.apply && routeLogger && typeof routeLogger.info === 'function') {
+        // Counts only — never a project id, a sheet id or a name.
+        routeLogger.info('[plugin-integration-core] stock-preparation managed-table relabel applied', {
+          tableCount: result.tables.length,
+          renamed: result.totals.renamed,
+          skippedNameChanged: result.totals.skipped_name_changed,
+          skippedNameTaken: result.totals.skipped_name_taken,
+          revisionCount: result.revisionCount,
+        })
+      }
+      return sendOk(res, result)
+    },
+
     async stockPreparationOptionsSync(req, res) {
       requireAccess(req, 'admin')
       const input = stockPreparationOptionSyncInput(req, requestBody(req))
@@ -10217,7 +10387,12 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
         return await handler(req, res)
       } catch (error) {
         if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
-          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`)
+          // R2: method + route TEMPLATE + one closed-list code (loggableRouteFailureCode). No request
+          // value — no param, no query, no id — is interpolated. Same single synchronous call as
+          // before, on the same branches, right before the unchanged `sendError`.
+          logger.warn(`[plugin-integration-core] route failed: ${method} ${path}`, {
+            code: loggableRouteFailureCode(error),
+          })
         }
         return sendError(res, error)
       }
@@ -10252,6 +10427,9 @@ module.exports = {
     scopedInput,
     sendError,
     inferHttpStatus,
+    ROUTE_FAILURE_LOGGABLE_CODES,
+    ROUTE_FAILURE_UNLISTED_CODE,
+    loggableRouteFailureCode,
     publicRunInput,
     redactDeadLetter,
     asSampleLimit,

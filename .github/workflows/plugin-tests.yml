@@ -1683,6 +1683,8 @@ jobs:
             tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
             tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
             tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
+            tests/integration/approval-template-groups-lifecycle.db.test.ts \
+            tests/integration/approval-template-groups-serialization.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
