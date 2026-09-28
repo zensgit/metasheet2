@@ -529,6 +529,48 @@ export async function readStockPreparationHandoff(
 }
 
 /**
+ * WHAT A PRESS OF 通知下一步 NEEDS TO KNOW — structural, so both surfaces that render the button
+ * satisfy it: this queue holds the full `StockPreparationHandoffStatus`, 项目备料页 a deliberately
+ * narrow cursor (projectBoard.ts `StockPreparationHandoffCursor`). `resendableStepKey` is optional
+ * because a backend older than J1 does not send it, and absent reads as "nothing owed".
+ */
+export interface StockPreparationHandoffPressState {
+  configured: boolean
+  currentStepKey: string | null
+  resendableStepKey?: string | null
+}
+
+/** The step whose notice is still owed AND still sendable by this caller. Server-computed; null = none. */
+export function stockPreparationHandoffResendableStepKey(
+  state: Pick<StockPreparationHandoffPressState, 'configured' | 'resendableStepKey'> | null | undefined,
+): string | null {
+  if (!state || !state.configured) return null
+  const key = state.resendableStepKey
+  return typeof key === 'string' && key ? key : null
+}
+
+/**
+ * THE `fromStepKey` A PRESS SENDS — the one derivation both surfaces use, or `null` for "do not press".
+ *
+ * FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
+ * what sends it; advancing the current one instead would claim the next step and push the monotonic
+ * max past the owed hop, losing it for good. So the owed resend step wins when both are possible.
+ *
+ * It lives next to `advanceStockPreparationHandoff` because the route REFUSES a body without it
+ * (400 STOCK_PREPARATION_HANDOFF_REQUEST_INVALID). 项目备料页 once carried its own advance client that
+ * sent no `fromStepKey`, and every press it ever made was refused — so the key is derived here, once,
+ * and the only client that posts the advance requires it in its type.
+ */
+export function stockPreparationHandoffFromStepKey(
+  state: StockPreparationHandoffPressState | null | undefined,
+): string | null {
+  const owed = stockPreparationHandoffResendableStepKey(state)
+  if (owed) return owed
+  const current = state ? state.currentStepKey : null
+  return typeof current === 'string' && current ? current : null
+}
+
+/**
  * Move the turn on one step and let the next person know. The body allowlist is CLOSED server-side —
  * an unexpected key is REFUSED 400, not ignored — so this builds exactly the four permitted keys and
  * omits the scope ones when they are empty rather than sending a null the allowlist has to tolerate.
