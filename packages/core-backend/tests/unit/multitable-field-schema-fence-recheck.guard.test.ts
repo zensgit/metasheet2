@@ -264,7 +264,7 @@ function mustWireViolations(census: Census, ledger: readonly LedgerEntry[]): str
     if (e.verdict !== 'must-wire') continue
     for (const h of census.holders.filter((x) => x.key === e.key)) {
       const verdict = checkHelperBeforeFirstWrite(h, e.helper ?? HELPER)
-      if (!verdict.ok) out.push(`${h.key} (line ${h.line}): ${verdict.reason}`)
+      if (verdict.ok === false) out.push(`${h.key} (line ${h.line}): ${verdict.reason}`)
     }
   }
   return out
