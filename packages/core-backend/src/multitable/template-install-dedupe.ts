@@ -69,12 +69,18 @@
  * 刻意**不**用进程内 Map:单进程内的 Map 在多实例/重启后各记一份,而这条路径的失败模式
  * (用户反复点、页面刷新后再点)恰好会跨越重启与实例。
  *
- * ── 未迁移时(fail-open,有意为之) ─────────────────────────────────────────
+ * ── 未迁移时(姿态由调用方定) ─────────────────────────────────────────────
  * 账本表不存在(SQLSTATE 42P01)或 `intent_kind` 列不存在(SQLSTATE 42703,一般化迁移未跑)→
- * 抛 TemplateInstallLedgerUnavailableError,路由退回**改动前的**行为(照常安装 / 复制,不去重),
- * 而不是 503。理由:这张表只服务于去重,不是动作的数据依赖;先部署代码后跑迁移的机器不该连
- * 模板都装不了。代价是迁移跑之前去重不生效 —— 上线时必须跑 `pnpm --filter @metasheet/core-backend migrate`。
- * 42703 只对**账本自己的语句**翻译(ledgerQuery),别的表缺列照常往上抛。
+ * 抛 TemplateInstallLedgerUnavailableError(带 `sqlState`)。本模块只报告,不替调用方决定:
+ *   - 模板安装(routes/univer-meta.ts):**fail-open,有意为之** —— 退回**改动前的**行为(照常安装,不去重),
+ *     而不是 503。理由:这张表只服务于去重,不是安装的数据依赖;先部署代码后跑迁移的机器不该连模板都
+ *     装不了。代价是迁移跑之前去重不生效(并发同意图可能多出一个 Base)。
+ *   - 复制数据表(copy-sheet-service.ts executeCopySheet):**fail-closed** —— 503 `COPY_TEMPORARILY_UNAVAILABLE`,
+ *     零写入(2026-09-28,PR #6136;决策登记册 R-20)。没有账本就兑现不了 CS-16「窗口内同意图只建一张表」;
+ *     只保留意图锁也不够 —— 后到者拿到锁后读不了账本,找不到先到者的结果可重放,照样再建一张。
+ * 上线时必须跑 `pnpm --filter @metasheet/core-backend migrate`。
+ * 42703 只对**账本自己的语句**翻译(ledgerQuery),别的表缺列照常往上抛;它通常意味着 intent_kind 迁移
+ * 没跑,但迁移已跑仍出现就是账本语句点名了表里没有的列(代码缺陷),所以 `sqlState` 要交给调用方的日志。
  */
 
 import { createHash } from 'node:crypto'
@@ -148,10 +154,17 @@ export interface TemplateInstallScope {
   readonly baseName: string | null
 }
 
-/** 账本表不存在 / 未一般化。路由据此退回「不去重」的旧行为,而不是把动作打成 500/503。 */
+/** 账本不可用的 SQLSTATE:42P01 = 账本表不存在;42703 = 账本自己的语句点名了表里没有的列。 */
+export type TemplateInstallLedgerUnavailableSqlState = '42P01' | '42703'
+
+/**
+ * 账本表不存在 / 缺列(见文件头「未迁移时」)。姿态**按调用方**:模板安装据此退回「不去重」的旧行为照常安装
+ * (fail-open);复制数据表据此拒绝,503 `COPY_TEMPORARILY_UNAVAILABLE`(fail-closed,CS-16)。
+ * `sqlState` 让调用方的日志区分「缺表」与「缺列」—— 缺列不一定是迁移没跑,也可能是账本语句的代码缺陷。
+ */
 export class TemplateInstallLedgerUnavailableError extends Error {
-  constructor() {
-    super(`${TEMPLATE_INSTALL_LEDGER_TABLE} is not migrated yet; the action ran without dedupe`)
+  constructor(public readonly sqlState: TemplateInstallLedgerUnavailableSqlState) {
+    super(`${TEMPLATE_INSTALL_LEDGER_TABLE} is unavailable (SQLSTATE ${sqlState}); template install proceeds without dedupe, copy-sheet refuses (503)`)
     this.name = 'TemplateInstallLedgerUnavailableError'
   }
 }
@@ -278,7 +291,8 @@ async function ledgerQuery(
   } catch (err) {
     // 只有**账本自己**的缺表 / 缺列才翻译成 fail-open;别的表缺失照常往上抛,
     // 否则会把一个真的坏掉的库伪装成「去重不可用」然后重跑一次动作。
-    if (isUndefinedTable(err) || isUndefinedColumn(err)) throw new TemplateInstallLedgerUnavailableError()
+    if (isUndefinedTable(err)) throw new TemplateInstallLedgerUnavailableError('42P01')
+    if (isUndefinedColumn(err)) throw new TemplateInstallLedgerUnavailableError('42703')
     throw err
   }
 }

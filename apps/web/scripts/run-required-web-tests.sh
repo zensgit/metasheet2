@@ -1463,6 +1463,7 @@ exec npx vitest run \
   approvalResubmitButton \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
   ApprovalTemplateGroupsPanel \
@@ -1787,6 +1788,15 @@ exec npx vitest run \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
   stockPrepPermissionMatrix \
+  tasks-api.spec.ts \
+  tasks-badge.spec.ts \
+  tasks-context.spec.ts \
+  tasks-detail-view.spec.ts \
+  tasks-list-view.spec.ts \
+  tasks-nav-badge.spec.ts \
+  tasks-routes.spec.ts \
+  tasks-view-transitions.spec.ts \
+  tasks-view.spec.ts \
   templateArchiveConfirm \
   templateCenterI18n \
   templateDetailI18n \

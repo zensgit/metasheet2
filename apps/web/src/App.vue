@@ -50,6 +50,16 @@
             </span>
             <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
             <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
+                 failure cannot blank the shell, and gated
+                 on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
+            <span v-if="canUseTasks" class="nav-tasks">
+              <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+              <ShellChromeBoundary>
+                <TasksTodoBadge v-if="!isPublicRoute" :label="navLabels.tasksTodo" />
+              </ShellChromeBoundary>
+            </span>
             <router-link
               v-for="item in pluginNavItems"
               :key="item.id"
@@ -135,6 +145,7 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
@@ -185,6 +196,10 @@ const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
 })
+const canUseTasks = computed(() => {
+  void route.fullPath
+  return hasPermission('tasks:read')
+})
 const isLoggedIn = computed(() => {
   void route.fullPath
   return Boolean(getToken())
@@ -209,6 +224,9 @@ const navLabels = computed(() => {
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
       approvalBatchTransfer: '批量转交',
+      tasks: '任务',
+      // Values-free: names the surface, never the count.
+      tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -237,6 +255,8 @@ const navLabels = computed(() => {
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
     approvalBatchTransfer: 'Batch Transfer',
+    tasks: 'Tasks',
+    tasksTodo: 'Pending tasks',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',

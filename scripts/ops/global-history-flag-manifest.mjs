@@ -644,6 +644,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
     source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
   },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
+  },
 ])
 
 /** Flat lookup by key, built once. */

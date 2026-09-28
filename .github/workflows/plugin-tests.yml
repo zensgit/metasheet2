@@ -457,6 +457,12 @@ jobs:
       - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
         run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
 
+      # Tasks auth gate wiring (no DB): dedicated config + setup + whole-file
+      # gate must stay pinned on the 20.x post-migrate step. Runs before
+      # install so dropping the step fails the required check without a build.
+      - name: Tasks auth CI wiring contract
+        run: node --test scripts/ops/tasks-auth-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract
@@ -513,6 +519,14 @@ jobs:
       # default no-DB collection and invoked as whole files in a required real-DB step.
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
+      # Approval form grouping (design lock v2.13) CI two-point wiring contract: all four
+      # approval-template-groups real-DB suites (phase-1 lifecycle/serialization, phase-3
+      # sections/reorder) must stay wired into BOTH vitest.config.ts (exclude) AND the approval
+      # real-DB step here (whole-file, on the required 20.x leg). Step-id-anchored (never by
+      # title), so a name-prefix decoy cannot stand in for the real step.
+      - name: Approval template-groups CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs
 
       # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
       # only ever exercises the verify script against a NORMAL package — it never proves the
@@ -1192,6 +1206,24 @@ jobs:
             tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
             --reporter=verbose
 
+      # Tasks auth gate: trust-off harness, whole file, after migrate.
+      # Do not fold this into vitest.integration.config.ts (that setup caches trust).
+      - name: Run tasks auth gate
+        id: tasks-auth-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+          RBAC_OPTIONAL: ''
+          TASKS_ENABLED: 'true'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for tasks auth gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.tasks-auth.config.ts run \
+            tests/tasks-auth/tasks-auth-gate.ts \
+            --reporter=verbose
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'
@@ -1695,6 +1727,8 @@ jobs:
             tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
             tests/integration/approval-template-groups-lifecycle.db.test.ts \
             tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-sections.db.test.ts \
+            tests/integration/approval-template-groups-reorder.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

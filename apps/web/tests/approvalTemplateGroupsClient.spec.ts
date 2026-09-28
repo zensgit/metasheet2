@@ -179,3 +179,110 @@ describe('approval template group client (design lock v2.13 §6 phase 1)', () =>
     }
   })
 })
+
+/**
+ * A-4 × A-2 合流收口 round 2 (gate `impl-gate-A4-on-A2-merge-fix-round1-20260920.md` P2-1,
+ * 2026-09-20) — line-level coverage for the two client functions that the phase-3 sections lane
+ * (A-4) contributes and that have NO A-2 counterpart: `listTemplatesBySection` and
+ * `reorderApprovalTemplateGroups`. Before this block the whole required web lane
+ * (`run-required-web-tests.sh`'s single exec line) stayed green with both functions emptied out:
+ * `approvalTemplateCenterSections.spec.ts` `vi.mock`s the entire `../src/approvals/api` module, so
+ * it cannot see them by construction, and the backend `approval-template-groups-{sections,reorder}`
+ * db tests cover the ROUTE, not the client's wire logic (query-string keys, response unwrapping).
+ *
+ * Why these two cases do NOT reuse the plain `vi.stubGlobal('fetch', …)` fixture above verbatim:
+ * unlike the seven §6 phase-1 group functions, these two open with `if (USE_MOCK) return …`, and
+ * `USE_MOCK` is `__APPROVAL_MOCK__ === true || (import.meta.env.DEV && __APPROVAL_MOCK__ !== false)`
+ * (`api.ts`) — `DEV` is always true under Vitest, so a bare fetch stub is VACUOUS here: measured,
+ * the stub records 0 calls and the function returns its mock value without ever building a URL.
+ * The `__APPROVAL_MOCK__ = false` override is the escape hatch `api.ts`'s own comment documents for
+ * "a mounted browser harness" (see `apps/web/verification/approval-instance-consistency-race-harness.ts:31`
+ * and `approval-form-builder-mounted-harness.ts:39` for the in-repo precedent); it is a
+ * module-load-time const, so the override must be set BEFORE a fresh `import()` of the module.
+ *
+ * Consequence to keep in mind when extending this block: the dynamically re-imported module has its
+ * OWN `ApprovalApiError` class identity, so `toBeInstanceOf(ApprovalApiError)` against the
+ * statically imported binding at the top of this file would silently stop meaning what it says.
+ * These two cases therefore assert on the REQUEST (url / method / body) and the RESPONSE unwrapping
+ * only, never on error-class identity; the error-surfacing contract stays covered by the static
+ * cases above.
+ */
+async function withRealFetchPath<T>(run: (api: typeof import('../src/approvals/api')) => Promise<T>): Promise<T> {
+  const globalScope = globalThis as { __APPROVAL_MOCK__?: boolean }
+  const previous = globalScope.__APPROVAL_MOCK__
+  globalScope.__APPROVAL_MOCK__ = false
+  vi.resetModules()
+  try {
+    const api = await import('../src/approvals/api')
+    return await run(api)
+  } finally {
+    if (previous === undefined) delete globalScope.__APPROVAL_MOCK__
+    else globalScope.__APPROVAL_MOCK__ = previous
+    vi.resetModules()
+  }
+}
+
+describe('approval template sections/reorder client (design lock v2.13 §6 phase 3, A-4 half)', () => {
+  it('listTemplatesBySection: builds the section= query string verbatim and never sends category', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { data: [{ id: 'tpl_1' }], total: 7 }),
+    )
+
+    const result = await withRealFetchPath(async (api) => {
+      vi.stubGlobal('fetch', fetchMock)
+      return api.listTemplatesBySection({
+        section: 'group:atg_1',
+        status: 'published',
+        search: 'ré',
+        page: 2,
+        pageSize: 20,
+      })
+    })
+
+    // Unwrapping: the route's own per-bucket `total` is passed through untouched (§4 row C).
+    expect(result).toEqual({ data: [{ id: 'tpl_1' }], total: 7 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    const requested = new URL(String(url), 'http://localhost')
+    expect(requested.pathname).toBe('/api/approval-templates')
+    // Key order + encoding are asserted verbatim, not key-by-key: a typo'd key
+    // (`sections=`/`per_page=`) or a dropped paging param is exactly the class of wire bug this
+    // case exists to catch, and a per-key `toContain` would miss a dropped one.
+    expect(requested.search).toBe('?section=group%3Aatg_1&status=published&search=r%C3%A9&page=2&pageSize=20')
+    // §4 row C / row J: `section=` and `category=` on the same request 400 server-side
+    // (`APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT`), so the client must never emit `category`.
+    expect(requested.searchParams.has('category')).toBe(false)
+    expect(init?.method ?? 'GET').toBe('GET')
+  })
+
+  it('reorderApprovalTemplateGroups: POSTs the full { groupIds } permutation, unwraps { groups }, and falls back to [] when the key is absent', async () => {
+    const withGroups = vi.fn().mockResolvedValue(
+      jsonResponse(200, { groups: [{ id: 'atg_2', sortOrder: 1 }, { id: 'atg_1', sortOrder: 2 }] }),
+    )
+
+    const ordered = await withRealFetchPath(async (api) => {
+      vi.stubGlobal('fetch', withGroups)
+      return api.reorderApprovalTemplateGroups(['atg_2', 'atg_1'])
+    })
+
+    expect(ordered).toEqual([{ id: 'atg_2', sortOrder: 1 }, { id: 'atg_1', sortOrder: 2 }])
+    expect(withGroups).toHaveBeenCalledTimes(1)
+    const [url, init] = withGroups.mock.calls[0]
+    expect(String(url)).toContain('/api/approval-template-groups/reorder')
+    expect(init?.method).toBe('POST')
+    // §3 I3: the FULL active-group permutation goes up, in caller order, under `groupIds` — not a
+    // delta and not a bare array body.
+    expect(JSON.parse(init.body as string)).toEqual({ groupIds: ['atg_2', 'atg_1'] })
+
+    // Same call, a response missing the `groups` key: the unwrapper must yield [] rather than
+    // leaking `undefined` into `applyGroupOrder`'s `results.map(...)`.
+    const withoutGroups = vi.fn().mockResolvedValue(jsonResponse(200, { result: [{ id: 'atg_2', sortOrder: 1 }] }))
+    const fallback = await withRealFetchPath(async (api) => {
+      vi.stubGlobal('fetch', withoutGroups)
+      return api.reorderApprovalTemplateGroups(['atg_2'])
+    })
+    expect(fallback).toEqual([])
+    expect(withoutGroups).toHaveBeenCalledTimes(1)
+  })
+})
