@@ -477,6 +477,114 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     expect(groupRow.rows[0].sort_order).toBeNull()
   })
 
+  // ── B (production path) ────────────────────────────────────────────────────────────────────
+  // B above archives through `beginArchiveHold`, a raw-SQL STAND-IN for the service transaction
+  // (it must hold the transaction open before COMMIT to prove the concurrent link blocks), so B
+  // does not exercise `archiveApprovalTemplateGroup` itself: making that function's member-unlink
+  // UPDATE a no-op left every test in this file green. This test archives through the real
+  // endpoint (route → `archiveApprovalTemplateGroup`, the same call style A / F / G use) and
+  // asserts I2 on the rows it wrote. Mutation probe: appending `AND false` to that UPDATE's WHERE
+  // turns this test red at the first member-row `group_id` assertion; restored + `cmp`-verified.
+  // The other-org leg bounds the blast radius (an UPDATE with no group predicate would reach it);
+  // it cannot, by itself, distinguish the UPDATE's `org_id = $1` predicate from its absence —
+  // `atgl_group_fk` already makes a cross-org link row carrying this group id impossible (the
+  // source comment above that UPDATE says the same).
+  it('B (production path): archiving via the endpoint unlinks EVERY member of that group (rows kept) and leaves the same org\'s other group and another org\'s same-named group linked', async () => {
+    const org = trackOrg(`atg-bsvc-${TS}`)
+    const otherOrg = trackOrg(`atg-bsvc-other-${TS}`)
+    const admin = await tok(base, `bsvc-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+    const otherAdmin = await tok(base, `bsvc-admin-other-${TS}`, { roles: 'admin', perms: '*:*', tenantId: otherOrg })
+    const name = `Bsvc Group ${TS}`
+
+    const createGroup = async (token: string, groupName: string) => {
+      const res = await httpReq(base, '/api/approval-template-groups', token, { method: 'POST', body: { name: groupName } })
+      expect(res.status).toBe(201)
+      return (await res.json()).group as { id: string; sortOrder: number | null }
+    }
+    const target = await createGroup(admin, name)
+    const sibling = await createGroup(admin, `Bsvc Sibling ${TS}`)
+    // Same name, same member templates, different org (A′: one global template may sit in
+    // different groups for different orgs).
+    const otherOrgTwin = await createGroup(otherAdmin, name)
+    expect(typeof target.sortOrder).toBe('number')
+
+    const link = async (token: string, templateId: string, groupId: string) => {
+      const res = await httpReq(base, `/api/approval-templates/${templateId}/group`, token, { method: 'POST', body: { groupId } })
+      expect(res.status).toBe(201)
+    }
+    const members = [
+      await createTemplate(`atg-bsvc-m1-${TS}`),
+      await createTemplate(`atg-bsvc-m2-${TS}`),
+      await createTemplate(`atg-bsvc-m3-${TS}`),
+    ]
+    for (const tpl of members) {
+      await link(admin, tpl, target.id)
+      await link(otherAdmin, tpl, otherOrgTwin.id)
+    }
+    const siblingTpl = await createTemplate(`atg-bsvc-sib-${TS}`)
+    await link(admin, siblingTpl, sibling.id)
+
+    // Precondition — the post-archive assertions below are not vacuous.
+    const activeBefore = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_group_links
+         WHERE org_id = $1 AND group_id = $2 AND unlinked_at IS NULL`,
+      [org, target.id],
+    )
+    expect(activeBefore.rows[0].n).toBe(members.length)
+
+    const archived = await httpReq(base, `/api/approval-template-groups/${target.id}/archive`, admin, { method: 'POST' })
+    expect(archived.status).toBe(200)
+
+    // I2 / I2′: every member row is still there, unlinked (group_id NULL, unlinked_at set).
+    const memberRows = await query<{ template_id: string; group_id: string | null; unlinked_at: string | null }>(
+      `SELECT template_id, group_id, unlinked_at FROM approval_template_group_links
+         WHERE org_id = $1 AND template_id = ANY($2::uuid[]) ORDER BY template_id`,
+      [org, members],
+    )
+    expect(memberRows.rowCount).toBe(members.length)
+    for (const row of memberRows.rows) {
+      expect(row.group_id, `member ${row.template_id}: group_id after archive`).toBeNull()
+      expect(row.unlinked_at, `member ${row.template_id}: unlinked_at after archive`).not.toBeNull()
+    }
+    const dangling = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM approval_template_group_links WHERE group_id = $1`,
+      [target.id],
+    )
+    expect(dangling.rows[0].n).toBe(0)
+
+    // Same org, other group: untouched.
+    const siblingRow = await query<{ group_id: string | null; unlinked_at: string | null }>(
+      `SELECT group_id, unlinked_at FROM approval_template_group_links WHERE org_id = $1 AND template_id = $2`,
+      [org, siblingTpl],
+    )
+    expect(siblingRow.rowCount).toBe(1)
+    expect(siblingRow.rows[0].group_id).toBe(sibling.id)
+    expect(siblingRow.rows[0].unlinked_at).toBeNull()
+
+    // Other org, same-named group, same template ids: untouched.
+    const twinRows = await query<{ group_id: string | null; unlinked_at: string | null }>(
+      `SELECT group_id, unlinked_at FROM approval_template_group_links
+         WHERE org_id = $1 AND template_id = ANY($2::uuid[])`,
+      [otherOrg, members],
+    )
+    expect(twinRows.rowCount).toBe(members.length)
+    for (const row of twinRows.rows) {
+      expect(row.group_id).toBe(otherOrgTwin.id)
+      expect(row.unlinked_at).toBeNull()
+    }
+
+    // The group itself: archived, sort_order cleared; the other two groups stay active.
+    const groupRows = await query<{ id: string; archived_at: string | null; sort_order: number | null }>(
+      `SELECT id, archived_at, sort_order FROM approval_template_groups WHERE id = ANY($1::text[])`,
+      [[target.id, sibling.id, otherOrgTwin.id]],
+    )
+    const byId = Object.fromEntries(groupRows.rows.map((r) => [r.id, r]))
+    expect(byId[target.id].archived_at).not.toBeNull()
+    expect(byId[target.id].sort_order).toBeNull()
+    expect(byId[sibling.id].archived_at).toBeNull()
+    expect(byId[otherOrgTwin.id].archived_at).toBeNull()
+  })
+
   // ── B′ ─────────────────────────────────────────────────────────────────────────────────────
   // NOTE (gate P2-3, fix round 3): I2′'s consumer (the `section=` list endpoint whose display
   // logic would read this predicate) does not exist in phase 1 — it lands in A-4. There is no
