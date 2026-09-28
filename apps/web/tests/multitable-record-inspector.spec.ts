@@ -32,6 +32,7 @@ import MetaRecordInspector from '../src/multitable/components/MetaRecordInspecto
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
+import { dateTimeZoneHint } from '../src/multitable/utils/business-timezone'
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -202,7 +203,8 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
   })
 
   describe('tab structure + ARIA pairing', () => {
-    it.each(['en', 'zh-CN'])('history preserves original time and displays the viewer zone (%s)', async (locale) => {
+    // 客户反馈 2026-09-24 #4c follow-up: the business timezone (Asia/Shanghai default), 24-hour, to the second.
+    it.each(['en', 'zh-CN'])('history preserves original time and displays the business timezone (%s)', async (locale) => {
       useLocale().setLocale(locale)
       const createdAt = '2026-09-14T08:00:00.000Z'
       const apiClient = fakeApiClient()
@@ -216,11 +218,8 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
         await flushUi()
         const times = container.querySelectorAll('.meta-record-drawer__history-meta time')
         expect(times).toHaveLength(2)
-        expect(times[0].textContent).toBe(new Date(createdAt).toLocaleString(locale === 'zh-CN' ? 'zh-CN' : 'en-US', {
-          year: 'numeric', month: '2-digit', day: '2-digit',
-          hour: '2-digit', minute: '2-digit', second: '2-digit',
-          hourCycle: 'h23', timeZoneName: 'short',
-        }))
+        const hint = dateTimeZoneHint('Asia/Shanghai', locale === 'zh-CN', new Date(createdAt))
+        expect(times[0].textContent).toBe(hint ? `2026-09-14 16:00:00 ${hint}` : '2026-09-14 16:00:00')
         expect(times[0].getAttribute('datetime')).toBe(createdAt)
         expect(times[0].getAttribute('title')).toBe(createdAt)
         expect(times[1].textContent).toBe('legacy-time-unavailable')
@@ -228,6 +227,41 @@ describe('MetaRecordInspector (W2 S3 shell)', () => {
         expect(tabPanel(container)?.textContent).toContain('unknown-actor')
       } finally {
         app.unmount()
+      }
+    })
+
+    // 客户反馈 2026-09-24 #4c follow-up: the comments tab hands MetaCommentsPanel the business-timezone formatter —
+    // 13:05Z reads 2026-09-24 21:05 (Asia/Shanghai default), 24-hour, not the browser's toLocaleString().
+    it('comments tab shows comment times in the business timezone, 24-hour', async () => {
+      useLocale().setLocale('en')
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaRecordInspector, {
+            visible: true,
+            record: RECORD,
+            fields: FIELDS,
+            canEdit: true,
+            canComment: false,
+            canDelete: false,
+            sheetId: 'sheet_1',
+            apiClient: fakeApiClient() as any,
+            openComments: true,
+            comments: [{
+              id: 'c1', spreadsheetId: 'sheet_1', rowId: 'rec_1', targetFieldId: null, mentions: [], authorId: 'u1',
+              authorName: 'Amy', content: 'hello', resolved: false, createdAt: '2026-09-24T13:05:07.000Z',
+            }] as any,
+          })
+        },
+      })
+      app.mount(container)
+      try {
+        await flushUi()
+        expect(container.querySelector('.meta-comments-drawer__time')?.textContent?.trim()).toBe('2026-09-24 21:05')
+      } finally {
+        app.unmount()
+        container.remove()
       }
     })
 

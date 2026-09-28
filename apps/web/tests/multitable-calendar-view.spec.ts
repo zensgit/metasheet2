@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 import { useLocale } from '../src/composables/useLocale'
+import { businessTodayKey } from '../src/multitable/utils/business-timezone'
 
+// Days relative to the day the calendar opens on — the business today (客户反馈 2026-09-24 #4c follow-up), never
+// the browser's day (the old local-midnight + UTC-date form was also a day early on UTC+ hosts).
 function isoDate(offsetDays = 0): string {
-  const date = new Date()
-  date.setHours(0, 0, 0, 0)
-  date.setDate(date.getDate() + offsetDays)
-  return date.toISOString().slice(0, 10)
+  const [year, month, day] = businessTodayKey().split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day + offsetDays)).toISOString().slice(0, 10)
 }
 
 describe('MetaCalendarView', () => {
@@ -115,8 +116,9 @@ describe('MetaCalendarView', () => {
     expect(button).not.toBeNull()
     button!.click()
 
-    const today = new Date()
-    const expectedDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+    // 客户反馈 2026-09-24 #4c follow-up: the calendar opens on the BUSINESS today (Asia/Shanghai default), not
+    // the browser's day — they differ for part of every day on a runner outside UTC+8.
+    const expectedDate = businessTodayKey()
     expect(createSpy).toHaveBeenCalledWith({
       fld_start: expectedDate,
       fld_end: expectedDate,

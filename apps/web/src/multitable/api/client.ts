@@ -4,6 +4,7 @@
  */
 import { requireRecoveryArchiveCaptureStatus, requireRecoveryArchiveRequestId,
   type RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
+import { setBusinessTimezone } from '../utils/business-timezone'
 export type { RecoveryArchiveCaptureStatus } from './recovery-archive-manual'
 
 import type {
@@ -1863,6 +1864,11 @@ export interface AiBulkJobCancelData {
   state: AiBulkJobStatus
 }
 
+/** A11: GET /api/multitable/ai/availability — one bit, nothing else. */
+export interface AiAvailability {
+  available: boolean
+}
+
 export interface AiUsageSummary {
   callerDayTokens: number
   callerWeekTokens: number
@@ -2324,7 +2330,10 @@ export class MultitableApiClient implements CommentsApiClient {
   // --- Context ---
   async loadContext(params: { baseId?: string; sheetId?: string; viewId?: string }): Promise<MetaContext> {
     const res = await this.fetch(`/api/multitable/context${qs(params)}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaContext>(res)
+    // 客户反馈 2026-09-24 #4c: adopt the server's business timezone for every date-time display/editor.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Sheets ---
@@ -2937,19 +2946,35 @@ export class MultitableApiClient implements CommentsApiClient {
     return this.parseJson(res)
   }
 
+  // A11 (customer feedback 2026-09-24 #7c): may the AI surfaces be shown at all?
+  // Any signed-in user; a values-free flat `{ available }`. Callers go through
+  // resolveAiAvailability (useAiShortcut.ts), which fails closed.
+  async aiAvailability(): Promise<AiAvailability> {
+    const res = await this.fetch('/api/multitable/ai/availability')
+    return this.parseJson(res)
+  }
+
   // --- Form context ---
   async loadFormContext(params: { sheetId?: string; viewId?: string; recordId?: string; publicToken?: string }): Promise<MetaFormContext> {
     const path = `/api/multitable/form-context${qs(params)}`
     const res = params.publicToken && this.fetch === apiFetch
       ? await apiFetch(path, { suppressUnauthorizedRedirect: true })
       : await this.fetch(path)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaFormContext>(res)
+    // The (public) form never loads /context — it learns the business timezone here.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   // --- Records ---
   async getRecord(recordId: string, params?: { sheetId?: string; viewId?: string }): Promise<MetaRecordContext> {
     const res = await this.fetch(`/api/multitable/records/${recordId}${qs(params ?? {})}`)
-    return this.parseJson(res)
+    const context = await this.parseJson<MetaRecordContext>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link, linked-record peek) may arrive
+    // before — or without — /context; it carries the same instance business timezone, so its date-times
+    // show the grid's wall clock. An older server omits the key and the current zone stays.
+    setBusinessTimezone(context?.businessTimezone)
+    return context
   }
 
   async listRecordHistory(sheetId: string, recordId: string, params?: { limit?: number; offset?: number }): Promise<MetaRecordRevision[]> {
@@ -3735,7 +3760,9 @@ export class MultitableApiClient implements CommentsApiClient {
 
   async listCommentInbox(params?: { limit?: number; offset?: number }): Promise<MultitableCommentInboxPage> {
     const res = await this.fetch(`/api/comments/inbox${qs(params ?? {})}`)
-    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number }>(res)
+    const data = await this.parseJson<{ items?: RawInboxItem[]; total?: number; limit?: number; offset?: number; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the inbox page loads no /context; adopt the zone its page carries.
+    setBusinessTimezone(data?.businessTimezone)
     return normalizeCommentInbox(data)
   }
 
@@ -3955,7 +3982,9 @@ export class MultitableApiClient implements CommentsApiClient {
     limit?: number
   }): Promise<AutomationRunView[]> {
     const res = await this.fetch(`/api/multitable/automation-executions${qs({ ...filters })}`)
-    const data = await this.parseJson<{ executions: AutomationRunView[] }>(res)
+    const data = await this.parseJson<{ executions: AutomationRunView[]; businessTimezone?: string }>(res)
+    // 客户反馈 2026-09-24 #4c follow-up: the runs page loads no /context; adopt the zone the list carries.
+    setBusinessTimezone(data?.businessTimezone)
     return Array.isArray(data?.executions) ? data.executions : []
   }
 

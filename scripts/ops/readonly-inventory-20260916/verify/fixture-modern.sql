@@ -115,6 +115,14 @@ INSERT INTO automation_rules VALUES
 --      predicate nor the upper bound does (it is not a url-keyed member).
   ('r-decoy', 'sheet-c', 'send_notification', '{}'::jsonb,
    '[{"type": "send_notification", "config": {"text": "docs say \"url\":\"http://fake-doc.invalid\" is legacy"}}]'),
+-- ── Q7 HOST SET rows (F7): https targets, so Q2-Q6 (http:// only) never see
+--    them; only Q7's internal-target counts do.
+-- I1 — branch-nested `*.internal` name (guard :81): counted by Q7.
+  ('r-internal-name', 'sheet-e', 'condition_branch', '{}'::jsonb,
+   '[{"type": "condition_branch", "config": {"branches": [{"key": "b1", "actions": [{"type": "send_webhook", "config": {"url": "https://fake-svc.internal/x"}}]}]}}]'),
+-- I2 — 172.15.255.255 sits one below 172.16/12: NOT counted.
+  ('r-public-172', 'sheet-e', 'send_webhook', '{}'::jsonb,
+   '[{"type": "send_webhook", "config": {"url": "https://172.15.255.255/x"}}]'),
 -- ── LEGACY COLUMN rows (Q4). `actions` is NULL, so toExecutorRule falls back to
 --    `[{ type: action_type, config: action_config }]`
 --    (automation-service.ts:1187-1190) and these DO run.
@@ -141,7 +149,16 @@ INSERT INTO multitable_webhooks VALUES
   ('w-http-off',   'fake disabled http', 'http://fake-sub2.invalid/hook',  false, 'user-fake-2'),
   ('w-http-upper', 'fake upper http',    'HTTP://FAKE-SUB3.invalid/hook',  true,  'user-fake-1'),
   ('w-https',      'fake https',         'https://fake-secure.invalid/h',  true,  'user-fake-3'),
-  ('w-internal',   'fake internal',      'http://127.0.0.1:9999/hook',     true,  'user-fake-3');
+  ('w-internal',   'fake internal',      'http://127.0.0.1:9999/hook',     true,  'user-fake-3'),
+-- Q7 host set (F7), https so Q5/Q6 stay as they are:
+--   counted     — 172.31.255.255 (top of 172.16/12); ::ffff:ac10:1 = 172.16.0.1
+--                 behind userinfo + port
+--   not counted — 172.32.0.0 (just above 172.16/12); a DNS name that merely
+--                 starts with `10.` (the old prefix literal counted it)
+  ('w-internal-172', 'fake internal 172', 'https://172.31.255.255/h',                          true, 'user-fake-4'),
+  ('w-internal-v6',  'fake mapped v6',    'https://fake-user:fake-pass@[::ffff:ac10:1]:8443/h', true, 'user-fake-4'),
+  ('w-public-172',   'fake public 172',   'https://172.32.0.0/h',                              true, 'user-fake-4'),
+  ('w-prefix-decoy', 'fake dns name',     'https://10.fake.invalid/h',                         true, 'user-fake-4');
 
 CREATE TABLE users (
   id          text PRIMARY KEY,

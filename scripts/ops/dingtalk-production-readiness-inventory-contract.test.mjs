@@ -11,6 +11,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
+import { spawnPythonSync, PYTHON_CANDIDATE_LABEL } from './python-interpreter.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const workflowPath = path.join(repoRoot, '.github', 'workflows', 'dingtalk-production-readiness-inventory.yml')
@@ -38,11 +39,16 @@ function loadYaml(text) {
       // try next
     }
   }
-  const py = spawnSync(
-    'python3',
+  const py = spawnPythonSync(
     ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
     { input: text, encoding: 'utf8' },
   )
+  if (py.error) {
+    throw new Error(
+      `YAML parse: no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; ` +
+        `last error: ${py.error.message})`,
+    )
+  }
   if (py.status !== 0) {
     throw new Error(`YAML parse failed: ${py.stderr || py.stdout}`)
   }

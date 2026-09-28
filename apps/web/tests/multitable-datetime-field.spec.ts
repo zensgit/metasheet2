@@ -7,7 +7,7 @@ import MetaFormView from '../src/multitable/components/MetaFormView.vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import {
   dateTimeInputValue,
-  dateTimeValueFromLocalInput,
+  dateTimeValueFromInput,
   resolveDateTimeTimezone,
 } from '../src/multitable/utils/field-display'
 
@@ -24,15 +24,16 @@ describe('dateTime field UI', () => {
     vi.restoreAllMocks()
   })
 
-  it('normalizes timezone property and local datetime input helpers', () => {
-    expect(resolveDateTimeTimezone({ timezone: 'Asia/Shanghai' })).toBe('Asia/Shanghai')
-    expect(resolveDateTimeTimezone({ timezone: 'Invalid/Zone' })).toBe('UTC')
-    expect(dateTimeInputValue('2026-05-06T02:30:00.000Z')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+  it('normalizes timezone property and business-timezone datetime input helpers (客户反馈 2026-09-24 #4c)', () => {
+    expect(resolveDateTimeTimezone({ timezone: 'Asia/Tokyo' })).toBe('Asia/Tokyo')
+    // Invalid / legacy 'UTC' / absent → the business timezone (default Asia/Shanghai), no longer 'UTC'.
+    expect(resolveDateTimeTimezone({ timezone: 'Invalid/Zone' })).toBe('Asia/Shanghai')
+    expect(resolveDateTimeTimezone({ timezone: 'UTC' })).toBe('Asia/Shanghai')
+    expect(dateTimeInputValue('2026-05-06T02:30:00.000Z')).toBe('2026-05-06 10:30')
 
-    const iso = dateTimeValueFromLocalInput('2026-05-06T10:30')
-    expect(iso).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/)
-    expect(dateTimeValueFromLocalInput('')).toBeNull()
-    expect(dateTimeValueFromLocalInput('not-a-date')).toBeNull()
+    expect(dateTimeValueFromInput('2026-05-06 10:30')).toBe('2026-05-06T02:30:00.000Z')
+    expect(dateTimeValueFromInput('')).toBeNull()
+    expect(dateTimeValueFromInput('not-a-date')).toBeNull()
   })
 
   it('renders datetime values with a datetime-specific class', async () => {
@@ -53,13 +54,13 @@ describe('dateTime field UI', () => {
 
     const value = container.querySelector('.meta-cell-renderer__date-time') as HTMLElement | null
     expect(value).not.toBeNull()
-    expect(value?.textContent).not.toBe('')
+    expect(value?.textContent).toBe('2026-05-06 10:30')
 
     app.unmount()
     container.remove()
   })
 
-  it('uses a datetime-local cell editor and emits ISO/null values', async () => {
+  it('uses the business-timezone text cell editor and emits ISO/null values', async () => {
     const updateSpy = vi.fn()
     const confirmSpy = vi.fn()
     const container = document.createElement('div')
@@ -81,14 +82,14 @@ describe('dateTime field UI', () => {
     app.mount(container)
     await flushUi()
 
-    const input = container.querySelector('input[type="datetime-local"]') as HTMLInputElement | null
+    const input = container.querySelector('input[data-meta-datetime-input]') as HTMLInputElement | null
     expect(input).not.toBeNull()
-    input!.value = '2026-05-06T10:30'
+    input!.value = '2026-05-06 11:45'
     input!.dispatchEvent(new Event('input', { bubbles: true }))
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     await flushUi()
 
-    expect(updateSpy).toHaveBeenCalledWith(expect.stringMatching(/Z$/))
+    expect(updateSpy).toHaveBeenCalledWith('2026-05-06T03:45:00.000Z')
     expect(confirmSpy).toHaveBeenCalledTimes(1)
 
     input!.value = ''
@@ -167,14 +168,14 @@ describe('dateTime field UI', () => {
     await flushUi()
 
     const input = container.querySelector('#field_fld_datetime') as HTMLInputElement | null
-    expect(input?.type).toBe('datetime-local')
-    input!.value = '2026-05-06T10:30'
+    expect(input?.type).toBe('text')
+    input!.value = '2026-05-06 11:45'
     input!.dispatchEvent(new Event('input', { bubbles: true }))
     await flushUi()
     container.querySelector('form')?.dispatchEvent(new Event('submit'))
     await flushUi()
 
-    expect(submitSpy).toHaveBeenCalledWith({ fld_datetime: expect.stringMatching(/Z$/) })
+    expect(submitSpy).toHaveBeenCalledWith({ fld_datetime: '2026-05-06T03:45:00.000Z' })
 
     app.unmount()
     container.remove()
@@ -203,12 +204,12 @@ describe('dateTime field UI', () => {
     await flushUi()
 
     const input = container.querySelector('#drawer_field_fld_datetime') as HTMLInputElement | null
-    expect(input?.type).toBe('datetime-local')
-    input!.value = '2026-05-06T10:30'
+    expect(input?.type).toBe('text')
+    input!.value = '2026-05-06 11:45'
     input!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
 
-    expect(patchSpy).toHaveBeenCalledWith('fld_datetime', expect.stringMatching(/Z$/))
+    expect(patchSpy).toHaveBeenCalledWith('fld_datetime', '2026-05-06T03:45:00.000Z')
 
     app.unmount()
     container.remove()

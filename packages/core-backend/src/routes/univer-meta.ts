@@ -19,6 +19,8 @@ import { withFieldRequiredWhenRule, withFieldVisibilityRule } from '../multitabl
 import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
+import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
+import { dateTimeMinuteKey, formatDateTimeValue } from '../multitable/date-time-wall-clock'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -205,6 +207,7 @@ import {
   assertSheetLive,
   assertSheetLiveForUpdate,
   assertSheetsLiveForUpdate,
+  describeLivenessLookupError,
   loadSheetLiveness,
   type SheetLiveness,
 } from '../multitable/sheet-liveness'
@@ -1327,6 +1330,44 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
     ...(foreignSheetId ? { foreignSheetId } : {}),
     ...(obj.skipForeignFieldMasking === true ? { skipForeignFieldMasking: true } : {}),
   }
+}
+
+/**
+ * 客户反馈 2026-09-24 #4c follow-up (deferred by PR #6083): for each lookup field in `fields` whose TARGET field
+ * (on the foreign sheet) is a date-time, the zone its values are shown in — the target's own rule: a dateTime
+ * field's explicit non-'UTC' zone else the instance business timezone; createdTime / modifiedTime → the business
+ * timezone. Other lookups are absent (their cells keep the raw projection). The foreign sheet is resolved as
+ * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
+ * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
+ * values themselves were already masked by applyLookupRollup).
+ */
+async function resolveLookupDateTimeTargetZones(
+  query: QueryFn,
+  fields: UniverMetaField[],
+  relationalLinkFields: RelationalLinkField[],
+): Promise<Map<string, string>> {
+  const zones = new Map<string, string>()
+  const lookups = fields
+    .filter((field) => field.type === 'lookup')
+    .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
+    .filter((entry): entry is { fieldId: string; cfg: LookupFieldConfig } => entry.cfg !== null)
+  if (lookups.length === 0) return zones
+  const linkConfigById = new Map(relationalLinkFields.map(({ fieldId, cfg }) => [fieldId, cfg] as const))
+  const foreignFieldsBySheet = new Map<string, Array<{ id: string; type: string; property?: unknown }>>()
+  for (const { fieldId, cfg } of lookups) {
+    const foreignSheetId = cfg.foreignSheetId ?? linkConfigById.get(cfg.linkFieldId)?.foreignSheetId
+    if (!foreignSheetId) continue
+    let foreignFields = foreignFieldsBySheet.get(foreignSheetId)
+    if (!foreignFields) {
+      foreignFields = (await loadFieldsForSheetShared(query, foreignSheetId)) as Array<{ id: string; type: string; property?: unknown }>
+      foreignFieldsBySheet.set(foreignSheetId, foreignFields)
+    }
+    const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
+    if (!target) continue
+    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+  }
+  return zones
 }
 
 function parseRollupAggregation(value: unknown): RollupAggregation | null {
@@ -4255,6 +4296,45 @@ export function evaluateMetaFilterCondition(
 
   if (opNorm === 'isempty') return isNullishSortValue(cellValue)
   if (opNorm === 'isnotempty') return !isNullishSortValue(cellValue)
+
+  // 客户反馈 2026-09-24 #4c (PR #6083 review S2): dateTime compares INSTANTS, not strings. Before this the
+  // type fell through to the string branch below, so `is` compared the stored ISO text against whatever the
+  // user typed (never equal) and greater/less hit the catch-all `return true` (matched every row). The filter
+  // value is parsed with the same rule as a cell edit: a zone-less wall clock (`2026-09-24 09:00`) is the
+  // instance BUSINESS timezone (the web sends an absolute instant when a field carries its own explicit
+  // zone, so per-field zones are honoured by the web's conversion; an API caller's zone-less text is
+  // business time). Both sides are floored to the MINUTE — the displayed precision — so a cell stored as
+  // 09:00:30 `is` 09:00. Relative-date operators stay `date`-only (day math is UTC there, see
+  // evaluateRelativeDateOp); an unknown operator keeps the pre-existing match-all catch-all.
+  if (effectiveType === 'dateTime') {
+    const businessZone = resolveMultitableBusinessTimezone()
+    const left = dateTimeMinuteKey(cellValue, businessZone)
+    const right = dateTimeMinuteKey(value, businessZone)
+    if (opNorm === 'is' || opNorm === 'equal') return left !== null && right !== null && left === right
+    if (opNorm === 'isnot' || opNorm === 'notequal') return left !== right
+    if (opNorm === 'greater' || opNorm === 'isgreater') return left !== null && right !== null && left > right
+    if (opNorm === 'greaterequal' || opNorm === 'isgreaterequal') return left !== null && right !== null && left >= right
+    if (opNorm === 'less' || opNorm === 'isless') return left !== null && right !== null && left < right
+    if (opNorm === 'lessequal' || opNorm === 'islessequal') return left !== null && right !== null && left <= right
+    if (opNorm === 'between') {
+      const arr = Array.isArray(condition.value) ? condition.value : []
+      if (arr.length < 2) return true
+      const a = dateTimeMinuteKey(arr[0], businessZone); const b = dateTimeMinuteKey(arr[1], businessZone)
+      if (a === null || b === null) return true
+      if (left === null) return false
+      return left >= Math.min(a, b) && left <= Math.max(a, b)
+    }
+    // contains / doesNotContain: mirror the string branch, but against the DISPLAYED wall-clock text
+    // (`2026-09-24 09:00`), never the raw stored ISO — the person is matching what the grid shows. A cell
+    // that is not a date-time keeps its raw text. Empty needle = inactive (match all), like the string branch.
+    if (opNorm === 'contains' || opNorm === 'doesnotcontain') {
+      const shown = (formatDateTimeValue(cellValue, businessZone) ?? toComparableString(cellValue)).trim().toLowerCase()
+      const needle = toComparableString(value).trim().toLowerCase()
+      if (needle === '') return true
+      return opNorm === 'contains' ? shown.includes(needle) : !shown.includes(needle)
+    }
+    return true
+  }
 
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
     const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
@@ -8306,8 +8386,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         'SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE sheet_id = ANY($1::text[]) ORDER BY "order" ASC',
         [sheetIds],
       )
+      // ORDER BY created_at, id (客户反馈 2026-09-24 #8 / A10 phase 1): 没有排序时 Postgres
+      // 不保证返回顺序,extractTemplateSheets 按这个数组的原样顺序把视图挂进模板 —— 顺序不稳会让
+      // 同一张表两次存出的模板视图次序不一样。created_at 主排、id 兜底。
+      // S1(2026-09-26 对抗评审):id 兜底不是空话——installMultitableTemplate 在**一个事务**里
+      // 建完一张模板的全部视图,事务内 now() 是同一个时刻,所有视图的 created_at 若都交给 DB
+      // 默认值会打成一片,这时真正生效的排序键就是 id(sha1,和模板顺序无关)。为此
+      // template-library.ts 给每个视图传一个按模板顺序递增的微秒偏移,created_at = 数据库
+      // now() + 偏移(provisioning.ts createView 的可选 createdAtOffsetMicros;其它调用方不传,
+      // 偏移为 0,等于原来的 DB 默认值 now()),装回去的视图顺序才会等于存下来的模板顺序,
+      // 这条 ORDER BY 重新读出来时才对得上。
+      // 已知残留(第二轮对抗评审 S-1,不做回填迁移):#6091 之前从模板装出来的 Base,视图
+      // created_at 全部打平,这里会按 id 排;/context(工作台标签顺序)刻意保持 created_at ASC
+      // 不加 id,所以这类老 Base 存模板时的视图顺序可能与用户看到的标签顺序不同。
       const viewResult = await pool.query(
-        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[])',
+        'SELECT id, sheet_id, name, type, group_info, hidden_field_ids, config FROM meta_views WHERE sheet_id = ANY($1::text[]) ORDER BY created_at, id',
         [sheetIds],
       )
 
@@ -8925,6 +9018,16 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const viewsResult = effectiveSheetId
         ? await pool.query(
+          // S-1 (second adversarial review of #6091): `ORDER BY created_at ASC` EXACTLY, with NO
+          // `, id` tie-breaker. Bases installed from a template before #6091 have every view on ONE
+          // timestamp (installMultitableTemplate ran inside one transaction on the DB default
+          // now()); an `id` tie-break would make the sha1 view id (stableChildId) their effective
+          // sort key and reshuffle the tabs / flip the default view (views[0]) of bases that already
+          // exist. Kept byte-identical to the pre-#6091 query and ordered exactly like GET /views
+          // (the two `... ORDER BY created_at ASC LIMIT 200` reads below); both are pinned by
+          // tests/unit/multitable-context-view-order.test.ts. Installs since #6091 stamp strictly
+          // increasing created_at per view (template-library.ts), so they have no ties at all.
+          // The save-as-template read (POST /templates) still breaks ties by id — see its note.
           `SELECT id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config
            FROM meta_views
            WHERE sheet_id = $1
@@ -8983,6 +9086,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       const allowedFieldIds = computeAllowedFieldIds(activeFields, capabilities, fieldScopeMap)
       const viewPermissions = deriveViewPermissions(effectiveViews, capabilities, viewScopeMap)
 
+      // A6 (customer feedback 2026-09-24 #1b): DELETE /sheets/:sheetId 409s
+      // (SHEET_PLUGIN_MANAGED / SHEET_SYSTEM_MANAGED) for a managed sheet no matter who is asking —
+      // see sheet-delete-guard.ts. Reporting `canDeleteSheet: true` for one draws a trash icon
+      // (MetaSheetViewRail.vue) that can never work. Reuse the delete route's OWN check
+      // (`resolveSheetDeleteRefusal`) rather than duplicating the managed predicate, and only probe
+      // it once the actor has ALREADY cleared `hasSheetLifecycleAuthority` — an actor without that
+      // authority is refused before this point and must never learn whether the sheet is managed
+      // (mirrors the route's own authz-before-existence posture, see its DELETE handler above).
+      //
+      // S1 (adversarial-review fix, #6089): the probe is a SIDE lookup on an otherwise-successful
+      // load — the button is the only thing at stake, never the load itself. A THROWN lookup
+      // (missing table, transient connection error, …) must not 500 the whole `/context` response;
+      // it fails CLOSED to `canDeleteSheet: false` (same fail-closed direction as an actor who lacks
+      // lifecycle authority — never fails OPEN into showing a delete affordance the route cannot
+      // actually honour) and logs values-free (no sheet id, no query text).
+      const hasDeleteLifecycleAuthority = effectiveSheetId
+        ? hasSheetLifecycleAuthority(access, selectedSheetScope)
+        : false
+      let canDeleteSheet = false
+      if (hasDeleteLifecycleAuthority && effectiveSheetId) {
+        try {
+          canDeleteSheet = (await resolveSheetDeleteRefusal(pool.query.bind(pool), effectiveSheetId)) === null
+        } catch (err) {
+          console.error(
+            '[univer-meta] load context: managed-sheet probe failed for canDeleteSheet; failing closed to false',
+            { reason: 'managed_sheet_probe_failed', ...describeLivenessLookupError(err) },
+          )
+          canDeleteSheet = false
+        }
+      }
+
       return res.json({
         ok: true,
         data: {
@@ -9010,6 +9144,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // FE "My view" toggle initializes from server state (not local guesswork). Empty when flag-off / no
           // override / no actor. Actor-scoped (§1-B) — never reflects another user's rows.
           personalOverrideViewIds,
+          // 客户反馈 2026-09-24 #4c: the instance business timezone the web shows and parses date-times in
+          // (MULTITABLE_BUSINESS_TIMEZONE, default Asia/Shanghai). A zone id — instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           // T8-2 Reset UI flag-visibility contract (#3239): a flag-derived, FE-readable signal so the Reset entry can be
           // truly HIDDEN when off (not a phantom flag read on the client). True iff MULTITABLE_ENABLE_PIT_RESET is on AND
           // the actor is a sheet-admin — mirrors the reset routes' PIT_RESET_ENABLED() + canManageSheetAccess gate.
@@ -9033,8 +9170,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // OR sheet-scoped ADMIN). Mirroring the route's own gate here is what keeps the FE delete
             // affordance from being shown to an actor the server will 403. Single-sheet by construction
             // (`selectedSheetScope` is resolved for `effectiveSheetId` only), so the FE may show a
-            // delete entry for the CURRENT sheet only, never for the rail's other rows.
-            canDeleteSheet: effectiveSheetId ? hasSheetLifecycleAuthority(access, selectedSheetScope) : false,
+            // delete entry for the CURRENT sheet only, never for the rail's other rows. Additionally
+            // ANDed with "not managed" (see the local `canDeleteSheet` computed above) — the route
+            // itself still 409s a managed sheet's delete as the backstop.
+            canDeleteSheet,
           },
           capabilityOrigin,
           fieldPermissions,
@@ -15953,6 +16092,21 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // call — `fieldIds` is the fully-masked set (field_permissions ∧ view-hidden ∧ §2a.3-taint ∧
       // selection). Keeping it a single call-site preserves the egress-coverage + taint-chokepoint
       // guard counts (a denied/tainted column never reaches a cell regardless of which branch ran).
+      // 客户反馈 2026-09-24 #4c (PR #6083 review B1): date-times export as the SAME `YYYY-MM-DD HH:mm` (24h)
+      // business-zone wall clock the grid shows — not the raw stored `…T01:00:00.000Z`. Zone rule per column:
+      // a dateTime field's explicit non-'UTC' zone, else the instance business timezone; createdTime /
+      // modifiedTime carry no field zone → business timezone. Resolved ONCE per export, not per cell. The
+      // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
+      // export re-imports to the same instant (minute precision — the displayed precision).
+      const exportDateTimeZoneById = new Map<string, string>()
+      for (const field of fields) {
+        if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
+        else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+      }
+      // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
+      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
+      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, string>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -15961,6 +16115,17 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // (a cell must read as text, never `<p>…</p>`).
           if (field.type === 'longText' && isRichLongTextProperty(field.property) && typeof cell === 'string') {
             return serializeXlsxCell(richLongTextToPlainText(cell))
+          }
+          const dateTimeZone = exportDateTimeZoneById.get(field.id)
+          if (dateTimeZone) {
+            const wallClock = formatDateTimeValue(cell, dateTimeZone)
+            // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
+            if (wallClock !== null) return wallClock
+          }
+          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupZone && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
+            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
@@ -16052,6 +16217,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         if (needsComputedFilterSort && all.length > 0) {
           linkValuesByRecord = await loadLinkValuesByRecord(pool.query.bind(pool), all.map((r) => r.id), relationalLinkFields)
           await applyLookupRollup(req, pool.query.bind(pool), sheetId, fields, all, relationalLinkFields, linkValuesByRecord)
+          exportLookupDateTimeZoneById = await resolveLookupDateTimeTargetZones(pool.query.bind(pool), fields, relationalLinkFields)
         }
 
         // Link-FILTER materialization (parity with /view): a link condition matches on the linked
@@ -17235,6 +17401,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           // allowlist / validated redirect / confirmation text), normalized by sanitizeFormLayout. Built
           // from view.config.formLayout via a whitelist — never carries publicForm or other config keys.
           ...(resolved.view ? (() => { const layout = projectPublicFormLayout(resolved.view.config); return layout ? { formLayout: layout } : {} })() : {}),
+          // 客户反馈 2026-09-24 #4c: the (public) form never loads /context, so it learns the instance business
+          // timezone here — same value as /context. A zone id only: nothing actor-, tenant- or view-derived.
+          businessTimezone: resolveMultitableBusinessTimezone(),
           fields: visibleFields,
           capabilities: effectiveCapabilities,
           ...(effectiveCapabilityOrigin ? { capabilityOrigin: effectiveCapabilityOrigin } : {}),
@@ -18489,6 +18658,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           linkSummaries,
           ...(personSummaries ? { personSummaries } : {}),
           ...(attachmentSummaries ? { attachmentSummaries } : {}),
+          // 客户反馈 2026-09-24 #4c follow-up: a record opened on its own (deep link / linked-record peek) shows its
+          // date-times in the SAME instance business timezone as /context and /form-context — a zone id,
+          // instance-wide, not actor data.
+          businessTimezone: resolveMultitableBusinessTimezone(),
         },
       })
     } catch (err) {

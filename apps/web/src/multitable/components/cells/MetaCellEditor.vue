@@ -13,19 +13,32 @@
       @keydown.tab="onScalarTab"
       @blur="onScalarBlur"
     />
-    <!-- datetime field type -->
-    <input
-      v-else-if="field.type === 'dateTime'"
-      ref="inputRef"
-      class="meta-cell-editor__input"
-      type="datetime-local"
-      :value="dateTimeInputValue(scalarActive ? scalarValue : modelValue)"
-      @input="commitScalar(dateTimeValueFromLocalInput(($event.target as HTMLInputElement).value))"
-      @keydown.enter="onEnterScalarConfirm"
-      @keydown.escape="onEscapeCancel"
-      @keydown.tab="onScalarTab"
-      @blur="onScalarBlur"
-    />
+    <!-- datetime field type: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c).
+         Text box on purpose (a popover picker fights the grid's click-away commit). B2: a non-empty draft
+         the parser rejects is never committed, reverted or dropped — Enter/Tab/blur keep the editor open
+         with the values-free error below; Escape is the explicit discard. -->
+    <div v-else-if="field.type === 'dateTime'" class="meta-cell-editor__datetime-wrap">
+      <MetaDateTimeInput
+        ref="inputRef"
+        class="meta-cell-editor__input"
+        :class="{ 'meta-cell-editor__input--invalid': dateTimeInvalid }"
+        :model-value="scalarActive ? scalarValue : modelValue"
+        :timezone="dateTimeZone"
+        :aria-invalid="dateTimeInvalid ? 'true' : undefined"
+        @update:model-value="commitScalar"
+        @update:invalid="onDateTimeInvalid"
+        @keydown.enter="onDateTimeEnter"
+        @keydown.escape="onEscapeCancel"
+        @keydown.tab="onDateTimeTab"
+        @blur="onDateTimeBlur"
+      />
+      <span
+        v-if="dateTimeInvalid"
+        class="meta-cell-editor__error meta-cell-editor__error--datetime"
+        role="alert"
+        data-meta-datetime-error=""
+      >{{ l('cell.dateTimeInvalid') }}</span>
+    </div>
     <!-- string: date-like -->
     <input
       v-else-if="field.type === 'string' && isDateLike"
@@ -350,7 +363,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, toRef } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, toRef } from 'vue'
 import type { MetaAttachment, MetaAttachmentDeleteFn, MetaAttachmentUploadContext, MetaAttachmentUploadFn, MetaCommentMentionSearch, MetaCommentMentionSuggestion, MetaField } from '../../types'
 import MetaAttachmentList from '../MetaAttachmentList.vue'
 import MetaYjsPresenceChip from '../MetaYjsPresenceChip.vue'
@@ -371,12 +384,12 @@ import {
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 import {
-  dateTimeInputValue,
-  dateTimeValueFromLocalInput,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
 } from '../../utils/field-display'
+import { resolveDateTimeTimezone } from '../../utils/business-timezone'
+import MetaDateTimeInput from './MetaDateTimeInput.vue'
 import { useYjsCellBinding, type YjsCellBinding } from '../../composables/useYjsCellBinding'
 import { useYjsScalarCell, type YjsScalarCellBinding } from '../../composables/useYjsScalarCell'
 import { isDateLikeStringField, isYjsTextEligible } from '../../utils/yjs-text-eligibility'
@@ -505,6 +518,13 @@ const emit = defineEmits<{
    * doc.
    */
   (e: 'tab-commit', shiftKey: boolean): void
+  /**
+   * B2 (客户反馈 2026-09-24 #4c, PR #6083 review item 3): the editor holds a non-empty dateTime draft the
+   * parser rejected on a commit attempt. While `true` the HOST must not close this editor on its own
+   * (clicking / double-clicking another cell) — that would drop the draft silently; the inline error is
+   * showing and Escape is the explicit discard. `false` again as soon as the text parses / empties.
+   */
+  (e: 'update:invalidDraft', invalid: boolean): void
 }>()
 
 const { isZh } = useLocale()
@@ -611,10 +631,11 @@ const SCALAR_YJS_TYPES = ['number', 'currency', 'percent', 'boolean', 'rating', 
 // plain string on edit — lazy convergence, no seed flip / migration needed.
 // 2a-DT-S2 (design-lock multitable-2a-datetime-live-crdt-designlock-20260618): dateTime
 // joins here. It is a string-stored atomic with the SAME Y.Text history (coerceText reads
-// old docs), but its editor handler writes the CANONICAL UTC ISO form — the dateTime
-// `@input` calls commitScalar(dateTimeValueFromLocalInput(localInput)), never the raw local
-// input — so cross-TZ collaborators converge on the canonical stored value and the flush
-// preserves the byte-identical REST shape. Display stays local via dateTimeInputValue.
+// old docs), but its editor handler writes the CANONICAL UTC ISO form — MetaDateTimeInput
+// emits `update:modelValue` with the UTC ISO instant of the typed wall clock (read in the
+// business timezone, 客户反馈 2026-09-24 #4c), never the raw text — so cross-TZ collaborators
+// converge on the canonical stored value and the flush preserves the byte-identical REST
+// shape. Every collaborator also SEES the same business-timezone wall clock.
 const STRING_STORED_ATOMIC_YJS_TYPES = ['select', 'date', 'dateTime']
 // 2a-2: duration is a plain number (seconds-backed) but commits ON CONFIRM, not per
 // keystroke — its editor's local h:mm buffer (durationText) owns the input while typing
@@ -654,6 +675,55 @@ const scalarBinding = scalarEligibleAtSetup
     })
   : inertScalarBinding
 const scalarActive = computed(() => scalarBinding.active.value)
+// dateTime: the zone the wall clock is shown/typed in — an explicit non-UTC field zone, else the business timezone.
+const dateTimeZone = computed(() => resolveDateTimeTimezone(props.field?.property))
+// B2 (客户反馈 2026-09-24 #4c): MetaDateTimeInput reports a non-empty draft the parser rejected on a commit
+// attempt. While set, Enter / Tab / blur do NOT confirm (the last valid staged value is not silently
+// committed over a visible error and the garbage is not dropped); the error span renders; Escape discards.
+const dateTimeInvalid = ref(false)
+function onDateTimeInvalid(invalid: boolean) {
+  if (dateTimeInvalid.value === invalid) return
+  dateTimeInvalid.value = invalid
+  emit('update:invalidDraft', invalid)
+}
+// Re-judge of PR #6083 (must-fix): this editor can be torn down by something other than the person
+// finishing the edit — a page change, filter/search, sort under virtualization, row delete, hide-field or
+// view switch removes its row/field from the rendered set — AFTER it reported an invalid draft. Without
+// this, the host's flag would outlive the editor and lock the grid out of edit mode. Always report
+// `false` on the way out (harmless when nothing was flagged; the host also checks the DOM — defence in depth).
+onBeforeUnmount(() => {
+  emit('update:invalidDraft', false)
+})
+function dateTimeDraftIsInvalid(): boolean {
+  const el = inputRef.value as unknown as { flagInvalidDraft?: () => boolean } | null
+  return !!el?.flagInvalidDraft?.()
+}
+function onDateTimeEnter(e: KeyboardEvent) {
+  if (isComposingEvent(e)) return
+  if (dateTimeDraftIsInvalid()) {
+    e.stopPropagation()
+    e.preventDefault()
+    return
+  }
+  onEnterScalarConfirm(e)
+}
+function onDateTimeTab(e: KeyboardEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (isComposingEvent(e)) return
+  if (dateTimeDraftIsInvalid()) {
+    e.preventDefault()
+    e.stopPropagation()
+    return
+  }
+  onScalarTab(e)
+}
+function onDateTimeBlur(e: FocusEvent) {
+  if (props.hostCommitPolicy !== 'grid') return
+  if (shouldIgnoreBlur(e)) return
+  // Keep the editor open with the error visible rather than click-away-committing the stale value.
+  if (dateTimeDraftIsInvalid()) return
+  onScalarBlur(e)
+}
 const scalarValue = computed(() => scalarBinding.value.value)
 
 // Mirror onTextInput: when the scalar Yjs path is live, drive the Y.Map (LWW)
@@ -1280,6 +1350,21 @@ onMounted(() => {
 .meta-cell-editor__clear-btn:disabled { opacity: 0.5; cursor: default; }
 .meta-cell-editor__uploading { padding: 4px 0; font-size: 11px; color: #409eff; }
 .meta-cell-editor__error { font-size: 11px; color: #d14343; }
+.meta-cell-editor__datetime-wrap { position: relative; display: flex; align-items: center; width: 100%; }
+.meta-cell-editor__input--invalid { border-color: #d14343 !important; }
+/* Sits below the cell's input, over the next row, so the message is readable inside a grid cell. */
+.meta-cell-editor__error--datetime {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 5;
+  margin-top: 2px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  background: var(--ms-bg-card, #fff);
+  border: 1px solid #d14343;
+  border-radius: 3px;
+}
 .meta-cell-editor__readonly { color: #999; font-size: 13px; }
 .meta-cell-editor__rating { display: flex; align-items: center; gap: 2px; }
 .meta-cell-editor__rating-star {

@@ -514,6 +514,10 @@ const {
   // warning cannot drift apart.
   CARRY_TARGET_OWNERSHIP_STATES,
   decideCarryTargetOwnership,
+  // ...and the two refusal vocabularies that verdict is mapped into: the carry's and the materials
+  // export's. The wall below is ONE function; only the codes differ per route.
+  CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -796,17 +800,29 @@ function sendError(res, error) {
 //
 // Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
 // sheet id, never a project id, never a row.
-async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+//
+// ONE WALL, TWO ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
+// through the very same deploy-global binding, so it needs the very same answer to "is this the
+// caller's sheet". It gets it from THIS function — the same two facts, gathered in the same order
+// from the same host port, decided by the same `decideCarryTargetOwnership` — and differs only in
+// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). A second
+// copy of the fact-gathering would be a second place for "registry, then derived id" to drift; a
+// change to how ownership is established must land in both routes at once or in neither.
+async function assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall } = {}) {
+  if (!wall || !wall.refusalCodes || !wall.portUnavailableCode) {
+    // A programming error, never a request-shaped one: every caller passes a frozen wall below.
+    throw new Error('assertStockPreparationTargetBelongsToTenant requires a tenant-wall vocabulary')
+  }
   const boundSheetId = target && typeof target.sheetId === 'string' ? target.sheetId.trim() : ''
   const objectId = target && typeof target.objectId === 'string' ? target.objectId.trim() : ''
   if (!boundSheetId || !objectId) {
-    throw new HttpRouteError(409, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH', 'the bound stock-preparation target cannot be attributed to a tenant', { objectId: objectId || null })
+    throw new HttpRouteError(409, wall.refusalCodes[CARRY_TARGET_OWNERSHIP_STATES.UNBOUND], CARRY_TARGET_OWNERSHIP_MESSAGES[CARRY_TARGET_OWNERSHIP_STATES.UNBOUND], { objectId: objectId || null })
   }
   // REACHABLE, and deliberately so: the caller hands this the RAW host surface rather than a helper
   // that has already refused on its own terms, so a host without the ownership port fails here, with
   // the code that names what is missing, instead of behind a generic provisioning 503.
   if (!provisioning || typeof provisioning.isSheetOwnedByProject !== 'function') {
-    throw new HttpRouteError(501, 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE', 'the carry tenant check requires multitable.provisioning.isSheetOwnedByProject', { requiredMethods: ['isSheetOwnedByProject'] })
+    throw new HttpRouteError(501, wall.portUnavailableCode, `the ${wall.label} tenant check requires multitable.provisioning.isSheetOwnedByProject`, { requiredMethods: ['isSheetOwnedByProject'] })
   }
   const ownedByProject = await provisioning.isSheetOwnedByProject(boundSheetId, targetProjectId) === true
   // The derived id is the ONLY fallback evidence, and it is gathered only when ownership was not
@@ -819,7 +835,31 @@ async function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId,
   const derivedSheetId = derive ? String(derive.call(provisioning, targetProjectId, objectId) || '') : ''
   const verdict = decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, derivedSheetId })
   if (verdict.ok) return
-  throw new HttpRouteError(409, verdict.refusalCode, CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
+  throw new HttpRouteError(409, wall.refusalCodes[verdict.state], CARRY_TARGET_OWNERSHIP_MESSAGES[verdict.state], { objectId })
+}
+
+// The per-route refusal vocabularies. The carry keeps EXACTLY the codes it always answered (the
+// preflight quotes them back, and the runbook tells a deployer what they mean); the export gets its
+// own family, so an export click is never reported as a 结转 refusal.
+const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
+  carry: Object.freeze({
+    label: 'carry',
+    refusalCodes: CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'CONFIRM_CARRY_PROVISIONING_UNAVAILABLE',
+  }),
+  prepLineExport: Object.freeze({
+    label: 'prep-line export',
+    refusalCodes: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
+  }),
+})
+
+function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.carry })
+}
+
+function assertPrepLineExportTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.prepLineExport })
 }
 
 // One message per refusing state. Values-free: they name no sheet id and no project id.
@@ -8673,18 +8713,39 @@ function requireStockPreparationAudit() {
       // install: apply is sandbox-only unless an owner configured a production policy, so the rows
       // are in the sandbox twin and every project answered 404.
       //
-      // NOTE, PRECISELY, WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so
-      // the persisted per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed
-      // tenant can no longer steer either of those. It does NOT decide the SHEET: `action.target` is
-      // DEPLOY-TIME configuration shared by every tenant on the deployment, and the only row-level
-      // scoping inside it is `projectNo`. That is a property of the table-action target model this
-      // route adopted, not of this scope; it is written down here so nobody reads the scope as a
-      // promise of per-tenant ROW isolation on this route the way it genuinely is on the other two
-      // (value-entry and the directory both derive their sheet from the verified tenant's staging
-      // project). Making this route's target tenant-scoped is a separate change.
+      // WHAT THE VERIFIED TENANT DECIDES HERE. It keys the ACTION LOOKUP — and so the persisted
+      // per-tenant SOURCE binding — and it keys the audit row, so a header-spoofed tenant can no
+      // longer steer either of those. It does NOT pick the SHEET: `action.target` is DEPLOY-TIME
+      // configuration shared by every tenant on the deployment (`getTableAction` is keyed by
+      // actionId alone, and the persisted source binding overrides only the source, never the
+      // target), and the only row-level scoping inside it is `projectNo`.
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
+      // ...SO THE SHEET MUST BE PROVEN TO BE THE CALLER'S OWN before a single row is read — the SAME
+      // wall the 结转 write runs (assertStockPreparationTargetBelongsToTenant, above), answering in
+      // this route's own vocabulary (PREP_LINE_EXPORT_TARGET_*).
+      //
+      // Without it the binding on its own handed EVERY tenant on the deployment the same sheet: a
+      // tenant-B operator whose scope resolved cleanly to tenant B was served tenant A's material
+      // names and quantities by naming one of tenant A's project numbers, 200, because nothing
+      // between the verified tenant and the records read ever asked whose sheet it was. The carry
+      // route closed exactly this on its write side; the read side of the same sheet stayed open.
+      //
+      // The sheet is the caller's when the ownership registry says so (the 222 shape: a sheet the
+      // tenant's own ensure provisioned, bound by hand, whose id is not the one derived for the
+      // action's objectId), or — only when the registry has no row — when its id is the one derived
+      // for (this tenant's staging project, target.objectId) (a pre-registry install). Anything else
+      // is refused 409 with ZERO records IO, no audit row and no workbook. The staging project is
+      // derived from the RESOLVED scope and nothing in the request; one registry read, no records.
+      await assertPrepLineExportTargetBelongsToTenant({
+        // The RAW host surface, as on the carry route: `getMultitableProvisioning()` would throw its
+        // own generic 503 for a host lacking `findObjectSheet`, masking this check's typed 501 about
+        // the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
       const exportResult = await exportStockPreparationPrepLines({
         recordsApi: getMultitableRecordsApi(),
         target: action.target,
@@ -10203,5 +10264,9 @@ module.exports = {
     stockPreparationExportSheetName,
     stockPreparationExportSafeToken,
     stockPreparationExportTimestamp,
+    // The ONE stock-prep target tenant wall and its per-route vocabularies, exported so a suite can
+    // witness that the carry and the export answer one verdict in two vocabularies.
+    assertStockPreparationTargetBelongsToTenant,
+    STOCK_PREPARATION_TARGET_TENANT_WALLS,
   },
 }

@@ -10,9 +10,13 @@ import { Router } from 'express';
 import { protectionRuleService } from '../services/ProtectionRuleService';
 import { requireAdminRole } from '../guards/audit-integration';
 import { Logger } from '../core/logger';
+import { createAdminFailureResponders } from './admin-failure-envelope';
 
 const router = Router();
 const logger = new Logger('ProtectionRulesRoutes');
+// Every 500 branch below answers through these (values-free: stable code + fixed string, the
+// original error goes to logger.error() only) — see routes/admin-failure-envelope.ts.
+const { sendAdminReadFailure, sendAdminWriteFailure } = createAdminFailureResponders(logger);
 
 // SECURITY (issue #5667): this router is mounted at /api/admin/safety/rules (admin-routes.ts) and its
 // four write endpoints (POST /, PATCH /:id, DELETE /:id, POST /evaluate) used to carry NO authorization
@@ -192,11 +196,7 @@ router.get('/', requireAdminRole(), async (req, res) => {
       count: rules.length
     });
   } catch (error) {
-    logger.error('Failed to list protection rules', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to list protection rules', error);
   }
 });
 
@@ -221,11 +221,7 @@ router.get('/:id', requireAdminRole(), async (req, res) => {
       rule
     });
   } catch (error) {
-    logger.error('Failed to get protection rule', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminReadFailure(res, 'Failed to get protection rule', error);
   }
 });
 
@@ -316,8 +312,7 @@ router.post('/', requireAdminRole(), async (req, res) => {
     if (isDatabaseError(error) && error.code === '23505') { // unique_violation
       return res.status(409).json({ success: false, error: 'Rule name already exists', error_code: 'RULE_DUPLICATE' });
     }
-    logger.error('Failed to create protection rule', error as Error);
-    return res.status(500).json({ success: false, error: (error as Error).message });
+    return sendAdminWriteFailure(res, 'Failed to create protection rule', error);
   }
 });
 
@@ -354,11 +349,7 @@ router.patch('/:id', requireAdminRole(), async (req, res) => {
       message: 'Protection rule updated successfully'
     });
   } catch (error) {
-    logger.error('Failed to update protection rule', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to update protection rule', error);
   }
 });
 
@@ -377,11 +368,7 @@ router.delete('/:id', requireAdminRole(), async (req, res) => {
       message: 'Protection rule deleted successfully'
     });
   } catch (error) {
-    logger.error('Failed to delete protection rule', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to delete protection rule', error);
   }
 });
 
@@ -416,11 +403,7 @@ router.post('/evaluate', requireAdminRole(), async (req, res) => {
         : 'No rules matched'
     });
   } catch (error) {
-    logger.error('Failed to evaluate protection rules', error as Error);
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message
-    });
+    sendAdminWriteFailure(res, 'Failed to evaluate protection rules', error);
   }
 });
 
