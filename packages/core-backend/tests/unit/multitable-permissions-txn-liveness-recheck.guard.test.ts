@@ -113,7 +113,16 @@ const RAW_LOCK_LEDGER = new Map<string, string>([])
  * ledger above read like the complete residual set. So this census names EVERY row lock on `meta_sheets`
  * anywhere under `src/`, with what it guards. A new one — in any file, in any lock mode — reds until it is
  * named, which is the only way "no eighth site" can be a claim rather than a hope.
+ *
+ * #6085 follow-up: the recognizer (`censusLocksSheetRow`) is main's plus two additions, (a) the
+ * schema-qualified `public.meta_sheets` / `"public"."meta_sheets"` and (b) `JOIN meta_sheets <alias>` locked
+ * `FOR … OF <alias>`. The three sites only those additions see are the last three entries, and each carries
+ * a liveness verdict (`SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT` / `KNOWN_SHEET_LIVENESS_GAPS` below).
  */
+const CLEANING_AUTHORITY_JOIN_LOCK = "attendance/attendance-multitable-cleaning-authority.ts :: SELECT sheet.id AS sheet_id, registry.project_id FROM meta_records projection JOIN meta_sheets sheet ON sheet.id = projection.sheet_id AND sheet.deleted_at IS NULL JOIN plugin_multitable_object_registry registry ON registry.sheet_id = sheet.id WHERE projection.id = $1 AND registry.plugin_name = 'plugin-attendance' AND registry.object_id = 'attendance_report_records' AND registry.project_id = $2 FOR SHARE OF sheet, registry"
+const DERIVED_PROCESSOR_SCOPE_LOCK = 'multitable/recovery-archive-derived-processor.ts :: SELECT sheet.id FROM public.meta_sheets sheet JOIN public.meta_bases base ON base.id=sheet.base_id WHERE sheet.id=ANY($1::text[]) AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL ORDER BY base.id,sheet.id FOR SHARE OF base,sheet NOWAIT'
+const RESTORE_JOB_BLOCK_LOCK = "multitable/recovery-archive-restore-jobs.ts :: SELECT id FROM public.meta_sheets WHERE id = $1 AND recovery_writer_state = 'archiving' AND recovery_writer_owner_kind = 'restore_job' AND recovery_writer_owner_id = $2 AND recovery_writer_owner_fence = $3::bigint AND recovery_writer_lease_until > clock_timestamp() FOR UPDATE"
+
 const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
   [
     'multitable/sheet-liveness.ts :: SELECT deleted_at FROM meta_sheets WHERE id = $1 FOR UPDATE',
@@ -153,7 +162,70 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     + 'soft-deleted projection sheet would be re-populated rather than refused — a different issue from '
     + 'this one (nobody grants on it), reported rather than hidden.',
   ],
+  [
+    CLEANING_AUTHORITY_JOIN_LOCK,
+    'attendance cleaning authority (seen via (b)) — pins the projection\'s sheet row FOR SHARE together with its '
+    + 'registry row, ahead of the permission and record locks that follow; not a permission write. Liveness is read IN the '
+    + 'locking statement: its JOIN keeps only `sheet.deleted_at IS NULL`, so a soft-deleted sheet returns no row '
+    + 'and the caller refuses (`ownership.rows.length !== 1` → unavailable).',
+  ],
+  [
+    DERIVED_PROCESSOR_SCOPE_LOCK,
+    'recovery-archive derived processor (seen via (a)) — pins every sheet of the fenced derived scope, and their '
+    + 'bases, FOR SHARE … NOWAIT (refuses rather than queues); not a permission write. Liveness is read IN the '
+    + 'locking statement: `sheet.deleted_at IS NULL AND base.deleted_at IS NULL`, and a row count short of the '
+    + 'scope throws RECOVERY_DERIVED_SCOPE_CHANGED.',
+  ],
+  [
+    RESTORE_JOB_BLOCK_LOCK,
+    'recovery-archive restore job `lockRestoreJobBlock` (seen via (a)) — pins the sheet row while the job still '
+    + 'owns its writer block (state, owner, fence, lease), else RECOVERY_ARCHIVE_RESTORE_JOB_BLOCK_LOST; a '
+    + 'RECORD-restore path, not a permission write. It does not read `deleted_at`: SHEET-LIVENESS-GAP-1 below.',
+  ],
 ])
+
+/**
+ * Verdicts for the sites ONLY (a)/(b) see (#6085 follow-up): does the locking statement itself read or
+ * filter the sheet row's `deleted_at`? Each "yes" names the predicate, and a test checks that predicate is
+ * in the statement text — a verdict cannot rest on prose alone. Every such site is here or in the GAP ledger.
+ */
+const SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT = new Map<string, string>([
+  [CLEANING_AUTHORITY_JOIN_LOCK, 'sheet.deleted_at IS NULL'],
+  [DERIVED_PROCESSOR_SCOPE_LOCK, 'sheet.deleted_at IS NULL'],
+])
+
+/** One tracked gap, in the shape of an issue: what is missing under the lock, the candidate fix, who decides. */
+interface SheetLivenessGap {
+  /** Stable id; the PR body lists the same item under it. */
+  id: string
+  /** The census key of the lock. */
+  site: string
+  missing: string
+  fix: string
+  /** `owner-ruling` when the fix changes product behaviour and needs a decision before code. */
+  decision: 'clear' | 'owner-ruling'
+}
+
+/**
+ * GAP ledger — sites only (a)/(b) see whose lock does NOT read `deleted_at`. Shrink-only: its length must
+ * equal `SHEET_LIVENESS_GAP_CEILING`, which a test holds at 1 or below. No production code changes here.
+ */
+const KNOWN_SHEET_LIVENESS_GAPS: readonly SheetLivenessGap[] = [
+  {
+    id: 'SHEET-LIVENESS-GAP-1',
+    site: RESTORE_JOB_BLOCK_LOCK,
+    missing: '`lockRestoreJobBlock` pins the sheet row but neither reads nor filters `deleted_at`, and neither '
+      + 'recovery-archive-restore-jobs.ts nor recovery-archive-writer-block.ts mentions `deleted_at` at all. '
+      + 'Whether another step of the restore path refuses a soft-deleted sheet was not traced. Reachable only '
+      + 'with MULTITABLE_RECOVERY_ARCHIVE_ENABLED and MULTITABLE_ENABLE_WRITER_FENCE both exactly "true".',
+    fix: 'Candidate: add `AND deleted_at IS NULL` to this statement, so a soft-deleted sheet becomes '
+      + 'RECOVERY_ARCHIVE_RESTORE_JOB_BLOCK_LOST. Owner ruling first: a soft-deleted sheet can be undeleted '
+      + '(routes/univer-meta.ts), so whether a restore job should abort, wait or continue on one is a product call.',
+    decision: 'owner-ruling',
+  },
+]
+
+const SHEET_LIVENESS_GAP_CEILING = 1
 
 interface TxnBlock {
   file: string
@@ -342,21 +414,100 @@ function locksSheetRowAnyMode(text: string): boolean {
 }
 
 /**
+ * (a) The schema-qualified spellings `public.meta_sheets` and `"public"."meta_sheets"` name the same table
+ * as bare `meta_sheets`. The census rewrites them to the bare name and then applies the recognizers
+ * unchanged, so (a) holds wherever the bare name is recognized: main's `FROM` position, and (b)'s `JOIN`.
+ * Case-insensitive, as main's recognizer is. Not recognized: mixed quoting (`public."meta_sheets"`),
+ * whitespace around the dot, other schemas, bare `"meta_sheets"`.
+ */
+function unqualifySheetTable(text: string): string {
+  return text.replace(/public\.meta_sheets|"public"\."meta_sheets"/gi, 'meta_sheets')
+}
+
+/**
+ * (b) The sheet enters by `JOIN meta_sheets <alias>` (optionally `AS <alias>`) and a locking clause names
+ * that alias: `FOR UPDATE | NO KEY UPDATE | SHARE | KEY SHARE OF …, <alias>, …`. PostgreSQL locks exactly
+ * the relations an `OF` list names, so an `OF` list without the alias is NOT a sheet-row lock.
+ *
+ * Aliases compare case-folded (PostgreSQL folds unquoted identifiers). A keyword after the table (`ON`,
+ * `USING`, …) is captured as an "alias" harmlessly: a reserved word cannot appear unquoted in an `OF` list.
+ * Not recognized: a JOINed sheet locked by a bare `FOR …` with no `OF`; a JOIN with no alias; a quoted
+ * alias or a quoted name in the `OF` list; a comma-list `FROM a, meta_sheets s`.
+ */
+function locksJoinedSheetByAlias(text: string): boolean {
+  const aliases = new Set<string>()
+  for (const m of text.matchAll(/\bJOIN\s+meta_sheets\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_$]*)/gi)) {
+    aliases.add(m[1].toLowerCase())
+  }
+  const lockOf = /\bFOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\s+OF\s+([A-Za-z_][A-Za-z0-9_$]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_$]*)*)/gi
+  for (const m of text.matchAll(lockOf)) {
+    if (m[1].split(',').some((name) => aliases.has(name.trim().toLowerCase()))) return true
+  }
+  return false
+}
+
+/**
+ * The census recognizer: main's `locksSheetRowAnyMode` UNCHANGED as the first disjunct, on the whole
+ * literal exactly as before, plus (a) and (b). A disjunction, so it recognizes every literal main's
+ * recognizer does — it can only see more, never less.
+ *
+ * (a) and (b) are judged per `;`-separated piece of the literal, so the sheet and the lock must sit in the
+ * same statement. Judged on the whole literal, (a) would book the plpgsql trigger bodies in
+ * `db/migrations/` (the sheet read in one `IF NOT EXISTS (…)`, a `FOR KEY SHARE` on another table in another
+ * statement) as sheet-row locks. The split is naive and only ever NARROWS the two additions: a `;` inside a
+ * comment, string or dollar quote within one statement makes (a)/(b) miss that statement. Main's disjunct
+ * never splits, so nothing it sees is affected.
+ */
+function censusLocksSheetRow(text: string): boolean {
+  if (locksSheetRowAnyMode(text)) return true
+  return text.split(';').some((piece) => {
+    const bare = unqualifySheetTable(piece)
+    return locksSheetRowAnyMode(bare) || locksJoinedSheetByAlias(bare)
+  })
+}
+
+/** main's file prefilter, VERBATIM — kept so the superset leg can re-run main's census exactly. */
+function mainMayLockSheetRow(text: string): boolean {
+  return /meta_sheets/.test(text) && /FOR\s+(?:UPDATE|SHARE)/i.test(text)
+}
+
+/**
+ * The census prefilter: main's, plus the two lock strengths main's recognizer already accepted
+ * (`NO KEY UPDATE`, `KEY SHARE`) but its prefilter never spelled. Without them a file whose only lock is
+ * `FOR KEY SHARE OF s` is never parsed at all, and (b) could not see it. Wider than main's, never narrower.
+ */
+function censusMayLockSheetRow(text: string): boolean {
+  return /meta_sheets/.test(text) && /FOR\s+(?:UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)/i.test(text)
+}
+
+/** Census keys for ONE source file: `<rel> :: <collapsed SQL>` for each literal the recognizer accepts. */
+function censusOfSource(
+  rel: string,
+  raw: string,
+  recognize: (sql: string) => boolean = censusLocksSheetRow,
+  mayLock: (text: string) => boolean = censusMayLockSheetRow,
+): string[] {
+  const text = raw.replace(/\r\n/g, '\n')
+  if (!mayLock(text)) return []
+  const source = ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, true)
+  return literalsIn(source).filter(({ text: sql }) => recognize(sql)).map(({ text: sql }) => `${rel} :: ${sql}`)
+}
+
+/**
  * `<relative file> :: <collapsed SQL>` for every `meta_sheets` row lock under `src/`.
  *
  * Text-prefiltered (cheap) and then AST-parsed (precise): a comment cannot produce a literal node, so
- * prose about `FOR UPDATE` neither enters nor is missing from the census.
+ * prose about `FOR UPDATE` neither enters nor is missing from the census. Called with main's recognizer
+ * and prefilter it reproduces main's census, which the superset leg compares against.
  */
-function censusOfSrcTree(): string[] {
+function censusOfSrcTree(
+  recognize: (sql: string) => boolean = censusLocksSheetRow,
+  mayLock: (text: string) => boolean = censusMayLockSheetRow,
+): string[] {
   const keys = new Set<string>()
   for (const file of srcFiles(SRC)) {
-    const text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
-    if (!/meta_sheets/.test(text) || !/FOR\s+(?:UPDATE|SHARE)/i.test(text)) continue
-    const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true)
     const rel = file.slice(SRC.length + 1).split(sep).join('/')
-    for (const { text: sql } of literalsIn(source)) {
-      if (locksSheetRowAnyMode(sql)) keys.add(`${rel} :: ${sql}`)
-    }
+    for (const key of censusOfSource(rel, readFileSync(file, 'utf8'), recognize, mayLock)) keys.add(key)
   }
   return [...keys].sort()
 }
@@ -477,6 +628,133 @@ describe('#5938 — permission write transactions re-check sheet liveness under 
     expect([...RAW_LOCK_LEDGER.keys()]).toEqual([])
     // …and the guarded files really do spell no raw sheet-row lock any more (rule A with nothing to excuse).
     expect(scan.rawLocks.map((l) => `${l.file}:${l.line} ${l.sql}`)).toEqual([])
+  })
+})
+
+/**
+ * #6085 follow-up — the census's two additions, each witnessed both ways, and the property that makes them
+ * safe to land: the census still sees EVERY site main's recognizer sees. (#6085 rewrote the recognizer
+ * instead, and its rewrite lost locks main caught — the regression this minimal extension exists to avoid.)
+ */
+describe('#6085 follow-up — the census adds (a) schema-qualified and (b) JOIN … OF <alias> sheet locks, losing nothing', () => {
+  /** A one-literal source file, so each witness runs the whole census path: prefilter, AST literal, recognizer. */
+  const probe = (sql: string): string => `export const Q = ${JSON.stringify(sql)}\n`
+  const census = (sql: string): string[] => censusOfSource('probe.ts', probe(sql))
+  const mainCensus = (sql: string): string[] =>
+    censusOfSource('probe.ts', probe(sql), locksSheetRowAnyMode, mainMayLockSheetRow)
+
+  const mainTree = censusOfSrcTree(locksSheetRowAnyMode, mainMayLockSheetRow)
+  const tree = censusOfSrcTree()
+
+  it('(a) positive: `FROM public.meta_sheets` and `FROM "public"."meta_sheets"` are sheet-row locks main did not see', () => {
+    for (const sql of [
+      'SELECT id FROM public.meta_sheets WHERE id = $1 FOR UPDATE',
+      'SELECT id FROM "public"."meta_sheets" WHERE id = $1 FOR SHARE',
+    ]) {
+      expect(census(sql), sql).toEqual([`probe.ts :: ${sql}`])
+      expect(mainCensus(sql), sql).toEqual([])
+    }
+    // Case-insensitive at the statement, as main's recognizer is. (The file prefilter, like main's, is not.)
+    expect(censusLocksSheetRow('SELECT id FROM PUBLIC.META_SHEETS WHERE id = $1 FOR UPDATE')).toBe(true)
+    expect(locksSheetRowAnyMode('SELECT id FROM PUBLIC.META_SHEETS WHERE id = $1 FOR UPDATE')).toBe(false)
+  })
+
+  it('(a) negative: a longer table name, another schema, or no lock clause is not a sheet-row lock', () => {
+    expect(census('SELECT id FROM public.meta_sheets_snapshot WHERE id = $1 FOR UPDATE')).toEqual([])
+    expect(census('SELECT id FROM archive.meta_sheets WHERE id = $1 FOR UPDATE')).toEqual([])
+    expect(census('SELECT deleted_at FROM public.meta_sheets WHERE id = $1')).toEqual([])
+  })
+
+  it('(b) positive: `JOIN meta_sheets <alias>` locked `FOR <any strength> OF <alias>` — main did not see it', () => {
+    for (const strength of ['UPDATE', 'NO KEY UPDATE', 'SHARE', 'KEY SHARE']) {
+      const sql = `SELECT r.id FROM meta_records r JOIN meta_sheets s ON s.id = r.sheet_id WHERE r.id = $1 FOR ${strength} OF s`
+      expect(census(sql), strength).toEqual([`probe.ts :: ${sql}`])
+      expect(mainCensus(sql), strength).toEqual([])
+    }
+    // `AS <alias>` with the alias later in a list and a trailing NOWAIT; an (a) spelling in the JOIN; case folding.
+    for (const sql of [
+      'SELECT r.id FROM meta_records r JOIN meta_sheets AS sheet ON sheet.id = r.sheet_id FOR SHARE OF r, sheet NOWAIT',
+      'SELECT r.id FROM meta_records r JOIN public.meta_sheets s ON s.id = r.sheet_id FOR UPDATE OF s',
+      'SELECT r.id FROM meta_records r JOIN meta_sheets Sheet ON Sheet.id = r.sheet_id FOR UPDATE OF SHEET',
+    ]) {
+      expect(census(sql), sql).toEqual([`probe.ts :: ${sql}`])
+      expect(mainCensus(sql), sql).toEqual([])
+    }
+  })
+
+  it('(b) negative: an `OF` list naming only OTHER relations, or a longer table name, is not a sheet-row lock', () => {
+    // PostgreSQL locks exactly the relations an `OF` list names; the joined sheet here is only read.
+    expect(census('SELECT r.id FROM meta_records r JOIN meta_sheets s ON s.id = r.sheet_id FOR UPDATE OF r')).toEqual([])
+    expect(census('SELECT r.id FROM meta_records r JOIN meta_sheets_archive s ON s.id = r.sheet_id FOR UPDATE OF s'))
+      .toEqual([])
+    // …and the real tree's two statements of that shape exist and stay out of the census.
+    const cleaning = readFileSync(join(SRC, 'attendance/attendance-multitable-cleaning-authority.ts'), 'utf8')
+    const effects = readFileSync(join(SRC, 'multitable/recovery-archive-derived-effects.ts'), 'utf8')
+    expect(cleaning).toContain('FOR UPDATE OF projection, attendance_record')
+    expect(effects).toContain('FOR UPDATE OF effect SKIP LOCKED')
+    expect(tree.filter((k) => k.includes('FOR UPDATE OF projection, attendance_record'))).toEqual([])
+    expect(tree.filter((k) => k.includes('FOR UPDATE OF effect SKIP LOCKED'))).toEqual([])
+  })
+
+  it('(a)/(b) need the sheet and the lock in ONE statement; main\'s whole-literal rule is untouched', () => {
+    // Another statement ahead of the lock does not hide it…
+    const after = 'SELECT 1; SELECT id FROM public.meta_sheets WHERE id = $1 FOR UPDATE'
+    expect(census(after)).toEqual([`probe.ts :: ${after}`])
+    // …but a sheet READ in one statement and a lock on another relation in the next is not a sheet-row lock.
+    expect(census('SELECT id FROM public.meta_sheets WHERE id = $1; SELECT id FROM meta_records WHERE id = $2 FOR UPDATE'))
+      .toEqual([])
+    expect(census(
+      'SELECT r.id FROM meta_records r JOIN meta_sheets s ON s.id = r.sheet_id; SELECT s.id FROM meta_records s WHERE s.id = $1 FOR UPDATE OF s',
+    )).toEqual([])
+    // The bare-name twin is still recognized: main's rule judges the whole literal, as it always did.
+    const bareTwin = 'SELECT id FROM meta_sheets WHERE id = $1; SELECT id FROM meta_records WHERE id = $2 FOR UPDATE'
+    expect(census(bareTwin)).toEqual([`probe.ts :: ${bareTwin}`])
+    expect(mainCensus(bareTwin)).toEqual([`probe.ts :: ${bareTwin}`])
+    // On the real tree the split drops only multi-statement plpgsql function bodies in migrations.
+    const wholeLiteral = (sql: string): boolean => {
+      const bare = unqualifySheetTable(sql)
+      return locksSheetRowAnyMode(sql) || locksSheetRowAnyMode(bare) || locksJoinedSheetByAlias(bare)
+    }
+    const dropped = censusOfSrcTree(wholeLiteral).filter((k) => !tree.includes(k))
+    expect(dropped.length).toBeGreaterThanOrEqual(1)
+    for (const key of dropped) {
+      expect(key.slice(0, 120)).toMatch(/^db\/migrations\/[^ ]+\.ts :: CREATE (?:OR REPLACE )?FUNCTION /)
+    }
+  })
+
+  it('SUPERSET: every site main\'s recognizer finds under src/ is still found', () => {
+    expect(mainTree.length).toBeGreaterThanOrEqual(6)
+    expect(mainTree.filter((k) => !tree.includes(k))).toEqual([])
+  })
+
+  it('every site only (a)/(b) finds has a verdict: `deleted_at` read IN the locking statement, or a ledgered GAP', () => {
+    const main = new Set(mainTree)
+    const added = tree.filter((k) => !main.has(k))
+    const inStatement = [...SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT.keys()]
+    expect(added).toEqual([...inStatement, ...KNOWN_SHEET_LIVENESS_GAPS.map((g) => g.site)].sort())
+    // A verdict is checked against the statement text, never taken from prose alone.
+    for (const [key, predicate] of SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT) {
+      expect(predicate).toMatch(/\bdeleted_at\b/)
+      expect(key.slice(key.indexOf(' :: ') + ' :: '.length), key).toContain(predicate)
+    }
+    for (const gap of KNOWN_SHEET_LIVENESS_GAPS) {
+      expect(gap.site.slice(gap.site.indexOf(' :: ')), gap.id).not.toMatch(/\bdeleted_at\b/)
+    }
+  })
+
+  it('the GAP ledger only shrinks, and each entry is a trackable item', () => {
+    // Raising the ceiling means editing this assertion; closing a gap means lowering it to match.
+    expect(SHEET_LIVENESS_GAP_CEILING).toBeLessThanOrEqual(1)
+    expect(KNOWN_SHEET_LIVENESS_GAPS.length).toBe(SHEET_LIVENESS_GAP_CEILING)
+    const ids = KNOWN_SHEET_LIVENESS_GAPS.map((g) => g.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const gap of KNOWN_SHEET_LIVENESS_GAPS) {
+      expect(gap.id).toMatch(/^SHEET-LIVENESS-GAP-\d+$/)
+      expect(SHEET_ROW_LOCK_CENSUS.has(gap.site), gap.id).toBe(true)
+      expect(gap.missing.length, gap.id).toBeGreaterThan(40)
+      expect(gap.fix.length, gap.id).toBeGreaterThan(40)
+      expect(['clear', 'owner-ruling']).toContain(gap.decision)
+    }
   })
 })
 
