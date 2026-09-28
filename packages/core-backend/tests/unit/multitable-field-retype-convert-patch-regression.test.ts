@@ -10,7 +10,7 @@
  */
 import express from 'express'
 import request from 'supertest'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { FIELD_RETYPE_NOT_LOSSLESS_CODE } from '../../src/multitable/field-retype-whitelist'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -49,7 +49,13 @@ function createStore() {
   return { field, writes, handler }
 }
 
-async function createApp(handler: (sql: string, params?: unknown[]) => { rows: any[] }) {
+/** One router per file (imported once); each test swaps only the fake pool's handler. */
+type Handler = (sql: string, params?: unknown[]) => { rows: any[]; rowCount?: number }
+const state: { handler: Handler } = { handler: () => ({ rows: [] }) }
+
+const pinned = usePinnedServer()
+
+beforeAll(async () => {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -71,7 +77,7 @@ async function createApp(handler: (sql: string, params?: unknown[]) => { rows: a
     ) {
       return { rows: [], rowCount: 0 }
     }
-    return handler(sql, params)
+    return state.handler(sql, params)
   })
   const mockPool = { query, transaction: vi.fn(async (fn: (c: { query: typeof query }) => Promise<unknown>) => fn({ query })) }
   vi.spyOn(poolManager, 'get').mockReturnValue(mockPool as any)
@@ -82,10 +88,14 @@ async function createApp(handler: (sql: string, params?: unknown[]) => { rows: a
     next()
   })
   app.use('/api/multitable', univerMetaRouter())
-  return app
-}
+  pinned.setApp(app)
+}, 120_000)
 
-const pinned = usePinnedServer()
+afterAll(() => {
+  vi.restoreAllMocks()
+  vi.doUnmock('../../src/rbac/service')
+  vi.resetModules()
+})
 
 describe('PATCH /fields/:fieldId with MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT=true — the first-batch pairs stay refused', () => {
   beforeEach(() => {
@@ -94,15 +104,13 @@ describe('PATCH /fields/:fieldId with MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT=tru
   })
   afterEach(() => {
     vi.unstubAllEnvs()
-    vi.restoreAllMocks()
-    vi.resetModules()
   })
 
   for (const target of ['select', 'multiSelect'] as const) {
     test(`string → ${target} ⇒ 400 FIELD_RETYPE_NOT_LOSSLESS, zero record writes, field row unchanged`, async () => {
       expect(process.env.MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT).toBe('true')
       const store = createStore()
-      pinned.setApp(await createApp(store.handler))
+      state.handler = store.handler
       const res = await request(pinned.url())
         .patch(`/api/multitable/fields/${FIELD}`)
         .send({ type: target, property: { options: [{ value: 'A' }] } })
@@ -117,7 +125,7 @@ describe('PATCH /fields/:fieldId with MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT=tru
 
   test('positive control: the same harness DOES write for a whitelisted retype (string → longText)', async () => {
     const store = createStore()
-    pinned.setApp(await createApp(store.handler))
+    state.handler = store.handler
     const res = await request(pinned.url()).patch(`/api/multitable/fields/${FIELD}`).send({ type: 'longText' })
     expect(res.status).toBe(200)
     expect(store.field.type).toBe('longText')

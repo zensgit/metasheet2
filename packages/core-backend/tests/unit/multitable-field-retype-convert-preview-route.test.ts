@@ -10,7 +10,7 @@
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { usePinnedServer } from '../utils/pinned-server'
 
@@ -93,18 +93,32 @@ const SCOPE_OR_SCAN_RE = /plugin_multitable_object_registry|integration_pipeline
 
 const ADMIN_PERMS = ['multitable:read', 'multitable:write', 'multitable:manage-schema']
 
-async function createApp(handler: (sql: string, params?: unknown[]) => { rows: any[] }, perms: string[]) {
+/**
+ * ONE router for the whole file: the module graph behind `univer-meta` is imported once (beforeAll), and each
+ * test swaps only the fake pool's handler and the actor's permissions. Re-importing per request made the suite
+ * slow enough to time out under load, and a timed-out test's still-running loop could then install ITS app on
+ * the shared pinned server underneath the next test.
+ */
+type Handler = (sql: string, params?: unknown[]) => { rows: any[]; rowCount?: number }
+/** `seen` is EVERY statement the route issued (including the permission probes the handler never sees). */
+const state: { handler: Handler; perms: string[]; seen: string[] } = { handler: () => ({ rows: [] }), perms: ADMIN_PERMS, seen: [] }
+let transaction: ReturnType<typeof vi.fn>
+
+const pinned = usePinnedServer()
+
+beforeAll(async () => {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
     userHasPermission: vi.fn().mockResolvedValue(false),
-    listUserPermissions: vi.fn().mockResolvedValue(perms),
+    listUserPermissions: vi.fn(async () => state.perms),
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    state.seen.push(sql)
     if (
       sql.includes('FROM spreadsheet_permissions')
       || sql.includes('FROM field_permissions')
@@ -115,25 +129,28 @@ async function createApp(handler: (sql: string, params?: unknown[]) => { rows: a
     ) {
       return { rows: [], rowCount: 0 }
     }
-    return handler(sql, params)
+    return state.handler(sql, params)
   })
-  const transaction = vi.fn(async () => {
+  transaction = vi.fn(async () => {
     throw new Error('retype-preview must never open a transaction')
   })
-  const mockPool = { query, transaction }
-  vi.spyOn(poolManager, 'get').mockReturnValue(mockPool as any)
+  vi.spyOn(poolManager, 'get').mockReturnValue({ query, transaction } as any)
 
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
-    req.user = { id: 'user_convert', roles: [], perms } as any
+    req.user = { id: 'user_convert', roles: [], perms: [...state.perms] } as any
     next()
   })
   app.use('/api/multitable', univerMetaRouter())
-  return { app, query, transaction }
-}
+  pinned.setApp(app)
+}, 120_000)
 
-const pinned = usePinnedServer()
+afterAll(() => {
+  vi.restoreAllMocks()
+  vi.doUnmock('../../src/rbac/service')
+  vi.resetModules()
+})
 
 describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
   beforeEach(() => {
@@ -141,23 +158,27 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
     vi.stubEnv('MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA', '')
     vi.stubEnv('MULTITABLE_SHEET_REVERT_MAX_RECORDS', '')
     vi.stubEnv('RESTORE_PREVIEW_SECRET', SECRET)
+    transaction.mockClear()
+    state.handler = () => ({ rows: [] })
+    state.perms = ADMIN_PERMS
+    state.seen = []
   })
   afterEach(() => {
     vi.unstubAllEnvs()
-    vi.restoreAllMocks()
-    vi.resetModules()
   })
 
   const preview = async (w: World, body: unknown = { targetType: 'select' }, perms: string[] = ADMIN_PERMS) => {
     const store = createStore(w)
-    const { app, transaction } = await createApp(store.handler, perms)
-    pinned.setApp(app)
+    state.handler = store.handler
+    state.perms = perms
+    state.seen = []
     const res = await request(pinned.url()).post(`/api/multitable/fields/${FIELD}/retype-preview`).send(body as object)
-    return { res, log: store.log, transaction }
+    return { res, log: store.log, seen: [...state.seen], transaction }
   }
 
   const expectNoWrites = (log: string[], transaction: ReturnType<typeof vi.fn>) => {
     expect(log.filter((sql) => WRITE_RE.test(sql))).toEqual([])
+    expect(state.seen.filter((sql) => WRITE_RE.test(sql))).toEqual([])
     expect(transaction).not.toHaveBeenCalled()
   }
 
@@ -165,10 +186,10 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
   test('① flag off ⇒ 403 FIELD_RETYPE_CONVERT_DISABLED before ANY query', async () => {
     for (const v of ['', 'TRUE', '1', ' true']) {
       vi.stubEnv('MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT', v)
-      const { res, log } = await preview(world({ records: [{ id: 'r1', version: 1, data: { [FIELD]: 'A' } }] }))
+      const { res, seen } = await preview(world({ records: [{ id: 'r1', version: 1, data: { [FIELD]: 'A' } }] }))
       expect(res.status).toBe(403)
       expect(res.body.error.code).toBe('FIELD_RETYPE_CONVERT_DISABLED')
-      expect(log).toEqual([])
+      expect(seen).toEqual([])
     }
   })
 
@@ -183,10 +204,10 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
   test('② legacy manage-schema flag on ⇒ 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag), zero queries', async () => {
     for (const v of ['true', 'TRUE', ' true ']) {
       vi.stubEnv('MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA', v)
-      const { res, log } = await preview(world())
+      const { res, seen } = await preview(world())
       expect(res.status).toBe(409)
       expect(res.body.error).toMatchObject({ code: 'FIELD_RETYPE_TRUST_REQUIRED', details: { reason: 'legacy_manage_schema_flag' } })
-      expect(log).toEqual([])
+      expect(seen).toEqual([])
     }
   })
 
