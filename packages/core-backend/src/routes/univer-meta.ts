@@ -336,8 +336,8 @@ import {
   parseDingTalkAutomationDeliveryLimit,
   parseUpdateRuleInput,
   preflightAutomationConditionFields,
+  preflightAutomationRuleUpdate,
   preflightDingTalkAutomationCreate,
-  preflightDingTalkAutomationUpdate,
   serializeAutomationRule,
 } from '../multitable/automation-service'
 import { withAutomationEventId } from '../multitable/automation-event-dedup'
@@ -20518,7 +20518,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const parsed = parseCreateRuleInput(req.body as Record<string, unknown> | undefined, access.userId)
       const input = await preflightDingTalkAutomationCreate(pool.query.bind(pool), sheetId, parsed)
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      // #4b: `input` also carries the action tree, so condition_branch conditions are field-checked too.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, input)
       const rule = await automationService.createRule(sheetId, input)
 
       return res.json({
@@ -20560,17 +20561,27 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!parsed) {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } })
       }
-      const input = await preflightDingTalkAutomationUpdate(
+      const preflight = await preflightAutomationRuleUpdate(
         pool.query.bind(pool),
         sheetId,
         ruleId,
         parsed,
         automationService,
       )
-      if (!input) {
+      if (!preflight) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Automation rule not found' } })
       }
-      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions)
+      const input = preflight.input
+      // #4b: an update that touches the action tree gets its condition_branch conditions field-checked too.
+      // The action type AND config are the EFFECTIVE ones (request ?? stored), exactly what updateRule persists:
+      // a PATCH that sends only `actionConfig` for a rule stored as condition_branch, or only `actionType` to
+      // re-type a rule whose stored `actionConfig` carries never-checked `branches`, must still have those branch
+      // values checked, not slip past unvalidated.
+      await preflightAutomationConditionFields(pool.query.bind(pool), sheetId, input.conditions, {
+        ...input,
+        actionType: preflight.effectiveActionType ?? input.actionType,
+        actionConfig: preflight.effectiveActionConfig ?? input.actionConfig,
+      })
 
       const updated = await automationService.updateRule(ruleId, sheetId, input, access.userId)
       if (!updated) {
