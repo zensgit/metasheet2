@@ -112,6 +112,11 @@ const KEY_ID = 'key-preview'
 const RECORD_ID = 'record-preview'
 const FIELD_ID = 'field-preview'
 const EXPIRES_AT = '2026-09-28T10:00:00.000Z'
+// One hour before EXPIRES_AT. asyncIdentityTtlSeconds is
+// min(600, floor((expiresAt - Date.now()) / 1000) - 1). At this instant the
+// remaining window is 3599s, so the minted async identity TTL is the
+// deterministic 600s cap and the JWT expiry stays strictly before EXPIRES_AT.
+const FROZEN_NOW_MS = Date.parse('2026-09-28T09:00:00.000Z')
 
 const runtime = {
   keyCustody: {},
@@ -267,6 +272,9 @@ function makeTransaction(
 
 describe('Time Machine recovery archive preview authority', () => {
   beforeEach(() => {
+    // Date only: this suite awaits real promises. Faking the timer queue can stall them.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(FROZEN_NOW_MS)
     vi.stubEnv('JWT_SECRET', 'unit-test-recovery-archive-preview-secret')
     for (const dependency of Object.values(dependencies)) dependency.mockReset()
     dependencies.readRecoveryArchiveCompleteSectionState.mockResolvedValue({
@@ -315,6 +323,7 @@ describe('Time Machine recovery archive preview authority', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllEnvs()
   })
 
