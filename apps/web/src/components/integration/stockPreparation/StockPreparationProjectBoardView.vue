@@ -112,8 +112,11 @@
           :placeholder="bi('项目号或名称', 'Project number or name')"
           @keyup.enter="openProject"
         >
-        <!-- D1=A: the union, not the directory alone. The home page's own caption says the list
-             holds "这台电脑最近开过的、和管理员归档过的项目" — so it has to. -->
+        <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
+             list holds 「这台电脑最近开过的项目、管理员归档过的项目,以及备料表里已经有数据的项目」 — so it
+             has to. A directory row is labelled by its own name; a row only this computer's memory
+             knows is labelled with the home page's words for that half of the list, verbatim. The
+             memory is written only when this page opens a project, so "opened" is literally true. -->
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
@@ -124,7 +127,7 @@
             v-for="entry in memoryOnlyProjectNos"
             :key="`memory:${entry}`"
             :value="entry"
-          >{{ bi('这台电脑最近开过的', 'Recently opened on this computer') }}</option>
+          >{{ bi('这台电脑最近开过的项目', 'A project this computer recently opened') }}</option>
         </datalist>
       </label>
       <button

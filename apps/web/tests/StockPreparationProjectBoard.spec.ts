@@ -78,6 +78,7 @@ import {
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
 } from '../src/services/integration/stockPreparation/workbenchAccess'
 import { resetStockPreparationOperatorHomeDirectoryThrottle } from '../src/services/integration/stockPreparation/operatorHomeDirectory'
+import { recordStockPrepProjectVisit } from '../src/services/integration/stockPreparation/operatorHomeMemory'
 import {
   stockPreparationHandoffFromStepKey,
   stockPreparationHandoffMayPress,
@@ -279,6 +280,8 @@ async function flush(): Promise<void> {
 //         can press (the press tells 仓库/采购), and only `completed` reads as finished.
 //   BNP-3 A hop whose notice is still OWED to this caller (`resendableStepKey`) can be sent from here
 //         even when the turn — or the whole chain — has moved on, as it can from the queue.
+//   BNP-4 (copy only) The project picker labels a project only this computer remembers in the home
+//         page's own words for that half of the list (#6088).
 //
 // The fixtures are the server's GET /handoff and POST /handoff/advance shapes
 // (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoff /
@@ -684,6 +687,32 @@ describe('项目备料页 — 通知下一步 matches the confirmation queue (BN
     expect(stockPreparationHandoffMayPress(at({ configured: false, resendableStepKey: 'process' }))).toBe(false)
     expect(stockPreparationHandoffMayPress(at({ resendableStepKey: '' }))).toBe(false)
     expect(stockPreparationHandoffMayPress(null)).toBe(false)
+  })
+
+  // ---- BNP-4 the picker's words for this computer's memory ------------------------------------
+
+  it('BNP-4: a project only this computer remembers is labelled in the home page’s own words', async () => {
+    // Derived from the fixture constant, so no new project number is written here; not in the directory.
+    const memoryOnly = `${PROJECT_NO}-M`
+    recordStockPrepProjectVisit(memoryOnly, 'ready', SCOPE)
+    // No project open: the home page and the picker are on ONE screen, so the two can be compared.
+    app = createApp(StockPreparationProjectBoardView, { scope: SCOPE, projectNo: '' })
+    app.mount(container!)
+    await flush()
+    const root = container!
+
+    const options = Array.from(
+      root.querySelectorAll('[data-testid="stock-prep-project-board-datalist"] option'),
+    ) as HTMLOptionElement[]
+    const remembered = options.find((option) => option.value === memoryOnly)
+    expect(remembered, 'the memory-only project is offered').toBeDefined()
+    expect(remembered!.textContent).toBe('这台电脑最近开过的项目')
+    expect(
+      text(root, 'stock-prep-operator-home-quick-open'),
+      'the home page describes that half of the list in the same words',
+    ).toContain(remembered!.textContent!)
+    // Control: a directory row is still labelled by its own name.
+    expect(options.find((option) => option.value === PROJECT_NO)?.textContent).toBe(PROJECT_NAME)
   })
 })
 
