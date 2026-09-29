@@ -919,6 +919,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 |
 | 新单测与改动的真库用例的类型检查(临时 tsconfig,继承 core-backend 配置,用后删除;CI 不对测试文件做类型检查) | 0 错误 |
 | s6a `sealed-export-package-provenance.test.cjs` | OK(本切片未触碰任何被钉文件) |
+| 插件自身的考勤集成(`plugin-tests.yml`「Run attendance integration tests」step 里的文件,被 `index.cjs` 改动触发),在**新建的第二个一次性库** `ms2_g4c2list2_20260929` 上跑(同样迁移 419 条,不带探针残留) | `attendance-plugin.test.ts` 166/166;`attendance-approval-action-authorization` / `attendance-approval-flow-dynamic-kind-s7-1` / `attendance-approval-direct-manager-s7-2` 三文件 57/57。该 step 其余文件未跑 |
 
 **mutation**:
 - 每条的步骤:cp 备份 → 精确替换(每处恰匹配一次)→ 核与备份的 numstat → 跑**整个文件** → cp 还原 → `cmp` 逐字节 → `git status` 与改前相同。
@@ -953,13 +954,15 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 2. **待办中心仍挂 `approvals:read`**(§9.9 第 4 项),本切片不改。C2 给只持 `attendance_approver` 的审批人提供了考勤侧入口,不依赖该码。
 3. **一单多请求行**的取法与**无索引**的批量读(§10.3)。
 4. **列表不是快照读**(§10.2):办理时由门在行锁下重判。
-5. **NOT RUN**:
+5. **列表只反映席位判定,不反映兑现结果**:列出的轮次在办理时仍可能碰到 §9.9 第 5 项的既有缺陷(发起后原请假被既有直接取消通道取消 ⇒ 兑现 500,归 C-1 线)。阶段 D 若在这里见红,属该项,不是 C2 缺陷。
+6. **NOT RUN**:
    - CI(未推送);CI 所用的 PostgreSQL 16(本地 15.17)。
+   - 「Run attendance integration tests」step 中上表四个文件以外的其余文件。
    - C2 的独立门审;阶段 D 验收。
    - 待办中心真库闸(本切片未改共享待办查询,未被触发)。
    - `attendance-web-guard.yml`(只跑 `apps/web` 的 spec,属前端 lane)。
    - 默认配置全量单测;被 `packages/core-backend/**` 宽匹配触发的其余 lane。
    - 真实钉钉发送。
-6. **测试残留**:
+7. **测试残留**:
    - 同 §8.8 第 7 项。C2 用例写入的 `approval_delegations` 行在 `afterAll` 显式删除,运行后库内 0 行;轮次、实例、请求、用户与角色随既有清理删除。
    - 动态探针对全部路由打请求,会在一次性库留下探针数据,随库 drop。
