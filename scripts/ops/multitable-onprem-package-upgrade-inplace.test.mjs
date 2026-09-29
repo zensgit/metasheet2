@@ -3796,6 +3796,29 @@ function copyItemFailureStubSource(failUnder) {
   ].join('\n')
 }
 
+// PowerShell for a Remove-Item stand-in, defined like the Copy-Item one above: removing
+// exactly failPath deletes partialFile first (with the real cmdlet) and then throws, the
+// way a recursive delete that meets a locked file stops halfway. Every other call is
+// the real cmdlet.
+function removeItemFailureStubSource(failPath, partialFile) {
+  return [
+    `$global:StubRemoveFailPath = ${psSingleQuote(failPath)}`,
+    `$global:StubRemovePartialFile = ${psSingleQuote(partialFile)}`,
+    'function global:Remove-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [switch]$Recurse, [switch]$Force)',
+    "  $target = (([string]($LiteralPath | Select-Object -First 1)) -replace '[\\\\/]+', '/').TrimEnd('/')",
+    "  $fail = ($global:StubRemoveFailPath -replace '[\\\\/]+', '/').TrimEnd('/')",
+    '  if ($target.Equals($fail, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $global:StubRemovePartialFile -Force',
+    '    throw "STUB_REMOVE_FAILED: stopped halfway through deleting $LiteralPath"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
 // The run must end on the ORIGINAL error, uncaught, on stderr. Both shells wrap it
 // (pwsh 7: colour codes and a "     | " gutter; Windows PowerShell 5.1: hard wraps at
 // the buffer width), so it is compared with those and all whitespace taken out.
@@ -4005,6 +4028,40 @@ test('stop gap (#6079): once the first live path is being replaced, the backend 
     assert.ok(restoreRecipeCommands(result.stdout).some((command) => command.startsWith('Remove-Item -LiteralPath ') && command.includes(liveDist)), 'the restore block must put the replaced dist back')
     assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
     assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a delete that stops halfway through the first live directory has already replaced something -- the fact is recorded BEFORE the delete, so the backend is never started and RESTORE REQUIRED is printed', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    // A second file, so "halfway" leaves one deleted and one still there.
+    writeFixtureFile(fx.liveRoot, 'packages/core-backend/dist/keep-me.js', 'KEEP_ME')
+    const deletedFirst = path.join(liveDist, 'src', 'db', 'migrate.js')
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      removeItemFailureStubSource(liveDist, deletedFirst),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_REMOVE_FAILED: stopped halfway through deleting')
+    assert.ok(!fs.existsSync(deletedFirst) && fs.existsSync(path.join(liveDist, 'keep-me.js')), 'the fixture must leave the live dist half-deleted')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...FAILURE_HANDLER_PM2_CALLS], `a half-deleted install must never be started.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling')
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
