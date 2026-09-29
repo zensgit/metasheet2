@@ -392,6 +392,27 @@ test('recovery archive flag is exact-case-sensitive, fence-dependent, and has no
   assert.match(archive.purpose, /no retention conflict/i)
 })
 
+test('recovery archive requires the exact writer-fence literal used by its worker', () => {
+  const fence = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_WRITER_FENCE
+  assert.equal(isActivated(fence, 'TRUE'), true)
+  for (const value of [undefined, 'false', 'TRUE', ' true ']) {
+    const violations = evaluateFlagRules({
+      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+      MULTITABLE_ENABLE_WRITER_FENCE: value,
+    })
+    assert.deepEqual(violations.map(({ id, flag, missing }) => ({ id, flag, missing })), [{
+      id: 'archive-without-exact-writer-fence',
+      flag: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+      missing: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    }], String(value))
+  }
+  assert.deepEqual(evaluateFlagRules({
+    MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+    MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+  }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'false' }), [])
+})
+
 // ── Combined ladder rung ───────────────────────────────────────────────────────────────────────────
 
 test('positive control: a full valid L1->L3.5 ladder rung (exact activation values) has zero violations', () => {
@@ -493,7 +514,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })

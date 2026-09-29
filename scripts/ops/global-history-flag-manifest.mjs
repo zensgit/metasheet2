@@ -24,8 +24,8 @@
 
 /**
  * @typedef {Object} FlagRule
- * @property {string} kind - 'requires' (dependsOn must ALSO be active) | 'conflicts' (dependsOn/target must NOT be active together)
- * @property {string} id - stable violation id, printed by --strict
+ * @property {string} kind - 'requires' (dependsOn active) | 'requires-exact' (dependsOn equals its activationValue byte-for-byte) | 'conflicts' (target active)
+ * @property {string} id - stable violation id reported by flag status
  * @property {string} description
  */
 
@@ -288,6 +288,13 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "Time Machine archive runtime gate: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. The dedicated local launcher requires this flag and MULTITABLE_ENABLE_WRITER_FENCE both exact ON, admitted local configuration and FD3 custody unlock before listening. Ordinary server startup without an injected archive composition refuses ON; manual capture also requires explicit policy. This flag has no retention conflict and does not enable prune or retention.",
     source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    rules: [
+      {
+        kind: 'requires-exact',
+        id: 'archive-without-exact-writer-fence',
+        description: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED is active but MULTITABLE_ENABLE_WRITER_FENCE is not exactly true; the archive worker and local launcher refuse this combination.',
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
@@ -762,22 +769,24 @@ export function isValueRedactedType(spec) {
 }
 
 /**
- * Evaluate every `requires`/`conflicts` rule in the manifest against a flat env-like flag map
+ * Evaluate every `requires`/`requires-exact`/`conflicts` rule in the manifest against a flat env-like flag map
  * (`{ [key]: string | null | undefined }`). Returns a list of violations; empty = no illegal
- * combination present. Uses EXACT per-flag activation (via `isActivated`), never the loose
- * "looks truthy" heuristic, so it cannot be fooled by the R4 footgun in either direction.
+ * combination present. `requires-exact` compares the dependency's raw value with its
+ * activationValue; other rules use per-flag activation via `isActivated`.
  */
 export function evaluateFlagRules(flags) {
   const violations = []
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
     const rules = spec.rules || []
     for (const rule of rules) {
-      if (rule.kind === 'requires') {
+      if (rule.kind === 'requires' || rule.kind === 'requires-exact') {
         const selfOn = isActivated(spec, flags[spec.key])
         if (!selfOn) continue
         const unmet = spec.dependsOn.filter((depKey) => {
           const depSpec = GLOBAL_HISTORY_FLAG_BY_KEY[depKey]
-          return depSpec && !isActivated(depSpec, flags[depKey])
+          return depSpec && (rule.kind === 'requires-exact'
+            ? flags[depKey] !== depSpec.activationValue
+            : !isActivated(depSpec, flags[depKey]))
         })
         if (unmet.length > 0) {
           violations.push({
