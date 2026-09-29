@@ -118,8 +118,14 @@ jobs:
           cp "$PKG_ROOT/docker/app.env.multitable-onprem.template" "$PKG_ROOT/docker/app.env"
           # Encryption-at-rest material (owner review F4, 2026-09-16). bootstrap-admin.sh
           # (recipe step 5 below) fail-closes when ENCRYPTION_KEY/ENCRYPTION_SALT are missing
-          # or still the built-in default, and the multitable template declares neither --
-          # without these two lines the rehearsal exits 1 at step 5, before any DB work.
+          # or still the built-in default, and the multitable template declares both only as
+          # live EMPTY lines (#5711) -- without these two lines the rehearsal exits 1 at step 5,
+          # before any DB work. Appending them duplicates those empty keys. That is fine HERE
+          # only because every consumer in this lane sources the file (bootstrap-admin.sh, and
+          # `set -a; .` before the backend starts), where the LAST declaration wins; a pm2 start
+          # on ecosystem.config.cjs would read the FIRST (empty) one, and
+          # multitable-onprem-preflight.sh rejects such a file as DUPLICATE_ENV_KEY. An operator
+          # sets the values on the template's own lines instead.
           #
           # RUN-SCOPED SYNTHETIC MATERIAL, NOT PRODUCTION MATERIAL: minted fresh on every run,
           # never echoed to the log (it is written into the env file, not to stdout), never

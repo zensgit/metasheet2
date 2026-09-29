@@ -52,9 +52,17 @@ import {
  * checked-in suite (which also runs against CI's SHARED `metasheet_test` database).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
-const EXPECT_DB = process.env.EXPECT_DB === '1'
-const itIfExpectDb = EXPECT_DB ? it : it.skip
 const TS = Date.now()
+
+// Sentinel deliberately lives OUTSIDE describeIfDatabase (top-level `it`, gated only on
+// EXPECT_DB): nested inside `describeIfDatabase` it would itself be skipped whenever
+// DATABASE_URL is absent, so a DB-expected lane (EXPECT_DB=1) with a missing DATABASE_URL would
+// report this whole file as skipped-green instead of red. Same shape as
+// approval-org-writer-w4-s1.db.test.ts / approval-comments.db.test.ts.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 async function canListen(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -222,10 +230,6 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   // interrupted before its own `afterAll` — pre-execution cleanup is what survives interruption,
   // post-execution cleanup only survives a completed run.
   const dbGrantedAdminUserIds: string[] = []
-
-  itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
-  })
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)

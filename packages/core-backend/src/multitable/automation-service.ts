@@ -877,9 +877,10 @@ function actionTargetsTriggerRecord(actionType: string, config: Record<string, u
  * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
  * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
  * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
- * Deliberately NOT applied to a disable-only / name-only / conditions-only edit or to deleteRule: an
- * operator must always be able to turn such a rule off (setRuleEnabled routes through updateRule) — see
- * the updateRule gate for the exact input shapes that run this check.
+ * Deliberately NOT applied to an on/off switch (disable-only, and enable-only since #6155), a name-only or
+ * conditions-only edit, or to deleteRule: an operator must always be able to turn such a rule off and back
+ * on (setRuleEnabled routes through updateRule) — see the updateRule gate for the exact input shapes that
+ * run this check.
  */
 export function validateDeletedTriggerSelfMutation(
   triggerType: string,
@@ -2077,19 +2078,21 @@ export class AutomationService {
 
     // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
     // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
-    // type/config/list, execution mode — or RE-ENABLES the rule (F9c precedent: `enabled` is not a bypass
-    // for arming a rule that can only ever no-op). Deliberately NOT gated like the T1-2/T1-3 blocks above
-    // (every write shape): a DISABLE-only `{ enabled: false }`, a rename, a conditions-only or a
-    // triggerConfig-only edit of an EXISTING such rule must still succeed — `setRuleEnabled` routes through
-    // this method, and the customer's way out of the self-chain is exactly "turn it off" (or deleteRule,
-    // which validates nothing). Existing rules stay loadable; they cannot be saved forward with this shape.
+    // type/config/list, execution mode. Deliberately NOT gated like the T1-2/T1-3 blocks above (every write
+    // shape): a rename, a conditions-only or a triggerConfig-only edit, and a pure on/off switch of an EXISTING
+    // such rule must still succeed — `setRuleEnabled` routes through this method.
+    // #6155 (Ratified-by-default-2026-09-29, reverses one sentence of #6078): an enable-only PATCH
+    // (`{ enabled: true }` with none of the five shape fields) is NOT checked either. Switching a rule off and
+    // on again must bring back the state it had; the shape does not change; a rule of this shape that is on
+    // already runs and each run ends as skipped (#6078). `enabled: true` sent TOGETHER with a shape field is
+    // still checked — the shape field alone opens this gate. Existing rules stay loadable and switchable; they
+    // cannot be saved forward with this shape.
     if (
       input.triggerType !== undefined
       || input.actionType !== undefined
       || input.actionConfig !== undefined
       || input.actions !== undefined
       || input.executionMode !== undefined
-      || input.enabled === true
     ) {
       // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
       // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
@@ -2120,7 +2123,7 @@ export class AutomationService {
       if (deletedTriggerSelfMutationError) {
         throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
       }
-      // Final review F4 (same gate condition as above, so disable-only / rename / conditions-only edits still skip it).
+      // Final review F4 (same gate condition as above, so on/off switches / rename / conditions-only edits still skip it).
       const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
         sheetId,
         nextTriggerType,
@@ -2176,7 +2179,8 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule through the same resulting-shape validation as every other edit.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit — except the
+   * record-deleted self-mutation shape check, which a pure on/off switch does not run (#6155).
    */
   async setRuleEnabled(
     ruleId: string,

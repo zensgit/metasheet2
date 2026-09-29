@@ -35,6 +35,41 @@ export interface DataSourceListItem {
   referenceCount?: number
 }
 
+/**
+ * Why a persisted source could not be loaded by the server (closed vocabulary, mirrored from the
+ * backend's DATA_SOURCE_LOAD_STATES). Only `credentials_unreadable` can be fixed from the UI (by
+ * re-entering credentials); the rest need an administrator.
+ */
+export const DATA_SOURCE_LOAD_STATES = [
+  'credentials_unreadable',
+  'unsupported_type',
+  'load_failed',
+] as const
+export type DataSourceLoadState = (typeof DATA_SOURCE_LOAD_STATES)[number]
+
+/**
+ * One entry of `GET /api/data-sources` → `data.loadFailed`: a source that EXISTS but the server
+ * could not load. Deliberately NOT a {@link DataSourceListItem}: it has no adapter behind it, so it
+ * cannot be tested, browsed, edited or deleted — only re-sealed (see `loadState`). Visible only to
+ * its owner and platform admins; the server omits the field when there is nothing to show.
+ */
+export interface DataSourceLoadFailedItem {
+  id: string
+  name: string
+  type: string
+  loadState: DataSourceLoadState
+  ownerId: string | null
+}
+
+/** What `PUT /api/data-sources/:id/credentials` tells the UI beyond "it worked". */
+export interface RotateDataSourceCredentialsResult {
+  /**
+   * The credentials were saved, but the source only goes live after a service restart (a source
+   * armed for SQL write can only be bound at startup). False for every ordinary rotation.
+   */
+  restartRequired: boolean
+}
+
 /** Sanitized detail from `GET /api/data-sources/:id`; credentials are never returned. */
 export interface DataSourceDetail extends DataSourceListItem {
   connection: DataSourceConnectionInput
