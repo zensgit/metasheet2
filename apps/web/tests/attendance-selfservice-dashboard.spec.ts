@@ -1996,6 +1996,32 @@ describe('Attendance self-service dashboard', () => {
     expect(block!.querySelector('[data-cancel-round-status]')?.textContent).toBe('Cancellation pending approval')
   })
 
+  // An approver with nothing to decide (e.g. the launch flag is OFF and no round was ever launched) sees no
+  // approver card on the overview at all: the list is read, comes back empty, and nothing is rendered.
+  it('an approver with no pending cancellation sees no approver card on the overview', async () => {
+    authMockState.accessSnapshot = { isAdmin: false, permissions: ['attendance:read', 'attendance:approve'] }
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      return baseImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+
+    const pendingReads = vi.mocked(apiFetch).mock.calls.filter(call =>
+      String(call[0]).endsWith('/api/attendance/cancel-rounds/pending'))
+    expect(pendingReads).toHaveLength(1)
+    expect(container!.querySelector('[data-attendance-request-tools]')).toBeTruthy()
+    expect(container!.querySelector('[data-cancel-round-pending]')).toBeNull()
+    expect(container!.textContent).not.toContain('Cancellation requests awaiting my approval')
+    expect(container!.textContent).not.toContain('No cancellation requests are waiting for your approval')
+  })
+
   // The person who follows a cancel round's todo item is usually an APPROVER of that round (not the
   // requester). The decision lives in the attendance-side 「待我审批的撤销申请」 card, whose deep-linked row
   // is marked and ends up in view — the page's own scroll to the request tools does not leave it behind.
