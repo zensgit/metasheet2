@@ -108,6 +108,20 @@ async function createHarness(
       },
     },
     services: {
+      // Product entry v2 phase A: plugin-attendance registers the two cancel-round routes only when
+      // core lends it this port. A stub that must never be reached — every case below is answered
+      // by the UUID guard before any lookup.
+      approvalCancelRoundEntry: {
+        canReadDocument: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        readRoundSummary: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        launch: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+      },
       attendanceW4SegmentCalculation: {
         resolveOrgSegmentCalculationPosture: async () => ({
           effectiveState: 'legacy',
@@ -1484,6 +1498,8 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/requests/:id/approve' },
       { key: 'POST /api/attendance/requests/:id/reject' },
       { key: 'POST /api/attendance/requests/:id/cancel' },
+      { key: 'GET /api/attendance/requests/:id/cancel-round' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round' },
       { key: 'DELETE /api/attendance/requests/:id' },
       { key: 'PUT /api/attendance/integrations/:id' },
       { key: 'DELETE /api/attendance/integrations/:id' },

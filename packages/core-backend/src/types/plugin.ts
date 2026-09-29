@@ -1307,8 +1307,8 @@ export interface PluginServices {
    * port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
    * (P-1 Q1′ = (i) attendance-side mounting; P-3 = (iii) round-summary carrier; P-4 summary read).
    * Same posture as `approvalAssigneeResolver` above: core-backend is the PROVIDER and ONLY
-   * plugin-attendance receives it; every other plugin gets `undefined`, and the consumer answers a
-   * fail-closed 503. `launch` is the ONE plugin-reachable path to the dedicated cancel-round creation
+   * plugin-attendance receives it; every other plugin gets `undefined`, and without it the consumer
+   * registers neither route (fail-closed). `launch` is the ONE plugin-reachable path to the dedicated cancel-round creation
    * path (never the public `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance`
    * applied to the ORIGINAL document instance. Implementation:
    * `approvals/approval-cancel-round-entry-port.ts`.

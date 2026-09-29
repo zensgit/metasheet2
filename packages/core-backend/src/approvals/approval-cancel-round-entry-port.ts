@@ -35,8 +35,8 @@
  *     the employee surface (P-6′ ②).
  *
  * Least-privilege posture (same as `approvalAssigneeResolver`): `src/index.ts` injects this port into
- * plugin-attendance ONLY; every other plugin sees `undefined`, and the plugin's routes answer a
- * fail-closed 503 rather than a fabricated empty summary.
+ * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port plugin-attendance
+ * does not register the two routes at all (fail-closed: no entry rather than a half-wired one).
  */
 
 import { pool } from '../db/pg'

@@ -37000,6 +37000,179 @@ module.exports = {
       })
     )
 
+    // ── Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记」 2026-09-28),
+    //    phase A: the attendance-side cancel-round entry (P-1 Q1′ = (i): launch behind
+    //    `attendance:write`, read progress behind `attendance:read`).
+    //
+    // The two routes reach core ONLY through `context.services.approvalCancelRoundEntry`, which core
+    // injects into this plugin alone. No port ⇒ the routes are not registered at all (fail-closed:
+    // no entry rather than a half-wired one).
+    //
+    // VISIBILITY is lock I7 — `canReadApprovalInstance` on the request's ORIGINAL approval instance
+    // (P-4: the predicate sits on the original document, never a second one). A viewer who fails it,
+    // an unknown id, and a request with no approval instance all get the SAME 404 body.
+    //
+    // LAUNCH preconditions are P-1 (a)/(b)/(c) on the attendance request row, answered with the P-8
+    // registered codes, and then the dedicated creation path re-checks them on the approval instance
+    // under its own row lock (the authoritative half). Refusals from that path are passed through as
+    // (status, code, message) only.
+    const cancelRoundEntryPort = context?.services?.approvalCancelRoundEntry ?? null
+    if (
+      cancelRoundEntryPort
+      && typeof cancelRoundEntryPort.canReadDocument === 'function'
+      && typeof cancelRoundEntryPort.readRoundSummary === 'function'
+      && typeof cancelRoundEntryPort.launch === 'function'
+    ) {
+      const respondCancelRoundRequestNotFound = (res) => {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+      }
+
+      const loadCancelRoundRequestForViewer = async (requestId, orgId, viewerId) => {
+        const rows = await db.query(
+          'SELECT id, user_id, status, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
+          [requestId, orgId]
+        )
+        const row = rows[0]
+        if (!row || !row.approval_instance_id) return null
+        const documentInstanceId = String(row.approval_instance_id)
+        const readable = await cancelRoundEntryPort.canReadDocument(viewerId, documentInstanceId)
+        if (!readable) return null
+        return {
+          requestId: String(row.id),
+          userId: row.user_id,
+          status: row.status,
+          documentInstanceId,
+        }
+      }
+
+      const cancelRoundLaunchBodySchema = z.object({
+        reason: z.string().max(2000).optional().nullable(),
+      })
+
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:read', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            const summary = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            res.json({ ok: true, data: { requestId: request.requestId, ...summary } })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round summary failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load cancellation' } })
+          }
+        })
+      )
+
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:write', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          const parsed = cancelRoundLaunchBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          const reason = typeof parsed.data.reason === 'string' && parsed.data.reason.trim().length > 0
+            ? parsed.data.reason.trim()
+            : null
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            // P-1 (a) — only an approved leave can be cancelled.
+            if (request.status !== 'approved') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+                  message: 'A cancel round can only be started for an approved document',
+                },
+              })
+              return
+            }
+            // P-1 (b) / lock:157 — only the original requester; a participant who may READ the
+            // document (approver, admin, delegate, proxy submitter) may not launch.
+            if (request.userId !== viewerId) {
+              res.status(403).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_REQUESTER_ONLY',
+                  message: 'Only the original requester may start a cancel round for this document',
+                },
+              })
+              return
+            }
+            // P-1 (c) / I3 — at most one in-flight round; the creation path's partial unique index
+            // remains the authoritative backstop for the concurrent case.
+            const current = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            if (current && current.round && current.round.outcome === 'pending') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_ALREADY_PENDING',
+                  message: 'This document already has a cancel round in progress',
+                },
+              })
+              return
+            }
+            const result = await cancelRoundEntryPort.launch(request.documentInstanceId, { userId: viewerId }, { reason })
+            if (!result || result.ok !== true) {
+              const status = Number.isInteger(result?.status) && result.status >= 400 && result.status <= 599
+                ? result.status
+                : 500
+              res.status(status).json({
+                ok: false,
+                error: {
+                  code: typeof result?.code === 'string' ? result.code : 'INTERNAL_ERROR',
+                  message: typeof result?.message === 'string' ? result.message : 'Failed to start cancellation',
+                },
+              })
+              return
+            }
+            res.status(201).json({ ok: true, data: { requestId: request.requestId, ...result.summary } })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round launch failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to start cancellation' } })
+          }
+        })
+      )
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/schedule-dispatch-requests',
