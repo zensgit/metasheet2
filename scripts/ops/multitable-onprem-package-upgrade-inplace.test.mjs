@@ -2154,15 +2154,20 @@ function runUpgradeScriptAsync(args, envOverrides = {}) {
 // after it is gone.
 // gateWired: answer 503 to everything but the backend-direct /health while the flag
 // exists, the way a host whose nginx reads the gate does.
+// preStopProbes: the one silent backend-direct request step 2 makes right before the
+// stop (Test-BackendAnswersNow, tagged X-Upgrade-Prestop-Probe) is recorded there and
+// NOT in `requests`, which stays the health POLLING the tests below count.
 function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false } = {}) {
   return new Promise((resolve) => {
     const requests = []
+    const preStopProbes = []
     const server = http.createServer((req, res) => {
       // backendUp only governs the backend-direct /health path: it lets the R59
       // fixtures model "the backend is down until the scheduled task starts it".
       const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
       const up = req.url === '/health' ? Boolean(backendUp()) : !gated
-      requests.push({
+      const log = req.headers['x-upgrade-prestop-probe'] === '1' ? preStopProbes : requests
+      log.push({
         url: req.url,
         flagExists: flagPath ? fs.existsSync(flagPath) : null,
         // The one-shot "is the gate actually wired on this host" probe tags
@@ -2182,7 +2187,7 @@ function startHealthServer({ flagPath = null, backendUp = () => true, gateWired 
     })
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address()
-      resolve({ server, port, requests, url: `http://127.0.0.1:${port}/api/health` })
+      resolve({ server, port, requests, preStopProbes, url: `http://127.0.0.1:${port}/api/health` })
     })
   })
 }
@@ -3840,11 +3845,22 @@ function liveInstallSnapshot(liveRoot) {
   return files
 }
 
+// The backend-direct /health of a pm2-runtime host as an upgrade meets it: answering
+// until the first `pm2 stop` (the pm2 stub's home log shows it), then down -- and, with
+// comesBackWithTask, up again once the scheduled task has started pm2-runtime (the task
+// stub's marker). Step 2's silent pre-stop probe therefore sees it up; every poll after
+// the stop sees it down until the task started. Across two runs of one fixture the
+// first run's stop keeps it down for the second.
+function backendUpUntilStopped(fx, { comesBackWithTask = true } = {}) {
+  return () => !readPm2HomeLog(fx.homeLogPath).some((entry) => entry.command === 'stop') || (comesBackWithTask && fs.existsSync(fx.runtimeStartedMarker))
+}
+
 test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing replaced -- brings the backend back the way step 7 does (pm2 restart, "not found", pm2 kill, the MetaSheet-PM2 task), checks it answers, says so and exits non-zero; no restore block (RED on the pre-fix script)', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  // The backend stays DOWN until the scheduled task has started pm2-runtime again.
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  // The backend answers until the step 2 stop, then stays DOWN until the scheduled task
+  // has started pm2-runtime again.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const before = liveInstallSnapshot(fx.liveRoot)
@@ -3868,6 +3884,9 @@ test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing rep
     assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], `the backend must be started again after the stop.\n${report}`)
     for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+    // The evidence for the start: step 2 asked the backend once, silently, right before
+    // it stopped it, and it answered (review F1: no answer there, no start).
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true'], `step 2 must ask the backend once, before the stop.\n${report}`)
     // It checked the backend answers, directly (the gate is still up), after the start.
     const probes = health.requests.filter((entry) => !entry.gateProbe)
     assert.ok(probes.length >= 1, `the backend-direct probe must run after the start.\n${report}`)
@@ -3878,7 +3897,7 @@ test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing rep
     assert.match(result.stdout, /NOTHING_REPLACED: /)
     assert.match(result.stdout, /=+ UPGRADE NOT APPLIED =+/)
     assert.match(result.stdout, /Backend: started again \(scheduled-task\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./)
-    assert.match(result.stdout, /The installed version was not changed and no migration ran\. Nothing needs to be restored\./)
+    assert.match(result.stdout, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
     assert.doesNotMatch(combined, /RESTORE REQUIRED/, 'nothing was replaced: there is nothing to restore, and the backup may be incomplete')
     assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'the failure handler\'s stop is for a replaced install only')
 
@@ -3907,13 +3926,22 @@ test('stop gap wiring (#6079): everything after the step 2 stop sits in the one 
   assert.ok(innerTryIdx < backupIdx && backupIdx < catchIdx, 'the step 3 backup must run inside the handler\'s try')
   const journalInitIdx = main.indexOf('$replaceJournal = @{ Replaced = $false }')
   assert.ok(journalInitIdx > -1 && journalInitIdx < main.indexOf('try {'), 'the journal must exist before the outer try, unmarked')
+  // Review F1: the evidence that the backend was running. $false until step 2's silent
+  // probe, taken after the gate probe and right before the stop, says otherwise; no
+  // probe at all with RestartService=0 (nothing is started then anyway).
+  const evidenceInitIdx = main.indexOf('$backendAnsweredBeforeStop = $false\n')
+  assert.ok(evidenceInitIdx > -1 && evidenceInitIdx < main.indexOf('try {'), 'the pre-stop evidence must start $false, before the outer try')
+  const probeMatch = main.match(/\n(\s*)if \(\$RestartService -ne '0'\) \{\n\s*\$backendAnsweredBeforeStop = Test-BackendAnswersNow -HealthUrl \$resolvedBackendHealthUrl\n\s*\}\n(?:\s*\n)?\s*Stop-Pm2App -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home\n/)
+  assert.ok(probeMatch, 'step 2 must probe the backend (RestartService other than 0) immediately before its stop, with nothing in between')
+  assert.ok(main.indexOf('Test-MaintenanceGateWired -ProbeUrl $HealthUrl') < main.indexOf('Test-BackendAnswersNow -HealthUrl'), 'the pre-stop probe comes after the gate probe')
+  assert.equal((main.match(/\$backendAnsweredBeforeStop\s*=/g) || []).length, 2, 'the evidence is set twice only: $false, then the probe')
   assert.match(main, /Update-ReplaceDirs -PackageRoot \$packageRoot -RootDir \$resolvedRoot -RelativeDirs \$ReplaceDirs -Journal \$replaceJournal\n/)
   assert.match(main, /Update-Plugins -PackageRoot \$packageRoot -RootDir \$resolvedRoot -Journal \$replaceJournal\n/)
 
   const handler = main.slice(catchIdx)
   assert.match(
     handler,
-    /^\} catch \{\s*\n\s*Write-Err \$_\.Exception\.Message\s*\n\s*if \(-not \$replaceJournal\.Replaced\) \{\s*\n(?:\s*#[^\n]*\n)*\s*\$null = Start-BackendAfterUnappliedUpgrade -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home -ScheduledTaskName \$Pm2ScheduledTaskName -RestartService \$RestartService -BackendHealthUrl \$resolvedBackendHealthUrl [^\n]*\n\s*throw\s*\n\s*\}\s*\n/,
+    /^\} catch \{\s*\n\s*Write-Err \$_\.Exception\.Message\s*\n\s*if \(-not \$replaceJournal\.Replaced\) \{\s*\n(?:\s*#[^\n]*\n)*\s*\$null = Start-BackendAfterUnappliedUpgrade -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home -ScheduledTaskName \$Pm2ScheduledTaskName -RestartService \$RestartService -BackendAnsweredBeforeStop \$backendAnsweredBeforeStop -BackendHealthUrl \$resolvedBackendHealthUrl [^\n]*\n\s*throw\s*\n\s*\}\s*\n/,
     'the handler must first report the error, then -- nothing replaced -- start the backend again and rethrow, before anything else',
   )
   const branchEnd = handler.search(/\n\s*throw\s*\n/)
@@ -3940,6 +3968,16 @@ test('stop gap wiring (#6079): everything after the step 2 stop sits in the one 
   const unapplied = fnBody('Start-BackendAfterUnappliedUpgrade')
   assert.match(unapplied, /Restart-Pm2AppOrScheduledTask -Pm2Command \$Pm2Command -Name \$Name -Pm2Home \$Pm2Home -ScheduledTaskName \$ScheduledTaskName\n/, 'the backend must be started the way step 7 starts it')
   assert.doesNotMatch(unapplied, /Write-RestoreBlock|Stop-Pm2App|Remove-Item|Copy-Item/, 'nothing replaced: no restore, no stop, no file operation')
+  assert.match(unapplied, /\[Parameter\(Mandatory = \$true\)\]\[bool\]\$BackendAnsweredBeforeStop/, 'the pre-stop evidence has no default: every caller must say what it saw')
+  assert.equal((unapplied.match(/Restart-Pm2AppOrScheduledTask/g) || []).length, 1)
+  assert.ok(unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') > -1 && unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') < unapplied.indexOf('Restart-Pm2AppOrScheduledTask'), 'no pre-stop answer, no start: the start sits in the branch after that refusal')
+
+  // The pre-stop probe: one tagged request, silent, never throws.
+  const probe = fnBody('Test-BackendAnswersNow')
+  assert.equal((probe.match(/Invoke-WebRequest/g) || []).length, 1, 'exactly one request')
+  assert.match(probe, /-Headers @\{ 'X-Upgrade-Prestop-Probe' = '1' \}/)
+  assert.doesNotMatch(probe, /Write-(Host|Info|Err|Output|Warning)/, 'the probe prints nothing: the success path output must not change')
+  assert.match(probe, /\} catch \{\s*\n\s*return \$false\s*\n\s*\}/, 'any failure is "did not answer"')
 })
 
 // Rebuilds the fixture archive (and its sidecar) from a stage the test has edited.
@@ -4071,7 +4109,7 @@ test('stop gap (#6079): a delete that stops halfway through the first live direc
 test('stop gap (#6079): when starting the backend again itself fails (the task cannot be started), the operator is told the site is DOWN, with the commands to start it by hand -- the pm2 home, pm2 restart, pm2 kill, the task by its folder -- and the run fails on the original error; no restore block', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4106,10 +4144,12 @@ test('stop gap (#6079): when starting the backend again itself fails (the task c
   }
 })
 
-test('stop gap (#6079): a backend that is started again but never answers is reported as started and NOT answering, after the normal number of backend-direct attempts', async () => {
+test('stop gap (#6079): a backend that is started again but never answers is reported as started and NOT answering, after the normal number of backend-direct attempts -- the site is DOWN, and the commands to start it by hand come with the pm2 home first (review F2: never a bare pm2 command)', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => false })
+  // Answering until the step 2 stop; the task starts pm2-runtime, but the backend never
+  // answers again (a crash loop, or a start slower than the attempts).
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx, { comesBackWithTask: false }) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4126,6 +4166,85 @@ test('stop gap (#6079): a backend that is started again but never answers is rep
     assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the backend-direct polling must run its attempts')
     assert.match(result.stdout, /Backend: started again \(scheduled-task\), but it did NOT answer http:\/\/127\.0\.0\.1:\d+\/health in 2 attempts\./, report)
     assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+
+    // Review F2. The finally drops the gate, so nginx answers 502 while the backend does
+    // not answer: the operator must read that the site is down, and get the start
+    // commands with the pm2 home FIRST -- on a pm2-runtime host whose runtime exited, a
+    // pm2 command without it starts an empty daemon in the operator's session (the
+    // caveat printed with `pm2 kill`). No bare pm2 advice at all.
+    const block = result.stdout.slice(result.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(result.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(block, /THE SITE IS DOWN until the backend answers\./, report)
+    assert.doesNotMatch(block, /pm2 status/, 'no bare `pm2 status` advice')
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const caveatIdx = block.indexOf('started an empty pm2 daemon in THIS session')
+    const killIdx = block.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && restartIdx > -1 && caveatIdx > -1 && killIdx > -1 && taskIdx > -1, `the block must print every start command and the kill caveat.\n${block}`)
+    assert.ok(homeIdx < restartIdx && restartIdx < caveatIdx && caveatIdx < killIdx && killIdx < taskIdx, 'order: PM2_HOME, pm2 restart, the caveat, pm2 kill, Start-ScheduledTask')
+    const firstPm2Idx = block.search(/\n\s*pm2 /)
+    assert.ok(firstPm2Idx > homeIdx, 'no pm2 command may be printed before the PM2_HOME line')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079, review F1): a re-run that meets a backend which does NOT answer (an earlier run replaced files, failed, and was never restored) and then fails before replacing anything does NOT start the backend -- the half-replaced tree stays stopped, and the operator is told why and to restore that run first', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    const env = r59ChildEnv(fx.profileDir, {}, ['PM2_HOME'])
+    const params = { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' }
+
+    // Run 1: the first copy into the live dist fails right after it was deleted (a full
+    // disk): RESTORE REQUIRED, the backend left stopped.
+    const run1 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(liveDist)), env)
+    const report1 = `run 1 stdout:\n${run1.stdout}\nrun 1 stderr:\n${run1.stderr}`
+    assert.notEqual(run1.status, 0, report1)
+    assert.match(run1.stdout, /RESTORE REQUIRED/, report1)
+    assert.ok(!fs.existsSync(path.join(liveDist, 'src', 'db', 'migrate.js')), 'run 1 must leave the live dist half-replaced')
+    const halfReplaced = liveInstallSnapshot(fx.liveRoot)
+    const pm2CallsBefore = readPm2HomeLog(fx.homeLogPath).length
+    const taskCallsBefore = readLogLines(fx.taskLogPath).length
+
+    // The operator does not restore. Run 2: the backup fails (the same full disk).
+    const run2 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(fx.backupRoot)), env)
+    const combined = run2.stderr + run2.stdout
+    const report = `run 2 stdout:\n${run2.stdout}\nrun 2 stderr:\n${run2.stderr}`
+    assert.notEqual(run2.status, 0, report)
+    assertEndsOnError(run2, 'STUB_COPY_FAILED: cannot write')
+    assert.doesNotMatch(run2.stdout, /BACKUP_PATH=/, 'run 2 must have failed inside the backup step')
+
+    // Nothing starts run 1's half-replaced tree: run 2's step 2 stop, and no pm2 call,
+    // no task start and no health polling after it.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).slice(pm2CallsBefore).map((entry) => entry.command), ['stop'], `the backend must not be started on a tree an earlier run half-replaced.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).slice(taskCallsBefore).filter((line) => line.startsWith('start')), [], 'the task must not be started')
+    assert.ok(!fs.existsSync(fx.runtimeStartedMarker), 'pm2-runtime must not have been started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling in either run')
+    // Why: run 1 met the backend answering before its stop, run 2 did not.
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true', '/health up=false'], report)
+
+    // What the operator reads.
+    const block = run2.stdout.slice(run2.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(run2.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(run2.stdout, /NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version\. The backend did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so it is NOT started/, report)
+    assert.match(block, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
+    assert.match(block, /Backend: NOT started -- it did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so nothing shows the installed files are a version that runs\./)
+    assert.match(block, /THE SITE IS DOWN until the backend is started\./)
+    assert.match(block, /If an earlier upgrade run printed RESTORE REQUIRED and that restore was not done, restore from THAT run's backup first/)
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && homeIdx < restartIdx && restartIdx < taskIdx, `the block must print the start commands, pm2 home first.\n${block}`)
+    assert.doesNotMatch(combined, /started again|so that version is intact|Nothing needs to be restored|=+ RESTORE REQUIRED =+/, 'run 2 must neither start the backend nor vouch for the installed files, and prints no restore block of its own (its backup holds run 1\'s half-replaced tree)')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), halfReplaced, 'run 2 changed no file')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
   } finally {
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
@@ -4135,8 +4254,10 @@ test('stop gap (#6079): a backend that is started again but never answers is rep
 test('stop gap (#6079): with -RestartService 0 a failure before anything was replaced starts nothing -- the operator is told the site is DOWN and how to start it', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // Only a witness here: with RestartService=0 step 2 must not probe the backend at all.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
   try {
-    const archivePath = buildR59LiveRootAndArchive(fx)
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
       root,
       fx.taskStub(),
@@ -4153,7 +4274,10 @@ test('stop gap (#6079): with -RestartService 0 a failure before anything was rep
     assert.match(result.stdout, /Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'/)
     assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
     assert.ok(!fs.existsSync(fx.witness.flagPath))
+    assert.deepEqual(health.preStopProbes, [], 'RestartService=0: no pre-stop probe')
+    assert.deepEqual(health.requests, [], 'RestartService=0: no request to the backend at all')
   } finally {
+    health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
