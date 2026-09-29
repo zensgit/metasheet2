@@ -259,6 +259,10 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+const summaryLine = () =>
+  container!.querySelector('[data-testid="approval-batch-result-dialog"] .approval-center__batch-result-summary')?.textContent?.trim()
+const resultKinds = () =>
+  [...container!.querySelectorAll<HTMLElement>('[data-testid="approval-batch-result-dialog"] [data-batch-result-kind]')].map((li) => li.dataset.batchResultKind)
 const attendanceCalls = () =>
   apiFetchMock.mock.calls.filter((c) => String(c[0]).includes('/cancel-round/actions')).map((c) => [c[0], JSON.parse(String((c[1] as RequestInit).body))])
 
@@ -376,12 +380,51 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     expect(elSuccessSpy).not.toHaveBeenCalled()
     const manifest = container!.querySelector('[data-testid="approval-batch-result-dialog"]')
     expect(manifest?.textContent).toContain('操作已提交,但无法确认它作用于页面上的这条撤销申请')
+    // accepted by the server ⇒ counted on its own, not as a failure (门审 r2 P3-6)
+    expect(summaryLine()).toBe('成功 0 项，已提交但未能确认 1 项，失败 0 项：')
+    expect(resultKinds()).toEqual(['unconfirmed'])
     // the leave's round is now decided — a retry must not send a second decision
     latestRound['req-1'] = pendingRound('cr_1', { outcome: 'applied', status: 'leave_cancelled' })
     ;(container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement).click()
     await flushUi()
     expect(attendanceCalls()).toHaveLength(1)
     expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')?.textContent).toContain('未执行任何操作')
+    // refused before sending ⇒ a failure again, with the original header shape
+    expect(summaryLine()).toBe('全部 1 项处理失败：')
+    expect(resultKinds()).toEqual(['failed'])
+  })
+
+  it('batch header: unconfirmed, succeeded and failed rows are three separate counts; no unconfirmed row keeps the old header', async () => {
+    actionResponses.push(() =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'round-of-cr_other', outcome: 'applied', status: 'leave_cancelled' } }))
+    dispatchActionSpy.mockImplementation(async (id: string) => {
+      if (id === 'apv_bad') throw new Error('冲突：状态已变更')
+      return {}
+    })
+    mockPendingApprovals.value = [
+      cancelRow('cr_1', 'apv_orig_1'),
+      pendingRow({ id: 'apv_ok', requestNo: 'AP-OK' }),
+      pendingRow({ id: 'apv_bad', requestNo: 'AP-BAD' }),
+    ]
+    await mountView()
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(summaryLine()).toBe('成功 1 项，已提交但未能确认 1 项，失败 1 项：')
+    expect(resultKinds().sort()).toEqual(['failed', 'unconfirmed'])
+
+    // a second batch with no cancel-round row in it: the header keeps its original shape
+    ;(container!.querySelector('[data-testid="approval-batch-result-close"]') as HTMLButtonElement).click()
+    await flushUi()
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_bad', requestNo: 'AP-BAD' }), pendingRow({ id: 'apv_ok2', requestNo: 'AP-OK2' })]
+    await flushUi()
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(summaryLine()).toBe('成功 1 项，失败 1 项：')
+    expect(resultKinds()).toEqual(['failed'])
   })
 })
 

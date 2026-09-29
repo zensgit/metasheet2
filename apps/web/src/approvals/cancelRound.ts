@@ -697,6 +697,14 @@ function cancelRoundClientRefusal(code: string, isZh: boolean): ApprovalApiError
   return new ApprovalApiError(isZh ? copy.zh : copy.en, 0, code)
 }
 
+/**
+ * The decision WAS accepted by the server, but for a round other than the confirmed one (or the body
+ * did not name it): not a failure — a batch counts it apart from its failures.
+ */
+export function isCancelRoundActedRoundUnconfirmed(error: unknown): boolean {
+  return errorCodeOf(error) === CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED
+}
+
 /** One of the three client refusals above: the page is showing a round that was not (or may not have been) the one decided. */
 export function isCancelRoundClientRefusal(error: unknown): boolean {
   const code = errorCodeOf(error)

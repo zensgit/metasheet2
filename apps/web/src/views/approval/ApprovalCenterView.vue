@@ -582,7 +582,10 @@
       data-testid="approval-batch-result-dialog"
     >
       <p class="approval-center__batch-result-summary">
-        <template v-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
+        <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
+             counted on its own — it is not a failure (the row's own line says to refresh and check). -->
+        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchFailureRows.length - batchUnconfirmedCount }} 项：</template>
+        <template v-else-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
         <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
       </p>
       <ul class="approval-center__batch-result-list">
@@ -590,6 +593,7 @@
           v-for="row in batchFailureRows"
           :key="row.id"
           class="approval-center__batch-result-item"
+          :data-batch-result-kind="row.unconfirmed ? 'unconfirmed' : 'failed'"
         >
           <div class="approval-center__batch-result-item-title">{{ row.requestNo }} · {{ row.title }}</div>
           <div class="approval-center__batch-result-item-message">{{ row.message }}</div>
@@ -624,6 +628,7 @@ import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../ap
 import {
   canDecideCancelRoundWith,
   dispatchApprovalDecision,
+  isCancelRoundActedRoundUnconfirmed,
   isCancelRoundClientRefusal,
   isCancelRoundWorkflow,
 } from '../../approvals/cancelRound'
@@ -924,15 +929,21 @@ interface ApprovalBatchFailureRow {
   title: string
   requestNo: string
   message: string
+  /** 撤销轮: accepted by the server, but not confirmed to be the round on screen — not a failure. */
+  unconfirmed: boolean
 }
 const batchResultDialogVisible = ref(false)
 const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
+const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
 
-function buildFailureRows(failed: ApprovalBatchActionResult['failed']): ApprovalBatchFailureRow[] {
+function buildFailureRows(
+  failed: ApprovalBatchActionResult['failed'],
+  unconfirmedIds: ReadonlySet<string>,
+): ApprovalBatchFailureRow[] {
   return failed.map(({ id, message }) => {
     const row = batchRowSnapshot.get(id)
     return {
@@ -940,6 +951,7 @@ function buildFailureRows(failed: ApprovalBatchActionResult['failed']): Approval
       title: row?.title ?? id,
       requestNo: row?.requestNo ?? '-',
       message,
+      unconfirmed: unconfirmedIds.has(id),
     }
   })
 }
@@ -950,16 +962,23 @@ async function dispatchBatchAndHandleResult(
   comment: string,
 ): Promise<void> {
   const trimmed = comment.trim()
+  const unconfirmedIds = new Set<string>()
   const result = await runApprovalBatchAction(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
     // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
     // at launch carries each row's workflowKey / businessKey for that decision. Every id comes from
     // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
-    (id, req) => {
+    async (id, req) => {
       const row = batchRowSnapshot.get(id)
       if (!row) throw new Error('操作失败，请刷新后重试')
-      return dispatchApprovalDecision(row, req, dispatchAction)
+      try {
+        return await dispatchApprovalDecision(row, req, dispatchAction)
+      } catch (error) {
+        // accepted but not confirmed to be this row's round: still listed, counted apart from failures
+        if (isCancelRoundActedRoundUnconfirmed(error)) unconfirmedIds.add(id)
+        throw error
+      }
     },
   )
   if (result.failed.length === 0) {
@@ -972,7 +991,7 @@ async function dispatchBatchAndHandleResult(
     lastBatchAction.value = action
     lastBatchComment.value = comment
     batchSucceededCount.value = result.succeeded.length
-    batchFailureRows.value = buildFailureRows(result.failed)
+    batchFailureRows.value = buildFailureRows(result.failed, unconfirmedIds)
     batchResultDialogVisible.value = true
   }
   clearPendingSelection()
