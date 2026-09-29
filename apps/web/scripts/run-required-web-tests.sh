@@ -1814,6 +1814,7 @@ exec npx vitest run \
   useAttendanceAdminUsers \
   useAutoSumTotal \
   usePlmExportActions \
+  userManagementView \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
