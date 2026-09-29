@@ -982,6 +982,29 @@ test('F1 a GBK comment near the top: the line called EMPTY is the physically emp
   }
 })
 
+test('F1 a GBK comment directly above a single declaration does not hide it from the value checks (get_env_value)', t => {
+  localePremise(t)
+  // No duplicate here, so require_unique_env_keys passes and only get_env_value decides.
+  const insertAbove = (entries, line) => {
+    const at = entries.indexOf(line)
+    assert.ok(at >= 0, 'fixture line not found')
+    return lfFile([...entries.slice(0, at), GBK_COMMENT, ...entries.slice(at)]).bytes
+  }
+  const valid = Object.entries(validEnv()).map(([key, value]) => `${key}=${value}`)
+  const hiddenMaterial = insertAbove(valid, `ENCRYPTION_KEY=${SYNTH.key}`)
+  // The dangerous direction: an invalid value the backend WILL read must not vanish into a comment.
+  const invalid = Object.entries(validEnv({ ENABLE_PLM: '2' })).map(([key, value]) => `${key}=${value}`)
+  const hiddenInvalid = insertAbove(invalid, 'ENABLE_PLM=2')
+  for (const locale of [CI_UTF8_LOCALE, 'C']) {
+    const ok = runPreflight(hiddenMaterial, { locale, reports: false })
+    assert.equal(ok.status, 0, `${locale}: a valid key below a GBK comment must still be read (no false "missing")`)
+    const bad = runPreflight(hiddenInvalid, { locale, reports: false })
+    assert.equal(bad.status, 1, `${locale}: an invalid value below a GBK comment must still fail`)
+    assert.match(bad.stderr, /ENABLE_PLM must be 0 or 1/, `${locale}: the invalid ENABLE_PLM must be the verdict`)
+    assertNoValues(ok, ['key', 'salt', 'jwt', 'pg'])
+  }
+})
+
 test('F1 structure: every read loop over the env file sits in a function whose first statement is local LC_ALL=C', () => {
   const source = readLf(SCRIPT)
   const loops = [...source.matchAll(/^[ \t]*done < "\$ENV_FILE"$/gm)]
