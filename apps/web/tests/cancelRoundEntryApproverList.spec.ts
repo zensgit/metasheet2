@@ -2,8 +2,9 @@
  * 请假撤销入口(阶段 B2)—— 考勤侧「待我审批的撤销」列表(AttendanceCancelRoundApproverPanel,owner 2026-09-29
  * 16:5x 「Attendance-side list (Recommended)」):只对持 `attendance:approve`(或 `attendance:admin` / 管理员)
  * 的查看者读取;首读为空或仍在读时不渲染卡片,有待办行或读失败时才出现,出现后在页面生命周期内保留(设计 MD
- * §9 第 22 项);读失败与「没有待办」不同形;每行通过 / 驳回走 `POST …/cancel-round/actions`,先读摘要
- * 确认轮次(实例 id 与轮次 id 都要对上、且仍在审批中),办理后核对 `data.roundId`;办理后重读列表。
+ * §9 第 22 项);读失败与「没有待办」不同形;每行通过 / 驳回走 `POST …/cancel-round/actions`,请求体带
+ * 列表行的轮次 id(`expectedRoundId`,阶段 D D2),由服务端核对轮次、不符 409 且零写入;不预读摘要(委托
+ * 席位持有者读不到原单);办理后核对 `data.roundId`;办理后重读列表。
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -255,8 +256,10 @@ describe('visibility and read states', () => {
   })
 })
 
-describe('decisions go through the attendance route with the round confirmed', () => {
-  it('通过: summary pre-read → POST actions → list re-read; success is announced and the row leaves (the card stays)', async () => {
+const summaryGets = () => calls().filter((c) => c[0] === 'GET' && /\/cancel-round$/.test(String(c[1])))
+
+describe('decisions go through the attendance route naming the listed round (phase D D2)', () => {
+  it('通过: POST actions naming the listed round (no summary read) → list re-read; success is announced and the row leaves (the card stays)', async () => {
     lists = [() => jsonResponse(200, listBody([item()])), () => jsonResponse(200, listBody([]))]
     const root = await mountPanel()
     await click(root, 'data-cancel-round-pending-approve')
@@ -267,8 +270,7 @@ describe('decisions go through the attendance route with the round confirmed', (
     await click(root, 'data-cancel-round-pending-confirm-submit')
     expect(calls()).toEqual([
       ['GET', PENDING_PATH, null],
-      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
-      ['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'approve' })],
+      ['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'approve', expectedRoundId: 'round-1' })],
       ['GET', PENDING_PATH, null],
     ])
     const notice = $(root, 'data-cancel-round-pending-notice')!
@@ -290,32 +292,45 @@ describe('decisions go through the attendance route with the round confirmed', (
     textarea.value = '  时间冲突  '
     textarea.dispatchEvent(new Event('input'))
     await click(root, 'data-cancel-round-pending-confirm-submit')
-    expect(posts()).toEqual([['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'reject', comment: '时间冲突' })]])
+    expect(posts()).toEqual([['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'reject', comment: '时间冲突', expectedRoundId: 'round-1' })]])
+    expect(summaryGets()).toHaveLength(0)
     expect($(root, 'data-cancel-round-pending-notice')!.textContent).toContain('已提交驳回意见')
   })
 
-  it('a stale row is never decided: another instance, another round id, a closed round, or an unreadable summary ⇒ nothing sent', async () => {
-    for (const stale of [
-      () => { latestRound['req-1'] = pendingRound({ engineInstanceId: 'cr_newer', roundId: 'round-newer' }) },
-      () => { latestRound['req-1'] = pendingRound({ roundId: 'round-other' }) },
-      () => { latestRound['req-1'] = pendingRound({ outcome: 'withdrawn', status: 'cancellation_withdrawn' }) },
-      () => { latestRound['req-1'] = null },
-      () => { summaryFails.add('req-1') },
-    ]) {
-      latestRound = { 'req-1': pendingRound() }
-      summaryFails = new Set()
-      stale()
+  it('a stale row is refused by the SERVER, not pre-read: the decision names the listed round, and the 409 INVALID_STATUS_TRANSITION it gets back is 「已不在审批中…未执行任何操作」 (not the withdraw copy); the list is re-read', async () => {
+    for (const action of ['approve', 'reject'] as const) {
       apiFetchMock.mockClear()
+      actionResponses.push(() => jsonResponse(409, { ok: false, error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' } }))
       const root = await mountPanel()
-      await click(root, 'data-cancel-round-pending-approve')
+      await click(root, action === 'approve' ? 'data-cancel-round-pending-approve' : 'data-cancel-round-pending-reject')
       await click(root, 'data-cancel-round-pending-confirm-submit')
-      expect(posts()).toHaveLength(0)
+      expect(posts()).toHaveLength(1)
+      expect(JSON.parse(String(posts()[0][2]))).toMatchObject({ action, expectedRoundId: 'round-1' })
+      expect(summaryGets()).toHaveLength(0)
       const notice = $(root, 'data-cancel-round-pending-notice')!
       expect(notice.dataset.noticeKind).toBe('error')
+      expect(notice.textContent).toContain('已不在审批中')
       expect(notice.textContent).toContain('未执行任何操作')
+      expect(notice.textContent).not.toContain('无法再撤回')
       // the list is re-read so the stale row does not stay on screen unexplained
       expect(calls().filter((c) => c[1] === PENDING_PATH)).toHaveLength(2)
+      while (apps.length) apps.pop()!.unmount()
+      document.body.innerHTML = ''
     }
+  })
+
+  it('a viewer who cannot read the leave (a seated delegator: the summary read would fail) still decides the listed round — nothing reads the summary', async () => {
+    summaryFails.add('req-1')
+    latestRound['req-1'] = null
+    actionResponses.push(() => jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'round-1', outcome: 'applied', status: 'leave_cancelled' } }))
+    const root = await mountPanel()
+    await click(root, 'data-cancel-round-pending-approve')
+    await click(root, 'data-cancel-round-pending-confirm-submit')
+    expect(summaryGets()).toHaveLength(0)
+    expect(posts()).toEqual([['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'approve', expectedRoundId: 'round-1' })]])
+    const notice = $(root, 'data-cancel-round-pending-notice')!
+    expect(notice.dataset.noticeKind).toBe('success')
+    expect(notice.textContent).toContain('已提交通过意见')
   })
 
   it('a decision the server attributes to another round is "could not confirm" — neither success nor failure', async () => {

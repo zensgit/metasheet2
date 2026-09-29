@@ -551,16 +551,18 @@ export async function withdrawCancelRound(requestId: string, comment?: string | 
 /**
  * `POST /api/attendance/requests/:id/cancel-round/actions` (attendance:approve). Resolves to the
  * `roundId` the minimal success body names — the round the server actually decided — or `null` when
- * the body does not name one.
+ * the body does not name one. `expectedRoundId` (optional): the round on screen; the server refuses
+ * (409 `INVALID_STATUS_TRANSITION`, nothing written) when it is not the leave's current round.
  */
 export async function decideCancelRound(
   requestId: string,
   action: 'approve' | 'reject',
   comment?: string | null,
+  expectedRoundId?: string | null,
 ): Promise<string | null> {
   const response = await apiFetch(cancelRoundPath(requestId, '/actions'), {
     method: 'POST',
-    body: JSON.stringify({ action, ...withOptionalText('comment', comment) }),
+    body: JSON.stringify({ action, ...withOptionalText('comment', comment), ...withOptionalText('expectedRoundId', expectedRoundId) }),
   })
   const payload = await readCancelRoundResponse(response)
   const data = payload?.data && typeof payload.data === 'object' ? (payload.data as Record<string, unknown>) : null
@@ -764,9 +766,8 @@ export async function decideCancelRoundFromApproval(
 }
 
 /**
- * The ONE decision path for a cancel round shown on screen, shared by the approval side and the
- * attendance-side 「待我审批的撤销」 list (owner 2026-09-29 16:5x 「Attendance-side list
- * (Recommended)」).
+ * The approval side's decision path for a cancel round shown on screen (the attendance-side
+ * 「待我审批的撤销」 list uses `decideListedCancelRound` since phase D D2).
  *
  * The route decides the leave's latest round, so the round on screen (`expected.engineInstanceId`,
  * and `expected.roundId` when the surface knows it) is first confirmed — by the summary read — to be
@@ -805,6 +806,39 @@ export async function decideCancelRoundOnRequest(
     throw new ApprovalApiError(described.message, status, described.code ?? undefined)
   }
   if (actedRoundId !== confirmed.roundId) {
+    throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED, isZh)
+  }
+}
+
+/**
+ * The attendance-side 「待我审批的撤销」 list's decision path (phase D D2). The list row names the round
+ * (`roundId`), so the decision carries it as `expectedRoundId` and the SERVER confirms it is still the
+ * leave's current round — refusing with 409 `INVALID_STATUS_TRANSITION` (nothing written) when it is
+ * not. There is no summary pre-read: that read stays behind the original document's read predicate,
+ * which a seated delegator does not pass. The refusal is shown with the client's 「no longer pending /
+ * replaced — nothing was done」 copy (`ROUND_NOT_CURRENT`); after the decision, the `roundId` the server
+ * names must be the listed one, or the caller is told to re-check. The approval-side path
+ * (`decideCancelRoundOnRequest`) is unchanged.
+ */
+export async function decideListedCancelRound(
+  requestId: string,
+  expectedRoundId: string,
+  action: 'approve' | 'reject',
+  comment?: string | null,
+  isZh = true,
+): Promise<void> {
+  let actedRoundId: string | null
+  try {
+    actedRoundId = await decideCancelRound(requestId, action, comment, expectedRoundId)
+  } catch (error) {
+    if (errorCodeOf(error) === 'INVALID_STATUS_TRANSITION') {
+      throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT, isZh)
+    }
+    const described = describeCancelRoundError(error, isZh, isZh ? '操作失败，请重试' : 'Action failed, please retry')
+    const status = error instanceof ApprovalApiError ? error.status : 0
+    throw new ApprovalApiError(described.message, status, described.code ?? undefined)
+  }
+  if (actedRoundId !== expectedRoundId) {
     throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED, isZh)
   }
 }

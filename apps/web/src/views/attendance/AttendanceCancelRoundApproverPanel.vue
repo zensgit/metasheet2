@@ -16,10 +16,12 @@
   - A failed read (any non-2xx, including a route that is not there, or a malformed body) is its own
     state with its own copy and a retry — never rendered like 「no pending cancellations」, and never
     rendered as nothing.
-  - Approve / reject go through `decideCancelRoundOnRequest`: the summary is read first and the round on
-    screen (engine instance id AND round id from the list) must still be the leave's pending round, or
-    nothing is sent; after the decision the server-named `roundId` must match, or the page says it could
-    not confirm (not 「failed」, not 「done」). The list is re-read after every attempt.
+  - Approve / reject go through `decideListedCancelRound` (phase D D2): the decision names the listed
+    round (`expectedRoundId`) and the server refuses it — 409, nothing written — when it is no longer the
+    leave's current round, shown as 「已不在审批中…未执行任何操作」. No summary is read first: that read
+    sits behind the original document's read predicate, which a seated delegator does not pass. After the
+    decision the server-named `roundId` must match, or the page says it could not confirm (not 「failed」,
+    not 「done」). The list is re-read after every attempt.
   - No approver / seat names are rendered (P-6): the list names only the requester and the leave.
   - The launch flag (`entryEnabled`) gates launching a round, not deciding one: this list does not read it.
   - Deep link (`?requestId=`, e.g. a cancel round's todo item, P-11 (a)): the matching row is marked and,
@@ -173,7 +175,7 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
   CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
-  decideCancelRoundOnRequest,
+  decideListedCancelRound,
   describeCancelRoundError,
   fetchPendingCancelRounds,
   type PendingCancelRoundItem,
@@ -299,9 +301,9 @@ async function submit(item: PendingCancelRoundItem): Promise<void> {
   busy.value = true
   notice.value = null
   try {
-    await decideCancelRoundOnRequest(
+    await decideListedCancelRound(
       item.requestId,
-      { engineInstanceId: item.engineInstanceId, roundId: item.roundId },
+      item.roundId,
       current.action,
       current.action === 'reject' ? comment.value : null,
       isZh.value,
