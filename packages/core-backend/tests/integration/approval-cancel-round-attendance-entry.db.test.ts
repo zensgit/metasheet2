@@ -1433,6 +1433,56 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
     })
 
+    it('the flag gates ONLY the launch: rounds opened while it was ON can still be approved by their seat holder and withdrawn by their requester after it is switched OFF; only a new launch is refused', async () => {
+      await grantAttendanceApproverRole(approverId)
+      const approverToken = await loginToken(approverId)
+      const toApprove = await launchedRound('scope-apr')
+      const toWithdraw = await launchedRound('scope-wd')
+      const stub = bindCancellationPort(async () => cancelledResponse)
+      try {
+        delete process.env[ENTRY_FLAG]
+        const approved = await http('POST', actionsPath(toApprove.requestId), approverToken, { action: 'approve' })
+        expect(approved.status, approved.text).toBe(200)
+        expect(approved.json.data).toMatchObject({ roundId: toApprove.roundId, outcome: 'applied' })
+        expect(stub.calls).toHaveLength(1)
+
+        const withdrawn = await http('POST', withdrawPath(toWithdraw.requestId), toWithdraw.employeeToken, {})
+        expect(withdrawn.status, withdrawn.text).toBe(200)
+        expect(withdrawn.json.data).toMatchObject({ roundId: toWithdraw.roundId, outcome: 'withdrawn' })
+
+        // With the round withdrawn, I3 would let the same leave launch again — the flag is what refuses.
+        const relaunch = await http('POST', entryPath(toWithdraw.requestId), toWithdraw.employeeToken, {})
+        expect(relaunch.status, relaunch.text).toBe(404)
+        expect(relaunch.text).toBe(NOT_FOUND_BODY)
+        const summary = await http('GET', entryPath(toWithdraw.requestId), toWithdraw.employeeToken)
+        expect(summary.status).toBe(200)
+        expect(summary.json.data.entryEnabled).toBe(false)
+      } finally {
+        process.env[ENTRY_FLAG] = 'true'
+        stub.stop()
+      }
+      expect((await roundsFor(toApprove.documentId)).map((row) => row.outcome)).toEqual(['applied'])
+      expect((await roundsFor(toWithdraw.documentId)).map((row) => row.outcome)).toEqual(['withdrawn'])
+    })
+
+    it('withdraw on the requester\'s own approved leave that has NO round: the entry\'s 404, byte-identical to a never-existing id (not a 500)', async () => {
+      const employee = `g4a-a2-wd-none-${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      const token = await loginToken(employee)
+      const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+      // The requester can read the leave (the summary answers 200, no round) — so the 404 below is the
+      // no-round branch, not the visibility one.
+      const read = await http('GET', entryPath(requestId), token)
+      expect(read.status, read.text).toBe(200)
+      expect(read.json.data.round).toBeNull()
+      const noRound = await http('POST', withdrawPath(requestId), token, {})
+      const absent = await http('POST', withdrawPath(randomUUID()), token, {})
+      expect(noRound.status, noRound.text).toBe(404)
+      expect(noRound.text).toBe(NOT_FOUND_BODY)
+      expect(noRound.text).toBe(absent.text)
+      expect(await roundsFor(documentId)).toHaveLength(0)
+    })
+
     it('identity comes from the authenticated token: with no Authorization header, a user-id header does not reach the actions or withdraw route (401), and the round is untouched', async () => {
       const fixture = await launchedRound('noauth')
       for (const [pathName, body] of [

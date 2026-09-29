@@ -463,7 +463,12 @@ export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
  */
 const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
 
-async function dispatchOnLatestCancelRound(
+/**
+ * Exported with its `Queryable` injected so the verb allow-list above can be pinned on its own by a
+ * unit test (a verb outside it must throw BEFORE any query); the port below is its only production
+ * caller.
+ */
+export async function dispatchOnLatestCancelRound(
   query: Queryable,
   documentInstanceId: string,
   actor: CancelRoundEntryActorV1,
