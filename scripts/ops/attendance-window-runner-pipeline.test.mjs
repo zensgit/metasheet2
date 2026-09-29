@@ -307,33 +307,148 @@ test('rehearsal restore keeps the replica-role trigger suppression (load-bearing
   assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })
 
-test('rehearsal restore splits archive sections around a clone-only legacy function compatibility shim', () => {
+test('rehearsal restore splits archive sections around a general clone-only function search_path shim', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
   const rehearseStart = remote.indexOf('action_migrate_rehearse() {')
   const rehearseEnd = remote.indexOf('\naction_migrate_apply() {', rehearseStart)
   assert.ok(rehearseStart >= 0 && rehearseEnd > rehearseStart, 'expected rehearsal function bounds')
   const rehearse = remote.slice(rehearseStart, rehearseEnd)
 
+  const select = rehearse.indexOf('-c "$(rehearsal_shim_candidates_sql)"')
+  const validate = rehearse.indexOf('rehearsal_shim_validate_signatures "$shim_list"')
   const preData = rehearse.indexOf('--section=pre-data')
-  const shim = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} SET search_path = pg_catalog, public')
+  const shim = rehearse.indexOf('rehearsal_shim_sql set "$shim_list"')
   const data = rehearse.indexOf('--section=data')
   const postData = rehearse.indexOf('--section=post-data')
-  const reset = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} RESET search_path')
-  assert.ok(preData >= 0 && shim > preData && data > shim && postData > data && reset > postData,
-    'restore must run pre-data -> clone shim -> data -> post-data -> clone reset')
+  const reset = rehearse.indexOf('rehearsal_shim_sql reset "$shim_list"')
+  assert.ok(select >= 0 && validate > select && preData > validate && shim > preData && data > shim && postData > data && reset > postData,
+    'restore must run: select candidates -> validate -> pre-data -> clone shim -> data -> post-data -> clone reset')
 
-  assert.match(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB" -tA[\s\S]*SELECT pg_get_functiondef/,
-    'legacy-shape detection must query the source DB read-only')
-  assert.match(rehearse, /-d "\$REHEARSAL_DB" -v ON_ERROR_STOP=1[\s\S]*ALTER FUNCTION \$\{legacy_fn_signature\} SET search_path/,
-    'compatibility ALTER must target only the fixed rehearsal DB')
+  // The source DB (the real staging DB) is used exactly twice in the rehearsal, both times as a
+  // read-only SELECT built by a lib function: the candidate list and the parity digest.
+  const sourceUses = rehearse.match(/-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*\n[^\n]*/g) || []
+  assert.equal(sourceUses.length, 2, `the source DB must be touched exactly twice in the rehearsal, got ${sourceUses.length}`)
+  assert.equal((rehearse.match(/MIGRATE_BACKUP_PG_DB/g) || []).length, 2,
+    'the source DB variable appears exactly twice in the rehearsal, in any spelling (braced, unquoted, --dbname=)')
+  assert.match(sourceUses[0], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_candidates_sql\)" \\$/,
+    'first source use: the read-only candidate SELECT')
+  assert.match(sourceUses[1], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)" \| tr -d '\[:space:\]'\)" \\$/,
+    'second source use: the read-only parity digest')
   assert.doesNotMatch(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*ALTER FUNCTION/,
     'compatibility shim must never alter the real staging DB')
-  assert.match(rehearse, /legacy_fn_def.*attendance_w4_canonical_date_text\(work_date\)/s,
-    'shim must be gated on the exact known unqualified legacy call shape')
-  assert.match(rehearse, /legacy_fn_config.*search_path=/s,
-    'shim must not override a source function that already pins its search_path')
+
+  // Exactly one SET and one RESET, each gated on a nonempty list, each piped only to the clone
+  // in one transaction, SET before RESET.
+  const setUses = rehearse.match(/rehearsal_shim_sql\s+set\b/g) || []
+  const resetUses = rehearse.match(/rehearsal_shim_sql\s+reset\b/g) || []
+  assert.equal(setUses.length, 1, 'exactly one SET pipeline')
+  assert.equal(resetUses.length, 1, 'exactly one RESET pipeline')
+  assert.ok(rehearse.lastIndexOf('rehearsal_shim_sql set') < rehearse.indexOf('rehearsal_shim_sql reset'), 'no SET may follow the RESET')
+  for (const mode of ['set', 'reset']) {
+    assert.match(rehearse, new RegExp(`if \\[\\[ "\\$shim_count" -gt 0 \\]\\]; then\\n\\s+log "[^"\\n]*"\\n\\s+rehearsal_shim_sql ${mode} "\\$shim_list" \\\\\\n\\s+\\| docker exec -i "\\$POSTGRES_CONTAINER" psql -U "\\$pg_user" -d "\\$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \\\\\\n`),
+      `the ${mode} pipeline must be gated on shim_count > 0 and go only to the rehearsal DB, in one transaction`)
+  }
+
+  // After the RESET the clone's function configuration must equal the source's, or the rehearsal stops.
+  const parity = rehearse.indexOf('[[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]]')
+  assert.ok(parity > rehearse.indexOf('rehearsal_shim_sql reset'), 'the parity check must run after the RESET')
+  const cloneDigest = rehearse.indexOf('clone_fn_digest="$(docker exec')
+  assert.ok(cloneDigest > rehearse.indexOf('rehearsal_shim_sql reset'), 'the clone digest must be MEASURED after the RESET')
+  assert.ok(cloneDigest < parity, 'the clone digest must be measured before it is compared')
+  assert.equal((rehearse.match(/source_fn_digest=/g) || []).length, 1, 'exactly one source digest assignment')
+  assert.equal((rehearse.match(/clone_fn_digest=/g) || []).length, 1, 'exactly one clone digest assignment')
+  assert.match(rehearse, /tee "\$\{OUTPUT_DIR\}\/rehearsal-restore-compat\.log" \\\n\s+\|\| fail "rehearsal restore compatibility: applying the clone-only search_path shim failed"/,
+    'a failed SET pipeline must fail the rehearsal')
+  assert.match(rehearse, /tee -a "\$\{OUTPUT_DIR\}\/rehearsal-restore-compat\.log" \\\n\s+\|\| fail "rehearsal restore compatibility: resetting the clone-only search_path shim failed"/,
+    'a failed RESET pipeline must fail the rehearsal')
+  assert.match(rehearse, /\[\[ "\$source_fn_digest" =~ \^\[0-9a-f\]\{32\}\$ && "\$source_fn_digest" == "\$clone_fn_digest" \]\] \\\n\s+\|\| fail "rehearsal restore compatibility: the clone's public function configuration differs/,
+    'a digest mismatch (or a non-digest) must fail the rehearsal')
+  assert.match(rehearse, /clone_fn_digest="\$\(docker exec "\$POSTGRES_CONTAINER" psql -U "\$pg_user" -d "\$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)"/)
+
+  // Fail closed on a bad query or an unexpected signature shape.
+  assert.match(rehearse, /> "\$shim_list" \\\n\s+\|\| fail "rehearsal restore compatibility: candidate function query/)
+  assert.match(rehearse, /shim_count="\$\(rehearsal_shim_validate_signatures "\$shim_list"\)" \\\n\s+\|\| fail "rehearsal restore compatibility: a candidate function signature has an unexpected shape/)
+
   assert.equal((rehearse.match(/pg_restore -j 2 --exit-on-error --section=/g) || []).length, 3,
     'all three archive sections must fail closed on the first restore error')
+})
+
+test('rehearsal shim SQL is pinned byte for byte (candidate filter direction and parity ordering are load-bearing)', () => {
+  const candidates = runPipefailBash(`source '${LIB}'\nrehearsal_shim_candidates_sql`)
+  assert.equal(candidates.status, 0, candidates.stderr)
+  assert.equal(candidates.stdout,
+    "SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' "
+    + 'FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang '
+    + "WHERE n.nspname = 'public' AND p.prokind = 'f' AND l.lanname IN ('sql', 'plpgsql') "
+    + "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid = p.oid AND d.deptype = 'e') "
+    + "AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search_path=%') "
+    + 'ORDER BY 1;')
+  const parity = runPipefailBash(`source '${LIB}'\nrehearsal_shim_parity_sql`)
+  assert.equal(parity.status, 0, parity.stderr)
+  assert.equal(parity.stdout,
+    "SELECT md5(coalesce(string_agg(p.oid::pg_catalog.regprocedure::text || '|' || coalesce(pg_catalog.array_to_string(p.proconfig, ','), '-'), ';' "
+    + 'ORDER BY p.oid::pg_catalog.regprocedure::text COLLATE "C"), \'\')) '
+    + "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public';")
+})
+
+test('EXECUTABLE (rehearsal_shim_validate_signatures): counts real catalog shapes, fails closed on anything else', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-shim-'))
+  const run = (lines) => {
+    const file = join(dir, 'list.txt')
+    writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''))
+    return runPipefailBash(`source '${LIB}'\nrehearsal_shim_validate_signatures '${file}'`)
+  }
+  const good = run([
+    'public.attendance_w4_job_proof_vector_valid(source_kind text, root uuid, vector jsonb, item_count integer, operational_branch text, distinct_target_count integer)',
+    'public.attendance_w4c3a_exact_object_keys(value jsonb, expected text[])',
+    'public.attendance_w4_deny_mutation()',
+    'public.f(VARIADIC args text[], at timestamp with time zone, "Weird" public.custom_type)',
+  ])
+  assert.equal(good.status, 0, good.stderr)
+  assert.equal(good.stdout.trim(), '4')
+  const empty = run([])
+  assert.equal(empty.status, 0)
+  assert.equal(empty.stdout.trim(), '0')
+  for (const bad of [
+    'public.f(); DROP TABLE users; --()',
+    'public.f(a;b)',
+    "public.f(a'b)",
+    'public.f(a\\b)',
+    'public.f(a$$b)',
+    'public.f(a=b)',
+    'public.f(a*/b)',
+    'public.f(a-b)',
+    'public.f(a(b)',
+    'public.f(a)b)',
+    'x public.f(a text)',
+    'public."Weird"(a text)',
+    'other.f(a text)',
+    'public.f(a text) ',
+    "public.f(a text)'",
+    'public.f(a text)\\',
+    'f(a text)',
+  ]) {
+    const r = run(['public.ok(a text)', bad])
+    assert.equal(r.status, 1, `must reject: ${bad}`)
+    assert.equal(r.stdout, '', `must print nothing on rejection: ${bad}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (rehearsal_shim_sql): one ALTER per signature for set and reset; unknown mode fails', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-shim-'))
+  const file = join(dir, 'list.txt')
+  writeFileSync(file, 'public.a(x jsonb)\n\npublic.b(y text[], z integer)\n')
+  const set = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql set '${file}'`)
+  assert.equal(set.status, 0, set.stderr)
+  assert.equal(set.stdout, 'ALTER FUNCTION public.a(x jsonb) SET search_path = pg_catalog, public;\nALTER FUNCTION public.b(y text[], z integer) SET search_path = pg_catalog, public;\n')
+  const reset = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql reset '${file}'`)
+  assert.equal(reset.status, 0, reset.stderr)
+  assert.equal(reset.stdout, 'ALTER FUNCTION public.a(x jsonb) RESET search_path;\nALTER FUNCTION public.b(y text[], z integer) RESET search_path;\n')
+  const bad = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql drop '${file}'`)
+  assert.equal(bad.status, 1)
+  assert.equal(bad.stdout, '')
+  rmSync(dir, { recursive: true, force: true })
 })
 
 function assertExactTargetMigrationContract({ remote, workflow }) {
