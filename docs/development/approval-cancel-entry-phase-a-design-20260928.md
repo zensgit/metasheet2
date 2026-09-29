@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,P-6′(ii) 管理员通知按 owner 2026-09-29 16:5x ① 暂缓(§9.6);阶段 C 门审 r1 已做(1 P2 / 2 P3 / 2 NIT),修复轮 1 见 §9.10,修复轮的复审未做;未推送、未开 PR;合并见 goal §0 owner 17:1x 选项原文「Yes, merge under those conditions (Recommended)」及其条件,本修复轮不涉合并) |
+| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,P-6′(ii) 管理员通知按 owner 2026-09-29 16:5x ① 暂缓(§9.6);阶段 C 门审 r1 已做(1 P2 / 2 P3 / 2 NIT),修复轮 1 见 §9.10;门审 r2(修复轮 1 的复审)已做(1 P2 / 4 NIT),修复轮 2 见 §9.11,修复轮 2 的复审未做;未推送、未开 PR;合并见 goal §0 owner 17:1x 选项原文「Yes, merge under those conditions (Recommended)」及其条件,本修复轮不涉合并) |
 | 分支 | `feat/approval-cancel-entry-phase-a-read-launch` |
 | 基线 | `main @ f47054d88e`(第 2 轮 rebase;原基线 `68a703038e`。撤销轮 C-1 #5851 `44770107f`、C-2 #5856 `2594ca6e2` 已在其中) |
 | 权威锁 | 撤销锁 v5.9(RATIFIED 2026-09-18)及其抬头「**RATIFY 追记 —— 产品入口增补 v2(P-1…P-11)**」(2026-09-28) |
@@ -651,6 +651,8 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 
 ### 9.10 阶段 C 门审 r1 的修复轮(修复轮 1)
 
+(本节读数保持原样;下表标「单次」的格子是单次运行的读数,P-5 待办镜像用例有计时抖动,已由 §9.11 的多次读数取代。)
+
 - **对象**:门审 r1 所见的 6 个提交(`2e44d6053..9a661b2d2b`)。本轮新提交(不 amend、未推送、未开 PR):`43111fde0a`(P2)、`a6a2420ba7`(P3 围栏见证)、`6f9e1cc5dc`(P3 待办镜像失败路径),以及本文档的提交。零 DDL;未碰 `apps/web/**`。⑤ P-6′(ii) 不在本轮范围(§9.6)。
 - **实现模型**:Claude Opus 5.5。
 
@@ -668,17 +670,17 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 |---|---|---|
 | R:计数推送带调用者的角色声明(新) | 一张无关的待办只有 `role: admin` 席位;请求人与审批人 `users.role = admin`、补授 `approvals:read`(清权限缓存)后重新登录。前置:两人各自的 `/api/todo/items` 都含这张无关待办(否则下面三段会空过)。① 请求人发起 ⇒ 请求人恰收 1 次 `todo:counts-updated`,计数 == 其自己的 `GET /api/todo/count`;② 审批人考勤侧 approve ⇒ 审批人恰收 1 次,计数 == 其 GET;③ 请求人对第二张请假发起后撤回 ⇒ 请求人恰收 1 次,计数 == 其 GET。`finally` 还原 `users.role`、撤回授予、停用无关席位 | 绿 |
 | P-11 (c) 围栏(改) | 拒绝前后序列 `(last_value, is_called)` 相等;零轮次、实例行数不变;正控后序列前进 | 绿 |
-| P-5 不变量经待办镜像(新) | 用生产方的构造函数 `buildApprovalTaskCreatedEvent` 由本轮在席席位造 task_created,经 `applyTodoMirrorTaskCreated`(开关只经 `deps.env` 传入,服务器自身的镜像仍 OFF)⇒ 插入 1 行 pending;真实 `DingTalkTodoMirrorWorker`(真库查询、`maxAttempts: 1`、全部网络注入点为抛错假件)跑一批 ⇒ 恰领 1 行,终态 `failed`(该 org 无启用的钉钉集成,重试额度用尽)或 `skipped`(有集成、收件人未绑定),尝试 1 次、无外部任务号;摘要 `deliveries` 恰为 `[{ dingtalk_todo, failed, 1 }]`;轮次仍 `pending`、引擎实例仍 `pending`、席位行逐行相等;持席位审批人 approve 200 ⇒ `applied` | 绿。两个终态分支本地各实测一次(临时改判后还原,`cmp` 一致):无集成时改判 `toBe('failed')` 过;临时插入一条启用集成后改判 `toBe('skipped')` 过;无集成时改判 `skipped` 红(负控)。临时集成行用后删除,库内 0 行 |
+| P-5 不变量经待办镜像(新) | 用生产方的构造函数 `buildApprovalTaskCreatedEvent` 由本轮在席席位造 task_created,经 `applyTodoMirrorTaskCreated`(开关只经 `deps.env` 传入,服务器自身的镜像仍 OFF)⇒ 插入 1 行 pending;真实 `DingTalkTodoMirrorWorker`(真库查询、`maxAttempts: 1`、全部网络注入点为抛错假件)跑一批 ⇒ 恰领 1 行,终态 `failed`(该 org 无启用的钉钉集成,重试额度用尽)或 `skipped`(有集成、收件人未绑定),尝试 1 次、无外部任务号;摘要 `deliveries` 恰为 `[{ dingtalk_todo, failed, 1 }]`;轮次仍 `pending`、引擎实例仍 `pending`、席位行逐行相等;持席位审批人 approve 200 ⇒ `applied` | 绿(单次;该用例有计时抖动,修复与多次读数见 §9.11)。两个终态分支本地各实测一次(临时改判后还原,`cmp` 一致):无集成时改判 `toBe('failed')` 过;临时插入一条启用集成后改判 `toBe('skipped')` 过;无集成时改判 `skipped` 红(负控)。临时集成行用后删除,库内 0 行 |
 
 **读数**(一次性库 `ms2_g4cancelc_fix1_20260929`,`createdb -O ms2testbed`,每次运行前断言 `current_database()`;`DATABASE_URL` 与 `ATTENDANCE_TEST_DATABASE_URL` 都指向它;迁移 `tsx src/db/migrate.ts` + CI 的 `MIGRATION_EXCLUDE`,EXIT 0,419 条;Node 20.20.2;工具直调 `node_modules/.bin/*`,未经 pnpm):
 
 | 运行 | 读数 |
 |---|---|
 | 修复前基线(同库,门审所见头) | 40/40 |
-| 本套件(`EXPECT_DB=1`,两条 URL) | **42/42**(40 + 新增 2) |
-| 逐提交 | `43111fde0a` 41/41;`a6a2420ba7` 41/41;`6f9e1cc5dc` 42/42 |
-| CI 形(`env -i`,仅 `DATABASE_URL`) | 41 通过 / 1 跳过(EXPECT_DB 哨兵) |
-| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 82/82 |
+| 本套件(`EXPECT_DB=1`,两条 URL) | **42/42**(40 + 新增 2;单次,由 §9.11 取代) |
+| 逐提交 | `43111fde0a` 41/41;`a6a2420ba7` 41/41;`6f9e1cc5dc` 42/42(各单次;`6f9e1cc5dc` 起含抖动用例,由 §9.11 取代) |
+| CI 形(`env -i`,仅 `DATABASE_URL`) | 41 通过 / 1 跳过(EXPECT_DB 哨兵;单次,由 §9.11 取代) |
+| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 82/82(单次,由 §9.11 取代) |
 | 撤销轮真库尾部上半(lock-order-census / creation / redemption) | 129/129 |
 | 下半(seat-guards / attendance-fk-migration / outlet-guards / node-timeout-effect) | 26/26 |
 | `approval-realdb-org-writer-w4-s1`(被插件改动触发;其 `run` 行的文件原样) | 15/15 |
@@ -701,8 +703,76 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | R-order | 调用者项移到席位之后,且不再从席位中剔除调用者 | 1 红(② 段:审批人本人也在席位里,发布函数取到的是不带声明的那一项) |
 | F-below-alloc | 13 行围栏整块移到分配单号之后 | 1 红(序列 `last_value` 前进 1) |
 | F-below-insert | 整块移到第一条 INSERT 之后 | 1 红(同上) |
-| M-seat | worker 终态写之后追加一条停用本实例席位的 UPDATE | 1 红(席位行不等) |
-| M-status | 同处追加一条改引擎实例状态的 UPDATE | 1 红(引擎状态 ≠ `pending`) |
-| M-noop | 终态写的 WHERE 恒假(终态写不进去) | 1 红(账本停在 `sending`) |
+| M-seat | worker 终态写之后追加一条停用本实例席位的 UPDATE | 1 红(席位行不等;单次,保留的日志显示红在 `:1826` 即该判据行) |
+| M-status | 同处追加一条改引擎实例状态的 UPDATE | 1 红(引擎状态 ≠ `pending`;单次,红在 `:1825`) |
+| M-noop | 终态写的 WHERE 恒假(终态写不进去) | 1 红(账本停在 `sending`;单次,红在 `:1808`) |
+
+(M-* 三条的红都落在各自判据行,不在领取计数行 `:1798`;修复后的重测见 §9.11。)
 
 **本轮 NOT RUN**:CI(未推送);本修复轮的独立复审;待办中心真库闸(未被本轮文件触发,共享待办查询未改);动态休眠探针(路由未增减);被 `packages/core-backend/**` 宽匹配触发的 `batch2-test-stabilization` / `migration-replay` / `observability-*`;`attendance-web-guard.yml`(前端 lane);CI 所用 PostgreSQL 版本(本地同 §9.7)。
+
+### 9.11 阶段 C 门审 r2 的修复轮(修复轮 2)
+
+- **对象**:门审 r2 所见的分支头 `920e7e37f2`(阶段 C 的 6 个提交 + 修复轮 1 的 5 个提交)。本轮新提交(不 amend、未推送、未开 PR):`0d21f8ec8a`(P2 + 作用域 NIT)、`25e2cb23de`(两条单测 NIT),以及本文档的提交。零 DDL;**无生产文件改动**(只改一个真库用例、新增两个单测文件);未碰 `apps/web/**`。
+- **⑤ P-6′(ii)**:未实现,不在本轮范围。§9.6 与 §9.9 第 1 项如实记录了 owner 16:5x ①「Defer: weak copy only (Recommended)」,本轮未改。
+- **实现模型**:Claude Opus 5.5。
+
+| 门审 r2 结论 | 级 | 处理 | 证据 |
+|---|---|---|---|
+| P-5 待办镜像用例是计时抖动:插入与领取落在同一毫秒时,worker 领到 0 行 | P2 | worker 经自身的 `now` 注入点拿一个**固定**、快 60 s 的时钟;不手写账本行 | 修复前:库 A 16 次全文件运行 4 红、库 B 14 次 2 红,红全在领取计数行 `:1798`(`expected +0 to be 1`)。修复后:库 A 25/25、库 B 13/13 全绿(下表) |
+| `runBatch()` 从全库领取;`claimed == 1` 与抛错假件的终态写都假设库里没有别的到期行 | NIT | 跑批前断言:本轮实例之外不存在 `pending` / `completing` / `sending` 行,带明确失败信息。这三个状态是领取谓词的在途状态,是「到期」的超集。另断言本轮自己那一行的 `last_attempt_at` 恰等于该 worker 的固定时钟,即这次领取落在这一行 | 守卫探针(下文);`claimed == 1` 在守卫成立时才断言 |
+| 两处收窄(分发动作 `roles: []`;创建只收 `{ userId, userName }`)拆掉后套件仍 42/42 | NIT | 新单测 `approval-cancel-round-entry-port-actor-narrowing.test.ts`。服务入口被 mock,入口 actor 带 roles、ip、userAgent。approve / reject / revoke 三个分发动作的 actor 逐键等于 `{ userId, userName, roles: [], ip, userAgent }`;创建参数键集恰为 `userId`、`userName`,无显示名时恰为 `userId` | LEAK-dispatch 3 红;LEAK-create 2 红 |
+| 插件 `getActorRoleClaims` 的 `req.user.roles` 数组臂无读数 | NIT | 新单测 `approval-cancel-round-plugin-actor-role-claims.test.ts`:从 `index.cjs` 取该函数的字节(断言恰一处定义)并**运行**,逐个请求形状与核心 `resolveApprovalActorRoles` 及字面量两边比较。形状包括:数组臂单独、两臂去重、role 去空白、数组项不去空白、非字符串 / 空白数组项、非数组 `roles`、无用户。不新增插件导出 | P-array(去掉数组臂)4 红 |
+| 待办中心仍挂 `approvals:read`,非管理员考勤审批人 403 | NIT | 阶段 C 不改代码,记录同 §9.9 第 4 项。去处是 owner 16:5x ② 的考勤侧列表(新范围,§9.9 第 8 项),或另行的授予决定(不在授权内) | — |
+
+**抖动机理(计时问题)**:consumer 插入的行 `next_attempt_at` 取数据库 `now()` 默认值,精度到微秒。worker 领取时用 `this.now().toISOString()` 作 `$1`,精度截断到毫秒,判据是 `next_attempt_at <= $1`。插入与领取落在同一毫秒时,例如 `.682Z` 对 `.682115`,该行不到期,领到 0 行。固定时钟快 60 s,既覆盖毫秒截断,也覆盖进程与数据库之间的小时钟差。用固定时钟而不是走动时钟,是为了能用 `last_attempt_at` 精确认出这一次领取。
+
+**守卫探针**(无文件改动,库 A):
+1. 手插一行其它实例的 `pending` 行,`next_attempt_at` 设为一小时前,即已到期。
+2. `-t` 只跑本用例 ⇒ 1 红,红在守卫行 `:1812`,报上述失败信息。
+3. 该行原样:`pending`、`attempt_count` 0、`last_attempt_at` 与 `claim_worker_id` 为空,即 worker 没有跑到。
+4. 删除该行后表内 0 行。
+
+**CI 里的前提**:`vitest.integration.config.ts` 设 `fileParallelism: false`、`maxConcurrency: 1`,同一 step 的文件串行执行,守卫取快照期间没有别的文件在写。今天集成测试里只有本文件写 `dingtalk_todo_mirrors`;它的其它用例只留终态行,`afterAll` 删除本文件写入的行。
+
+**读数**:
+- 库 A = `ms2_g4cancelc_fix2_20260929`;库 B = `ms2_g4cancelc_fix2b_20260929`,另行新建。
+- 两库均 `createdb -O ms2testbed`,迁移 `tsx src/db/migrate.ts` + CI 的 `MIGRATION_EXCLUDE`,EXIT 0,419 条。
+- 每次运行前断言 `current_database()`;`DATABASE_URL` 与 `ATTENDANCE_TEST_DATABASE_URL` 都指向该库。
+- Node 20.20.2;工具直调 `node_modules/.bin/*`,未经 pnpm;结束时两库均已 drop 并核不存在。
+
+| 运行 | 读数 |
+|---|---|
+| 修复前,门审所见头 `920e7e37f2`,全文件 `EXPECT_DB=1`,库 A | 16 次中 4 红(均在 `:1798`,领取 0 行),12 绿 |
+| 修复前,用例文件临时还原为修复前版本(cp 还原后 `cmp` 一致),库 B | 14 次中 2 红(均在 `:1798`),12 绿 |
+| 修复后,全文件,库 A | **25 次全绿**,每次 42/42 |
+| 修复后,全文件,库 B | **13 次全绿**,每次 42/42 |
+| CI 形(`env -i`,仅 `DATABASE_URL`),库 B | 5 次,每次 41 通过 / 1 跳过(EXPECT_DB 哨兵) |
+| 三文件一次调用(seed-template-visibility / attendance-entry / template-groups-lifecycle,同 CI run-list 片段),库 B | 3 次,每次 82/82 |
+| 两个新单测 | 12/12(5 + 7) |
+| coverage-enumeration + 撤销轮 ci-wiring | 381/381;两个新文件在 T4 普查里被枚举并判为已接线,无需改 workflow |
+| 默认配置全量单测(`vitest run`,无库) | 1046 文件通过 / 174 跳过;17362 用例通过 / 1634 跳过 |
+| `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 |
+| 三个改动 / 新增测试文件的类型检查(临时 tsconfig,继承 core-backend 配置,另含 `types/**`;CI 不对测试文件做类型检查) | 集成文件与收窄单测 0 错误。对等单测 1 条 TS1343(`import.meta` 与基础配置的 `module` 设置),既有的 `approval-cancel-round-plugin-mirror-constant.test.ts` 在同一配置下报同样的错 |
+| s6a:`computePackageProvenancePinSet` 全量重算 | 与已提交 pins 逐字节相等;`sealed-export-package-provenance.test.cjs` OK |
+| 私有短语自扫(三份短语表,去重后 6 条) | 本轮每个提交的新增行与提交信息 0 命中;树命中数与父提交相同(均为 main 既有文件的旧命中) |
+
+**mutation**:每条的步骤同 §9.10,即 cp 备份 → 精确替换(恰匹配一次)→ 跑 → cp 还原 → `cmp` 逐字节 → `git status` 与改前相同。真库条目只跑本用例(`-t`),每条跑 3 次,并记红所在的行。
+
+| # | 手术 | 读数 |
+|---|---|---|
+| M-seat | 同 §9.10 | 3 次各 1 红,均在 `:1849`(席位行相等) |
+| M-status | 同 §9.10 | 3 次各 1 红,均在 `:1848`(引擎状态) |
+| M-round(本轮新增) | worker 终态写之后追加一条 UPDATE,把本轮 `approval_rounds.outcome` 改为 `rejected` | 3 次各 1 红,均在 `:1847`(轮次 outcome)。此前这条判据没有 mutation 覆盖。门审 r2 提到的 M-outcome,我方看不到其具体手术;M-round 是我方自己的写法 |
+| M-noop | 同 §9.10 | 3 次各 1 红,均在 `:1829`(账本停在 `sending`) |
+| LEAK-dispatch | 端口分发动作的 `roles: []` 改为 `roles: [...(actor.roles ?? [])]` | 单测 3 红(三个动词),其余 9 过 |
+| LEAK-create | 创建参数改为整个 `actor` | 单测 2 红 |
+| P-array | 插件 `getActorRoleClaims` 去掉数组臂 | 单测 4 红(涉及数组臂的 4 个形状) |
+
+真库四条的红都不在领取计数行(`:1814`)或守卫行(`:1812`)。
+
+**本轮 NOT RUN**:
+- CI(未推送);本修复轮的独立复审。
+- 撤销轮真库尾部与其它真库 lane:本轮未改生产代码,只改本用例与两个单测。
+- 待办中心真库闸;动态休眠探针(路由未增减)。
+- CI 所用的 PostgreSQL 版本(本地 15.17)。
