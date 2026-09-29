@@ -512,6 +512,29 @@ export interface StockPreparationHandoffAdvanceResult {
 }
 
 /**
+ * WAS THIS PRESS A PLAIN REPLAY — the ONE result for which 「没有重复通知」 is the honest sentence.
+ *
+ * THE DISCRIMINATOR IS `notifyOutcome` (and `resumed`), NOT `changed`. `changed` says whether the
+ * TURN moved; it says nothing about the MESSAGE. A send that was attempted (sent / partial / failed),
+ * or a click that took the owed claim (`resumed`), is never "nothing needed sending", whatever
+ * `changed` says — and by then the at-most-once claim is spent, so no later click can resend.
+ *
+ * SHARED BY BOTH SURFACES THAT RENDER 通知下一步. This is the confirmation queue's own predicate,
+ * moved here unchanged. 项目备料页 keyed its notice off `changed` instead, and told an operator whose
+ * message had just failed either that the deployment has no notification channel (a fresh advance)
+ * or that the step "had already been handed on" (an owed resend) — the one moment they needed to be
+ * told to go and say it in person.
+ */
+export function stockPreparationHandoffAdvanceWasReplay(
+  result: Pick<StockPreparationHandoffAdvanceResult, 'changed' | 'notifyOutcome' | 'resumed'>,
+): boolean {
+  const attempted = result.notifyOutcome === 'sent'
+    || result.notifyOutcome === 'partial'
+    || result.notifyOutcome === 'failed'
+  return result.changed === false && !attempted && result.resumed !== true
+}
+
+/**
  * Whose turn it is on this project. Values-free, and inert rather than fatal on a deployment with no
  * handoff config — the route answers 200 with `configured: false`.
  * GET /api/integration/stock-preparation/handoff
@@ -568,6 +591,39 @@ export function stockPreparationHandoffFromStepKey(
   if (owed) return owed
   const current = state ? state.currentStepKey : null
   return typeof current === 'string' && current ? current : null
+}
+
+/**
+ * What deciding WHETHER to offer 通知下一步 reads: the press state plus who holds the step and whether
+ * the chain is done. Separate from `StockPreparationHandoffPressState`, which only picks the step.
+ */
+export interface StockPreparationHandoffAvailabilityState extends StockPreparationHandoffPressState {
+  isCurrentHandler: boolean
+  completed: boolean
+}
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步 — the one rule both surfaces render the button by.
+ *
+ * Two ways in, both computed by the SERVER; the page only reads its answer:
+ *   * the caller holds the current step and the chain is not finished. That includes the LAST step:
+ *     `terminal` means the last step is current, and pressing it is what tells 仓库/采购;
+ *   * the caller still owes the group notice for a hop they completed (`resendableStepKey`), whether
+ *     or not the turn has moved on since — even past the end of the chain. The server sets that key
+ *     only for a configured handler of that hop, and accepts the press as a replay that takes the
+ *     unspent claim (stock-preparation-handoff.cjs `planStockPreparationHandoffAdvance`, http-routes.cjs
+ *     `stockPreparationHandoffAdvance`).
+ *
+ * Courtesy, not enforcement: the server re-checks the roster on the POST and refuses in words of its
+ * own. This was the confirmation queue's template condition; 项目备料页 disabled the button for anyone
+ * not holding the current step, so an owed notice could only be sent from the queue.
+ */
+export function stockPreparationHandoffMayPress(
+  state: StockPreparationHandoffAvailabilityState | null | undefined,
+): boolean {
+  if (!state || !state.configured) return false
+  if (state.isCurrentHandler && !state.completed) return true
+  return stockPreparationHandoffResendableStepKey(state) !== null
 }
 
 /**
