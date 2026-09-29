@@ -7,7 +7,9 @@
   See docs/development/approval-cancel-entry-phase-b-fe-design-20260929.md.
 
   - `entryEnabled === false` (or absent): the launch entry is not rendered at all. The progress of a
-    round that already exists is still shown — reading it and withdrawing it are not flag-gated.
+    round that already exists is still shown — reading it and withdrawing it are not flag-gated (owner
+    2026-09-29 18:3x 「Hide launch, keep existing (Recommended)」: OFF hides only the launch entry; an
+    existing round keeps its progress and withdraw).
   - Entry visible only when (a) the leave is approved and (b) the viewer is the leave's own user.
     (c) an in-flight round (I3) DISABLES the entry — never hides it — with a subject-bearing reason
     and an in-page link to that round's progress.

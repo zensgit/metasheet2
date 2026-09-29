@@ -159,6 +159,42 @@ describe('entry visibility (P-1 + entryEnabled)', () => {
   })
 })
 
+describe('launch flag OFF with an existing round (owner 2026-09-29 18:3x 「Hide launch, keep existing (Recommended)」)', () => {
+  it('OFF hides only the launch: an existing pending round keeps its progress and a working withdraw', async () => {
+    summaries = [
+      () => jsonResponse(200, summaryBody({ entryEnabled: false, round: round() })),
+      () => jsonResponse(200, summaryBody({ entryEnabled: false, round: round({ outcome: 'withdrawn', status: 'cancellation_withdrawn', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' }) })),
+    ]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请审批中')
+    expect($(root, 'data-cancel-round-entry')).toBeNull()
+    expect($(root, 'data-cancel-round-launch')).toBeNull()
+    const withdraw = $(root, 'data-cancel-round-withdraw') as HTMLButtonElement
+    expect(withdraw).not.toBeNull()
+    expect(withdraw.disabled).toBe(false)
+    withdraw.click()
+    await flushUi()
+    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({})])
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请已撤回')
+    // the withdrawn round stays readable; OFF still offers no launch
+    expect($(root, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(root, 'data-cancel-round-launch')).toBeNull()
+  })
+
+  it('OFF with a finished round: its outcome stays readable (V2 result lines, V3 word), and no launch', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: false, round: round({ outcome: 'applied', status: 'leave_cancelled', canWithdraw: false, cancellationOutcome: { status: 'cancelled', reversal: { reversed: 480, lots: 1, unrecoverableExpired: 0, alreadyReversed: false } } }) }))]
+    const applied = await mountPanel({ ...LEAVE, status: 'cancelled' })
+    expect($(applied, 'data-cancel-round-status')!.textContent).toBe('请假已取消')
+    expect($(applied, 'data-cancel-round-result')!.textContent).toContain('本次已返还 1天')
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: false, round: round({ outcome: 'rejected', status: 'cancellation_rejected', canWithdraw: false }) }))]
+    const rejected = await mountPanel()
+    expect($(rejected, 'data-cancel-round-status')!.textContent).toBe('撤销申请被驳回')
+    expect($(rejected, 'data-cancel-round-launch')).toBeNull()
+    expect($(rejected, 'data-cancel-round-withdraw')).toBeNull()
+  })
+})
+
 describe('launch dialog and withdraw', () => {
   it('confirm + optional reason → POST launch → summary re-read → V1 progress, entry now disabled', async () => {
     summaries = [
