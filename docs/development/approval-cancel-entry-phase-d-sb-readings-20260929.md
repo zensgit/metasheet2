@@ -1,0 +1,42 @@
+# 请假撤销 —— 产品入口 阶段 D:S 层与 B 层读数(验收记录)
+
+配套:`approval-cancel-entry-phase-b-fe-design-20260929.md`(阶段 B / B2 前端设计与验证记录)。本文件只记阶段 D 的前端 spec 与本地浏览器读数,单独成文以免与该记录的后续修订冲突。
+
+读数绑定前后端合拢树 `d85d83be6`(树 `b0c3b0ace`)加其上的一个测试提交(`53d457785`,树 `08767119`;该提交只改 `cancelRoundEntryAttendancePanel.spec.ts`)。门审与 owner 待裁状态以验收报告为准;本文件只记读数。Node 20.20.2,工具直调 `node node_modules/…`,零 pnpm。
+
+## 1. S 层(vitest + jsdom)
+
+- **新增用例 P6b**(`cancelRoundEntryAttendancePanel.spec.ts`,describe「P-6 on the self-service panel (§15.6)」):在面板收到的每一个线上对象(摘要、轮次、投递行、兑现结果、父列表行)上埋入审批人 / 席位人名,走「在途 → 撤回 → 发起对话框 → 再发起」与四种已结束轮次;断言人名从不出现在渲染后的 HTML 里,且每一次读取都只去考勤撤销轮路由,不请求 `/api/approvals/*`。
+- **mutation**(备份 → 替换 → 跑整个 spec 文件 → 还原 → `cmp` 与 `git diff --quiet`):
+
+| # | 改动 | numstat | 红 |
+|---|---|---|---|
+| M1 | 面板渲染父列表行的人名字段 | `1 1`(面板) | 恰 P6b |
+| M2 | 规范化函数透传线上人名字段,面板渲染它 | `2 1` + `1 1` | 恰 P6b |
+| M3 | 摘要读取时经 `apiFetch` 另读审批实例 | `1 0` | P6b + 4 条既有调用序列断言 |
+| M4 | 摘要读取时经全局 `fetch` 另读审批实例 | `1 0` | 恰 P6b |
+
+- **回归**:八个 `cancelRoundEntry*` + `attendance-selfservice-dashboard` + `TodoCenterView` + `todoApi` + `approval-center` + `approval-center-master-detail` + `run-required-web-tests-shape`,14 文件 **281/281**(合拢树上 280/280,多出的 1 条即 P6b)。
+- `vue-tsc -b`(本地 `.tmp` 空起):合拢树与测试提交后输出逐字节相同,sha256 `ec44fee4…`,EXIT 2,仅已知 TS2769。
+- `required-web-lane-token-manifest.mjs --check`:19 gating invocations,543 = 543,MANIFEST MATCHES(P6b 写进既有文件,token 不变)。
+
+## 2. B 层(本地 dev server + 一次性库 + headless chromium)
+
+后端进程两相:开关未设置(OFF)与 `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=true`(ON),各自重启;开关只在这两个本地进程里设置过。`RBAC_BYPASS=false`、`RBAC_TOKEN_TRUST=false`、`RBAC_CACHE_TTL_MS=0`;账号经注册路由建、真实登录表单登录;请假原单经考勤插件路由创建与批准。审批面板的开发期 mock 在浏览器上下文里关闭,并做了负控(不关闭时列表 / 计数请求为 0)。
+
+读数(均为该一次性环境内):
+
+- 开关 OFF:已批准请假行无撤销块、摘要读 200 且 `entryEnabled:false`、零发起写入;已有轮次时进度与撤回保留、任何行都没有「申请撤销」、已结束轮次的结果照常可读。
+- 开关 ON:发起 → 同一按钮禁用并带原因与页内进度链接 → 撤回 → 再发起;非请假行与换班列表无撤销块;员工全程零 `/api/approvals/*` 请求。
+- 员工自助面六种轮次 V1–V6 文字互不相同,V2 不带「请假仍然有效」,V5 / V6 不出现「驳回」;带余额的 V2 结果行「本次已返还 2小时(共 1 个批次)」;V6 未登记 code 默认折叠、展开可见并可全选复制;投递列表三行按固定文案呈现且轮次仍是 V1;席位失格发起显示弱版文案,三张投递表行数前后不变。
+- 审批侧:详情页、审批中心表格、详情窗格、移动列表(移动列表在本环境要经开发期特性开关覆盖才出现)对系统收口都不显示「已驳回」;在途撤销轮只显示「撤销申请审批中 · 已等待 …」一行,普通在途实例仍显示「当前处理人：{名}」。
+- 考勤侧「待我审批的撤销」:零 `approvals:*` 的 `attendance_approver` 在考勤页找到并办理撤销轮;待办中心撤销轮项带子类型标、链接到原请假,落地后聚焦行显示 V1,卡片中该行被标记并滚入视野。
+
+需要跟进的读数(详见验收报告):
+
+1. **办理后的待办计数推送少计**:在考勤侧卡片办理一条撤销轮后,推送的 `todo:counts-updated` 计数比同一时刻 `GET /api/todo/count` 少 1(差额是查看者待办里的一条考勤补卡队列项),徽标从 4 变成 2 而不是 3;刷新页面后恢复。
+2. **审批人卡片的可见性依赖 ENTRY 套件既有的额外夹具准备**(见私有记录):未做该准备的 `attendance_approver` 看不到卡片(零读取),做了之后可见;服务端办理不受影响。
+3. **审批侧时间线的执行人**:平台实例的历史行是下划线字段,前端按驼峰取值,所有行(含审批人的人工驳回与员工的发起)都显示「系统」(`approvals/api.ts` 注释已记录这一既有漂移)。V3 与 V5 / V6 仍可由状态词与动作词区分。
+4. **卡片行不显示请假日期**:按分钟请假的轮次在列表里 `startAt` / `endAt` 为空,卡片显示「请假时间: -- – --」。
+
+NOT RUN:委托对(A / D)的浏览器腿(考勤流程路由不做委托替换,构造的委托形状被发起路径的席位资格校验拒绝);两席撤销轮的审批侧呈现(组件层两席用例覆盖);多维表记录面板的负控;真实钉钉投递。
