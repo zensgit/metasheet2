@@ -1124,6 +1124,10 @@ async function onCreateComment(): Promise<void> {
       newCommentBody.value = ''
       if (commentsResult.value.kind === 'ok') {
         commentsResult.value = { kind: 'ok', items: [...commentsResult.value.items, result.comment] }
+      } else {
+        // The list is still loading or failed to load, so there is nothing to append to: re-read
+        // it (bumping the generation also discards a stale in-flight read that predates this post).
+        void loadComments(id)
       }
       notifyTasksChanged()
       return

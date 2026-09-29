@@ -676,3 +676,34 @@ describe('checkCommentBody — parity with the server normalization', () => {
     expect(checkCommentBody(' 　 ')).toBe('COMMENT_BLANK')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// Every path segment is URI-encoded, in every M3 wrapper.
+// ---------------------------------------------------------------------------------------------
+
+describe('path segments are URI-encoded in every M3 wrapper', () => {
+  const R = 'a/b?c#d'
+  const E = 'a%2Fb%3Fc%23d'
+  it.each([
+    ['setParent task id', () => setParent(R, 'p1'), `/api/tasks/${E}/parent`],
+    ['addAssignee task id', () => addAssignee(R, 'u1'), `/api/tasks/${E}/assignees`],
+    ['removeAssignee task id', () => removeAssignee(R, 'u1'), `/api/tasks/${E}/assignees/u1`],
+    ['removeAssignee user id', () => removeAssignee('t1', R), `/api/tasks/t1/assignees/${E}`],
+    ['setCompletionMode task id', () => setCompletionMode(R, 'any'), `/api/tasks/${E}/completion-mode`],
+    ['addFollower task id', () => addFollower(R, 'u1'), `/api/tasks/${E}/followers`],
+    ['removeFollower task id', () => removeFollower(R, 'u1'), `/api/tasks/${E}/followers/u1`],
+    ['removeFollower user id', () => removeFollower('t1', R), `/api/tasks/t1/followers/${E}`],
+    ['leaveTask task id', () => leaveTask(R), `/api/tasks/${E}/leave`],
+    ['listComments task id', () => listComments(R), `/api/tasks/${E}/comments`],
+    ['createComment task id', () => createComment(R, 'x'), `/api/tasks/${E}/comments`],
+    ['editComment task id', () => editComment(R, 'c1', 'x'), `/api/tasks/${E}/comments/c1`],
+    ['editComment comment id', () => editComment('t1', R, 'x'), `/api/tasks/t1/comments/${E}`],
+    ['deleteComment task id', () => deleteComment(R, 'c1'), `/api/tasks/${E}/comments/c1`],
+    ['deleteComment comment id', () => deleteComment('t1', R), `/api/tasks/t1/comments/${E}`],
+    ['deleteTask task id', () => deleteTask(R), `/api/tasks/${E}`],
+  ] as const)('%s', async (_label, call, path) => {
+    h.apiFetch.mockResolvedValue(jsonResponse(500, {}))
+    await call()
+    expect(lastCall()[0]).toBe(path)
+  })
+})

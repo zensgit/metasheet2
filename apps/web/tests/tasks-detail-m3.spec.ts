@@ -1401,3 +1401,227 @@ describe('TasksView detail — edit pre-check, generic fallback, error text', ()
     expect(shown(el, 'tasks-detail-comment-edit')).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// Review round 1, re-verified items: each M3 handler clears a stale banner at its start and
+// notifies the badge once on success; draft inputs, inline errors and an open comment editor do
+// not survive a navigation; a comment posted while the list is not loaded still shows up.
+// ---------------------------------------------------------------------------------------------
+
+type ActionRow = {
+  name: string
+  mock: keyof typeof h_
+  task?: Partial<TaskDetailFixture> & { followers?: string[]; canLeave?: boolean }
+  ownComment?: boolean
+  act: (el: HTMLElement) => Promise<void>
+  ok: unknown
+}
+
+const membershipOk = { kind: 'ok', task: { id: 't1', status: 'open', completionMode: 'all', assignees: [] } }
+const followersOk = { kind: 'ok', task: { id: 't1', followers: [] } }
+
+const ACTION_ROWS: ActionRow[] = [
+  {
+    name: 'setParent', mock: 'setParent', ok: { kind: 'ok', id: 't1', parentId: 'p1', depth: 1 },
+    act: async (el) => { typeInto(el, 'tasks-detail-set-parent-input', 'p1'); await flush(); clickOn(el, 'tasks-detail-set-parent-submit') },
+  },
+  {
+    name: 'makeIndependent', mock: 'setParent', task: { parentId: 'p0', depth: 1 }, ok: { kind: 'ok', id: 't1', parentId: null, depth: 0 },
+    act: async (el) => { clickOn(el, 'tasks-detail-make-independent') },
+  },
+  {
+    name: 'addAssignee', mock: 'addAssignee', ok: membershipOk,
+    act: async (el) => { typeInto(el, 'tasks-detail-add-assignee-input', 'u9'); await flush(); clickOn(el, 'tasks-detail-add-assignee-submit') },
+  },
+  {
+    name: 'removeAssignee', mock: 'removeAssignee', task: { assignees: [{ userId: 'u2', completedAt: null }] }, ok: membershipOk,
+    act: async (el) => { clickOn(el, 'tasks-detail-assignee-remove') },
+  },
+  {
+    name: 'setCompletionMode', mock: 'setCompletionMode', ok: membershipOk,
+    act: async (el) => {
+      const select = shown(el, 'tasks-detail-completion-mode-select') as HTMLSelectElement
+      select.value = 'any'
+      select.dispatchEvent(new Event('change'))
+    },
+  },
+  {
+    name: 'addFollower', mock: 'addFollower', ok: followersOk,
+    act: async (el) => { typeInto(el, 'tasks-detail-add-follower-input', 'u5'); await flush(); clickOn(el, 'tasks-detail-add-follower-submit') },
+  },
+  {
+    name: 'removeFollower', mock: 'removeFollower', task: { followers: ['u5'] }, ok: followersOk,
+    act: async (el) => { clickOn(el, 'tasks-detail-follower-remove') },
+  },
+  {
+    name: 'leave', mock: 'leaveTask', task: { canLeave: true }, ok: followersOk,
+    act: async (el) => { clickOn(el, 'tasks-detail-leave') },
+  },
+  {
+    name: 'createComment', mock: 'createComment', ok: { kind: 'ok', comment: comment({ id: 'c9', body: 'hi' }) },
+    act: async (el) => { typeInto(el, 'tasks-detail-comment-input', 'hi'); await flush(); clickOn(el, 'tasks-detail-comment-submit') },
+  },
+  {
+    name: 'saveEditComment', mock: 'editComment', ownComment: true, ok: { kind: 'ok', comment: comment({ id: 'c1', authorId: 'viewer1', body: 'new' }) },
+    act: async (el) => {
+      clickOn(el, 'tasks-detail-comment-edit')
+      await flush()
+      typeInto(el, 'tasks-detail-comment-edit-input', 'new')
+      await flush()
+      clickOn(el, 'tasks-detail-comment-edit-save')
+    },
+  },
+  {
+    name: 'deleteComment', mock: 'deleteComment', ownComment: true, ok: { kind: 'ok', comment: comment({ id: 'c1', authorId: 'viewer1', deleted: true, body: null }) },
+    act: async (el) => { clickOn(el, 'tasks-detail-comment-delete') },
+  },
+  {
+    name: 'deleteTask', mock: 'deleteTask', ok: { kind: 'ok', id: 't1', deleted: true },
+    act: async (el) => { clickOn(el, 'tasks-detail-delete'); await flush(); clickOn(el, 'tasks-detail-delete-confirm-yes') },
+  },
+]
+
+describe('TasksView detail — every M3 action clears a stale banner at its start and notifies once on success', () => {
+  it.each(ACTION_ROWS.map((row) => [row.name, row] as const))('%s', async (_name, row) => {
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: { ...taskDetail(row.task), ...(row.task ?? {}) } })
+    if (row.ownComment) {
+      h_.getCurrentUserId.mockResolvedValue('viewer1')
+      h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1', authorId: 'viewer1', body: 'old' })] })
+    }
+    h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
+    const pending = deferred<unknown>()
+    ;(h_[row.mock] as ReturnType<typeof vi.fn>).mockReturnValue(pending.promise)
+    const el = await mountAt('/tasks/t1')
+
+    // A different action leaves a banner behind first.
+    clickOn(el, 'tasks-detail-complete-button')
+    await flush()
+    expect(shown(el, 'tasks-action-error')?.textContent?.trim()).toBe('您没有权限修改此任务')
+
+    await row.act(el)
+    await flush()
+    // Cleared at the START of the action, while its request is still in flight.
+    expect(h_[row.mock]).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+
+    pending.resolve(row.ok)
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await flush()
+    expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('TasksView detail — drafts, inline errors and the comment editor do not survive a navigation', () => {
+  beforeEach(() => {
+    h_.getTask.mockImplementation(async (id: string) => ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+  })
+
+  it('draft inputs typed on t1 are empty on t2', async () => {
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-set-parent-input', 'p1')
+    typeInto(el, 'tasks-detail-add-assignee-input', 'u9')
+    typeInto(el, 'tasks-detail-add-follower-input', 'u5')
+    typeInto(el, 'tasks-detail-comment-input', 'draft')
+    await flush()
+
+    await router!.push('/tasks/t2')
+    await flush()
+
+    for (const testid of ['tasks-detail-set-parent-input', 'tasks-detail-add-assignee-input', 'tasks-detail-add-follower-input', 'tasks-detail-comment-input']) {
+      expect((shown(el, testid) as HTMLInputElement).value, testid).toBe('')
+    }
+  })
+
+  it('inline errors raised on t1 are gone on t2', async () => {
+    h_.setParent.mockResolvedValue({ kind: 'validation', code: 'INVALID_PARENT' })
+    h_.addAssignee.mockResolvedValue({ kind: 'validation', code: 'LIMIT' })
+    h_.addFollower.mockResolvedValue({ kind: 'validation', code: 'LIMIT' })
+    h_.deleteTask.mockResolvedValue({ kind: 'conflict', code: 'HAS_CHILDREN' })
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-set-parent-input', 'p1')
+    await flush()
+    clickOn(el, 'tasks-detail-set-parent-submit')
+    await flush()
+    typeInto(el, 'tasks-detail-add-assignee-input', 'u9')
+    await flush()
+    clickOn(el, 'tasks-detail-add-assignee-submit')
+    await flush()
+    typeInto(el, 'tasks-detail-add-follower-input', 'u5')
+    await flush()
+    clickOn(el, 'tasks-detail-add-follower-submit')
+    await flush()
+    typeInto(el, 'tasks-detail-comment-input', '   ')
+    await flush()
+    clickOn(el, 'tasks-detail-comment-submit')
+    await flush()
+    clickOn(el, 'tasks-detail-delete')
+    await flush()
+    clickOn(el, 'tasks-detail-delete-confirm-yes')
+    await flush()
+    const errorIds = ['tasks-detail-parent-error', 'tasks-detail-membership-error', 'tasks-detail-follower-error', 'tasks-detail-comment-error', 'tasks-detail-delete-error']
+    for (const testid of errorIds) expect(shown(el, testid), `${testid} raised on t1`).toBeTruthy()
+
+    await router!.push('/tasks/t2')
+    await flush()
+
+    for (const testid of errorIds) expect(shown(el, testid), `${testid} on t2`).toBeNull()
+  })
+
+  it('an open comment editor does not survive leaving the task and coming back', async () => {
+    h_.getCurrentUserId.mockResolvedValue('viewer1')
+    h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1', authorId: 'viewer1', body: 'old' })] })
+    const el = await mountAt('/tasks/t1')
+    clickOn(el, 'tasks-detail-comment-edit')
+    await flush()
+    typeInto(el, 'tasks-detail-comment-edit-input', 'half-typed')
+    await flush()
+
+    await router!.push('/tasks')
+    await flush()
+    await router!.push('/tasks/t1')
+    await flush()
+
+    expect(shown(el, 'tasks-detail-comment-edit-input')).toBeNull()
+    expect(shown(el, 'tasks-detail-comment-body')?.textContent).toBe('old')
+  })
+})
+
+describe('TasksView detail — a comment posted while the list is not loaded still appears', () => {
+  it('after a failed list read, a successful post re-reads the list and shows the new comment', async () => {
+    h_.listComments
+      .mockResolvedValueOnce({ kind: 'error' })
+      .mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c9', body: 'posted' })] })
+    h_.createComment.mockResolvedValue({ kind: 'ok', comment: comment({ id: 'c9', body: 'posted' }) })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-comments-error')).toBeTruthy()
+
+    typeInto(el, 'tasks-detail-comment-input', 'posted')
+    await flush()
+    clickOn(el, 'tasks-detail-comment-submit')
+    await flush()
+
+    expect(h_.listComments).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-detail-comments-error')).toBeNull()
+    expect(shownAll(el, 'tasks-detail-comment-body').map((node) => node.textContent)).toEqual(['posted'])
+  })
+
+  it('while the first list read is still in flight, the post re-reads and the older in-flight result is discarded', async () => {
+    const first = deferred<unknown>()
+    h_.listComments
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c0', body: 'older' }), comment({ id: 'c9', body: 'posted' })] })
+    h_.createComment.mockResolvedValue({ kind: 'ok', comment: comment({ id: 'c9', body: 'posted' }) })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-comments-loading')).toBeTruthy()
+
+    typeInto(el, 'tasks-detail-comment-input', 'posted')
+    await flush()
+    clickOn(el, 'tasks-detail-comment-submit')
+    await flush()
+    first.resolve({ kind: 'ok', items: [comment({ id: 'c0', body: 'older' })] })
+    await flush()
+
+    expect(shownAll(el, 'tasks-detail-comment-body').map((node) => node.textContent)).toEqual(['older', 'posted'])
+  })
+})

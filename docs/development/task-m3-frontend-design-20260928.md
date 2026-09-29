@@ -66,9 +66,9 @@ M2 的 `onDetailComplete`/`onDetailReopen` 用 `taskId.value !== id` 判断"响�
 
 ## 4. 测试与 CI 接线
 
-- `apps/web/tests/tasks-api-m3.spec.ts`（108 用例）：每个新调用的路径/方法/请求体、每个契约码、网络失败 → error；路径段 id 检查；`getTask` 的 M2 形状默认值与 M3 字段的 malformed 分支；`checkCommentBody` 的码点边界（含 astral 字符）以及与服务端归一化一致的边界（首尾空白、零宽字符、分解形式）。
-- `apps/web/tests/tasks-detail-m3.spec.ts`（72 用例）：五个新 section 的渲染、成功路径、错误映射（含精确文案）、delete confirm + 409、own-comment gating；详情带 `canLeave`/`followers` 时的 Leave 与关注人列表；setParent、addAssignee、deleteComment、deleteTask、addFollower 的晚到结果守卫（含"离开又回来"与「晚到结果不得解除另一任务上进行中的动作」）；六个动作的一次一个；切换任务时关注人、删除确认、评论列表的复位；编辑预检、通用横幅回退与 `useAuth` 抛错回退。
-- 审阅第 1 轮后，对上述守卫做了 39 个变异，逐个改坏源码后都有用例变红（其中「分组缺字段」一条是等价变异，已删除冗余的那行检查）。
+- `apps/web/tests/tasks-api-m3.spec.ts`（124 用例）：每个新调用的路径/方法/请求体、每个契约码、网络失败 → error；路径段 id 检查；`getTask` 的 M2 形状默认值与 M3 字段的 malformed 分支；`checkCommentBody` 的码点边界（含 astral 字符）以及与服务端归一化一致的边界（首尾空白、零宽字符、分解形式）。
+- `apps/web/tests/tasks-detail-m3.spec.ts`（89 用例）：五个新 section 的渲染、成功路径、错误映射（含精确文案）、delete confirm + 409、own-comment gating；详情带 `canLeave`/`followers` 时的 Leave 与关注人列表；setParent、addAssignee、deleteComment、deleteTask、addFollower 的晚到结果守卫（含"离开又回来"与「晚到结果不得解除另一任务上进行中的动作」）；六个动作的一次一个；切换任务时关注人、删除确认、评论列表的复位；编辑预检、通用横幅回退与 `useAuth` 抛错回退。
+- 审阅后共做 60 个变异（两批 39 + 21），逐个改坏源码后都有用例变红（其中「分组缺字段」一条是等价变异，已删除冗余的那行检查）。详见 `task-m3-frontend-verification-20260929.md`。
 - 两个 token 已登记进 `apps/web/scripts/run-required-web-tests.sh` 的 exec 块（保持大小写不敏感字母序：`tasks-api-m3.spec.ts` 在 `tasks-api.spec.ts` 之前，`tasks-detail-m3.spec.ts` 在 `tasks-detail-view.spec.ts` 之前）与 `.github/workflows/tasks-web-guard.yml` 的 exec 列表（十二个整文件参数）。
 
 ### 4.1 连带修复（必要，非范围蔓延）

@@ -461,10 +461,10 @@ describe('TasksView detail — complete/reopen actions', () => {
   })
 })
 
-// P2-2: `actionErrorKind` is reset at the START of each detail action (~:400 complete, ~:426
-// reopen) and in the id watch (~:448) — the ONLY three places anything ever clears it back to
-// null (a successful `applyActionOutcome('ok')` does NOT touch it). Each is its own guard; each
-// gets its own test below.
+// P2-2: `actionErrorKind` is reset at the START of each detail action (complete, reopen) and in
+// the id watch; a successful `applyActionOutcome('ok')` does NOT touch it. Each is its own guard;
+// each gets its own test below. The M3 detail actions clear it at their own start as well — those
+// clears are pinned in tasks-detail-m3.spec.ts.
 describe('TasksView detail — actionError resets (P2-2)', () => {
   it('a failed complete, then a successful retry, clears the "操作失败" banner', async () => {
     h_.getTask.mockImplementation(async (id: string) =>
