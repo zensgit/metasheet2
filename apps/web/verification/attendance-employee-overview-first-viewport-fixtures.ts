@@ -9,8 +9,8 @@ const requestFollowup = {
   title: '待跟进申请',
   detail: '4月15日的请假申请仍在等待审批。',
   status: 'pending' as string | null,
-  action: 'request-report' as const,
-  actionLabel: '打开申请报表',
+  action: 'my-requests' as const,
+  actionLabel: '查看我的申请',
 }
 
 const emptyFollowup = {

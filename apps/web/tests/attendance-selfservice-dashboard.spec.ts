@@ -954,10 +954,11 @@ describe('Attendance self-service dashboard', () => {
     // lock §4.3 item 6: status guide is the last, lowest-frequency surface — pinned against EVERY
     // historical section, not just the requests summary (review NIT: under-pinned order).
     const anomaliesIndex = domOrderIndex(container!, '#attendance-overview-anomalies')
-    const requestReportIndex = domOrderIndex(container!, '#attendance-overview-request-report')
+    expect(container!.querySelector('#attendance-overview-request-report')).toBeNull()
     expect(summaryIndex).toBeLessThan(guideIndex)
+    expect(anomaliesIndex).toBeGreaterThan(summaryIndex)
     expect(anomaliesIndex).toBeLessThan(guideIndex)
-    expect(requestReportIndex).toBeLessThan(guideIndex)
+    expect(container!.querySelector('#attendance-overview-anomalies h3')?.textContent).toContain('Anomalies')
 
     // §9.2: exactly one primary recommended action across the whole page.
     expect(container!.querySelectorAll('[data-attendance-overview-attention-action]')).toHaveLength(1)
@@ -1065,7 +1066,7 @@ describe('Attendance self-service dashboard', () => {
     const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
     const form = container!.querySelector('#attendance-request-work-date')
     const summary = container!.querySelector('#attendance-overview-requests')
-    const anomalies = container!.querySelector('#attendance-overview-request-report')
+    const anomalies = container!.querySelector('#attendance-overview-anomalies')
 
     expect(filters).toBeTruthy()
     expect(filters.open).toBe(false)
@@ -1085,7 +1086,7 @@ describe('Attendance self-service dashboard', () => {
       '#attendance-overview-requests',
       '.attendance__card--calendar',
       '[data-attendance-request-tools]',
-      '#attendance-overview-request-report',
+      '#attendance-overview-anomalies',
     ].map(selector => domOrderIndex(container!, selector))
     expect(order[0]).toBeLessThan(order[1])
     expect(order[1]).toBeLessThan(order[2])
@@ -1093,6 +1094,101 @@ describe('Attendance self-service dashboard', () => {
     expect(order[3]).toBeLessThan(order[4])
     expect(summary).toBeTruthy()
     expect(anomalies).toBeTruthy()
+    expect(anomalies?.querySelector('h3')?.textContent).toContain('Anomalies')
+    expect(requestTools.contains(anomalies)).toBe(false)
+    expect(requestTools.id).toBe('')
+    expect(container!.querySelector('#attendance-overview-request-report')).toBeNull()
+  })
+
+  it('task-home anomalies deep link lands on the anomalies list and leaves the makeup disclosure closed', async () => {
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-anomalies',
+    })
+    app.mount(container!)
+    await flushUi(8)
+
+    const anomalies = container!.querySelector<HTMLElement>('#attendance-overview-anomalies')
+    const requestTools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')
+    expect(anomalies?.querySelector('h3')?.textContent).toContain('Anomalies')
+    expect(anomalies?.querySelector('table, .attendance__empty')).toBeTruthy()
+    expect(requestTools?.open).toBe(false)
+    expect(requestTools?.contains(anomalies!)).toBe(false)
+    expect(container!.querySelector('#attendance-overview-request-report')).toBeNull()
+    const scrolled = (HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mock.instances as HTMLElement[]
+    expect(scrolled.some(element => element.id === 'attendance-overview-anomalies')).toBe(true)
+    expect(scrolled.some(element => element.hasAttribute('data-attendance-request-tools'))).toBe(false)
+  })
+
+  it('pending follow-up opens my requests and does not scroll to the anomalies list', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const followup = container!.querySelector<HTMLButtonElement>('[data-selfservice-action="request-followup"]')
+    expect(followup?.textContent).toContain('View my requests')
+    expect(followup?.textContent).not.toContain('Open request report')
+    const requestTools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')
+    expect(requestTools?.open).toBe(false)
+
+    ;(HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+    followup!.click()
+    await flushUi(3)
+
+    expect(requestTools?.open).toBe(true)
+    const scrolled = (HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mock.instances as HTMLElement[]
+    expect(scrolled.some(element => element.hasAttribute('data-attendance-request-tools'))).toBe(true)
+    expect(scrolled.some(element => element.id === 'attendance-overview-anomalies')).toBe(false)
+  })
+
+  it('pending attention action opens my requests when there is no anomaly reminder', async () => {
+    installOverviewMock({ anomalyItems: [] })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('request_pending')
+    const requestTools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')
+    expect(requestTools?.open).toBe(false)
+
+    ;(HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+    container!.querySelector<HTMLButtonElement>('[data-attendance-overview-attention-action]')!.click()
+    await flushUi(3)
+
+    expect(requestTools?.open).toBe(true)
+    const scrolled = (HTMLElement.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mock.instances as HTMLElement[]
+    expect(scrolled.some(element => element.id === 'attendance-overview-anomalies')).toBe(false)
+  })
+
+  it('anomaly Create request opens the dedicated makeup card with the shift suggested time', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestTools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')
+    expect(requestTools?.open).toBe(false)
+    findButton(container!, 'Create request').click()
+    await flushUi(3)
+
+    const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
+    expect(card).toBeTruthy()
+    expect(requestTools?.open).toBe(false)
+    expect(card?.querySelector<HTMLSelectElement>('[data-makeup-card-anomaly]')?.value).toBe('record-today::2026-04-15')
+    expect(card?.querySelector<HTMLInputElement>('[data-makeup-card-time]')?.value).toBe('2026-04-15T09:00')
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
+    expect(container!.querySelector('#attendance-overview-anomalies')?.contains(card!)).toBe(false)
+  })
+
+  it('reports mode keeps the request-report id on the request report card', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const report = container!.querySelector('#attendance-overview-request-report')
+    expect(report?.getAttribute('data-report-card')).toBe('request-report')
+    expect(report?.querySelector('h3')?.textContent).toContain('Request Report')
+    expect(container!.querySelector('#attendance-overview-anomalies')).toBeNull()
   })
 
   it('below-fold IA: expanding history filters keeps the request/makeup disclosure closed and does not refetch', async () => {
@@ -1348,7 +1444,7 @@ describe('Attendance self-service dashboard', () => {
       '.attendance__card--calendar',
       '[data-attendance-request-tools]',
       '#attendance-overview-requests',
-      '#attendance-overview-request-report',
+      '#attendance-overview-anomalies',
     ]
 
     for (const width of [1440, 390] as const) {

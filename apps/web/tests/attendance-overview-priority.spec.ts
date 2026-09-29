@@ -78,7 +78,9 @@ describe('resolveAttendanceOverviewAttention (pure priority matrix)', () => {
       tr,
     )
     expect(item.key).toBe('request_rejected')
-    expect(item.action).toBe('request-report')
+    expect(item.action).toBe('my-requests')
+    expect(item.actionLabel).toBe('Review request history')
+    expect(item.actionLabel).not.toContain('request report')
     expect(item.detail.toLowerCase()).not.toContain('pending')
   })
 
@@ -96,7 +98,9 @@ describe('resolveAttendanceOverviewAttention (pure priority matrix)', () => {
       tr,
     )
     expect(item.key).toBe('request_pending')
-    expect(item.action).toBe('request-report')
+    expect(item.action).toBe('my-requests')
+    expect(item.actionLabel).toBe('View my requests')
+    expect(item.actionLabel).not.toContain('request report')
     expect(item.title.toLowerCase()).not.toContain('approve')
     expect(item.title.toLowerCase()).not.toContain('reject')
     expect(item.detail.toLowerCase()).not.toContain('approve')

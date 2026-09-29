@@ -18,6 +18,7 @@ import {
   formatMakeupAnomalyOptionLabel,
   makeupTimeFieldForRequestType,
   resolveMakeupCardPrefill,
+  resolveSuggestedMakeupTimes,
   workDateFromDateTimeLocal,
 } from '../src/views/attendance/makeupRequestCardPrefill'
 
@@ -32,9 +33,9 @@ describe('shouldRevealOverviewRequestTools', () => {
     expect(shouldRevealOverviewRequestTools(ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID, 'request-focused')).toBe(true)
   })
 
-  it('opens for the request-form / anomalies and request-report landings', () => {
-    expect(shouldRevealOverviewRequestTools(ATTENDANCE_OVERVIEW_ANOMALIES_SECTION_ID, '')).toBe(true)
-    expect(shouldRevealOverviewRequestTools(ATTENDANCE_OVERVIEW_REQUEST_REPORT_SECTION_ID, '')).toBe(true)
+  it('does not open the makeup disclosure for the anomalies list or the reports-mode request report', () => {
+    expect(shouldRevealOverviewRequestTools(ATTENDANCE_OVERVIEW_ANOMALIES_SECTION_ID, '')).toBe(false)
+    expect(shouldRevealOverviewRequestTools(ATTENDANCE_OVERVIEW_REQUEST_REPORT_SECTION_ID, '')).toBe(false)
   })
 
   it('stays closed for unrelated overview sections', () => {
@@ -221,5 +222,54 @@ describe('makeup-card prefill (skip pending; do not invent types)', () => {
     expect(makeupTimeFieldForRequestType('time_correction')).toBe('requestedInAt')
     expect(workDateFromDateTimeLocal('2026-08-29T09:02')).toBe('2026-08-29')
     expect(workDateFromDateTimeLocal('')).toBeNull()
+  })
+
+  it('suggests the same-day shift boundary for a missing punch, and leaves overnight windows blank', () => {
+    const shift = { workStartTime: '09:00', workEndTime: '18:00' }
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'missed_check_in',
+      firstInAt: '2026-04-15T09:18:00+08:00',
+    }, shift)).toEqual({ requestedInAt: '2026-04-15T09:00', requestedOutAt: '' })
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'missed_check_out',
+    }, shift)).toEqual({ requestedInAt: '', requestedOutAt: '2026-04-15T18:00' })
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'missed_check_in',
+      firstInAt: '2026-04-15T09:18:00+08:00',
+    }, { workStartTime: '22:00', workEndTime: '06:00' })).toEqual({
+      requestedInAt: '2026-04-15T09:18',
+      requestedOutAt: '',
+    })
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'missed_check_in',
+    }, null)).toEqual({ requestedInAt: '', requestedOutAt: '' })
+  })
+
+  it('uses an existing check-in for time correction and ignores a punch dated on another day', () => {
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'time_correction',
+      firstInAt: '2026-04-15T09:18:00+08:00',
+      lastOutAt: '2026-04-15T17:42:00+08:00',
+    }, { workStartTime: '09:00', workEndTime: '18:00' })).toEqual({
+      requestedInAt: '2026-04-15T09:18',
+      requestedOutAt: '',
+    })
+    expect(resolveSuggestedMakeupTimes({
+      workDate: '2026-04-15',
+      suggestedRequestType: 'time_correction',
+      firstInAt: '2026-04-14T09:18:00+08:00',
+    }, { workStartTime: '09:00', workEndTime: '18:00' })).toEqual({
+      requestedInAt: '2026-04-15T09:00',
+      requestedOutAt: '',
+    })
+    expect(resolveSuggestedMakeupTimes(null, { workStartTime: '09:00', workEndTime: '18:00' })).toEqual({
+      requestedInAt: '',
+      requestedOutAt: '',
+    })
   })
 })

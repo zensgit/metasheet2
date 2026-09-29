@@ -246,8 +246,9 @@ function buildImportEntries(tr: TranslateFn): AttendanceContextHelpEntry[] {
 }
 
 // ---------------------------------------------------------------------------
-// 'self-request-center' — the self-service "Adjustment Request" / 补卡申请 card
-// (`attendance-overview-anomalies` section, AttendanceView.vue). Category ④ only — the deep-link
+// 'self-request-center' — the self-service "Adjustment Request" / 补卡申请 disclosure
+// (`data-attendance-request-tools` in AttendanceView.vue; it does not own
+// `attendance-overview-anomalies`, which is the anomalies list). Category ④ only — the deep-link
 // entry point the W5-1 PR body explicitly left for this slice ("从异常行/申请行的上下文深入口按锁
 // 属 W5-2"). Preset category = missing_punch: the literal 1:1 match for a makeup-punch request
 // card (mirrors the W5-1 comp_time-balance「查看依据」preset precedent).

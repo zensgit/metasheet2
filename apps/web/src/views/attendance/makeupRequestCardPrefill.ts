@@ -71,6 +71,90 @@ export function makeupTimeFieldForRequestType(requestType: string | null | undef
   return requestType === 'missed_check_out' ? 'requestedOutAt' : 'requestedInAt'
 }
 
+export interface MakeupShiftWindow {
+  workStartTime?: string | null
+  workEndTime?: string | null
+}
+
+export interface MakeupSuggestedTimeSource {
+  workDate?: string | null
+  suggestedRequestType?: string | null
+  firstInAt?: string | null
+  lastOutAt?: string | null
+}
+
+const CLOCK_TEXT = /^(\d{1,2}):(\d{2})$/
+const PUNCH_WALL_CLOCK = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/
+
+function parseClockMinutes(value: string | null | undefined): number | null {
+  if (typeof value !== 'string') return null
+  const match = value.trim().match(CLOCK_TEXT)
+  if (!match) return null
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
+  return hour * 60 + minute
+}
+
+function formatClock(workDate: string, minutesFromMidnight: number): string {
+  const hour = Math.floor(minutesFromMidnight / 60)
+  const minute = minutesFromMidnight % 60
+  return `${workDate}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+/** Same-day shift boundary only. Overnight / reversed windows return '' — do not guess. */
+function sameDayShiftDateTime(
+  workDate: string,
+  shiftWindow: MakeupShiftWindow | null | undefined,
+  side: 'start' | 'end',
+): string {
+  const start = parseClockMinutes(shiftWindow?.workStartTime)
+  const end = parseClockMinutes(shiftWindow?.workEndTime)
+  if (start === null || end === null || end <= start) return ''
+  return formatClock(workDate, side === 'start' ? start : end)
+}
+
+/**
+ * Wall-clock prefix of an ISO timestamp, only when that prefix date is the work date.
+ * No timezone conversion: `2026-04-15T09:18:00+08:00` stays `2026-04-15T09:18`.
+ */
+function punchDateTimeLocal(value: string | null | undefined, workDate: string): string {
+  if (typeof value !== 'string') return ''
+  const match = value.trim().match(PUNCH_WALL_CLOCK)
+  if (!match || match[1] !== workDate) return ''
+  return `${match[1]}T${match[2]}`
+}
+
+/**
+ * Suggested makeup time for the dedicated card's single visible field.
+ * Missing-punch sides prefer the same-day shift boundary, then an existing punch.
+ * time_correction prefers the existing check-in, then the shift start.
+ * The hidden opposite field stays empty so a time the card does not show is not submitted.
+ */
+export function resolveSuggestedMakeupTimes(
+  item: MakeupSuggestedTimeSource | null | undefined,
+  shiftWindow?: MakeupShiftWindow | null,
+): { requestedInAt: string; requestedOutAt: string } {
+  const empty = { requestedInAt: '', requestedOutAt: '' }
+  const workDate = String(item?.workDate ?? '').trim()
+  if (!DATE_ONLY.test(workDate)) return empty
+
+  const requestType = resolveMakeupRequestType(item ?? null)
+  const shiftIn = sameDayShiftDateTime(workDate, shiftWindow, 'start')
+  const shiftOut = sameDayShiftDateTime(workDate, shiftWindow, 'end')
+  const punchedIn = punchDateTimeLocal(item?.firstInAt, workDate)
+  const punchedOut = punchDateTimeLocal(item?.lastOutAt, workDate)
+
+  if (requestType === 'missed_check_out') {
+    return { requestedInAt: '', requestedOutAt: shiftOut || punchedOut }
+  }
+  if (requestType === 'missed_check_in') {
+    return { requestedInAt: shiftIn || punchedIn, requestedOutAt: '' }
+  }
+  return { requestedInAt: punchedIn || shiftIn, requestedOutAt: '' }
+}
+
 export function workDateFromDateTimeLocal(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null
   const match = value.trim().match(/^(\d{4}-\d{2}-\d{2})/)

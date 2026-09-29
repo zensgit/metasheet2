@@ -32,6 +32,7 @@ export type AttendanceOverviewAttentionAction =
   | 'overtime'
   | 'shift_swap'
   | 'records'
+  | 'my-requests'
   | 'request-report'
   | null
 
@@ -137,7 +138,7 @@ export function resolveAttendanceOverviewAttention(
         'Your latest request was rejected and may need a new submission.',
         '你最近提交的申请已被驳回，可能需要重新提交。',
       ),
-      action: 'request-report',
+      action: 'my-requests',
       actionLabel: tr('Review request history', '查看申请历史'),
       presentedByStatusBanner: false,
     }
@@ -152,8 +153,8 @@ export function resolveAttendanceOverviewAttention(
         `${facts.pendingRequestCount} request${facts.pendingRequestCount === 1 ? '' : 's'} still waiting for approval.`,
         `还有 ${facts.pendingRequestCount} 条申请正在等待审批。`,
       ),
-      action: 'request-report',
-      actionLabel: tr('Open request report', '打开申请报表'),
+      action: 'my-requests',
+      actionLabel: tr('View my requests', '查看我的申请'),
       presentedByStatusBanner: false,
     }
   }

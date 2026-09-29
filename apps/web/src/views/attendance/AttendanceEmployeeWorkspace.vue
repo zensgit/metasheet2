@@ -527,6 +527,7 @@ type WorkspaceSelfServiceActionKey =
   | 'overtime'
   | 'shift_swap'
   | 'records'
+  | 'my-requests'
   | 'request-report'
 
 interface WorkspaceRequestItem {
