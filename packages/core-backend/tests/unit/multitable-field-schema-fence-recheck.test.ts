@@ -729,3 +729,26 @@ describe('§3.12 — gate OFF (either flag): automation writes exactly as today,
     }
   }
 })
+
+// ── C1-F7 (fix round): the derived-merge refusal is logged as a retype, not as a recovery writer-block ──
+
+import { Logger } from '../../src/core/logger'
+
+describe('C1-F7 — log text names the reason (no behaviour change)', () => {
+  it('formula engine: a retype refusal logs "no longer a derived field", never "recovery block"', async () => {
+    bothOn()
+    const errors: string[] = []
+    vi.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => { errors.push(String(message)) })
+    const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
+    spyPool(db)
+    const formula = serializeFieldRow({ id: FIELD, name: 'F', type: 'formula', property: { expression: '=1+1' }, order: 0 })
+    expect(await new MultitableFormulaEngine().recalculateRecordFromData(db.pool as never, SHEET, RECORD, {}, [formula])).toBeNull()
+    expect(errors.some((m) => m.includes('no longer a derived field'))).toBe(true)
+    expect(errors.some((m) => m.includes('recovery block'))).toBe(false)
+  })
+
+  it('univer-meta: both relation-agg skip branches choose the text by error class', () => {
+    const source = readFileSync(join(__dirname, '..', '..', 'src', 'routes', 'univer-meta.ts'), 'utf8').replace(/\r\n/g, '\n')
+    expect(source.match(/console\.warn\(err instanceof DerivedMergeTargetRetypedError\n/g)?.length).toBe(2)
+  })
+})

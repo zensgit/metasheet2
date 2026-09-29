@@ -353,6 +353,75 @@ export function defineFieldSchemaFenceRecheckRealDbCases(): void {
       expect((await recordData(R))?.[F_FORMULA]).toBe(2)
     })
 
+    // ── R-F3 (fix round): rows 2 / 3 run in a transaction the PLUGIN CALLER owns. A caller that catches the refusal
+    //    and commits must still commit nothing — the re-check has to run BEFORE the write, not merely before COMMIT
+    //    (a late re-check would be rolled back only when the caller lets the error escape). ──
+    const catchingCaller = (write: (query: never) => Promise<unknown>) => () =>
+      runWithMultitableRequestMetadataCache(async () => {
+        await loadFieldsForSheet(q as never, SHEET, getMultitableRequestMetadataCache()!.fields)
+        let caught: unknown = null
+        await poolManager.get().transaction(async ({ query }) => {
+          try {
+            await write(query as never)
+          } catch (error) {
+            caught = error // swallowed: the transaction COMMITS
+          }
+        })
+        return caught
+      })
+
+    test('R-F3 row 2 plugin SDK patchRecord: the caller catches the refusal and commits ⇒ the cell is still untouched', async () => {
+      const R = mkRecord('cc2')
+      await seedRecord(R)
+      process.env[CONVERT_FLAG] = 'true'
+      process.env[CACHE_FLAG] = 'true'
+      const outcome = await raceRetype(F_STR, 'select', SELECT_PROPERTY,
+        catchingCaller((query) => pluginPatchRecord({ query, sheetId: SHEET, recordId: R, changes: { [F_STR]: STALE } })))
+      expect(outcome.ok).toBe(true)
+      expect((outcome as { value: unknown }).value).toBeInstanceOf(FieldSchemaChangedError)
+      expect(await recordData(R)).toEqual({ [F_STR]: 'orig' })
+    })
+
+    test('R-F3 row 3 plugin SDK createRecord: the caller catches the refusal and commits ⇒ no record was inserted', async () => {
+      process.env[CONVERT_FLAG] = 'true'
+      process.env[CACHE_FLAG] = 'true'
+      const before = await recordCount()
+      const outcome = await raceRetype(F_STR, 'select', SELECT_PROPERTY,
+        catchingCaller((query) => pluginCreateRecord({ query, sheetId: SHEET, data: { [F_STR]: STALE } })))
+      expect(outcome.ok).toBe(true)
+      expect((outcome as { value: unknown }).value).toBeInstanceOf(FieldSchemaChangedError)
+      expect(await recordCount()).toBe(before)
+    })
+
+    // ── R-F4 (fix round): row 6 create_record had no real-DB race case ──
+    const row6create = () => () => automationService().executor.execute(
+      {
+        id: `rule_fsr_c_${TS}`, name: 'fsr create', sheetId: SHEET, trigger: { type: 'record.created', config: {} },
+        actions: [{ type: 'create_record', config: { sheetId: SHEET, data: { [F_STR]: STALE } } }],
+        enabled: true, createdBy: ACTOR, createdAt: '2026-09-28T00:00:00Z',
+      },
+      { recordId: `rec_fsr_trigger_${TS}`, sheetId: SHEET, actorId: ACTOR, data: {} },
+    )
+
+    test('R-F4 row 6 automation create_record: a retype committed while the step waited on the fence ⇒ step failed, no record', async () => {
+      process.env[CONVERT_FLAG] = 'true'
+      const before = await recordCount()
+      const outcome = await raceRetype(F_STR, 'select', SELECT_PROPERTY, row6create())
+      expect(outcome.ok).toBe(true)
+      const steps = (outcome as { value: { steps: Array<{ status: string; error?: string }> } }).value.steps
+      expect(steps[0]?.status).toBe('failed')
+      expect(steps[0]?.error).toBe(new FieldSchemaChangedError().message)
+      expect(await recordCount()).toBe(before)
+    })
+
+    test('R-F4 row 6 CONTROL, convert flag OFF ⇒ the automation inserts the stale value into the select column', async () => {
+      const before = await recordCount()
+      const outcome = await raceRetype(F_STR, 'select', SELECT_PROPERTY, row6create())
+      expect(outcome.ok, String((outcome as { error?: unknown }).error ?? '')).toBe(true)
+      expect((outcome as { value: { steps: Array<{ status: string }> } }).value.steps[0]?.status).toBe('success')
+      expect(await recordCount()).toBe(before + 1)
+    })
+
     // ── R-F2 (fix round): the realtime (Yjs) bridge's snapshot is built from RAW rows ──
     // Fields stored with raw alias types and plain-string options exist in practice (provisioning stores descriptor
     // types verbatim; the approval projection writes 'text'). With both flags on and NOTHING changing, a write through

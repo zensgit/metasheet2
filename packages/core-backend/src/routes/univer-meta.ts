@@ -421,6 +421,7 @@ import {
 } from '../multitable/link-writer-fence'
 import {
   assertFieldSchemaUnchangedAfterFence,
+  DerivedMergeTargetRetypedError,
   FieldSchemaChangedError,
 } from '../multitable/field-schema-fence-recheck'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
@@ -3287,7 +3288,9 @@ async function recalculateFormulaFields(
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
-              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
               throw err
             }
@@ -4294,7 +4297,9 @@ async function computeDependentLookupRollupRecords(
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
-              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] fan-out relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
             throw err
