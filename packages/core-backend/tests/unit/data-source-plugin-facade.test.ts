@@ -1,9 +1,15 @@
+import fs from 'node:fs'
+import path from 'node:path'
+import { inspect } from 'node:util'
+
 import { describe, expect, it, vi } from 'vitest'
 
 import {
   createDataSourcePluginFacade,
   createDataSourceSealedSnapshotConnectionFacade,
   createDataSourceWritePluginFacade,
+  DATA_SOURCE_REFUSAL_REASON_KEY,
+  DATA_SOURCE_REFUSAL_REASONS,
   DATA_SOURCE_NOT_FOUND_CODE,
   DATA_SOURCE_NOT_READ_ONLY_CODE,
   DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE,
@@ -70,29 +76,45 @@ interface ManagerStubOptions {
     tenantId: string | null
     scopeKind: 'legacy_private' | 'private' | 'workspace'
   }
+  // Refusal reasons (#6067 §5 R1). The load-state accessor exists on the stub ONLY when a case asks
+  // for it, so every case written before it keeps running against a manager that has none — which
+  // is exactly the shape the facade must tolerate.
+  loadState?: unknown
+  loadStateThrows?: Error
+  scopeMissing?: boolean
+  getDataSourceThrows?: boolean
 }
 
 function managerStub(opts: ManagerStubOptions = {}) {
   const adapter = opts.adapter ?? adapterStub()
+  const withLoadState = 'loadState' in opts || opts.loadStateThrows !== undefined
+  const getLoadState = vi.fn((_id: string) => {
+    if (opts.loadStateThrows) throw opts.loadStateThrows
+    return opts.loadState
+  })
   const stub = {
+    ...(withLoadState ? { getLoadState } : {}),
     // Mirror DataSourceManager's uniform not-found wording verbatim — the wrapper must re-raise it
     // unchanged (no existence leak), so the test asserts against the real message shape.
     assertAccess: vi.fn((id: string, _owner: string | undefined) => {
       if (opts.deny) throw new Error(`Data source with id '${id}' not found`)
     }),
-    getScope: vi.fn(() => opts.scope ?? {
+    getScope: vi.fn(() => (opts.scopeMissing ? undefined : opts.scope ?? {
       ownerId: 'owner-1',
       workspaceId: null,
       tenantId: 'tenant-1',
       scopeKind: 'private',
+    })),
+    getDataSource: vi.fn((id: string) => {
+      if (opts.getDataSourceThrows) throw new Error(`Data source with id '${id}' not found`)
+      return adapter
     }),
-    getDataSource: vi.fn(() => adapter),
     connectDataSource: vi.fn(async () => undefined),
     select: vi.fn(async () => ({ data: [{ id: 1 }], metadata: {} })),
     insert: vi.fn(async (_id: string, _table: string, rows: unknown[]) => ({ data: rows, metadata: {} })),
     update: vi.fn(async (_id: string, _table: string, data: unknown, where: unknown) => ({ data: [{ data, where }], metadata: {} })),
   }
-  return { stub, adapter, manager: stub as unknown as DataSourceManager }
+  return { stub, adapter, getLoadState, manager: stub as unknown as DataSourceManager }
 }
 
 describe('createDataSourcePluginFacade', () => {
@@ -787,5 +809,443 @@ describe('createDataSourceWritePluginFacade', () => {
       message: 'rows[0].password is not in keyFields or writableFields',
     })
     expect(m.stub.insert).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Refusal reasons — WHY a connection was refused, for the server log only (#6067 §5 R1).
+//
+// Every refusal of `resolveConnectionRegistration` and of the sealed snapshot facade carries exactly
+// one word of DATA_SOURCE_REFUSAL_REASONS, as a non-enumerable property under a registered symbol.
+// What is thrown is otherwise exactly what was thrown before: the `expected` of each case below is
+// the class name, code, message and status of that branch as it stood before the reason existed.
+//
+// Equal cost: a refusal decided from caller input alone looks nothing up and does not resolve the
+// manager; every refusal decided after the manager was resolved has read the load state exactly
+// once. `lookups` and `managerResolved` pin both halves, per branch.
+// ---------------------------------------------------------------------------------------------
+describe('refusal reasons (server log only)', () => {
+  const ID = 'ds-1'
+  const NOT_FOUND = `Data source with id '${ID}' not found`
+  const UNAVAILABLE = { name: 'DataSourceUnavailableError', code: DATA_SOURCE_NOT_FOUND_CODE, message: NOT_FOUND }
+  const sealedInvalid = (field: string) => ({
+    name: 'DataSourceSealedSnapshotConnectionError',
+    code: DATA_SOURCE_SEALED_SNAPSHOT_CONNECTION_INVALID_CODE,
+    message: `data source sealed snapshot SQL Server connection field '${field}' is not representable`,
+  })
+  const TENANTLESS_LEGACY = { ownerId: 'owner-1', workspaceId: null, tenantId: null, scopeKind: 'legacy_private' as const }
+  const TENANTLESS_PRIVATE = { ownerId: 'owner-1', workspaceId: null, tenantId: null, scopeKind: 'private' as const }
+  const SEALED_CONNECTION = {
+    server: 'sql.example.test',
+    database: 'production',
+    encrypt: true,
+    trustServerCertificate: false,
+  }
+  const sealedAdapter = (overrides: AdapterStubOptions = {}) => adapterStub({
+    type: 'sqlserver',
+    connection: SEALED_CONNECTION,
+    credentials: { username: 'readonly-user', password: 'readonly-password' },
+    ...overrides,
+  })
+
+  interface RefusalRun {
+    error: Error
+    lookups: number
+    managerResolved: number
+  }
+
+  interface RefusalCase {
+    label: string
+    reason: string
+    expected: { name: string; code: string; message: string }
+    lookups: 0 | 1
+    inputOnly: boolean
+    run(): Promise<RefusalRun>
+  }
+
+  type RegistrationOptions = Parameters<ReturnType<typeof createDataSourcePluginFacade>['resolveConnectionRegistration']>[1]
+
+  async function refusalOf(action: () => Promise<unknown>): Promise<Error> {
+    try {
+      await action()
+    } catch (error) {
+      return error as Error
+    }
+    throw new Error('expected a refusal, the call resolved')
+  }
+
+  function reasonOf(error: unknown): unknown {
+    return (error as Record<symbol, unknown>)[DATA_SOURCE_REFUSAL_REASON_KEY]
+  }
+
+  async function registration(stubOptions: ManagerStubOptions, options: Partial<RegistrationOptions> = {}): Promise<RefusalRun> {
+    const m = managerStub(stubOptions)
+    const getManager = vi.fn(() => m.manager)
+    const facade = createDataSourcePluginFacade(getManager)
+    const error = await refusalOf(() => facade.resolveConnectionRegistration(ID, {
+      tenantId: 'tenant-1',
+      principal: 'owner-1',
+      ...options,
+    } as RegistrationOptions))
+    return { error, lookups: m.getLoadState.mock.calls.length, managerResolved: getManager.mock.calls.length }
+  }
+
+  async function sealed(
+    stubOptions: ManagerStubOptions,
+    options: Partial<RegistrationOptions> = {},
+    arrange: (m: ReturnType<typeof managerStub>) => void = () => undefined,
+  ): Promise<RefusalRun> {
+    const m = managerStub({ adapter: sealedAdapter(), ...stubOptions })
+    arrange(m)
+    const getManager = vi.fn(() => m.manager)
+    const facade = createDataSourceSealedSnapshotConnectionFacade(getManager)
+    const error = await refusalOf(() => facade.resolveSqlServerConnection(ID, {
+      tenantId: 'tenant-1',
+      principal: 'owner-1',
+      runAs: 'user',
+      ...options,
+    } as RegistrationOptions))
+    return { error, lookups: m.getLoadState.mock.calls.length, managerResolved: getManager.mock.calls.length }
+  }
+
+  const PRINCIPAL_REQUIRED = {
+    name: 'DataSourcePrincipalRequiredError',
+    code: DATA_SOURCE_PRINCIPAL_REQUIRED_CODE,
+    message: MISSING_PRINCIPAL_MESSAGE,
+  }
+
+  // One case per refusal branch. `resolveRegistration` has eight refusal sites; the catch around the
+  // access step is one site with six outcomes (three separate throws behind it), and the sealed
+  // facade adds seven sites of its own.
+  const CASES: RefusalCase[] = [
+    // ── decided from caller input, before the manager is resolved ──
+    {
+      label: 'principal missing',
+      reason: 'principal_missing',
+      expected: PRINCIPAL_REQUIRED,
+      lookups: 0,
+      inputOnly: true,
+      run: () => registration({ loadState: 'loaded' }, { principal: undefined }),
+    },
+    {
+      label: 'requested tenant missing',
+      reason: 'tenant_missing',
+      expected: UNAVAILABLE,
+      lookups: 0,
+      inputOnly: true,
+      run: () => registration({ loadState: 'loaded' }, { tenantId: '   ' }),
+    },
+    {
+      label: 'runAs is not user / owner / service',
+      reason: 'run_as_invalid',
+      expected: UNAVAILABLE,
+      lookups: 0,
+      inputOnly: true,
+      run: () => registration({ loadState: 'loaded' }, { runAs: 'admin' as never }),
+    },
+    // ── the access step refused ──
+    {
+      label: 'loaded, and the principal is not its owner',
+      reason: 'owner_mismatch',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'loaded' }),
+    },
+    {
+      label: 'not loaded: its stored credential cannot be decrypted',
+      reason: 'not_loaded_credentials_unreadable',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'credentials_unreadable' }),
+    },
+    {
+      label: 'not loaded: its type has no adapter',
+      reason: 'not_loaded_unsupported_type',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'unsupported_type' }),
+    },
+    {
+      label: 'not loaded: the load failed for another cause',
+      reason: 'not_loaded_load_failed',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'load_failed' }),
+    },
+    {
+      label: 'not loaded: the registry has never seen the id',
+      reason: 'not_loaded_absent',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'absent' }),
+    },
+    {
+      label: 'the access step refused and the load state is not one of the known words',
+      reason: 'load_state_unknown',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ deny: true, loadState: 'owner_mismatch' }),
+    },
+    // ── access passed, the stored scope refused ──
+    {
+      label: 'access passed and no scope is stored',
+      reason: 'scope_missing',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ scopeMissing: true, loadState: 'loaded' }),
+    },
+    {
+      label: 'the source belongs to another tenant',
+      reason: 'tenant_mismatch',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ loadState: 'loaded' }, { tenantId: 'tenant-2' }),
+    },
+    {
+      label: 'tenantless source whose scope is not legacy_private',
+      reason: 'tenantless_scope',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ scope: TENANTLESS_PRIVATE, loadState: 'loaded' }, { runAs: 'user' }),
+    },
+    {
+      label: 'tenantless legacy_private source, asked for by a service run',
+      reason: 'tenantless_service',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => registration({ scope: TENANTLESS_LEGACY, loadState: 'loaded' }, { runAs: 'service' }),
+    },
+    // ── sealed snapshot facade only ──
+    {
+      label: 'sealed: runAs is not user',
+      reason: 'sealed_run_as_not_user',
+      expected: sealedInvalid('runAs'),
+      lookups: 0,
+      inputOnly: true,
+      run: () => sealed({ loadState: 'loaded' }, { runAs: 'service' }),
+    },
+    {
+      label: 'sealed: the registration is not a SQL Server source',
+      reason: 'sealed_type_unsupported',
+      expected: sealedInvalid('type'),
+      lookups: 1,
+      inputOnly: false,
+      run: () => sealed({ adapter: adapterStub({ type: 'postgres' }), loadState: 'loaded' }),
+    },
+    {
+      label: 'sealed: the adapter left the registry after the registration passed',
+      reason: 'sealed_adapter_unavailable',
+      expected: UNAVAILABLE,
+      lookups: 1,
+      inputOnly: false,
+      run: () => sealed({ loadState: 'loaded' }, {}, (m) => {
+        m.stub.getDataSource
+          .mockImplementationOnce(() => m.adapter)
+          .mockImplementationOnce((id: string) => { throw new Error(`Data source with id '${id}' not found`) })
+      }),
+    },
+    {
+      label: 'sealed: the source is writable',
+      reason: 'sealed_not_read_only',
+      expected: sealedInvalid('readOnly'),
+      lookups: 1,
+      inputOnly: false,
+      run: () => sealed({ adapter: sealedAdapter({ readOnly: false }), loadState: 'loaded' }),
+    },
+    {
+      label: 'sealed: the adapter configuration cannot be read',
+      reason: 'sealed_config_unreadable',
+      expected: sealedInvalid('connection'),
+      lookups: 1,
+      inputOnly: false,
+      run: () => sealed({ loadState: 'loaded' }, {}, (m) => {
+        m.adapter.getConfig.mockImplementation(() => { throw new Error('config marker-zq9 is gone') })
+      }),
+    },
+    {
+      label: 'sealed: a connection field cannot be projected',
+      reason: 'sealed_connection_not_representable',
+      // The projection names the offending field, and that name is a key of the stored config.
+      expected: sealedInvalid('connection.markerFieldZq9'),
+      lookups: 1,
+      inputOnly: false,
+      run: () => sealed({
+        adapter: sealedAdapter({ connection: { ...SEALED_CONNECTION, markerFieldZq9: true } }),
+        loadState: 'loaded',
+      }),
+    },
+  ]
+
+  it.each(CASES)('$label → $reason', async ({ reason, expected, lookups, inputOnly, run }) => {
+    const { error, lookups: observedLookups, managerResolved } = await run()
+
+    // The one word.
+    expect(reasonOf(error)).toBe(reason)
+    expect(DATA_SOURCE_REFUSAL_REASONS).toContain(reason)
+
+    // What is thrown is what was thrown before the reason existed.
+    expect({ name: error.name, code: (error as { code?: unknown }).code, message: error.message }).toEqual(expected)
+    expect((error as { status?: unknown }).status).toBe(422)
+    expect(error).toBeInstanceOf(Error)
+    if (expected.name === 'DataSourceUnavailableError') expect(error).toBeInstanceOf(DataSourceUnavailableError)
+    expect(Object.keys(error).sort()).toEqual(['code', 'name', 'status'])
+    expect(JSON.parse(JSON.stringify(error))).toEqual({ code: expected.code, name: expected.name, status: 422 })
+
+    // Nothing that serializes an error can pick the word up.
+    const descriptor = Object.getOwnPropertyDescriptor(error, DATA_SOURCE_REFUSAL_REASON_KEY)
+    expect(descriptor).toEqual({ value: reason, enumerable: false, writable: false, configurable: false })
+    expect((error as { reason?: unknown }).reason).toBeUndefined()
+    expect('reason' in error).toBe(false)
+    expect(Object.getOwnPropertyNames(error)).not.toContain('reason')
+    expect(Object.getOwnPropertySymbols({ ...error })).toEqual([])
+    expect(Object.getOwnPropertySymbols(Object.assign({}, error))).toEqual([])
+    expect(JSON.stringify(error)).not.toContain(reason)
+    expect(inspect(error)).not.toContain(reason)
+    expect(String(error)).not.toContain(reason)
+    expect(String(error.stack)).not.toContain(reason)
+
+    // Equal cost, per branch.
+    expect(observedLookups).toBe(lookups)
+    if (inputOnly) expect(managerResolved).toBe(0)
+    else expect(managerResolved).toBeGreaterThan(0)
+  })
+
+  it('the vocabulary is CLOSED: the branches produce exactly the exported list, no word more and none less', async () => {
+    const produced = new Set<string>()
+    for (const refusalCase of CASES) {
+      produced.add(String(reasonOf((await refusalCase.run()).error)))
+    }
+    expect([...produced].sort()).toEqual([...DATA_SOURCE_REFUSAL_REASONS].sort())
+    expect(new Set(DATA_SOURCE_REFUSAL_REASONS).size).toBe(DATA_SOURCE_REFUSAL_REASONS.length)
+    for (const word of DATA_SOURCE_REFUSAL_REASONS) expect(word).toMatch(/^[a-z]+(_[a-z]+)+$/)
+  })
+
+  it('the source names no reason outside the list, and every listed word is used at a refusal site', () => {
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../../src/data-adapters/data-source-plugin-facade.ts'),
+      'utf8',
+    )
+    // Every snake_case literal of the file, minus the ones that are not reasons: a scope kind, and
+    // the load states the manager answers with.
+    const NOT_REASONS = new Set(['legacy_private', 'loaded', 'absent', 'credentials_unreadable', 'unsupported_type', 'load_failed'])
+    const literals = new Map<string, number>()
+    for (const match of source.matchAll(/'([a-z]+(?:_[a-z]+)+)'/g)) {
+      if (NOT_REASONS.has(match[1])) continue
+      literals.set(match[1], (literals.get(match[1]) ?? 0) + 1)
+    }
+    expect([...literals.keys()].sort()).toEqual([...DATA_SOURCE_REFUSAL_REASONS].sort())
+    // Once in the list, at least once more where a refusal is built.
+    for (const word of DATA_SOURCE_REFUSAL_REASONS) {
+      expect(literals.get(word), `${word} is listed but no refusal site uses it`).toBeGreaterThanOrEqual(2)
+    }
+  })
+
+  it('principal_missing is the refusal of requirePrincipal, not a not-found, for every blank principal', async () => {
+    for (const principal of [undefined, '', '   ']) {
+      const { error, lookups, managerResolved } = await registration({ loadState: 'loaded' }, { principal })
+      expect(reasonOf(error)).toBe('principal_missing')
+      expect(error).not.toBeInstanceOf(DataSourceUnavailableError)
+      expect(error.name).toBe('DataSourcePrincipalRequiredError')
+      expect(lookups).toBe(0)
+      expect(managerResolved).toBe(0)
+    }
+  })
+
+  it('load_state_unknown covers a manager without the accessor, an accessor that throws, and a registry that contradicts itself', async () => {
+    // No accessor at all — the manager stub every earlier case in this file uses.
+    const bare = managerStub({ deny: true })
+    expect('getLoadState' in bare.stub).toBe(false)
+    const bareError = await refusalOf(() => createDataSourcePluginFacade(() => bare.manager)
+      .resolveConnectionRegistration(ID, { tenantId: 'tenant-1', principal: 'stranger' }))
+    expect(reasonOf(bareError)).toBe('load_state_unknown')
+    expect({ name: bareError.name, message: bareError.message }).toEqual({ name: UNAVAILABLE.name, message: NOT_FOUND })
+
+    // The accessor throws: the refusal is the one the access step raised, never the accessor's error.
+    const throwing = await registration({ deny: true, loadStateThrows: new Error('accessor marker-zq9 failed') })
+    expect(reasonOf(throwing.error)).toBe('load_state_unknown')
+    expect(throwing.error.message).toBe(NOT_FOUND)
+    expect(throwing.lookups).toBe(1)
+
+    // Loaded, access granted, and the adapter read still failed: not an owner mismatch.
+    const contradicting = await registration({ getDataSourceThrows: true, loadState: 'loaded' })
+    expect(reasonOf(contradicting.error)).toBe('load_state_unknown')
+    expect(contradicting.error.message).toBe(NOT_FOUND)
+
+    // The same adapter read failing on an id the registry reports as not loaded keeps its state.
+    const notLoaded = await registration({ getDataSourceThrows: true, loadState: 'credentials_unreadable' })
+    expect(reasonOf(notLoaded.error)).toBe('not_loaded_credentials_unreadable')
+
+    // A non-string answer is not a state.
+    for (const loadState of [undefined, null, 1, true, { toString: () => 'loaded' }, ['loaded']]) {
+      expect(reasonOf((await registration({ deny: true, loadState })).error)).toBe('load_state_unknown')
+    }
+  })
+
+  it('sealed_type_unsupported also names the second type check, on the adapter itself', async () => {
+    const { error, lookups } = await sealed({ loadState: 'loaded' }, {}, (m) => {
+      let reads = 0
+      m.adapter.getType = () => {
+        reads += 1
+        return reads === 1 ? 'sqlserver' : 'postgres'
+      }
+    })
+    expect(reasonOf(error)).toBe('sealed_type_unsupported')
+    expect(error.message).toBe(sealedInvalid('type').message)
+    expect(lookups).toBe(1)
+  })
+
+  it('a refusal of the registration reaches the sealed caller with the reason it already had', async () => {
+    const { error, lookups } = await sealed({ deny: true, loadState: 'credentials_unreadable' })
+    expect(reasonOf(error)).toBe('not_loaded_credentials_unreadable')
+    expect(error).toBeInstanceOf(DataSourceUnavailableError)
+    expect(lookups).toBe(1)
+  })
+
+  it('a resolution that passes reads the load state once as well, and returns what it returned before', async () => {
+    const m = managerStub({ loadState: 'loaded' })
+    const facade = createDataSourcePluginFacade(() => m.manager)
+    await expect(facade.resolveConnectionRegistration(ID, { tenantId: 'tenant-1', principal: 'owner-1' }))
+      .resolves.toEqual({ id: ID, type: 'postgres', tenantId: 'tenant-1', scopeKind: 'private' })
+    expect(m.getLoadState).toHaveBeenCalledTimes(1)
+    expect(m.getLoadState).toHaveBeenCalledWith(ID)
+
+    const s = managerStub({ adapter: sealedAdapter(), loadState: 'loaded' })
+    await expect(createDataSourceSealedSnapshotConnectionFacade(() => s.manager)
+      .resolveSqlServerConnection(ID, { tenantId: 'tenant-1', principal: 'owner-1', runAs: 'user' }))
+      .resolves.toMatchObject({ credentials: { user: 'readonly-user' } })
+    expect(s.getLoadState).toHaveBeenCalledTimes(1)
+  })
+
+  it('the lookup is given the id and nothing about the caller', async () => {
+    const m = managerStub({ deny: true, loadState: 'absent' })
+    await refusalOf(() => createDataSourcePluginFacade(() => m.manager)
+      .resolveConnectionRegistration(ID, { tenantId: 'tenant-1', principal: 'stranger', runAs: 'user' }))
+    expect(m.getLoadState.mock.calls).toEqual([[ID]])
+  })
+
+  it('refusals outside the two resolution entry points carry no reason', async () => {
+    const denied = managerStub({ deny: true, loadState: 'loaded' })
+    const facade = createDataSourcePluginFacade(() => denied.manager)
+    for (const action of [
+      () => facade.describe(ID, 'stranger'),
+      () => facade.assertReferenceable(ID, 'stranger'),
+      () => facade.getSchema(ID, 'stranger'),
+      () => facade.describe(ID, undefined),
+      () => facade.select(ID, 't', { limit: 1 }, undefined),
+    ]) {
+      const error = await refusalOf(action)
+      expect(Object.getOwnPropertySymbols(error)).toEqual([])
+    }
+    expect(denied.getLoadState).not.toHaveBeenCalled()
   })
 })

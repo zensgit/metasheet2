@@ -15,6 +15,7 @@ import {
   extractSelectOptions,
   isPersonSingleRecord,
   normalizeMultiSelectValue,
+  classifySelectCellValue,
   normalizeJson,
   normalizeJsonArray,
   validateLongTextValue,
@@ -40,6 +41,7 @@ import {
   isWriterFenceEnabled,
 } from './canonical-sheet-fence'
 import { getDefaultValidationRules, validateRecord } from './field-validation-engine'
+import { assertFieldSchemaUnchangedAfterFence } from './field-schema-fence-recheck'
 import type { FieldValidationConfig } from './field-validation'
 import { loadFieldsForSheet } from './loaders'
 import {
@@ -1540,12 +1542,12 @@ export class RecordService {
         continue
       }
       if (field.type === 'select') {
-        if (typeof value !== 'string') {
+        const verdict = classifySelectCellValue(value, field.options ?? [])
+        if (verdict === 'not_string') {
           fieldErrors[fieldId] = 'Select value must be a string'
           continue
         }
-        const allowed = new Set(field.options ?? [])
-        if (value !== '' && !allowed.has(value)) {
+        if (verdict === 'not_in_options') {
           fieldErrors[fieldId] = 'Invalid select option'
           continue
         }
@@ -1699,6 +1701,10 @@ export class RecordService {
       } else {
         await fenceWriterEntry(query, sheetId)
       }
+      // Field retype slice 3a (ADR §3.11 row 4, REST + OAPI single-record PATCH): `fieldById` was loaded through
+      // the pool BEFORE this transaction and the patch was validated against it. Re-read the touched fields FOR
+      // SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift. No query unless the convert flag is 'true'.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, fieldById, Object.keys(data))
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const currentRes = await query(

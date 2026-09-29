@@ -419,6 +419,11 @@ import {
   prepareSheetLinkDeleteFencePlan,
   type FieldLinkRestoreFencePlan,
 } from '../multitable/link-writer-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  DerivedMergeTargetRetypedError,
+  FieldSchemaChangedError,
+} from '../multitable/field-schema-fence-recheck'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -3283,7 +3288,9 @@ async function recalculateFormulaFields(
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
-              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
               throw err
             }
@@ -4290,7 +4297,9 @@ async function computeDependentLookupRollupRecords(
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
-              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] fan-out relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
             throw err
@@ -6964,7 +6973,7 @@ type PatchFailurePayload = {
 
 type WriterFenceConflictPayload = {
   statusCode: 409
-  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED'
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED' | 'FIELD_SCHEMA_CHANGED'
   message: string
 }
 
@@ -6977,6 +6986,14 @@ function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload 
     }
   }
   if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  // Field retype slice 3a: a touched field changed type / options while the write waited on the fence.
+  if (err instanceof FieldSchemaChangedError) {
     return {
       statusCode: err.statusCode,
       code: err.code,
@@ -18069,6 +18086,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           await acquireAutoNumberSheetWriteLock(query, view.sheetId)
           if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
         }
+        // Field retype slice 3a (ADR §3.11 row 5, form submit EDIT + CREATE incl. public forms): the submission
+        // was validated against `fieldById`, loaded through the pool before this transaction. Re-read the
+        // submitted fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift — one call covers both
+        // branches. No query unless the convert flag is 'true'.
+        await assertFieldSchemaUnchangedAfterFence(query, view.sheetId, fieldById, Object.keys(data))
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)
