@@ -353,6 +353,55 @@ export function defineFieldSchemaFenceRecheckRealDbCases(): void {
       expect((await recordData(R))?.[F_FORMULA]).toBe(2)
     })
 
+    // ── R-F2 (fix round): the realtime (Yjs) bridge's snapshot is built from RAW rows ──
+    // Fields stored with raw alias types and plain-string options exist in practice (provisioning stores descriptor
+    // types verbatim; the approval projection writes 'text'). With both flags on and NOTHING changing, a write through
+    // a realtime-shaped guard must land — before the fix every such write was refused FIELD_SCHEMA_CHANGED.
+    test('R-F2 realtime-shaped guard: raw text / longtext / checkbox / plain-string select, both flags on, no change ⇒ the write lands', async () => {
+      process.env[CONVERT_FLAG] = 'true'
+      const extra = [
+        { id: `fld_fsr_rawtext_${TS}`, type: 'text', property: {}, value: 'hello' },
+        { id: `fld_fsr_rawlong_${TS}`, type: 'longtext', property: {}, value: 'hi' },
+        { id: `fld_fsr_rawbool_${TS}`, type: 'checkbox', property: {}, value: true },
+        { id: `fld_fsr_rawsel_${TS}`, type: 'select', property: { options: ['A', 'B'] }, value: 'A' },
+      ]
+      const R = mkRecord('rt')
+      try {
+        for (const [i, f] of extra.entries()) {
+          await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [f.id, SHEET, `Raw ${i}`, f.type, JSON.stringify(f.property), 10 + i])
+        }
+        await seedRecord(R)
+        // The guard exactly as src/index.ts's realtime bridge builds it (raw type, raw property, lenient options);
+        // the unit file carries a tripwire on that source shape.
+        const rows = (await q('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [SHEET])).rows as Array<{ id: string; type: string; property: unknown }>
+        const fieldById = new Map(rows.map((f) => {
+          const prop = (f.property && typeof f.property === 'object' ? f.property : {}) as Record<string, unknown>
+          const guard: Record<string, unknown> = { type: f.type, readOnly: false, hidden: false, property: prop }
+          if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
+            guard.options = (prop.options as unknown[]).map((o) => (typeof o === 'string' ? o : (o as { value?: unknown })?.value ?? ''))
+          }
+          return [f.id, guard] as const
+        }))
+        const fields = rows.map((f) => ({ id: f.id, name: f.id, type: f.type, property: f.property, order: 0 }))
+        await writeService().patchRecords({
+          sheetId: SHEET,
+          changesByRecord: new Map([[R, extra.map((f) => ({ fieldId: f.id, value: f.value }))]]),
+          actorId: ACTOR,
+          fields,
+          visiblePropertyFields: fields,
+          visiblePropertyFieldIds: new Set(rows.map((f) => f.id)),
+          attachmentFields: [],
+          fieldById,
+          capabilities,
+          access,
+        } as unknown as RecordPatchInput)
+        const data = await recordData(R)
+        for (const f of extra) expect(data?.[f.id], f.type).toEqual(f.value)
+      } finally {
+        await q('DELETE FROM meta_fields WHERE id = ANY($1::text[])', [extra.map((f) => f.id)]).catch(() => {})
+      }
+    })
+
     // ── R-F1 (fix round): convert ON + writer fence OFF must not close a lock cycle with a schema edit ──
     //
     // The cycle the verifier reproduced three times (DL-A shape): writer W holds the canonical fence (plugin create

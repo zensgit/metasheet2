@@ -524,3 +524,94 @@ describe('row 13 — the formula-engine caller takes its skip branch (no echo of
     expect(await engine.recalculateRecordFromData(control.pool as never, SHEET, RECORD, {}, [formula])).toMatchObject({ [FIELD]: 2 })
   })
 })
+
+// ── R-F2 (fix round): like with like — raw aliases and plain-string options never refuse without a change ──
+
+import { mapFieldType } from '../../src/multitable/field-codecs'
+
+/**
+ * The realtime (Yjs) bridge's field guard, built exactly as src/index.ts builds it from RAW `meta_fields` rows
+ * (raw stored type, raw property, options kept as plain strings). The tripwire below fails if index.ts changes that
+ * shape, so this copy cannot drift silently.
+ */
+function realtimeGuardMap(rows: Array<{ id: string; type: string; property: unknown }>): Map<string, Record<string, unknown>> {
+  return new Map(rows.map((f) => {
+    const prop = (f.property && typeof f.property === 'object' ? f.property : {}) as Record<string, unknown>
+    const guard: Record<string, unknown> = { type: f.type, readOnly: false, hidden: false, property: prop }
+    if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
+      guard.options = (prop.options as unknown[]).map((o) => (typeof o === 'string' ? o : (o as { value?: unknown })?.value ?? ''))
+    }
+    return [f.id, guard] as const
+  }))
+}
+
+/** Every raw spelling mapFieldType accepts, plus case variants of mapped names. */
+const RAW_ALIASES = [
+  'text', 'longtext', 'long_text', 'long-text', 'textarea', 'multi_line_text', 'multiline', 'checkbox', 'datetime',
+  'date_time', 'date-time', 'timestamp', 'multiselect', 'multi_select', 'multi-select', 'bar_code', 'bar-code', 'qr',
+  'qr_code', 'qr-code', 'geo', 'geolocation', 'geo_location', 'geo-location', 'autonumber', 'auto_number', 'auto-number',
+  'createdtime', 'created_time', 'created-time', 'modifiedtime', 'modified_time', 'modified-time', 'createdby',
+  'created_by', 'created-by', 'modifiedby', 'modified_by', 'modified-by', 'Number', 'SELECT', 'String', 'unknown_kind',
+]
+const MAPPED = [
+  'string', 'number', 'boolean', 'date', 'dateTime', 'formula', 'button', 'select', 'multiSelect', 'link', 'person',
+  'lookup', 'rollup', 'attachment', 'currency', 'percent', 'rating', 'duration', 'url', 'email', 'phone', 'barcode',
+  'qrcode', 'location', 'autoNumber', 'createdTime', 'modifiedTime', 'createdBy', 'modifiedBy', 'longText',
+]
+
+describe('R-F2 — the comparison is like with like, whatever builder made the snapshot', () => {
+  it('mapFieldType is idempotent on every mapped name (the premise of normalising the snapshot side)', () => {
+    for (const t of MAPPED) expect(mapFieldType(t), t).toBe(t)
+    for (const t of RAW_ALIASES) expect(mapFieldType(String(mapFieldType(t))), t).toBe(mapFieldType(t))
+  })
+
+  it('tripwire: src/index.ts still builds the realtime guard from the RAW type and property (the shape this file copies)', () => {
+    const indexTs = readFileSync(join(__dirname, '..', '..', 'src', 'index.ts'), 'utf8')
+    expect(indexTs).toContain("const guard: any = { type: f.type, readOnly: isReadOnly, hidden: isHidden, property: prop }")
+    expect(indexTs).toContain("guard.options = prop.options.map((o: any) => typeof o === 'string' ? o : o?.value ?? '')")
+  })
+
+  for (const raw of RAW_ALIASES) {
+    it(`raw type '${raw}', no change ⇒ no refusal (realtime guard, serialised guard, and rows snapshot)`, async () => {
+      bothOn()
+      const row = { id: FIELD, type: raw, property: {} }
+      for (const snapshot of [realtimeGuardMap([row]), serializedGuardMap({ type: raw }), fieldSchemaSnapshotFromRows([row])]) {
+        const db = makeDb({ snapshot: { type: raw }, recheck: { type: raw } })
+        await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot as never, [FIELD])).resolves.not.toThrow()
+        expect(db.rechecks()).toHaveLength(1)
+      }
+    })
+  }
+
+  it('a select whose options are plain strings, no change ⇒ no refusal from any builder', async () => {
+    bothOn()
+    const property = { options: ['A', 'B'] }
+    const row = { id: FIELD, type: 'select', property }
+    for (const snapshot of [realtimeGuardMap([row]), serializedGuardMap({ type: 'select', property }), fieldSchemaSnapshotFromRows([row])]) {
+      const db = makeDb({ snapshot: { type: 'select', property }, recheck: { type: 'select', property } })
+      await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot as never, [FIELD])).resolves.not.toThrow()
+    }
+  })
+
+  it('a real change still refuses on a raw-shaped snapshot: raw text → select, and an option removed', async () => {
+    bothOn()
+    await expect(assertFieldSchemaUnchangedAfterFence(
+      makeDb({ snapshot: { type: 'text' }, recheck: SELECT_B }).txn, SHEET, realtimeGuardMap([{ id: FIELD, type: 'text', property: {} }]) as never, [FIELD],
+    )).rejects.toBeInstanceOf(FieldSchemaChangedError)
+    const two = { options: [{ value: 'A' }, { value: 'B' }] }
+    await expect(assertFieldSchemaUnchangedAfterFence(
+      makeDb({ snapshot: { type: 'select', property: two }, recheck: { type: 'select', options: ['A'] } }).txn, SHEET,
+      realtimeGuardMap([{ id: FIELD, type: 'select', property: two }]) as never, [FIELD],
+    )).rejects.toBeInstanceOf(FieldSchemaChangedError)
+  })
+
+  it('row 1 through the realtime-shaped guard: text / longtext / plain-string select stored raw, no change ⇒ every write lands', async () => {
+    bothOn()
+    for (const [shape, value] of [[{ type: 'text' }, 'hello'], [{ type: 'longtext' }, 'hi'], [{ type: 'select', property: { options: ['A', 'B'] } }, 'A']] as const) {
+      const db = makeDb({ snapshot: shape, recheck: shape })
+      await expect(runPatchRecords(db, realtimeGuardMap([{ id: FIELD, type: shape.type, property: (shape as Shape).property ?? {} }]), value)).resolves.toBeDefined()
+      expect(db.rechecks()).toHaveLength(1)
+      expect(db.recordWrites()).toHaveLength(1)
+    }
+  })
+})

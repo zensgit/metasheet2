@@ -19,6 +19,13 @@
  * field rows until the writer commits, so the conversion's own `FOR UPDATE` on the field row waits for the
  * writer instead of the other way round.
  *
+ * LIKE WITH LIKE. Writers build their snapshots differently: most from `serializeFieldRow` output (mapped type,
+ * option objects), the realtime (Yjs) bridge from RAW rows (the stored type string — `text`, `longtext`,
+ * `checkbox` … — and options kept as plain strings). Both sides of the comparison therefore go through the SAME
+ * codec as the re-read: a snapshot entry that carries its `property` is re-serialised from `(type, property)`;
+ * one that does not has its type mapped with `mapFieldType` (idempotent on mapped names). A raw alias and its
+ * mapped name compare equal; an unchanged field never refuses, whatever the builder.
+ *
  * INERT UNLESS BOTH FLAGS ARE ON. Every function here returns before issuing any query unless
  * `isFieldRetypeConvertEnabled()` (the ADR §5 convert flag — the SAME predicate the conversion endpoints use)
  * AND `isWriterFenceEnabled()` (the canonical writer fence). Execute / undo refuse while the fence is off, so
@@ -33,7 +40,7 @@
  * and re-throw everything else (ADR §3.11 row 13, r6 N2).
  */
 import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
-import { serializeFieldRow, mapFieldType } from './field-codecs'
+import { mapFieldType, serializeFieldRow, type MultitableField } from './field-codecs'
 import { isFieldRetypeConvertEnabled } from './field-retype-convert'
 
 /** Minimal query shape shared by the writers' QueryFn / FenceQuery / AutomationQueryFn aliases. */
@@ -65,10 +72,14 @@ export class FieldSchemaChangedError extends Error {
   }
 }
 
-/** What a writer validated against, per field: the mapped type and, for select types, the option values. */
+/**
+ * What a writer validated against, per field. `type` may be a mapped or a raw stored name. When `property` (the
+ * field's stored or serialised property object) is present, it is authoritative and `options` is ignored.
+ */
 export type FieldSchemaSnapshotEntry = {
   type: string
   options?: readonly string[] | null
+  property?: unknown
 }
 export type FieldSchemaSnapshot = ReadonlyMap<string, FieldSchemaSnapshotEntry>
 
@@ -84,26 +95,41 @@ export const FIELD_SCHEMA_FENCE_RECHECK_SQL =
 export const FIELD_SCHEMA_SNAPSHOT_SQL =
   'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) ORDER BY id'
 
+type Comparable = { type: string; options?: readonly string[] }
+
 function isSelectType(type: string): boolean {
   return type === 'select' || type === 'multiSelect'
 }
 
-function entryFromRow(row: Record<string, unknown>): FieldSchemaSnapshotEntry {
-  const field = serializeFieldRow({ id: row.id, name: '', type: row.type, property: row.property, order: 0 })
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function serialize(type: unknown, property: unknown): MultitableField {
+  return serializeFieldRow({ id: '', name: '', type, property, order: 0 })
+}
+
+function comparableFromField(field: MultitableField): Comparable {
   return isSelectType(field.type)
     ? { type: field.type, options: (field.options ?? []).map((option) => option.value) }
     : { type: field.type }
+}
+
+/** The snapshot side, through the same codec as the re-read (see "LIKE WITH LIKE"). */
+function comparableFromSnapshot(entry: FieldSchemaSnapshotEntry): Comparable {
+  if (isPlainObject(entry.property)) return comparableFromField(serialize(entry.type, entry.property))
+  const type = String(mapFieldType(String(entry.type ?? '')))
+  return isSelectType(type) ? { type, options: [...(entry.options ?? [])].map(String) } : { type }
 }
 
 /** Snapshot from raw `meta_fields` rows (`id, type, property`), normalised exactly as the read path does. */
 export function fieldSchemaSnapshotFromRows(rows: Iterable<unknown>): Map<string, FieldSchemaSnapshotEntry> {
   const out = new Map<string, FieldSchemaSnapshotEntry>()
   for (const raw of rows) {
-    if (!raw || typeof raw !== 'object') continue
-    const row = raw as Record<string, unknown>
-    const id = typeof row.id === 'string' ? row.id : ''
+    if (!isPlainObject(raw)) continue
+    const id = typeof raw.id === 'string' ? raw.id : ''
     if (!id) continue
-    out.set(id, entryFromRow(row))
+    out.set(id, comparableFromField(serialize(raw.type, raw.property)))
   }
   return out
 }
@@ -159,7 +185,7 @@ function sameOptionSet(a: readonly string[], b: readonly string[]): boolean {
   return true
 }
 
-function sameFieldSchema(before: FieldSchemaSnapshotEntry, now: FieldSchemaSnapshotEntry): boolean {
+function sameFieldSchema(before: Comparable, now: Comparable): boolean {
   if (before.type !== now.type) return false
   if (!isSelectType(now.type)) return true
   return sameOptionSet(before.options ?? [], now.options ?? [])
@@ -169,8 +195,8 @@ function sameFieldSchema(before: FieldSchemaSnapshotEntry, now: FieldSchemaSnaps
  * THE helper (ADR §3.11). Call it with the WRITER'S OWN transactional query, after the fence-acquisition
  * branch and before the first row lock / `meta_records` write.
  *
- * - `fieldById`: what the writer validated against (only its `type` / `options` are read). `null` ⇒ the
- *   writer took no snapshot (flag was off when it would have) ⇒ nothing to compare.
+ * - `fieldById`: what the writer validated against (only `type` / `options` / `property` are read). `null` ⇒
+ *   the writer took no snapshot (the gate was off when it would have) ⇒ nothing to compare.
  * - `touchedFieldIds`: the fields this write sets. Ids the snapshot does not carry are skipped — the writer
  *   validated nothing about them, so nothing about them can be stale.
  * - A touched field that no longer exists counts as changed.
@@ -186,11 +212,17 @@ export async function assertFieldSchemaUnchangedAfterFence(
   const ids = touchedIds(fieldById, touchedFieldIds)
   if (ids.length === 0) return
   const res = await query(FIELD_SCHEMA_FENCE_RECHECK_SQL, [sheetId, ids])
-  const current = fieldSchemaSnapshotFromRows(res.rows)
+  const current = new Map<string, MultitableField>()
+  for (const raw of res.rows) {
+    if (!isPlainObject(raw) || typeof raw.id !== 'string') continue
+    current.set(raw.id, serialize(raw.type, raw.property))
+  }
   for (const id of ids) {
     const before = fieldById.get(id)
     const now = current.get(id)
-    if (!before || !now || !sameFieldSchema(before, now)) throw new FieldSchemaChangedError()
+    if (!before || !now || !sameFieldSchema(comparableFromSnapshot(before), comparableFromField(now))) {
+      throw new FieldSchemaChangedError()
+    }
   }
 }
 
