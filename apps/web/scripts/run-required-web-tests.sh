@@ -1463,6 +1463,7 @@ exec npx vitest run \
   approvalResubmitButton \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
   ApprovalTemplateGroupsPanel \
@@ -1506,6 +1507,7 @@ exec npx vitest run \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
+  formViewValidation \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
   lineDerivation \

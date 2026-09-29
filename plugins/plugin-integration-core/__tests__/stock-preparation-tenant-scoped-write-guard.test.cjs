@@ -417,6 +417,11 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
+  // 通知下一步 (#6121). The advance probes the deploy-global bound sheet for "does this project have
+  // rows" before it writes, so it now runs the shared target tenant wall first — and the staging
+  // project that wall compares against must come from the resolved scope with no request projectId,
+  // or a caller could name the project the registry is asked about.
+  'stockPreparationHandoffAdvance',
 ])
 
 /**

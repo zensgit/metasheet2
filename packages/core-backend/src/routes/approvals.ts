@@ -96,6 +96,11 @@ import {
   unarchiveApprovalTemplateGroup,
   unlinkApprovalTemplateFromGroup,
 } from '../services/ApprovalTemplateGroupService'
+import {
+  listApprovalTemplatesBySection,
+  parseApprovalTemplateSectionToken,
+} from '../services/ApprovalTemplateGroupSectionService'
+import { reorderApprovalTemplateGroups } from '../services/ApprovalTemplateGroupReorderService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -374,6 +379,49 @@ function isOrgIdValuePresent(value: unknown): boolean {
   if (typeof value === 'string') return value.trim().length > 0
   if (Array.isArray(value)) return value.some((entry) => isOrgIdValuePresent(entry))
   return true
+}
+
+// Approval form grouping — daily-ops fix round (P3-1, groups-daily-ops-real-browser-acceptance-
+// 20260920.md). `:id` on the link/unlink endpoints is bound into a query against a `uuid` column
+// on BOTH sides (`approval_templates.id` in `isApprovalTemplateVisibleForGroupLink`'s SELECT,
+// `approval_template_group_links.template_id` in the link/unlink service functions —
+// `zzzz20260918090000_create_approval_template_groups.ts`). A malformed id (e.g. "not-a-uuid")
+// never reaches `mapGroupConstraintError`: Postgres raises `22P02 invalid_text_representation` on
+// the query itself, which is not a `ServiceError` and falls through `handleApprovalsError`'s
+// generic branch as a bare 500 `*_FAILED` code — a client input error mis-filed as a server
+// failure (measured pre-fix, real DB: 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED` /
+// `APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED`). Checked BEFORE either query fires — same
+// "validate request shape before any DB access" discipline as `resolveApprovalTemplateGroupOrgId`
+// just below.
+//
+// Scope, stated as measured (P3-1a, impl-gate-A5-daily-ops-round1-20260920.md — an earlier draft
+// of this comment claimed this predicate "is not narrower than any real id, only narrower than the
+// strings that could never have been one", and that claim is FALSE, withdrawn here): this accepts
+// the canonical 8-4-4-4-12 hex form and nothing else, case-insensitively. Postgres' own `uuid`
+// input parser accepts more textual forms of the SAME value — an A/B run of this head against the
+// pre-fix head on one database measured `383f976ea2f24757ac25b6f501bbb0ef` (no hyphens) and
+// `{383f976e-a2f2-4757-ac25-b6f501bbb0ef}` (braces) both LINKING successfully (201/204) before this
+// check and both 400 after it, and `SELECT 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid` /
+// `SELECT '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid` both normalize to the canonical string.
+// Those are alternative spellings of a real id, not strings that "could never have been one", so
+// this IS a deliberate narrowing of the accepted request shape — chosen over normalizing (strip
+// braces / re-insert hyphens) because one canonical spelling per id keeps the endpoint's input
+// space equal to what the product's own clients send: the UI only ever passes ids it read back
+// from these APIs, which are always canonical.
+//
+// The real-DB census (`SELECT count(*) FROM approval_templates WHERE id::text !~
+// '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'` = 0 on a freshly migrated
+// database, where every id is `DEFAULT gen_random_uuid()`) is kept, with its scope corrected: it
+// shows no STORED id fails this pattern, i.e. no existing row becomes unaddressable. It says
+// nothing about which INPUT spellings are accepted — those are two different sets, and conflating
+// them is exactly what the withdrawn sentence did.
+//
+// A well-formed-but-nonexistent id is UNAFFECTED — it still reaches the pre-existing 404
+// `APPROVAL_TEMPLATE_NOT_FOUND` (link) / idempotent 204 (unlink) path.
+const WELL_FORMED_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isWellFormedUuid(value: string): boolean {
+  return WELL_FORMED_UUID_PATTERN.test(value)
 }
 
 function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
@@ -959,6 +1007,57 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = resolveApprovalListPaging(page, pageSize)
+
+      // Approval form grouping lock v2.13 §6 phase 3 (A-4), §4 rows C/J — this two-clause request
+      // shape check was requested up from A-1/A-2 (supplementary checklist lane-A #5) and lands
+      // here: `section=` and `?category=` are mutually exclusive, and an unrecognized `section=`
+      // token is a 400, never a silent fall-through to the unsectioned list (that fall-through is
+      // literally row C's own mutation target — "去掉 section 过滤 ⇒ 分页跨桶"). Both checks run
+      // BEFORE any DB access. Category-conflict is checked first (a structural shape conflict,
+      // same footing as `resolveApprovalTemplateGroupOrgId`'s own body/query `orgId` check ahead
+      // of its session check) so a request combining both never depends on which order errors
+      // happen to surface in.
+      const sectionRaw = req.query.section
+      if (sectionRaw !== undefined) {
+        if (isOrgIdValuePresent(req.query.category)) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT',
+              'section and category cannot be combined',
+            ),
+          )
+        }
+        // A repeated `?section=a&section=b` query key parses to an ARRAY, not a string — treating
+        // that (or any other non-string) as "no section" would silently degrade to the unsectioned
+        // list, the same fail-open shape the category check above guards against.
+        const sectionToken = typeof sectionRaw === 'string' && sectionRaw.length > 0
+          ? parseApprovalTemplateSectionToken(sectionRaw)
+          : null
+        if (!sectionToken) {
+          return res.status(400).json(
+            approvalErrorResponse('APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID', 'Unknown section token'),
+          )
+        }
+        const sectionOrgId = resolveApprovalTemplateGroupOrgId(req, res)
+        if (!sectionOrgId) return
+        const sectioned = await listApprovalTemplatesBySection({
+          orgId: sectionOrgId,
+          token: sectionToken,
+          actor,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
+          search: typeof req.query.search === 'string' ? req.query.search : undefined,
+          limit,
+          offset,
+        })
+        return res.json({
+          data: sectioned.data,
+          total: sectioned.total,
+          limit,
+          offset,
+          section: sectionRaw,
+        })
+      }
+
       // Wave 2 WP4 slice 1 — `?category=xxx` equality filter. Empty / missing
       // leaves the filter unset, which matches all categories AND uncategorized
       // rows (same semantics as before the slice).
@@ -1551,11 +1650,43 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Reorder — design lock v2.13 §6 phase 3 (A-4), §3 I3 / §4 acceptance E (phase-3 leg) / §6 表第
+  // 3 行. Body is the ORG'S FULL permutation of its currently-active group ids (§3 I3: "分期 3
+  // 拖拽后整体重排 1..n", a full re-rank, not a delta). Shape (array of non-blank strings) is
+  // checked here, BEFORE any DB access (same "org resolved / request validated before any write"
+  // discipline as every other handler in this block); the SET-equality check against the org's
+  // actual active ids happens inside the service's own L0 critical section (no TOCTOU window
+  // between validating the set and writing it) and raises the dedicated `GROUP_REORDER_SET_MISMATCH`
+  // code for every shape of mismatch (missing / extra / duplicate / archived id).
+  r.post('/api/approval-template-groups/reorder', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const rawIds = req.body?.groupIds
+      if (!Array.isArray(rawIds) || rawIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        return res.status(400).json(
+          approvalErrorResponse('GROUP_REORDER_IDS_REQUIRED', 'groupIds must be an array of group ids'),
+        )
+      }
+      const groups = await reorderApprovalTemplateGroups(orgId, rawIds)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_REORDER_FAILED', 'Failed to reorder approval template groups')
+    }
+  })
+
   // Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
   r.post('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — validate shape before the visibility SELECT or the upsert ever touch the uuid
+      // columns; see the doc comment on `isWellFormedUuid` above.
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       const actorId = resolveApprovalActorId(req)
       if (!actorId) {
         return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
@@ -1583,6 +1714,13 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — see the doc comment on `isWellFormedUuid` above (link handler applies the same
+      // check for the same reason: `template_id` is a `uuid` column here too).
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
       res.status(204).end()
     } catch (error) {
