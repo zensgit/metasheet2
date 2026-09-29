@@ -1,7 +1,8 @@
 /**
  * 请假撤销入口(阶段 B2)—— 考勤侧「待我审批的撤销」列表(AttendanceCancelRoundApproverPanel,owner 2026-09-29
  * 16:5x 「Attendance-side list (Recommended)」):只对持 `attendance:approve`(或 `attendance:admin` / 管理员)
- * 的查看者渲染并读取;读失败与「没有待办」不同形;每行通过 / 驳回走 `POST …/cancel-round/actions`,先读摘要
+ * 的查看者读取;首读为空或仍在读时不渲染卡片,有待办行或读失败时才出现,出现后在页面生命周期内保留(设计 MD
+ * §9 第 22 项);读失败与「没有待办」不同形;每行通过 / 驳回走 `POST …/cancel-round/actions`,先读摘要
  * 确认轮次(实例 id 与轮次 id 都要对上、且仍在审批中),办理后核对 `data.roundId`;办理后重读列表。
  */
 import { readFileSync } from 'node:fs'
@@ -140,11 +141,12 @@ describe('visibility and read states', () => {
     expect($(root, 'data-cancel-round-pending-error')).toBeNull()
   })
 
-  it('an empty list and a failed read never share a shape', async () => {
+  it('an empty first read renders no card at all; a failed read is a card of its own — never the same shape', async () => {
     lists = [() => jsonResponse(200, listBody([]))]
     const empty = await mountPanel()
-    expect($(empty, 'data-cancel-round-pending-empty')!.textContent).toContain('暂无待我审批的撤销申请')
-    expect($(empty, 'data-cancel-round-pending-error')).toBeNull()
+    expect(calls()).toEqual([['GET', PENDING_PATH, null]])
+    expect($(empty, 'data-cancel-round-pending')).toBeNull()
+    expect(empty.textContent).toBe('')
 
     for (const failed of [
       () => jsonResponse(500, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'x' } }),
@@ -154,11 +156,38 @@ describe('visibility and read states', () => {
     ]) {
       lists = [failed]
       const root = await mountPanel()
+      expect($(root, 'data-cancel-round-pending')!.dataset.cancelRoundPendingState).toBe('error')
       expect($(root, 'data-cancel-round-pending-error')!.textContent).toContain('待我审批的撤销申请暂时无法读取')
       expect($(root, 'data-cancel-round-pending-empty')).toBeNull()
       expect($(root, 'data-cancel-round-pending-list')).toBeNull()
       expect(root.textContent).not.toContain('暂无待我审批的撤销申请')
     }
+  })
+
+  it('no card while the first read is in flight; it appears when the read lands with rows', async () => {
+    let release: (response: Response) => void = () => {}
+    lists = [(() => new Promise<Response>((resolve) => { release = resolve })) as unknown as () => Response]
+    const root = await mountPanel()
+    expect(calls()).toEqual([['GET', PENDING_PATH, null]])
+    expect($(root, 'data-cancel-round-pending')).toBeNull()
+    expect(root.textContent).toBe('')
+    release(jsonResponse(200, listBody([item()])))
+    await flushUi()
+    expect($(root, 'data-cancel-round-pending')!.dataset.cancelRoundPendingState).toBe('ready')
+    expect($(root, 'data-cancel-round-pending-item')!.dataset.cancelRoundPendingItem).toBe('req-1')
+  })
+
+  it('once shown the card stays: a failed read retried into an empty list shows the empty line', async () => {
+    lists = [
+      () => jsonResponse(503, { ok: false, error: { code: 'DB_NOT_READY', message: 'x' } }),
+      () => jsonResponse(200, listBody([])),
+    ]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-pending-error')).not.toBeNull()
+    await click(root, 'data-cancel-round-pending-retry')
+    expect($(root, 'data-cancel-round-pending')!.dataset.cancelRoundPendingState).toBe('ready')
+    expect($(root, 'data-cancel-round-pending-empty')!.textContent).toContain('暂无待我审批的撤销申请')
+    expect($(root, 'data-cancel-round-pending-error')).toBeNull()
   })
 
   it('retry after a failed read re-reads and renders the list', async () => {
@@ -212,7 +241,7 @@ describe('visibility and read states', () => {
 })
 
 describe('decisions go through the attendance route with the round confirmed', () => {
-  it('通过: summary pre-read → POST actions → list re-read; success is announced and the row leaves', async () => {
+  it('通过: summary pre-read → POST actions → list re-read; success is announced and the row leaves (the card stays)', async () => {
     lists = [() => jsonResponse(200, listBody([item()])), () => jsonResponse(200, listBody([]))]
     const root = await mountPanel()
     await click(root, 'data-cancel-round-pending-approve')

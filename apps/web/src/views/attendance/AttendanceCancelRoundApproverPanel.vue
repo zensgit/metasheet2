@@ -8,8 +8,14 @@
 
   - `canDecide` is the caller's display predicate (`canDecideCancelRoundWith`, the same one the approval
     surfaces use). False ⇒ nothing is rendered and nothing is read.
+  - The card appears once it has something to show — a pending row, or a failed read — and then stays for
+    the life of the page (after the last row is decided, its notice and the empty line remain). A first
+    read still in flight, or one that comes back empty, renders nothing: a viewer with nothing to decide
+    sees no card (while the launch flag is OFF and no round was ever launched, that is every viewer; design
+    MD §9 #22).
   - A failed read (any non-2xx, including a route that is not there, or a malformed body) is its own
-    state with its own copy and a retry — never rendered like 「no pending cancellations」.
+    state with its own copy and a retry — never rendered like 「no pending cancellations」, and never
+    rendered as nothing.
   - Approve / reject go through `decideCancelRoundOnRequest`: the summary is read first and the round on
     screen (engine instance id AND round id from the list) must still be the leave's pending round, or
     nothing is sent; after the decision the server-named `roundId` must match, or the page says it could
@@ -24,7 +30,7 @@
 -->
 <template>
   <section
-    v-if="canDecide"
+    v-if="canDecide && shown"
     ref="rootEl"
     class="attendance-cancel-round-approver"
     :aria-labelledby="titleId"
@@ -210,6 +216,8 @@ const notice = ref<Notice | null>(null)
 const confirming = ref<{ roundId: string; action: 'approve' | 'reject' } | null>(null)
 const comment = ref('')
 const rootEl = ref<HTMLElement | null>(null)
+// Sticky for the life of the page: set by the first read that has rows, or by a failed read.
+const shown = ref(false)
 let generation = 0
 let landedFor = ''
 
@@ -225,12 +233,14 @@ async function load(): Promise<void> {
     items.value = list.items
     total.value = list.total
     loadState.value = 'ready'
+    if (list.items.length > 0) shown.value = true
     void landOnFocusedRow()
   } catch {
     if (mine !== generation) return
     items.value = []
     total.value = 0
     loadState.value = 'error'
+    shown.value = true
   }
 }
 
