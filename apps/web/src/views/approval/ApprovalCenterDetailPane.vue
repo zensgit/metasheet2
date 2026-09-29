@@ -6,7 +6,7 @@
   >
     <header class="approval-detail-pane__header">
       <div class="approval-detail-pane__title-row">
-        <StatusTag domain="approvalInstance" :status="row.status" />
+        <StatusTag v-bind="statusTag" />
         <h3 class="approval-detail-pane__title">{{ row.title }}</h3>
       </div>
       <button
@@ -90,6 +90,7 @@ import { computed, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import { approvalStatusTagProps, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail pane's
 // read-only content. Presentation only: every mutating action is EMITTED to the parent
@@ -112,6 +113,17 @@ const props = defineProps<{
   /** Mirrors the row actions' shared gate (`inlineApprovingId !== null`) — one in-flight approve at a time. */
   actionsDisabled: boolean
 }>()
+
+// 撤销锁 P-2: the pane shows the list row immediately and the single-fetch detail once it lands. The
+// detail read whitelist-projects `cancelRoundCloseReason`, so for a cancel-round instance it is the
+// source of the V-word; before it lands (or if it fails) a REJECTED cancel-round row says 「读取中」 /
+// 「暂时无法读取」 rather than guessing between an approver's rejection and a system closure.
+const statusTag = computed(() => {
+  const detail = props.detail
+  if (detail && detail.id === props.row.id) return approvalStatusTagProps(detail)
+  if (!needsCancelRoundCloseReason(props.row)) return approvalStatusTagProps(props.row)
+  return approvalStatusTagProps(props.row, props.detailError ? { kind: 'unavailable' } : { kind: 'resolving' })
+})
 
 defineEmits<{
   (e: 'quick-approve', row: UnifiedApprovalDTO): void

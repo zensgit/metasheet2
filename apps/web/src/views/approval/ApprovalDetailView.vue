@@ -42,7 +42,7 @@
         </el-button>
       </template>
       <template v-if="approval" #meta>
-        <StatusTag domain="approvalInstance" :status="approval.status" force-locale="zh" />
+        <StatusTag v-bind="approvalStatusTagProps(approval)" force-locale="zh" />
         <!-- B1-03: 已等待 aging — glanceable next to the status tag, only while still pending. -->
         <el-tag
           v-if="approval.status === 'pending'"
@@ -365,7 +365,7 @@
                   >
                     <div class="approval-detail__timeline-content">
                       <div class="approval-detail__timeline-header">
-                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                        <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ historyActorName(item) }}</strong>
                         <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                           {{ actionLabel(item.action, item.metadata) }}
                         </el-tag>
@@ -433,7 +433,7 @@
               >
                 <div class="approval-detail__timeline-content">
                   <div class="approval-detail__timeline-header">
-                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统') }}</strong>
+                    <span class="approval-detail__actor-avatar" aria-hidden="true">{{ actorInitial(item) }}</span><strong>{{ historyActorName(item) }}</strong>
                     <el-tag :type="timelineActionTagType(item.action, item.metadata)" size="small">
                       {{ actionLabel(item.action, item.metadata) }}
                     </el-tag>
@@ -1131,11 +1131,16 @@ import {
   CirclePlus,
   Remove,
 } from '@element-plus/icons-vue'
-import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph } from '../../types/approval'
+import type { ApprovalActionType, ApprovalAssignmentDTO, ApprovalGraph, UnifiedApprovalDTO } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
+import {
+  approvalStatusTagProps,
+  cancelRoundStatusKeyFromApproval,
+  isCancelRoundSystemActor,
+} from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import { useAuth } from '../../composables/useAuth'
@@ -1451,7 +1456,7 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
     rows.push({
       id: item.id,
       nodeName: item.metadata?.nodeKey ? nodeLabel(item.metadata.nodeKey as string) : '-',
-      actorName: item.metadata?.autoApproved ? '系统自动审批' : (item.actorName ?? '系统'),
+      actorName: historyActorName(item),
       resultLabel: actionLabel(item.action, item.metadata),
       timestamp: item.occurredAt ?? null,
       action: item.action,
@@ -1464,7 +1469,7 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
       id: '__end',
       nodeName: '结束',
       actorName: '-',
-      resultLabel: resolveStatusDisplay('approvalInstance', detail.status, true).label,
+      resultLabel: instanceStatusLabel(detail),
       timestamp: detail.updatedAt ?? null,
       action: null,
       metadata: null,
@@ -2116,6 +2121,13 @@ function statusTagType(status: string) {
 
 function actionLabel(action: string, metadata?: Record<string, unknown>) {
   if (action === 'approve' && metadata?.autoApproved) return '自动通过'
+  // 撤销锁 P-2 / lock:131: a cancel round the SYSTEM closed writes a `reject` row whose bounded
+  // close-reason token (`cancelRoundCloseReason`, whitelisted onto the history DTO) is what tells it
+  // apart from an approver's 驳回 — render the V5 / V6 word, never 「驳回」.
+  if (action === 'reject' && typeof metadata?.cancelRoundCloseReason === 'string') {
+    const key = cancelRoundStatusKeyFromApproval('rejected', { kind: 'resolved', closeReason: metadata.cancelRoundCloseReason })
+    return resolveStatusDisplay('cancelRound', key, true).label
+  }
   if (action === 'sign' && metadata?.autoCancelled) return '自动失效'
   const map: Record<string, string> = {
     created: '发起',
@@ -2135,9 +2147,25 @@ function actionLabel(action: string, metadata?: Record<string, unknown>) {
   return map[action] ?? action
 }
 
+// Timeline / record-table actor label. The cancel-round system closure writes a sentinel as BOTH its
+// actor id and actor name (lock:131 「系统终结身份」); it is shown as 「系统」, never as the raw id.
+function historyActorName(item: { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+  if (item.metadata?.autoApproved) return '系统自动审批'
+  if (isCancelRoundSystemActor(item.actorId, item.actorName)) return '系统'
+  return item.actorName ?? '系统'
+}
+
+// The record table's synthetic 结束 row and the 复制摘要 text state the instance's status through the
+// SAME domain selector as the header tag, so a system-closed cancel round never reads 「已驳回」 there.
+function instanceStatusLabel(detail: UnifiedApprovalDTO): string {
+  const tag = approvalStatusTagProps(detail)
+  return resolveStatusDisplay(tag.domain, tag.status, true).label
+}
+
 // G-B2-09: initial-letter avatar for timeline actors — display only, token-styled.
-function actorInitial(item: { actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
+function actorInitial(item: { actorId?: string | null; actorName?: string | null; metadata?: Record<string, unknown> | null }): string {
   if (item.metadata?.autoApproved) return '系'
+  if (isCancelRoundSystemActor(item.actorId, item.actorName)) return '系'
   const name = (item.actorName ?? '').trim()
   return name ? Array.from(name)[0]! : '系'
 }
@@ -2859,7 +2887,7 @@ function buildApprovalSummary(): string | null {
   return [
     `审批：${detail.title ?? '-'}`,
     `编号：${detail.requestNo ?? '-'}`,
-    `状态：${resolveStatusDisplay('approvalInstance', detail.status, true).label}`,
+    `状态：${instanceStatusLabel(detail)}`,
     `发起人：${detail.requester?.name ?? '-'}`,
     `发起时间：${formatDate(detail.createdAt)}`,
     `进度：${detail.currentStep ?? '-'} / ${detail.totalSteps ?? '-'}`,
