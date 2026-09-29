@@ -948,6 +948,7 @@
                   v-if="item.request_type === 'leave'"
                   :request="item"
                   :current-user-id="currentUserId"
+                  :format-date-time="formatDateTime"
                 />
               </li>
             </ul>

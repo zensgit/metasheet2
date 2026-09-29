@@ -13,6 +13,8 @@
     and an in-page link to that round's progress.
   - No approver / seat names anywhere (P-6). No free-text block detail (P-7): only the bounded code,
     folded as a technical detail.
+  - P-5: the round's own notice deliveries (status / channel type / attempts / timestamps, fixed copy);
+    not reported ⇒ nothing, an empty list ⇒ its own line. A failed delivery never changes the round's word.
   - A failed summary read is NOT rendered like 「no round」 (P-8 ③); a 404 (route absent or not
     visible) renders nothing, like a disabled entry.
   - Hiding a button is never the guard: every predicate is re-checked by the server.
@@ -64,6 +66,36 @@
         <ul v-if="statusKey === 'leave_cancelled'" class="attendance-cancel-round__result" data-cancel-round-result>
           <li v-for="line in resultLines" :key="line">{{ line }}</li>
         </ul>
+
+        <!-- P-5: this round's own notice deliveries — fixed category copy per status, channel TYPE, attempts,
+             timestamps; no ids, recipients or provider text. Not reported (null) ⇒ nothing; [] ⇒ its own empty
+             line. A failed delivery says so here and changes nothing about the round's word above. -->
+        <div v-if="deliveries" class="attendance-cancel-round__deliveries" data-cancel-round-deliveries>
+          <span class="attendance-cancel-round__note">{{ tr('Approval notices', '审批通知') }}</span>
+          <p v-if="deliveries.length === 0" class="attendance-cancel-round__note" data-cancel-round-deliveries-empty>
+            {{ tr('No notice delivery has been recorded for this cancellation.', '暂无这条撤销申请的通知投递记录') }}
+          </p>
+          <ul v-else class="attendance-cancel-round__delivery-list">
+            <li
+              v-for="(delivery, index) in deliveries"
+              :key="index"
+              class="attendance-cancel-round__delivery"
+              data-cancel-round-delivery
+              :data-delivery-status="delivery.status"
+            >
+              <span data-cancel-round-delivery-channel>{{ cancelRoundDeliveryChannelLabel(delivery.channelType, isZh) }}</span>
+              <span
+                class="attendance-cancel-round__delivery-status"
+                :class="`attendance-cancel-round__delivery-status--${delivery.status}`"
+                data-cancel-round-delivery-status
+              >{{ cancelRoundDeliveryStatusLabel(delivery.status, isZh) }}</span>
+              <span data-cancel-round-delivery-attempts>{{ tr(`Attempts: ${delivery.attempts}`, `尝试 ${delivery.attempts} 次`) }}</span>
+              <span v-if="delivery.lastAttemptAt" data-cancel-round-delivery-last-attempt>{{ tr('Last attempt', '最近尝试') }} {{ formatStamp(delivery.lastAttemptAt) }}</span>
+              <span data-cancel-round-delivery-created>{{ tr('Created', '创建于') }} {{ formatStamp(delivery.createdAt) }}</span>
+              <span data-cancel-round-delivery-updated>{{ tr('Updated', '更新于') }} {{ formatStamp(delivery.updatedAt) }}</span>
+            </li>
+          </ul>
+        </div>
 
         <div v-if="showWithdraw" class="attendance-cancel-round__line">
           <button
@@ -165,6 +197,8 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import { ApprovalApiError } from '../../approvals/api'
 import {
+  cancelRoundDeliveryChannelLabel,
+  cancelRoundDeliveryStatusLabel,
   cancelRoundStatusKeyFromSummary,
   describeCancelRoundBlock,
   describeCancelRoundError,
@@ -179,6 +213,8 @@ import { cancelRoundResultLines } from './attendanceCancelRoundPresentation'
 const props = defineProps<{
   request: { id: string; request_type: string; status: string; user_id?: string | null }
   currentUserId: string | null
+  /** The attendance page's own date-time formatter (attendance timezone); a locale fallback otherwise. */
+  formatDateTime?: (value: string | null | undefined) => string
 }>()
 
 const { isZh } = useLocale()
@@ -228,6 +264,14 @@ const leaveStillValid = computed(() =>
 )
 const blockCopy = computed(() => describeCancelRoundBlock(round.value?.blockCode, isZh.value))
 const resultLines = computed(() => cancelRoundResultLines(round.value?.cancellationOutcome ?? null, tr))
+const deliveries = computed(() => round.value?.deliveries ?? null)
+
+function formatStamp(value: string | null): string {
+  if (props.formatDateTime) return props.formatDateTime(value)
+  if (!value) return '--'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '--' : date.toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
+}
 
 /**
  * The withdraw affordance is for the leave's own user on a pending round. `canWithdraw` is resolved
@@ -363,6 +407,37 @@ watch(() => [props.request.id, props.request.status] as const, () => { void load
   padding-left: var(--ms-space-4);
   color: var(--ms-text-1);
   font-size: 13px;
+}
+
+.attendance-cancel-round__deliveries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+}
+
+.attendance-cancel-round__delivery-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attendance-cancel-round__delivery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
+  color: var(--ms-text-2);
+  font-size: 12px;
+}
+
+.attendance-cancel-round__delivery-status {
+  color: var(--ms-text-1);
+}
+
+.attendance-cancel-round__delivery-status--failed {
+  color: var(--ms-color-warning);
 }
 
 .attendance-cancel-round__block {

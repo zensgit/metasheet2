@@ -118,6 +118,79 @@ export interface CancelRoundSummaryRound {
   canWithdraw: boolean
   withdrawBlockedReason: CancelRoundWithdrawBlockedReason | string | null
   cancellationOutcome: CancelRoundCancellationOutcome | null
+  /**
+   * P-5 delivery status of THIS round's own notices. `null` = the read did not report deliveries at
+   * all (absent / not a list on the wire) — rendered as nothing, never as 「no notices were sent」;
+   * `[]` = reported, none.
+   */
+  deliveries: CancelRoundDelivery[] | null
+}
+
+// ---------------------------------------------------------------------------
+// P-5 (owner 「(iii) Full delivery」 with 「Full status, no raw ids/errors (Recommended)」; 16:5x
+// 「Show the list (Recommended)」): per delivery the status (delivered / pending / failed), the channel
+// TYPE, the attempt count and timestamps — nothing else is read off the wire. Each status has fixed
+// category copy. A delivery's status never changes the round's: the round's V-word comes from the
+// round alone (lock invariant 「投递失败不改变撤销轮任何状态」).
+
+export const CANCEL_ROUND_DELIVERY_STATUSES = ['delivered', 'pending', 'failed'] as const
+export type CancelRoundDeliveryStatus = (typeof CANCEL_ROUND_DELIVERY_STATUSES)[number]
+
+export interface CancelRoundDelivery {
+  channelType: string
+  status: CancelRoundDeliveryStatus
+  attempts: number
+  createdAt: string | null
+  lastAttemptAt: string | null
+  updatedAt: string | null
+}
+
+export const CANCEL_ROUND_DELIVERY_STATUS_COPY: Readonly<Record<CancelRoundDeliveryStatus, { zh: string; en: string }>> = Object.freeze({
+  delivered: { zh: '已送达', en: 'Delivered' },
+  pending: { zh: '发送中或结果待确认', en: 'Sending, or the result is not confirmed yet' },
+  failed: { zh: '未能送达(不影响撤销申请本身)', en: 'Not delivered (the cancellation itself is not affected)' },
+})
+
+export const CANCEL_ROUND_DELIVERY_CHANNEL_COPY: Readonly<Record<string, { zh: string; en: string }>> = Object.freeze({
+  dingtalk_approval_card: { zh: '钉钉审批卡片', en: 'DingTalk approval card' },
+  dingtalk_todo: { zh: '钉钉待办', en: 'DingTalk to-do' },
+})
+
+/** A channel type this client has no label for is shown under a neutral label, never dropped. */
+export const CANCEL_ROUND_DELIVERY_CHANNEL_OTHER_COPY = { zh: '其他通知渠道', en: 'Other notification channel' } as const
+
+/**
+ * Field-by-field copy of the six P-5 fields. A row whose status is not one of the three values is
+ * dropped (it cannot be given category copy — the same rule the server applies to an unknown ledger
+ * state); an unknown channel type is kept and labelled neutrally.
+ */
+export function normalizeCancelRoundDeliveries(raw: unknown): CancelRoundDelivery[] | null {
+  if (!Array.isArray(raw)) return null
+  const deliveries: CancelRoundDelivery[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue
+    const d = entry as Record<string, unknown>
+    if (typeof d.status !== 'string' || !(CANCEL_ROUND_DELIVERY_STATUSES as readonly string[]).includes(d.status)) continue
+    deliveries.push({
+      channelType: typeof d.channelType === 'string' ? d.channelType : '',
+      status: d.status as CancelRoundDeliveryStatus,
+      attempts: typeof d.attempts === 'number' && Number.isFinite(d.attempts) && d.attempts >= 0 ? Math.trunc(d.attempts) : 0,
+      createdAt: typeof d.createdAt === 'string' ? d.createdAt : null,
+      lastAttemptAt: typeof d.lastAttemptAt === 'string' ? d.lastAttemptAt : null,
+      updatedAt: typeof d.updatedAt === 'string' ? d.updatedAt : null,
+    })
+  }
+  return deliveries
+}
+
+export function cancelRoundDeliveryChannelLabel(channelType: string, isZh: boolean): string {
+  const copy = CANCEL_ROUND_DELIVERY_CHANNEL_COPY[channelType] ?? CANCEL_ROUND_DELIVERY_CHANNEL_OTHER_COPY
+  return isZh ? copy.zh : copy.en
+}
+
+export function cancelRoundDeliveryStatusLabel(status: CancelRoundDeliveryStatus, isZh: boolean): string {
+  const copy = CANCEL_ROUND_DELIVERY_STATUS_COPY[status]
+  return isZh ? copy.zh : copy.en
 }
 
 export interface CancelRoundSummary {
@@ -412,6 +485,7 @@ function normalizeRound(raw: unknown): CancelRoundSummaryRound | null {
     canWithdraw: r.canWithdraw === true,
     withdrawBlockedReason: toStringOrNull(r.withdrawBlockedReason),
     cancellationOutcome: normalizeCancellationOutcome(r.cancellationOutcome),
+    deliveries: normalizeCancelRoundDeliveries(r.deliveries),
   }
 }
 

@@ -17,7 +17,7 @@ vi.mock('../src/utils/api', async (importOriginal) => {
 
 import AttendanceCancelRoundPanel from '../src/views/attendance/AttendanceCancelRoundPanel.vue'
 import { useLocale } from '../src/composables/useLocale'
-import { CANCEL_ROUND_BLOCK_CATEGORY_COPY, CANCEL_ROUND_SEAT_CLASS_COPY } from '../src/approvals/cancelRound'
+import { CANCEL_ROUND_BLOCK_CATEGORY_COPY, CANCEL_ROUND_SEAT_CLASS_COPY, normalizeCancelRoundDeliveries } from '../src/approvals/cancelRound'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -73,10 +73,10 @@ const calls = () => apiFetchMock.mock.calls.map((c) => [(c[1] as RequestInit | u
 const LEAVE = { id: 'req-1', request_type: 'leave', status: 'approved', user_id: 'emp_1' }
 
 const apps: VueApp[] = []
-async function mountPanel(request: Record<string, unknown> = LEAVE, currentUserId: string | null = 'emp_1') {
+async function mountPanel(request: Record<string, unknown> = LEAVE, currentUserId: string | null = 'emp_1', extra: Record<string, unknown> = {}) {
   const container = document.createElement('div')
   document.body.appendChild(container)
-  const app = createApp({ render: () => h(AttendanceCancelRoundPanel, { request: request as never, currentUserId }) })
+  const app = createApp({ render: () => h(AttendanceCancelRoundPanel, { request: request as never, currentUserId, ...extra }) })
   app.mount(container)
   apps.push(app)
   await flushUi()
@@ -280,6 +280,74 @@ describe('round outcome presentation (P-2 / P-3 / P-7)', () => {
     expect(block.textContent).toContain(CANCEL_ROUND_BLOCK_CATEGORY_COPY.zh)
     expect(block.querySelector('details')!.textContent).toContain('FUTURE_CODE_X')
     expect(root.textContent).not.toContain('原因未知')
+  })
+})
+
+describe('P-5 delivery status (「Full status, no raw ids/errors」; 16:5x 「Show the list」)', () => {
+  const delivery = (overrides: Record<string, unknown> = {}) => ({
+    channelType: 'dingtalk_approval_card', status: 'delivered', attempts: 1,
+    createdAt: '2026-09-29T01:00:00.000Z', lastAttemptAt: '2026-09-29T01:00:00.000Z', updatedAt: '2026-09-29T01:00:05.000Z',
+    ...overrides,
+  })
+
+  it('one row per delivery: channel type, fixed status copy, attempts, timestamps — and nothing else off the wire', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ deliveries: [
+      // extra keys a future server might add must never reach the page
+      delivery({ recipientUserId: 'u-secret-1', externalMessageId: 'ext-secret-2', errorText: 'provider said secret-3' }),
+      delivery({ channelType: 'dingtalk_todo', status: 'pending', attempts: 2, lastAttemptAt: '2026-09-29T02:00:00.000Z' }),
+      delivery({ channelType: 'dingtalk_todo', status: 'failed', attempts: 3 }),
+    ] }) }))]
+    const root = await mountPanel(LEAVE, 'emp_1', { formatDateTime: (v: string | null | undefined) => `T<${v ?? '-'}>` })
+    const rows = [...root.querySelectorAll<HTMLElement>('[data-cancel-round-delivery]')]
+    expect(rows.map((r) => r.dataset.deliveryStatus)).toEqual(['delivered', 'pending', 'failed'])
+    expect(rows.map((r) => r.querySelector('[data-cancel-round-delivery-channel]')!.textContent)).toEqual(['钉钉审批卡片', '钉钉待办', '钉钉待办'])
+    expect(rows.map((r) => r.querySelector('[data-cancel-round-delivery-status]')!.textContent)).toEqual([
+      '已送达', '发送中或结果待确认', '未能送达(不影响撤销申请本身)',
+    ])
+    expect(rows[1].querySelector('[data-cancel-round-delivery-attempts]')!.textContent).toBe('尝试 2 次')
+    expect(rows[1].querySelector('[data-cancel-round-delivery-last-attempt]')!.textContent).toContain('T<2026-09-29T02:00:00.000Z>')
+    expect(rows[0].querySelector('[data-cancel-round-delivery-created]')!.textContent).toContain('T<2026-09-29T01:00:00.000Z>')
+    expect(rows[0].querySelector('[data-cancel-round-delivery-updated]')!.textContent).toContain('T<2026-09-29T01:00:05.000Z>')
+    const text = root.textContent ?? ''
+    for (const secret of ['u-secret-1', 'ext-secret-2', 'secret-3']) expect(text).not.toContain(secret)
+    expect(Object.keys(normalizeCancelRoundDeliveries([delivery({ recipientUserId: 'x', id: 'y' })])![0]).sort()).toEqual(
+      ['attempts', 'channelType', 'createdAt', 'lastAttemptAt', 'status', 'updatedAt'],
+    )
+  })
+
+  it('a failed delivery does not change the round: the pending round keeps its V1 word and tone', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ deliveries: [delivery({ status: 'failed' })] }) }))]
+    const root = await mountPanel()
+    const tag = $(root, 'data-cancel-round-status')!
+    expect(tag.dataset).toMatchObject({ domain: 'cancelRound', status: 'cancellation_pending_approval', tone: 'warning' })
+    expect(tag.textContent).toBe('撤销申请审批中')
+    const block = $(root, 'data-cancel-round-deliveries')!
+    expect(block.querySelector('.ms-status-tag')).toBeNull()
+    for (const word of ['驳回', '撤回', '请假已取消', '无法撤销', '失败']) expect(block.textContent).not.toContain(word)
+    expect($(root, 'data-cancel-round-withdraw')).not.toBeNull()
+  })
+
+  it('an empty list is its own line; deliveries not reported at all render nothing (never 「none sent」)', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ deliveries: [] }) }))]
+    const empty = await mountPanel()
+    expect($(empty, 'data-cancel-round-deliveries-empty')!.textContent).toContain('暂无这条撤销申请的通知投递记录')
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round() }))]
+    const absent = await mountPanel()
+    expect($(absent, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(absent, 'data-cancel-round-deliveries')).toBeNull()
+    expect($(absent, 'data-cancel-round-deliveries-empty')).toBeNull()
+  })
+
+  it('an unknown status is not reported; an unknown channel type is kept under a neutral label', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ deliveries: [
+      delivery({ status: 'outcome_unknown' }),
+      delivery({ channelType: 'future_channel', status: 'delivered' }),
+    ] }) }))]
+    const root = await mountPanel()
+    const rows = [...root.querySelectorAll<HTMLElement>('[data-cancel-round-delivery]')]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].querySelector('[data-cancel-round-delivery-channel]')!.textContent).toBe('其他通知渠道')
+    expect(root.textContent).not.toContain('future_channel')
   })
 })
 
