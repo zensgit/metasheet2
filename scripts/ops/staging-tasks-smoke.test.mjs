@@ -117,6 +117,7 @@ const FAKE_PG = `import { appendFileSync } from 'node:fs'
 const LOG = process.env.FAKE_PG_LOG
 const THROW_ON = process.env.FAKE_PG_THROW_ON || ''
 const RESIDUE = process.env.FAKE_PG_RESIDUE === '1'
+const DIRTY_PREFLIGHT = process.env.FAKE_PG_DIRTY_PREFLIGHT === '1'
 let residueQueries = 0
 class Pool {
   async query(text) {
@@ -127,7 +128,7 @@ class Pool {
     if (flat.includes('FROM permissions WHERE code IN')) return { rows: [{ n: 2 }] }
     if (flat.includes(' AS users,')) {
       residueQueries += 1
-      const dirty = RESIDUE && residueQueries > 1
+      const dirty = (DIRTY_PREFLIGHT && residueQueries === 1) || (RESIDUE && residueQueries > 1)
       return { rows: [{ users: dirty ? 1 : 0, roles: 0, tasks: 0 }] }
     }
     return { rows: [], rowCount: 0 }
@@ -185,6 +186,7 @@ async function runSmoke({ routes = HAPPY, pgEnv = {}, source = script } = {}) {
   try {
     const result = await new Promise((resolve) => {
       const child = spawn(process.execPath, [join(dir, 'scripts', 'ops', 'staging-tasks-smoke.mjs')], {
+        timeout: 30_000,
         env: {
           PATH: process.env.PATH,
           BASE_URL: `http://127.0.0.1:${server.address().port}`,
@@ -260,4 +262,12 @@ test('HARNESS a non-throwing assertion failure (created task missing from view=c
   assert.match(r.out, /FAIL {2}created task is visible under view=created/)
   assert.match(r.out, /had 1 failed assertion/)
   assert.doesNotMatch(r.out, /TASKS_API_DB_SMOKE_PASS/)
+})
+
+test('HARNESS pre-existing rows for the stamp: the smoke refuses before writing anything and deletes nothing', async () => {
+  const r = await runSmoke({ pgEnv: { FAKE_PG_DIRTY_PREFLIGHT: '1' } })
+  assert.notEqual(r.code, 0)
+  assert.match(r.out, /pre-existing residue found for tasks-smoke-t1/)
+  assert.ok(!r.sql.some((text) => text.startsWith('INSERT')), 'no seed row may be written')
+  assert.ok(!r.sql.some((text) => text.startsWith('DELETE')), 'cleanup must not touch rows this run did not write')
 })
