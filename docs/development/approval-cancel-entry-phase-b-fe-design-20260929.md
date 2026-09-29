@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿:实现 7 个提交 + 门审 r1(0 P1 / 1 P2 / 7 P3 / 4 NIT)后的修复轮 1(见 §8、§10);门审 r2 APPROVE-with-hardening(0 P1 / 0 P2 / 7 P3 / 3 NIT);前端 14 提交已叠到后端头 `84dd4545e`;其后 **B2**(7 个代码 / 测试提交 + 1 个本文件提交,§11);B2 门审 r1:0 P1 / 1 P2(owner 待裁,§9 第 22 项)/ 4 P3 / 3 NIT;其后 B2 修复轮 1(2 个测试提交 + 1 个本文件提交,§11.10)—— **第 22 项仍待 owner 裁定,未关闭**;未推送、未开 PR;合并按 owner 2026-09-29 17:1x 的条件式预授权(§1),条件尚未满足 |
+| 状态 | 草稿:实现 7 个提交 + 门审 r1(0 P1 / 1 P2 / 7 P3 / 4 NIT)后的修复轮 1(见 §8、§10);门审 r2 APPROVE-with-hardening(0 P1 / 0 P2 / 7 P3 / 3 NIT);前端 14 提交已叠到后端头 `84dd4545e`;其后 **B2**(7 个代码 / 测试提交 + 1 个本文件提交,§11);B2 门审 r1:0 P1 / 1 P2(owner 待裁,§9 第 22 项)/ 4 P3 / 3 NIT;其后 B2 修复轮 1(2 个测试提交 + 1 个本文件提交,§11.10)—— 第 22 项当时仍待 owner 裁定;B2 门审 r2:0 P1 / 1 P2(第 22 项,沿用)/ 2 P3 / 3 NIT;其后 B2 修复轮 2(1 个代码提交 + 3 个测试提交 + 1 个本文件提交,§11.11)—— 第 22 项在代码侧取可回退的 (b) 族读法,**待重门;这不是 owner 裁定,本项仍未关闭**;未推送、未开 PR;合并按 owner 2026-09-29 17:1x 的条件式预授权(§1),条件尚未满足 |
 | 分支 | `feat/approval-cancel-entry-phase-b-fe` |
 | 基线 | 起初:后端分支 `feat/approval-cancel-entry-phase-a-read-launch` 的 `2e44d6053`(阶段 A + A2;其基线 `main @ f47054d88e`);现:同一后端分支的门审头 `84dd4545e`(阶段 C 过门,r3),本分支 B2 起点 `a538caf0a` |
 | 改动面 | 只 `apps/web/**` 与本文件;**后端零改动**,**DDL 零** |
@@ -49,7 +49,7 @@
 | P-5 投递条数 | 2026-09-29 16:5x ③「Show the list (Recommended)」;选项说明原文(同上 §0.2 #25):「Keep the per-delivery list as implemented (follows your 'Full status, no raw ids/errors' choice); mapping outcome_unknown→pending and hiding zero-attempt superseded/skipped rows as documented.」 | 后端在阶段 C;**呈现在 B2(§11.4)** |
 | P-11 (b) 待办中心 | 2026-09-29 18:3x(goal §0 记录标签;转录:问 10:13:37Z / 答 12:40:04Z = 20:40 +0800)O-12「**Shown + subtype label (Recommended)**」;选项说明原文(主会话转录):「Cancel-round items appear in the todo centre AND carry a cancel-round subtype label keyed on workflowKey (the addendum text); both count toward phase D.」(goal §0 的中文括注是其译述) | B2 §11.3 |
 | 开关 OFF 的前端 | 同上一问,O-13「**Hide launch, keep existing (Recommended)**」;选项说明原文(主会话转录):「OFF hides only the launch entry; rounds that already exist keep their progress view and withdraw, so nobody is stranded mid-round.」(goal §0 的中文括注是其译述) | 与现状一致;B2 用 spec 钉住(§11.6) |
-| **合并** | 2026-09-29 17:1x ①「**Yes, merge under those conditions (Recommended)**」。**选项说明原文**(转录派生记录:`goal-four-items-design-20260929.md` §0.2 #26、`cancel-entry-phase-d-acceptance-plan-20260929.md` §0.1):「Main session merges (squash, neutral body) as soon as all conditions hold; flag stays OFF; switch-on and deploy remain separate asks.」;**问题正文(条件,经选项标签「under those conditions」并入;同一出处)**:「Conditions: every gate CONFIRMED with 0 P1 / 0 P2, phase D acceptance passed, 13/13 required checks on the exact head, merge preview / ⑨ / pins / manifest / identity checks all pass. The launch switch ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED stays OFF (feature invisible); turning it on and any deploy still need your separate approval.」;goal §0 所录「条件原文」:「every gate CONFIRMED with 0 P1 / 0 P2, phase D acceptance passed, 13/13 required checks on the exact head, merge preview / ⑨ / pins / manifest / identity checks all pass;开关 `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED` 保持 OFF;**打开开关与任何部署仍须 owner 另行批准**」—— 其中两句中文是 owner 所选文本(上引选项说明与问题正文末句)的译述 | 本分支(实现 / 修复代理)不推送、不开 PR、不合并;合并只由主会话在上列条件全部满足时执行,今天未满足(B2 门审 r1 有 1 条 P2 待 owner 裁定(§9 第 22 项)、阶段 D 未做、未推送)。合并后开关保持 OFF;打开开关与任何部署另请 owner。goal §0 更早的「这些新 PR 的合并未被点名 ⇒ 完成后单独请示」已被 17:1x 选项取代(门审 r2 P3-1:此前本行把译述标成「记录者文字」,有误,已改) |
+| **合并** | 2026-09-29 17:1x ①「**Yes, merge under those conditions (Recommended)**」。**选项说明原文**(转录派生记录:`goal-four-items-design-20260929.md` §0.2 #26、`cancel-entry-phase-d-acceptance-plan-20260929.md` §0.1):「Main session merges (squash, neutral body) as soon as all conditions hold; flag stays OFF; switch-on and deploy remain separate asks.」;**问题正文(条件,经选项标签「under those conditions」并入;同一出处)**:「Conditions: every gate CONFIRMED with 0 P1 / 0 P2, phase D acceptance passed, 13/13 required checks on the exact head, merge preview / ⑨ / pins / manifest / identity checks all pass. The launch switch ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED stays OFF (feature invisible); turning it on and any deploy still need your separate approval.」;goal §0 所录「条件原文」:「every gate CONFIRMED with 0 P1 / 0 P2, phase D acceptance passed, 13/13 required checks on the exact head, merge preview / ⑨ / pins / manifest / identity checks all pass;开关 `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED` 保持 OFF;**打开开关与任何部署仍须 owner 另行批准**」—— 其中两句中文是 owner 所选文本(上引选项说明与问题正文末句)的译述 | 本分支(实现 / 修复代理)不推送、不开 PR、不合并;合并只由主会话在上列条件全部满足时执行,今天未满足(B2 门审 r1 / r2 各有 1 条 P2(owner-gate,§9 第 22 项);B2 修复轮 2 已在代码侧取可回退的 (b) 族读法,须重门,且不是 owner 裁定;阶段 D 未做、未推送)。合并后开关保持 OFF;打开开关与任何部署另请 owner。goal §0 更早的「这些新 PR 的合并未被点名 ⇒ 完成后单独请示」已被 17:1x 选项取代(门审 r2 P3-1:此前本行把译述标成「记录者文字」,有误,已改) |
 
 ---
 
@@ -348,7 +348,7 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 19. **批量快照缺行即拒(NIT)**:今天不可达(每个 id 都来自发起时的快照),所以没有 spec;把它改回「回落到通用路由」的 mutation 存活,属预期(§10)。
 20. **审批侧 V 词只看 `cancelRoundCloseReason`(门审 r1 NIT,只记录)**:锁 lock:131 的判据是「系统终结身份 + 专用 reason」,审批侧只用了后一半。今天等价:该键唯一的写入点是系统收口路径(基线 `ApprovalProductService.ts:9842`)。未改。
 21. **门审 r1 的自报残留(P3,owner 定是否扩范围)**:第 2 项(审批侧撤回仍走通用路由)、第 4 项(第二跳对非原实例参与者的席位持有者失败关闭)、第 12 项(会签驳回时 `cancelledAssigneesLabel` 列出已失效席位人名)——本切片不改。
-22. **开关 OFF 时考勤审批人看到的撤销卡片(B2,owner 待裁,与第 14 项同族)**:考勤侧「待我审批的撤销」卡片只按授权码显示(§11.2),不看开关。开关 OFF 且从未开过时它恒为「暂无待我审批的撤销申请」—— 每个持 `attendance:approve` 的人都会在考勤概览看到一张空卡片,而 17:1x 问题正文写的是 “stays OFF (feature invisible)”。两种读法:(a) 现状 —— 开关只门发起(owner 11:0x、18:3x「Hide launch, keep existing」),ON 期间开出的轮次在 OFF 后仍须能办理,所以列表不能跟开关一起消失;(b) 列表为空且开关 OFF 时整卡不渲染(需要前端知道开关态:列表响应不带它,摘要读才带)。实现不代选,记为 owner 问题;阶段 D 取实现读数。**读失败的情形同属本项**:列表读失败时(例如撤销轮表未就绪的 503 `DB_NOT_READY`、偶发 500),开关 OFF 下每个持 `attendance:approve` 的人看到的是「待我审批的撤销申请暂时无法读取。」+ 重试 —— 与第 14 项(自助面摘要读失败的呈现)同属故障态呈现,一并交 owner。B2 门审 r1 把本项定为 P2(owner-gate):它关系到 17:1x 条件能否按字面成立,而不是代码缺陷。代码层面的事实:取 (a) 不需要改代码;取 (b) 或其它读法需要改前端(按开关态判断时还需后端给出开关态)并重新门审。B2 修复轮 1 未改代码,本项**仍未关闭**。
+22. **开关 OFF 时考勤审批人看到的撤销卡片(B2,owner 待裁,与第 14 项同族)**:考勤侧「待我审批的撤销」卡片只按授权码显示(§11.2),不看开关。开关 OFF 且从未开过时它恒为「暂无待我审批的撤销申请」—— 每个持 `attendance:approve` 的人都会在考勤概览看到一张空卡片,而 17:1x 问题正文写的是 “stays OFF (feature invisible)”。两种读法:(a) 现状 —— 开关只门发起(owner 11:0x、18:3x「Hide launch, keep existing」),ON 期间开出的轮次在 OFF 后仍须能办理,所以列表不能跟开关一起消失;(b) 列表为空且开关 OFF 时整卡不渲染(需要前端知道开关态:列表响应不带它,摘要读才带)。实现不代选,记为 owner 问题;阶段 D 取实现读数。**读失败的情形同属本项**:列表读失败时(例如撤销轮表未就绪的 503 `DB_NOT_READY`、偶发 500),开关 OFF 下每个持 `attendance:approve` 的人看到的是「待我审批的撤销申请暂时无法读取。」+ 重试 —— 与第 14 项(自助面摘要读失败的呈现)同属故障态呈现,一并交 owner。B2 门审 r1 把本项定为 P2(owner-gate):它关系到 17:1x 条件能否按字面成立,而不是代码缺陷。代码层面的事实:取 (a) 不需要改代码;取 (b) 或其它读法需要改前端(按开关态判断时还需后端给出开关态)并重新门审。B2 修复轮 1 未改代码,本项**仍未关闭**。**B2 修复轮 2(门审 r2 之后)**:代码侧改取 (b) 族里不需要后端的一种(门审 r2 所列「读成功且为空时整卡不渲染」)—— **卡片只在有内容时出现**:首次读仍在进行、或读成功且为空 ⇒ 整卡不渲染;读到待办行、或读失败 ⇒ 卡片出现,此后在页面生命周期内保留(提交 `560d729758`;页面级 spec `9725f955d`;§11.11)。它不看开关,所以开关 ON 而查看者没有待办时同样不渲染。开关 OFF 且从未开过 ⇒ 读成功时没有任何人看到这张卡片。**残留**:列表读失败时仍有失败卡片(上段读失败的情形不变,与第 14 项同族,P3 口径,留 owner)。**这不是 owner 裁定,也不是主会话裁定**:它是修复轮可回退的实现选择,须重门;owner 若答 (a)(保留空卡片),回退 `9725f955d` 与 `560d729758` 两个提交即可(本轮另两个测试提交不依赖它们)。重门确认或 owner 答复之前,本项**仍未关闭**,仍列决策单。
 23. **委托席位在考勤侧列表上的办理(B2,与门审 r2 P3-3 同族)**:列表行的办理同样先读摘要(`attendance:read` + I7 于原单);读不到原请假的席位持有者(如委托人)会在预读处失败关闭(「暂时无法核对…未执行任何操作」),不发写。根治同第 16 项。(B2 门审 r1 P3-3:确认存在,归后端 lane / owner,修复轮 1 未改。)
 24. **列表路由的合同只按约定实现(B2)**:`GET /api/attendance/cancel-rounds/pending` 与字段集按主会话与后端 lane 约定的形状写;该路由不在 `84dd4545e` 上,`cancelRoundEntryContract` 因此不核它(§11.5)。**两分支叠合后须核**:成功体键集、`requesterName` 可空、`total` 语义、无授权码 403 的呈现(前端按读失败渲染)、非法 / 缺失字段。NOT RUN。另:B2 收尾时后端分支本地头 `735b8bacca`(C2 lane 的提交,门审状态不由本 lane 判定)上已有该路由,只读 `git show` 对照见 §11.5 —— 形状与约定一致;叠合后的 spec 与真 HTTP 仍 NOT RUN。B2 门审 r1 P3-2 要求叠合后在合同 spec 里核这条路由;本分支不加的理由与叠合时要核的锚点见 §11.10。
 25. **深链落点的聚焦标签**:从待办中心进入时,聚焦行的标签仍是既有的「来自审批中心 / Opened from Approval Center」(既有 spec 钉住);措辞与来源不完全一致,只是呈现,未改。
@@ -452,10 +452,10 @@ owner 2026-09-29 16:5x ②「Attendance-side list (Recommended)」(选项说明�
 - **组件** `AttendanceCancelRoundApproverPanel.vue`,挂在 `AttendanceView` 概览页,**自成一张卡片**,位于折叠的「申请工具」`<details>` 之前、不在其内(spec 按源码钉住唯一挂载点与位置)。
 - **显示谓词** = 共享的 `canDecideCancelRoundWith(auth.getAccessSnapshot())` = 管理员 ∨ `attendance:approve` ∨ `attendance:admin` —— 照抄插件 `withAnyPermission` 对 `withPermission('attendance:approve')` 的放行(与审批侧两处同一谓词,§4.2)。谓词为假 ⇒ 不渲染、**不发读**。只是显示;路由(授权码、席位)才是判据。
 - **读**:`GET /api/attendance/cancel-rounds/pending`,合同按主会话与后端 lane 的约定:`{ ok: true, data: { items: [{ requestId, roundId, engineInstanceId, requesterUserId, requesterName, requestType, startAt, endAt, launchedAt }], total } }`,`requesterName` 可空。`normalizePendingCancelRoundList` 严格:缺 `data.items` 数组、或任一行缺三个办理用 id(`requestId` / `roundId` / `engineInstanceId`)⇒ **整次读失败**;`total` 非数或小于行数 ⇒ 取行数;`total > items.length` 时显示「显示 N 条,共 M 条」。
-- **读失败 ≠ 没有待办**:非 2xx(含路由不存在的 404、无授权码的 403)、畸形体 ⇒ 独立的失败态「待我审批的撤销申请暂时无法读取」+ 重试(`data-cancel-round-pending-state="error"`);空列表是另一句「暂无待我审批的撤销申请」。二者不同形(spec + mutation A1 / A7)。
+- **读失败 ≠ 没有待办**:非 2xx(含路由不存在的 404、无授权码的 403)、畸形体 ⇒ 独立的失败态「待我审批的撤销申请暂时无法读取」+ 重试(`data-cancel-round-pending-state="error"`);空列表是另一句「暂无待我审批的撤销申请」。二者不同形(spec + mutation A1 / A7)。B2 修复轮 2 起,首次读为空时不渲染卡片,空态句只在卡片已出现之后才会出现(§11.11);读失败仍是带失败文案的卡片 —— 空 = 不渲染,失败 = 有卡片,仍不同形(mutation M1 / M2 / A1 / A7,§11.11)。
 - **每行**:申请人名(空则「用户 {id}」)、请假类型(页面自己的 `formatRequestType`)、请假起止与撤销发起时刻(页面自己的 `formatDateTime`,即考勤时区)、V1 词「撤销申请审批中」。**不渲染任何审批人 / 席位人名**(P-6)。
 - **办理**:通过 / 驳回 → 行内确认(驳回可填说明 ≤2000)→ `decideCancelRoundOnRequest(requestId, { engineInstanceId, roundId }, action)`。这是把 §4.2 的轮次确认从审批侧抽出来的**同一条路径**(`decideCancelRoundFromApproval` 现在先解析请假 id,再委托它):先读摘要,要求摘要里的轮次 `engineInstanceId` 与 `roundId` 都等于该行、且 `outcome === 'pending'`,否则**不发写**;读失败同样失败关闭;办理后核对成功体 `data.roundId`,不符 ⇒「操作已提交,但无法确认…」(`unconfirmed`,既不是成功也不是失败)。审批侧只知道实例 id,不传 `roundId`,行为不变。每次尝试之后**重读列表**。
-- **开关不参与**:`entryEnabled` 只门发起(owner 11:0x「a default-OFF flag on the launch endpoint」、18:3x O-13),本卡片不读它;spec 的摘要夹具故意给 `entryEnabled: false`,办理照常。开关 OFF 时这张卡片是否整卡隐藏,见 §9 第 22 项(owner 待裁)。
+- **开关不参与**:`entryEnabled` 只门发起(owner 11:0x「a default-OFF flag on the launch endpoint」、18:3x O-13),本卡片不读它;spec 的摘要夹具故意给 `entryEnabled: false`,办理照常。开关 OFF 时这张卡片是否整卡隐藏,见 §9 第 22 项(owner 待裁);B2 修复轮 2 起卡片只在有内容时出现,开关 OFF 且没有任何撤销轮时,读成功即不渲染(§11.11)。
 - **深链**:`?requestId=` 命中的行加标记;落点见 §11.7。
 
 ### 11.3 ② 待办中心子类型标与深链落点(P-11 (a)(b))
@@ -606,4 +606,64 @@ B2 门审 r1 结论:0 P1 / 1 P2 / 4 P3 / 3 NIT,判定 CHANGES-REQUESTED(owner-ga
 | 提交身份 | 作者与提交者均为 `zensgit <77236085+zensgit@users.noreply.github.com>`,尾行 `Co-Authored-By: Claude Opus 5.5` |
 | required web lane 全量 | 本轮未重跑:只改了两个既有 spec 文件,已分别整文件跑过。B2 门审 r1 已在 `cc079bef5a` 上跑过全量,10/10 块 0 失败 |
 
-**仍待 owner 或下一步**:§9 第 22 项(P2,owner-gate,**未关闭**)与第 14 项;叠合后合同 spec 加列表路由的核对(P3-2,锚点见上);第 16 项服务端校验(P3-3);阶段 D;CI(未推送)。
+**仍待 owner 或下一步**:§9 第 22 项(P2,owner-gate,**未关闭**)与第 14 项;叠合后合同 spec 加列表路由的核对(P3-2,锚点见上);第 16 项服务端校验(P3-3);阶段 D;CI(未推送)。(B2 修复轮 2 见 §11.11。)
+
+### 11.11 B2 修复轮 2(B2 门审 r2 之后)
+
+B2 门审 r2 结论:0 P1 / 1 P2(owner-gate,沿用 r1)/ 2 P3 / 3 NIT,判定 CHANGES-REQUESTED(owner-gate)。本轮只动 `apps/web/**` 与本文件;后端零改动,DDL 零;纯前端切片,未建库、未连库。
+
+**续跑说明**:本轮由同一 lane 的两次运行写成(同一工作树 `g4-cancel-b2`、同一分支)。第一次运行跑了 vue-tsc 改前基线、写了提交 1 并跑了 M1–M5,提交之后撞上账户级 403 中断。第二次运行(本节作者)做了四件事。一是复核:基线日志的 sha256 与 §11.8 / §11.10 相同(`ec44fee420b32b96…`),确是改前基线;提交 1 之后的 vue-tsc 输出与它逐字节相同;M1–M5 重跑全红、全部还原。二是在新头上重跑门审 r2 的 H 系 mutation 与 B2 提交 1 的 A 系 mutation。三是补提交 2、3、4。四是写本文件。
+
+| # | 提交 | 内容 | 门审项 |
+|---|---|---|---|
+| 1 | `560d729758` `fix(web): approver cancellation card renders only when it has something to show` | 卡片只在有内容时出现(组件 + `cancelRoundEntryApproverList` 改 1 例、增 2 例、1 例名补「(the card stays)」) | P2-1 |
+| 2 | `b9a30d6f24` `test(web): the re-run deep-link case collapses the request tools first` | dashboard「卡片先、页面后」一例先收起工具区,使「重新打开」能证明页面的深链处理确实重跑了 | NIT-4 |
+| 3 | `9725f955dd` `test(web): an approver with nothing pending sees no approver card on the overview` | 页面级:持 `attendance:approve` 的查看者、列表为空 ⇒ 读了一次、页面上没有审批人卡片及其文案 | P2-1 |
+| 4 | `cb6f161ec2` `test(web): an approver card already on screen leaves when the grant does` | 卡片出现后授权撤回 ⇒ 卡片消失、不再读。提交 1 之后,首读本身已要求授权,「模板不看授权」的 mutation(A2a′)在既有用例上存活;本例使它变红。页面上该谓词只在挂载时求值一次(NIT-1),所以本例钉的是组件自身「无授权 ⇒ 不渲染」的契约 | P2-1 的补充 |
+| 5 | 本文件 | 抬头、§1 合并行落点列、§9 第 22 项、§11.2 两条、§11.10 末句指针、本节 | —— |
+
+逐条处置:
+
+| 级 | 项 | 处置 |
+|---|---|---|
+| P2(owner-gate) | 开关 OFF 且没有任何撤销轮时,审批人卡片对所有审批人稳态可见(§9 第 22 项) | **代码侧取 (b) 族里不需要后端的一种**,即门审 r2 列出的「读成功且为空时整卡不渲染」。首次读仍在进行、或读成功且为空,整卡不渲染。读到待办行、或读失败,卡片出现,此后在页面生命周期内保留:最后一行办理完后,提示与空态句仍在;读失败后重试得空列表,显示空态句。取这一种的理由有四。其一,它直接满足 17:1x 问题正文的字面 “stays OFF (feature invisible)”:开关 OFF 且从未开过时,读成功就没有人看到这张卡片。其二,不需要后端:不读开关,也不要求列表响应带开关态。其三,可回退:一个代码提交加一个页面级 spec 提交。其四,不扩大授权:卡片的数据、办理路径、授权码都不变。列表仍不读开关,理由同 §11.2(owner 11:0x 选项说明原文「Plus a default-OFF flag on the launch endpoint until phase D acceptance passes, so merging never exposes a half-working flow.」,开关门的是发起端点)。**残留**:开关 OFF 下列表读失败时,持授权码的查看者仍看到失败卡片,与 §9 第 14 项同族,P3 口径,留 owner。**这不是 owner 裁定,也不是主会话裁定**,而是修复轮可回退的实现选择,须重门;owner 若答 (a)(保留空卡片),回退提交 3 与提交 1 即可(提交 2、4 不依赖它们,在 (a) 下照样成立)。重门确认或 owner 答复之前,本项**仍未关闭**,仍列决策单 |
+| P3-2 | 待我审批列表的线上形状只由前端夹具钉住(§9 第 24 项) | **本分支不改**,理由同 §11.10。本轮再核:`git grep "cancel-rounds/pending" HEAD -- plugins packages` 在本分支头上为空;本分支的后端祖先仍是 `84dd4545e`,`7b5f390132` 不是 HEAD 的祖先。叠合时要加的三个锚点见 §11.10 |
+| P3-3 | 委托席位持有者在新列表里看得到、点不动(§9 第 23 项) | 不改。根治是 §9 第 16 项的服务端期望实例 / 轮次校验,归后端 lane / owner;阶段 D 取读数 |
+| NIT-4 | dashboard 新例在加 `section` 后断言工具区打开,不区分「重跑了」与「没重跑」(`requestId` 在挂载时已把它打开;H6 存活) | 提交 2:审批人行落地后,经工具区自己的 `<summary>` 收起它,并断言已收起;加 `section` 后断言它重新打开。H6 在改前的 spec 上**存活**(88/88);在改后的 spec 上**红**,失败的恰是「重新打开」那一行断言(`expected false to be true`)。H4a / H4-never / H4d / H5 在新头上仍红 |
+| NIT-1 | 卡片可见性是对非响应式 `auth.getAccessSnapshot()` 的一次性 `computed` | 不改,理由见 §11.10 |
+| NIT-3 | goal §0 的 O-12 / O-13 时刻标签 | 记录者标签,不是本分支缺陷;未改 |
+
+**mutation**(每条:cp 备份 → 断言恰一处命中 → 替换 → 跑**整个** spec 文件 → 从备份还原 → `cmp` 逐字节且 `git diff --quiet`;脚本 `g4b2r2-mut.py`;全部 `restored=True`):
+
+| 条目 | 改动 | spec | 读数(失败用例) |
+|---|---|---|---|
+| M1 | 首读为空也置出现(`shown.value = true` 不看行数) | `cancelRoundEntryApproverList` | **红** 1/16(「an empty first read renders no card at all…」) |
+| M2 | 读失败不置出现 | 同上 | **红** 3/16 |
+| M3 | 出现不保留(`shown.value = list.items.length > 0`) | 同上 | **红** 2/16(含「once shown the card stays…」与通过例「(the card stays)」) |
+| M4 | 首读进行中也渲染 | 同上 | **红** 1/16(「no card while the first read is in flight…」) |
+| M5 | 模板回到改前(`v-if="canDecide"`) | 同上 | **红** 2/16 |
+| M1@页面 | 同 M1 | `attendance-selfservice-dashboard` | **红** 1/89(提交 3 的页面级例) |
+| M5@页面 | 同 M5(即改前代码) | 同上 | **红** 1/89(同上) |
+| P0@页面 | 页面谓词恒假(`false && …`) | 同上 | **红** 3/89(页面级例的「读了一次」正控,及两条深链例) |
+| A1 / A2b / A3 / A4 / A5 / A6 / A7 / A8 / A9 / A10 | B2 提交 1 的原 A 系(定义同 §11.8),在提交 1 之后的代码上重跑 | `cancelRoundEntryApproverList`(A3 / A9 / A10 另跨三个 spec) | **全红**:A1 3/16、A2b 1/16、A3 1/65、A4 1/16、A5 1/16、A6 2/16、A7 1/16、A8 1/16、A9 3/65、A10 3/65。A1(读失败按空)与 A7(畸形体按空)仍红 ⇒ 空与失败在新行为下仍不同形 |
+| A2a′ | 模板不看授权(`v-if="canDecide && shown"` → `v-if="shown"`;原 A2a 的替换串已不存在,改写为此) | 同上 | 提交 4 之前**存活** 16/16(首读本身要求授权,出现即已有授权);提交 4 之后**红** 1/17(新例) |
+| H4a / H4-never / H4d / H5 | 门审 r2 同名条目(页面滚动守卫、永不滚、不比 `requestId`、不接事件) | `attendance-selfservice-dashboard`(提交 2 之后) | 各**红** 1/88,失败的都是「卡片先、页面后」一例 |
+| H6 | 深链 watcher 依赖去掉 `props.initialSectionId` | 同上 | 提交 2 之前**存活** 88/88;提交 2 之后**红** 1/88,失败断言在「重新打开」那一行(`expected false to be true`) |
+
+**读数**(Node 20.20.2;工具直调 `node node_modules/…`,**零 pnpm**;vitest `--pool=forks`,forks ≤ 3;vue-tsc 与 vitest 不并发):
+
+| 项 | 读数 |
+|---|---|
+| `vue-tsc -b`(先清本地 `.tmp`;与改前基线日志 `cmp`) | 改前基线(`18e697b586`)sha256 `ec44fee420b32b96…`(与 §11.8 / §11.10 同);提交 1 之后 **逐字节相同**,EXIT 2,只有已知的 TS2769;`tsbuildinfo` 含 `attendancecancelroundapproverpanel.vue`。提交 2–4 只改 `tests/**`,`tsconfig.app.json` 不含 `tests/**` |
+| 八个 `cancelRoundEntry*` | **109/109**(提交 4 之后;门审 r2 时 106 + 提交 1 的 2 例 + 提交 4 的 1 例) |
+| `attendance-selfservice-dashboard` | **89/89**(88 + 提交 3 的 1 例) |
+| 邻居 `TodoCenterView` / `todoApi` / `approval-center*` / `run-required-web-tests-shape`(子串过滤) | 6 文件 / 94 用例全过 |
+| `attendance-web-guard` 工作流 run-list 原样 68 个 token | 69 文件 / **1371** 用例全过(1370 + 1) |
+| required web lane 全量(`.tokens` 543 个,每块 30 个,19 块,在提交 3 的头 `9725f955dd` 上) | 19/19 块 rc=0,合计 10507 用例 0 失败(各块文件数相加 627,块间有重叠)。其后只有提交 4 改了 `cancelRoundEntryApproverList`,已整文件复跑 17/17 |
+| manifest `--check` | 19 gating invocations,543 = 543 MATCHES(无新 spec 文件、无新 token) |
+| core-backend `required-web-lane-registration-shape` + `…-token-manifest-guard` | 63/63 |
+| 私有短语逐提交自扫(三份短语表,大小写不敏感;提交信息 + 新增行 + 所触文件后像相对父提交的新增命中) | 正控:暂存本文件后,用一份临时提交信息(含一条短语)跑暂存模式 ⇒ `HIT [msg]`、exit 1(临时文件已删);本轮 5 个提交(提交 1–4 与本文件提交)各 **0 命中**;提交 1 的提交信息较长,已单独以提交模式复扫 |
+| 提交身份 | 本轮每个提交的作者与提交者均为 `zensgit <77236085+zensgit@users.noreply.github.com>`,尾行 `Co-Authored-By: Claude Opus 5.5` |
+| canonical 工作树 | `git status --porcelain` 的 md5 与本轮开跑前相同(`a87cbf87…`);`node_modules/.modules.yaml` mtime 仍为 2026-09-26 05:03:42 |
+
+**仍待 owner 或下一步**:§9 第 22 项(P2,代码侧取 (b) 族,待重门;不是 owner 裁定,**未关闭**,仍列决策单)与第 14 项;叠合后合同 spec 加列表路由的核对(P3-2,锚点见 §11.10);第 16 项服务端校验(P3-3);阶段 D;CI(未推送)。
