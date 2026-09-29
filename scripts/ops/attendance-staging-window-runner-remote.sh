@@ -1950,8 +1950,8 @@ action_migrate_rehearse() {
   # plpgsql functions that are not extension members and do not already pin a search_path (a
   # pinned one is left untouched). The real staging DB is never altered by this shim. After the
   # RESET a digest of every public function's (signature, proconfig) must match the source, or the
-  # rehearsal stops. Limit: the shim goes on after pre-data, so a function evaluated DURING
-  # pre-data (for example a STORED generated column's expression) is not covered.
+  # rehearsal stops. Limit: the shim goes on after pre-data, so a function body executed while
+  # pre-data itself is being restored is not covered.
   local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
   local shim_list="${OUTPUT_DIR}/rehearsal-search-path-shim.txt"
   local shim_count
@@ -1972,7 +1972,8 @@ action_migrate_rehearse() {
     log "rehearsal: applying clone-only function search_path compatibility"
     rehearsal_shim_sql set "$shim_list" \
       | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
-      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: applying the clone-only search_path shim failed"
   fi
   log "rehearsal: restoring data"
   docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=data -U "$pg_user" \
@@ -1984,7 +1985,8 @@ action_migrate_rehearse() {
     log "rehearsal: resetting clone-only function search_path compatibility"
     rehearsal_shim_sql reset "$shim_list" \
       | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
-      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: resetting the clone-only search_path shim failed"
   fi
   local source_fn_digest clone_fn_digest
   source_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
