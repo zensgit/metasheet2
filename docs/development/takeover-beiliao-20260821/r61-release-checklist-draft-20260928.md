@@ -3,7 +3,7 @@
 > **状态：草案。** 打包点与范围由 owner 决定。§1 只列事实，不代 owner 推荐。owner 定下具体提交之后，§2 的迁移名单必须在那个提交上用命令重算，§5、§6 只看对应选项。
 > **执行者：** 旧机（运维机）。开发机连不上演示机，演示机现状全部来自 #6079 的回帖，按回帖时间戳（UTC）引用。
 > **口径：** values-free。回帖只写布尔、计数、枚举、键名、用时；不写主机、地址、口令、令牌、客户名、项目号、单元格值。需要项目号、表 id 的地方用 `<项目号>`、`<表 id>` 或 psql 变量代入，不回显。
-> **基线：** 文中 `path:line` 以 origin/main `6cddab3e5`（#5927，2026-09-28T20:23:49Z 合入）为准，另注明者除外。PR 状态为 2026-09-28 约 21:50Z `gh pr view` 的结果。
+> **基线：** 文中 `path:line` 以 origin/main `cd89c74dd`（#6146，2026-09-28T23:10:28Z 合入）为准，另注明者除外。PR 状态为 2026-09-29 约 00:30Z `gh pr view` 的结果。
 > **上机手册：** 仍是 `handoff-r59-two-machine-20260924.md` §2–§3（#6079 正文第 0 节要求每次上机前读）。本文只补 R61 特有的事项。
 
 ---
@@ -17,7 +17,7 @@ git fetch origin main --tags
 git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 ```
 
-在 `6cddab3e5` 上共 16 条，从旧到新：
+在 `cd89c74dd` 上共 17 条，从旧到新：
 
 | # | 提交 | PR | 内容 | 类别 |
 |---|---|---|---|---|
@@ -37,12 +37,13 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 | 14 | `68578b56f` | #6139 | 字段类型转换第 2 刀：只读预览，开关默认关，无界面 | 客户需求线，界面无变化 |
 | 15 | `33047ef94` | #6143 | #6142 的两条 409 分支测试 | 仅测试 |
 | 16 | `6cddab3e5` | #5927 | 审批模板分组 A-5 | 审批模板分组 |
+| 17 | `cd89c74dd` | #6146 | 项目备料页「通知下一步」：结果措辞、最后一步、欠发补发与确认队列一致 | 客户修复 |
 
 由此得出的事实：
 
 - 客户修复 #6136（第 10 条）排在任务线 #6062、#6092、#6123（第 7–9 条，含两条任务迁移）之后。#6142、#6140（第 12、13 条）排在审批模板分组 #5878（第 11 条）之后。所以**沿 first-parent 切的点只要带上 #6136，就一定带上任务线和它的两条迁移；只要带上 #6142 或 #6140，就一定带上 #5878。**
 - 不带任务线和 #5878 的最后一个 first-parent 点是 `b433ac814`（第 5 条）。它有复制数据表 S1，但没有 #6136、#6142、#6140。
-- #5927（第 16 条）排在今天所有客户修复之后：切在 `33047ef94`（第 15 条）不带它，切在 `6cddab3e5` 带它。
+- #6146（第 17 条）排在 #5927（第 16 条）之后：沿 first-parent 切的点只要带上 #6146，就一定带上 #5927。切在 `33047ef94`（第 15 条）两者都不带；切在 `6cddab3e5` 带 #5927、不带 #6146。
 - main 还会前进（在开 PR 见 §2.3、§6.3）。owner 定的应是一个具体提交号。
 
 ### 1.2 R59、R60 是怎么切的
@@ -50,7 +51,7 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 - **R59** = main `05461c739`（`handoff-r59-two-machine-20260924.md:9`），CI 打包（同文 `:10`）。它在 main 的 first-parent 链上（`git log --first-parent --format=%h origin/main | grep ^05461c739` 有输出）。origin 上没有指向它的 tag：`git ls-remote --tags origin` 里既没有指向 `05461c739` 的，也没有名字含 `r59` 的；`onprem-` 开头的发布 tag 只有 `onprem-r60`。
 - **R60** = main `583dfdf1a`，即 #6131 的合入提交，开发机在 #6079 2026-09-28T09:01:43Z 指定。origin 上 tag `onprem-r60` 指向它，它也在 first-parent 链上。旧机 2026-09-28T10:34:09Z 回帖：CI 打包按 `expected_sha` 复核，本地门禁全过。
 - **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。检出的提交与它不一致就拒绝打包（`:122-131`）。
-- **R60 之后没改过的东西：** 下面这条命令在 `6cddab3e5` 上无输出。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动：
+- **R60 之后没改过的东西：** 下面这条命令在 `cd89c74dd` 上无输出。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动：
   ```bash
   git diff --stat 583dfdf1a origin/main -- scripts/ops/multitable-onprem-package-upgrade-inplace.ps1 \
     .github/workflows/multitable-onprem-package-build.yml docker ecosystem.config.cjs
@@ -58,7 +59,7 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 
 ### 1.3 选项 A：在 main 上选一个 first-parent 提交，原样打包
 
-- **候选：** `6cddab3e5`（今天的头，含 #5927），或 `33047ef94`（不含 #5927）。
+- **候选：** `cd89c74dd`（今天的头，含 #5927 与 #6146）、`6cddab3e5`（含 #5927，不含 #6146），或 `33047ef94`（两者都不含）。
 - **迁移：** 4 条（§2.2）。
 - **与已验证流程的偏差：** 切法、tag、`expected_sha`、升级脚本都与 R60 相同。需要注意的是包里带两条任务线迁移。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
 
@@ -82,8 +83,8 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 
 ### 1.5 选项 C：从 `b433ac814` 拉发布分支，拣选客户修复
 
-- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试）。#6139 可拣可不拣，界面都无变化。
-- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）。模拟得到的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
+- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试），再拣 `cd89c74dd`（#6146）。#6139 可拣可不拣，界面都无变化。
+- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）；在这四次的结果上再模拟拣选 `cd89c74dd`，同样无冲突。四次拣选后的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
 - **迁移：** 2 条（复制数据表的两条）。
 - **与已验证流程的偏差：** R59、R60 都切在 main 的 first-parent 提交上（§1.2），选项 C 的包提交不在 main 上，main 的 CI 从没对这棵树整体跑过。打包工作流可以在任意 ref 上 `workflow_dispatch`，`expected_sha` 照样能钉住提交，但 tag 要打在发布分支的提交上。
 
@@ -91,9 +92,9 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 
 | 选项 | 迁移条数 | 客户会看到（详见 §5） | 与 R59/R60 做法的偏差 |
 |---|---|---|---|
-| A | 4 | 复制数据表；「通知下一步」修复；「任务」入口（管理员、默认外壳）；审批「审批表单」页改动 | 无；需做 C2 |
+| A | 4 | 复制数据表；「通知下一步」修复（切在 `cd89c74dd` 时含 #6146）；「任务」入口（管理员、默认外壳）；审批「审批表单」页改动 | 无；需做 C2 |
 | B | 2（两条任务迁移留待以后） | 与 A 相同，包括「任务」入口 | 未登记变量、只在一次会话里设；以后的某次 migrate 会补跑两条任务迁移 |
-| C | 2 | 复制数据表；「通知下一步」修复；没有「任务」入口，也没有审批页改动 | 包提交不在 main 上；整树未经 CI |
+| C | 2 | 复制数据表；「通知下一步」修复（拣了 #6146 时含它）；没有「任务」入口，也没有审批页改动 | 包提交不在 main 上；整树未经 CI |
 
 ---
 
@@ -117,7 +118,7 @@ git diff --name-status --diff-filter=DRM 583dfdf1a "$C" -- packages/core-backend
 - Kysely 版本是 0.28.8（`pnpm-lock.yaml:3222`）。它的 Migrator 把全部迁移名排序（`#resolveMigrations`：`Object.keys(...).sort()`），把历史表里没有的那些按这个顺序执行。
 - 在 PostgreSQL 上，一次 migrate 的**全部**待执行迁移在同一个事务里跑（Migrator 的 `#runMigrations` 在适配器支持事务型 DDL 时包一层 `db.transaction()`，PostgresAdapter 对此返回 true）。任何一条失败，这一批都不生效。
 
-### 2.2 在 `6cddab3e5` 上的输出（执行顺序）
+### 2.2 在 `cd89c74dd` 上的输出（执行顺序）
 
 `--diff-filter=DRM` 那条无输出。新增的 4 条：
 
@@ -140,7 +141,7 @@ gh pr list --state open --limit 500 --json number,files \
 | while read n p; do git cat-file -e "origin/main:$p" 2>/dev/null || echo "$n $p"; done | sort -n
 ```
 
-`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-28 约 21:50Z 的结果：
+`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-29 约 00:30Z 的结果（与 2026-09-28 约 21:50Z 那次相同）：
 
 | PR | 状态 | 会新增的迁移 |
 |---|---|---|
@@ -235,7 +236,7 @@ gh pr list --state open --limit 500 --json number,files \
 
 ### C4 演示机是否配置了交接链（「通知下一步」）
 
-- **目的：** 交接链只有在环境变量 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 非空、且指向一个可读文件时才存在（`packages/core-backend/src/plugin-runtime-config.ts:9`、`:69-70`、`:176-188`）。没配时，状态读取回 `configured: false`（`plugins/plugin-integration-core/lib/http-routes.cjs:9185-9190`）；项目备料页收到这个应答就不渲染交接区块，也就没有「通知下一步」按钮（`apps/web/src/services/integration/stockPreparation/projectBoard.ts:165-167`，视图 `StockPreparationProjectBoardView.vue:344`）。§6 里「通知下一步」的回归行只在已配置时才适用。
+- **目的：** 交接链只有在环境变量 `INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH` 非空、且指向一个可读文件时才存在（`packages/core-backend/src/plugin-runtime-config.ts:9`、`:69-70`、`:176-188`）。没配时，状态读取回 `configured: false`（`plugins/plugin-integration-core/lib/http-routes.cjs:9185-9190`）；项目备料页收到这个应答就不渲染交接区块，也就没有「通知下一步」按钮（`apps/web/src/services/integration/stockPreparation/projectBoard.ts:169-171`，视图 `StockPreparationProjectBoardView.vue:347`）。§6 里「通知下一步」的回归行只在已配置时才适用。
 - **命令一（只报键是否存在）：**
   ```powershell
   $k = 'INTEGRATION_CORE_STOCK_PREPARATION_HANDOFF_PATH'
@@ -396,7 +397,7 @@ gh pr list --state open --limit 500 --json number,files \
   - C4 未配置：R61 前后都没有这个按钮。
   - 已配置、C5 通过：当前处理人按下后请求第一次能到达服务器。R60 上是每按必 400，见 PR #6142 正文。
   - 已配置、C5 不通过：见 C5 的拒绝文案。
-  - #6146 修的三类看板缺陷（消息没发出去却说已交接、末步按不了、欠发补发按不了）在它合入并进包之前仍然存在（§6.3）。
+  - #6146（`cd89c74dd`）修了三类看板缺陷：消息没发出去却说已交接、最后一步按不了、欠发的群通知补发不了（回归见 §6.2）。打包点不含 `cd89c74dd` 时，这三类缺陷仍在。
 - **结转、物料导出：** 墙在 R60 已经上线（#6109）。R61 只在预检里多给一个 `detail.handoffRouteCode`。
 - **字段类型转换：** 无变化（开关关、无界面）。
 
@@ -407,7 +408,7 @@ gh pr list --state open --limit 500 --json number,files \
   - `TASKS_ENABLED` 未设时：角标显示「!」（`apps/web/src/tasks/TasksTodoBadge.vue:41`；读取非 2xx 即判为不可用，`useTasksBadge.ts:9`）；页面显示「任务功能未启用或当前服务不支持」（`apps/web/src/views/tasks/TasksView.vue:189-192`；上下文读取 404 即判为不可用，`tasksContext.ts:50`）。
   - 考勤专注外壳与 PLM 工作台外壳里没有这个入口（`App.vue:8`、`:11-39`）。演示机用哪种外壳由产品模式决定（`apps/web/src/stores/featureFlags.ts:494-500`），本文不知道，列为 §7 的问题。
   - 选项 B 下这个入口同样存在（前端与迁移无关）。
-- **审批「审批表单」页**（`/approval-templates`，`apps/web/src/router/appRoutes.ts:406-409`，只要求登录）：#5878 改了该页的模板分组界面（`TemplateCenterView.vue`、`TemplateGroupSections.vue`、`ApprovalTemplateGroupsPanel.vue`）和 `routes/approvals.ts` 的接口；切在 `6cddab3e5` 时还包括 #5927。#5927 另外改了 `SessionOrgSwitcher.vue`（只被审批模板分组面板使用），并在 `authPrincipal.ts` 里新增导出。具体控件是什么、谁能看到，本文没有逐项核对（§8）。
+- **审批「审批表单」页**（`/approval-templates`，`apps/web/src/router/appRoutes.ts:406-409`，只要求登录）：#5878 改了该页的模板分组界面（`TemplateCenterView.vue`、`TemplateGroupSections.vue`、`ApprovalTemplateGroupsPanel.vue`）和 `routes/approvals.ts` 的接口；切在 `6cddab3e5` 或之后（含 `cd89c74dd`）时还包括 #5927。#5927 另外改了 `SessionOrgSwitcher.vue`（只被审批模板分组面板使用），并在 `authPrincipal.ts` 里新增导出。具体控件是什么、谁能看到，本文没有逐项核对（§8）。
 
 **只有 C 没有：** 上面两项。
 
@@ -429,20 +430,23 @@ gh pr list --state open --limit 500 --json number,files \
 
 ### 6.2 R60 之后已合入、客户能看到的修复：每条一行回归
 
+每行只在打包点含该提交时适用（先后顺序见 §1.1）。
+
 | PR（`gh` 现状） | 回归 |
 |---|---|
 | #6116、#6112（MERGED；`8a6746428`、`0185b00a5`） | 见 §6.1。 |
 | #6136（MERGED 2026-09-28T14:27:17Z，`5ac5b3ed1`） | 迁移按名核对通过后，复制（含数据）应成功。若提示「复制暂不可用：服务器需要先完成数据库升级，请联系管理员。」（503 `COPY_TEMPORARILY_UNAVAILABLE`，`meta-copy-sheet-labels.ts:160-163`；`copy-sheet-service.ts:1189-1190`、`:1234-1237`），说明账本迁移没生效；此时零写入，回到 §2.4。 |
 | #6142（MERGED 2026-09-28T16:37:34Z，`5e97c7116`）+ #6143（MERGED 2026-09-28T17:50:06Z，`33047ef94`，仅测试） | 前提是 C4 已配置、C5 通过。当前处理人在项目备料页按「通知下一步」，不再回 400 `STOCK_PREPARATION_HANDOFF_REQUEST_INVALID`，页面给出一句结果。服务器回 409 `STOCK_PREPARATION_HANDOFF_STEP_MISMATCH` 时，页面重读「轮到谁」并显示该拒绝的专门说明，不显示通用的「过一会儿再点一次」（#6143 钉住的两条分支）。回帖：状态码 + 是否显示了结果句（布尔）。 |
 | #6140（MERGED 2026-09-28T16:51:44Z，`03202a1e9`） | 正确配置的部署行为不变。C5 不通过的部署上，「通知下一步」回 409（`…_TARGET_TENANT_MISMATCH` 或 `…_TARGET_OWNER_UNKNOWN`；宿主缺端口时回 501 `…_PROVISIONING_UNAVAILABLE`），页面显示专门说明，不邀请重试（`plainLanguage.ts:717-734`）。回帖：实际拒绝码与 C5 的布尔是否一致。 |
+| #6146（MERGED 2026-09-28T23:10:28Z，`cd89c74dd`） | 前提同 #6142 行（C4 已配置、C5 通过）。① 当前处理人持有最后一步时，按钮是「通知仓库和采购」，可以按，「下一步」条里的按钮同词（`apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue:1053-1067`，词取自 `apps/web/src/services/integration/stockPreparation/operatorNextStep.ts:54-57`，「下一步」条经视图 `:1101` 与 `operatorNextStep.ts:135-140` 用同一个词）。② 交接成功但群消息没发出去时，页面说「已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。」，并说明交接本身已成功、不用再点；只发出去一部分群时，说「……有一个群没发出去 —— 请您自己跟对方说一声。」（`plainLanguage.ts:1886-1897`）。③ 欠着上一跳群通知的人，可以在看板上按「通知下一步(补发上一步的群消息)」补发（`StockPreparationProjectBoardView.vue:1061-1064`；谁能按与确认队列同一规则，`confirmationQueue.ts:621-627`）。另：项目选择器里本机记住的项目写作「这台电脑最近开过的项目」（`StockPreparationProjectBoardView.vue:130`）。回帖：①②③ 各自是否符合（布尔）。 |
 | #6139（MERGED 2026-09-28T17:47:15Z，`68578b56f`） | 客户看不到任何变化（开关默认关、无界面）。字段设置里把文本改成单选，仍是原来的 400 `FIELD_RETYPE_NOT_LOSSLESS`（`scripts/ops/global-history-flag-manifest.mjs:61-79` 该条目所述）。不需要回归。 |
-| 仅选项 A、B：#6062、#6092、#6123、#5878，以及切在 `6cddab3e5` 时的 #5927 | 不是客户修复，但会被看到：「任务」入口与「!」角标（§5）；「审批表单」页改动。回帖：演示机外壳（枚举）、管理员账号是否看到「任务」入口（布尔）。 |
+| 仅选项 A、B：#6062、#6092、#6123、#5878，以及切在 `6cddab3e5` 或之后时的 #5927 | 不是客户修复，但会被看到：「任务」入口与「!」角标（§5）；「审批表单」页改动。回帖：演示机外壳（枚举）、管理员账号是否看到「任务」入口（布尔）。 |
 
 ### 6.3 合入后才适用（只在该 PR 进了打包提交时适用）
 
 | PR（`gh` 现状） | 适用时的上机动作或回归 |
 |---|---|
-| #6146（OPEN，draft） | 项目备料页：群消息没发出去时，说「已经交给下一步了,但群里的消息没有发出去……」；当前处理人持有最后一步时，按钮为「通知仓库和采购」且可按；欠发的上一跳群通知可以从看板补发；选择器文案改为「这台电脑最近开过的项目」（见该 PR 正文的表格）。 |
+| #6151（OPEN，draft；带两项待 owner 确认的决定，核验中） | 「数据来源与体检」的「检查这个源」不再对所有人回 409，改为只从已验证令牌的租户声明取租户：带声明且能读该源的账号得到报告，令牌不带租户声明的账号得到 403 `TENANT_CLAIM_REQUIRED`（该 PR 正文的主体表与「上机说明」）。先看 §7 的「普通账号登录令牌是否带租户声明」。 |
 | #6144（OPEN） | 数据源页出现「无法装载」分组。属主或平台管理员在「重新输入凭据」里原地重封，属主、租户、作用域、连接、选项都不变，无需重启。之后 #6079 2026-09-28T12:51:17Z 的「新建同 id 覆盖原行」绕行会回 409，不要再用（见该 PR 正文「上机说明」）。前提：客户 DBA 已轮换 PLM 只读口令（owner 口径，#6079 2026-09-28T02:03:25Z 第 3 步），新口令只由属主在界面输入。 |
 | #6138（OPEN，draft） | 只改 `scripts/ops/multitable-onprem-preflight.sh`：任何重复键都判 FAIL。只有旧机 R61 wrapper 调用这个脚本时才相关（C7）。 |
 | #6145（OPEN，draft） | 开关不是精确的 `'true'` 时零变化（见该 PR 正文）。不需要回归。 |
@@ -453,7 +457,7 @@ gh pr list --state open --limit 500 --json number,files \
 
 ## 7. 旧机侧状态未知的事项
 
-2026-09-28 约 21:50Z 查 #6079：共 24 条评论，最后一条是 2026-09-28T14:02:47Z。之后旧机没有回帖，下列状态都没有更新。
+2026-09-29 约 00:25Z 查 #6079：共 24 条评论，最后一条是 2026-09-28T14:02:47Z。之后旧机没有回帖，下列状态都没有更新。
 
 | 事项 | 怎样算结清 |
 |---|---|
@@ -472,6 +476,7 @@ gh pr list --state open --limit 500 --json number,files \
 | 演示机的产品模式（决定「任务」入口出不出现） | 旧机报一个枚举（默认、考勤专注、PLM 工作台）。 |
 | 复制验收要用的测试身份是否存在 | 旧机报三个身份各自是否存在（布尔）。新建需要 owner 放行（§6.1）。 |
 | 上机当月是十月时的次月审计分区 | C3。R60 时 2026-09、2026-10 两个分区都在（10:37:13Z）。 |
+| 普通账号的登录令牌是否带租户声明 `tenantId` | 旧机回报一个布尔。登录时只有两种情况会写入这项声明：账号恰好有一条启用的 `user_orgs` 成员关系，或登录时点名了一个自己所属的组织（`packages/core-backend/src/auth/AuthService.ts:309`、`:359-360`、`:387-421`）。所以不看任何令牌，用库里的计数就能判断：`SELECT CASE WHEN n = 0 THEN '0' WHEN n = 1 THEN '1' ELSE '2+' END AS active_memberships, count(*) AS active_users FROM (SELECT (SELECT count(*) FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active) AS n FROM users u WHERE u.is_active) t GROUP BY 1 ORDER BY 1;`（只读事务，只出计数）。「0」或「2+」的账号，按上面的规则登录令牌不带这项声明。#6151 若进包，这些账号在「检查这个源」上得到 403 `TENANT_CLAIM_REQUIRED`。PR #6140 正文把「无租户声明」称为演示机形态，但没有给出处。任何令牌都不贴出来。 |
 
 ---
 
@@ -488,6 +493,7 @@ gh pr list --state open --limit 500 --json number,files \
 - **C6 的推断**（「R60 之前封存的 `enc:` 值现在都解不开」）：来自 #6079 2026-09-28T02:03:25Z 对密钥历史的叙述，加上 `encrypted-secrets.ts` 的代码，没有按存储逐条实测。计数只是可能受影响的值的上限。
 - **C6 的日志切分方法与日志文件位置：** 沿用旧机 R60 复核的做法。pm2-runtime 主机上后端日志是否写到 `ecosystem.config.cjs:71-72` 配置的文件，没有核对。
 - **根选择订正里「演示机不用 `pm2 restart`」：** 依据是交接文档对托管方式的描述。在运行中的 pm2-runtime 上执行 `pm2 restart --update-env` 能否读到 `app.env` 的改动，没有核对，订正也不依赖这一点。
+- **#6146 的三条回归：** 读的是 `cd89c74dd` 上的界面代码与该 PR 正文，没有在浏览器里看过。
 - **#6144 会进 R61：** `gh` 显示它是 OPEN。合入前的核验是否已经完成，本文没有核对，不能当作事实。
 
 ---
