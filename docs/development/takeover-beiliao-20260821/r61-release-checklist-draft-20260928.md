@@ -3,7 +3,7 @@
 > **状态：草案。** 打包点与范围由 owner 决定。§1 只列事实，不代 owner 推荐。owner 定下具体提交之后，§2 的迁移名单必须在那个提交上用命令重算，§5、§6 只看对应选项。
 > **执行者：** 旧机（运维机）。开发机连不上演示机，演示机现状全部来自 #6079 的回帖，按回帖时间戳（UTC）引用。
 > **口径：** values-free。回帖只写布尔、计数、枚举、键名、用时；不写主机、地址、口令、令牌、客户名、项目号、单元格值。需要项目号、表 id 的地方用 `<项目号>`、`<表 id>` 或 psql 变量代入，不回显。
-> **基线：** 文中 `path:line` 以 origin/main `cd89c74dd`（#6146，2026-09-28T23:10:28Z 合入）为准，另注明者除外。PR 状态为 2026-09-29 约 00:30Z `gh pr view` 的结果。
+> **基线：** 文中 `path:line` 以 origin/main `2888addb4`（#6141，2026-09-29T02:18:18Z 合入）为准，另注明者除外。PR 状态与 #6079 评论为 2026-09-29 约 03:10Z 用 `gh` 读到的结果（#6079 共 30 条评论，最后一条是 2026-09-29T02:27:53Z）。交给旧机之前，按 §1.1 的命令和 §7 开头的说明再对一次。
 > **上机手册：** 仍是 `handoff-r59-two-machine-20260924.md` §2–§3（#6079 正文第 0 节要求每次上机前读）。本文只补 R61 特有的事项。
 
 ---
@@ -17,7 +17,7 @@ git fetch origin main --tags
 git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 ```
 
-在 `cd89c74dd` 上共 17 条，从旧到新：
+在 `2888addb4` 上共 21 条，从旧到新：
 
 | # | 提交 | PR | 内容 | 类别 |
 |---|---|---|---|---|
@@ -38,12 +38,17 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 | 15 | `33047ef94` | #6143 | #6142 的两条 409 分支测试 | 仅测试 |
 | 16 | `6cddab3e5` | #5927 | 审批模板分组 A-5 | 审批模板分组 |
 | 17 | `cd89c74dd` | #6146 | 项目备料页「通知下一步」：结果措辞、最后一步、欠发补发与确认队列一致 | 客户修复 |
+| 18 | `68a703038` | #5974 | Web 必跑车道的令牌集合固定成已提交的清单文件；只改 CI 用的脚本与清单文件、测试、文档和 `.gitattributes` | 仅 CI 与测试 |
+| 19 | `e48d3307b` | #6147 | 配置恢复里的有损类型回退要求对表有读：共享函数 `hasFullTableReadAccess` 先查 `canRead` | 修复，两个开关默认关，客户看不到（§6.2） |
+| 20 | `4aa0385cd` | #6148 | 修 bridge-agent 只读契约测试 | 仅测试与文档 |
+| 21 | `2888addb4` | #6141 | 用户提供的正则按模式长度与输入长度设上限（公式、字段校验、集成管道校验、公开表单） | 平台加固，超长输入才看得到（§6.2） |
 
 由此得出的事实：
 
 - 客户修复 #6136（第 10 条）排在任务线 #6062、#6092、#6123（第 7–9 条，含两条任务迁移）之后。#6142、#6140（第 12、13 条）排在审批模板分组 #5878（第 11 条）之后。所以**沿 first-parent 切的点只要带上 #6136，就一定带上任务线和它的两条迁移；只要带上 #6142 或 #6140，就一定带上 #5878。**
 - 不带任务线和 #5878 的最后一个 first-parent 点是 `b433ac814`（第 5 条）。它有复制数据表 S1，但没有 #6136、#6142、#6140。
 - #6146（第 17 条）排在 #5927（第 16 条）之后：沿 first-parent 切的点只要带上 #6146，就一定带上 #5927。切在 `33047ef94`（第 15 条）两者都不带；切在 `6cddab3e5` 带 #5927、不带 #6146。
+- #6147（第 19 条）与 #6141（第 21 条）排在 #5927、#6146 之后：沿 first-parent 切的点只要带上其中任何一个，就一定带上 #5927 和 #6146。第 18–21 条都不带新迁移（§2.2 的命令在 `2888addb4` 上的输出与 `cd89c74dd` 相同）。
 - main 还会前进（在开 PR 见 §2.3、§6.3）。owner 定的应是一个具体提交号。
 
 ### 1.2 R59、R60 是怎么切的
@@ -51,7 +56,7 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 - **R59** = main `05461c739`（`handoff-r59-two-machine-20260924.md:9`），CI 打包（同文 `:10`）。它在 main 的 first-parent 链上（`git log --first-parent --format=%h origin/main | grep ^05461c739` 有输出）。origin 上没有指向它的 tag：`git ls-remote --tags origin` 里既没有指向 `05461c739` 的，也没有名字含 `r59` 的；`onprem-` 开头的发布 tag 只有 `onprem-r60`。
 - **R60** = main `583dfdf1a`，即 #6131 的合入提交，开发机在 #6079 2026-09-28T09:01:43Z 指定。origin 上 tag `onprem-r60` 指向它，它也在 first-parent 链上。旧机 2026-09-28T10:34:09Z 回帖：CI 打包按 `expected_sha` 复核，本地门禁全过。
 - **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。检出的提交与它不一致就拒绝打包（`:122-131`）。
-- **R60 之后没改过的东西：** 下面这条命令在 `cd89c74dd` 上无输出。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动：
+- **R60 之后没改过的东西：** 下面这条命令在 `2888addb4` 上无输出。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动：
   ```bash
   git diff --stat 583dfdf1a origin/main -- scripts/ops/multitable-onprem-package-upgrade-inplace.ps1 \
     .github/workflows/multitable-onprem-package-build.yml docker ecosystem.config.cjs
@@ -59,9 +64,9 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 
 ### 1.3 选项 A：在 main 上选一个 first-parent 提交，原样打包
 
-- **候选：** `cd89c74dd`（今天的头，含 #5927 与 #6146）、`6cddab3e5`（含 #5927，不含 #6146），或 `33047ef94`（两者都不含）。
+- **候选：** `2888addb4`（2026-09-29 约 03:10Z 的头，含 #5927、#6146、#6147、#6141）、`e48d3307b`（含 #5927、#6146、#6147，不含 #6141）、`cd89c74dd`（含 #5927 与 #6146）、`6cddab3e5`（含 #5927，不含 #6146），或 `33047ef94`（两者都不含）。排列不代表推荐。
 - **迁移：** 4 条（§2.2）。
-- **与已验证流程的偏差：** 切法、tag、`expected_sha`、升级脚本都与 R60 相同。需要注意的是包里带两条任务线迁移。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
+- **与已验证流程的偏差：** 切法、tag、`expected_sha` 都与 R60 相同；升级脚本在 `2888addb4` 及以前的提交上也与 R60 相同（§1.2），打包提交若含 #6157 则不同（C8）。需要注意的是包里带两条任务线迁移。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
 
 ### 1.4 选项 B：选项 A 的提交，但在 migrate 这一步用 `MIGRATION_EXCLUDE` 排除两条任务迁移
 
@@ -71,20 +76,25 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 - **效果：** `getMigrations()` 的最后一步把命中的名字**整条丢掉**（`:309-311`）。迁移表里不留任何历史标记，Kysely 根本看不到这两条。
 - **谁读它：** 只有这个 provider。仓库里（测试与文档除外）只有 `migrate.ts:33` 构造它；`migrateToLatest` 的调用也只有 `migrate.ts:63`，后端启动时不跑迁移。
 - **登记：** 没有登记在 `scripts/ops/global-history-flag-manifest.mjs`（`grep -n MIGRATION_EXCLUDE` 无结果）。provider 的注释说它是 CI 用的机制（`:36-39`），并明写 production 与 on-prem 的 `db:migrate` 这两种排除机制都不用（`:52-57`）。
-- **怎么设：** 升级脚本第 6 步先把 `docker/app.env` 导入自身进程（`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1885`），再起子进程 `node migrate.js`（`:1892`），子进程继承这个进程的环境。所以只在执行升级脚本的那个 PowerShell 会话里设：
-  ```powershell
-  $env:MIGRATION_EXCLUDE = 'zzzz20260926120000_create_task_p0a_tables,zzzz20260926120100_add_task_permissions'
-  ```
-  不要写进 `app.env`。写进去之后，每次升级都会导入它（`Import-AppEnvFile`，`:1354-1394`），以后每次 migrate 都会排除这两条。
+- **怎么设（先看 wrapper 怎么起升级脚本）：** 升级脚本第 6 步先把 `docker/app.env` 导入自身进程（`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1885`），再起子进程 `node migrate.js`（`:1892`）。子进程继承的是**升级脚本那个进程**的环境，所以变量必须出现在升级脚本进程里。
+  - R60 的 wrapper（rev 3）不在 ssh 会话里直接跑升级脚本：「升级子进程经 WMI 在 ssh 会话外运行」，教训 ①「远端子进程一律 WMI 启动 + 哨兵文件轮询」（#6079 2026-09-28T10:34:09Z）。经 WMI 创建的进程由 WMI 服务一侧创建，父进程不是 ssh 会话，拿不到 ssh 会话里用 `$env:` 设的变量。这一条依据的是 Windows 的进程创建方式，没有在演示机上核对（§8）。wrapper 不在仓库里，本文没见过它怎么拼命令。
+  - 所以**在 ssh 会话里 `$env:MIGRATION_EXCLUDE = …` 不起作用**。变量要放进 wrapper 交给 WMI 的那条命令里，在调用升级脚本之前设置；或者由 wrapper 显式给出新进程的环境。具体写法由旧机按 wrapper 的实际写法改，本文不给现成命令。要设的值是：
+    ```text
+    MIGRATION_EXCLUDE=zzzz20260926120000_create_task_p0a_tables,zzzz20260926120100_add_task_permissions
+    ```
+  - **上机前先证明变量传得到：** 用与升级脚本**完全相同**的起法（同一个 WMI 调用、同样的设变量方式），只把调用升级脚本的那一段换成只报布尔的 `[bool]$env:MIGRATION_EXCLUDE`，结果写进哨兵文件。报 `True` 才继续；报 `False` 就停下回帖，不要升级。
+  - 不要写进 `app.env`。写进去之后，每次升级都会导入它（`Import-AppEnvFile`，`:1354-1394`），以后每次 migrate 都会排除这两条。
+- **上机后的证据（选项 B 必须回帖）：** migrate 为每条执行成功的迁移打印一行 `migration "<名字>" was executed successfully`（`packages/core-backend/src/db/migrate.ts:41-47`），这些行出现在升级脚本的输出里，也就是 wrapper 收集输出的地方。选项 B 下这样的行必须**恰好两行**，名字正是复制数据表那两条（§2.2 第 3、4 条）。只要出现任务迁移的名字，就说明排除没有生效，回帖。§2.4 按名核对时，两条任务迁移应为 `applied = f`，行数 = 421 + 2。
+- **C2 照做：** 排除没传到时，两条任务迁移照样会跑。所以只要包里有任务迁移，不管打不打算排除，都要先过 C2。
 - **以后会怎样：** 这两条在迁移表里没有行。下一次不带该变量的 migrate 会把它们当作待执行，按名字顺序执行（`migrate.ts:32` 允许乱序历史；执行顺序见 §2.1）。那一次上机前要重做 C2。
 - **界面上仍然看得到的：** 「任务」导航入口仍然出现（它是前端代码，只看 `tasks:read`，与迁移无关，见 §5）。`/api/tasks` 路由在 `TASKS_ENABLED` 未设时本来就不挂（`packages/core-backend/src/routes/tasks.ts:35-36`；返回 null 时 `packages/core-backend/src/index.ts:1879-1880` 不挂载）。三个 `tasks:*` 权限码不会写进 `permissions` 表；平台管理员不受影响（前端判定走管理员短路，`apps/web/src/composables/useAuth.ts:551-552`）。
 - **迁移：** 2 条（复制数据表的两条）。
-- **与已验证流程的偏差：** 用了一个未登记、按代码注释不用于 on-prem 的变量，而且只在一次会话里生效。按名核对（§2.4）时，预期名单是 2 条，而不是命令算出的 4 条。
+- **与已验证流程的偏差：** 用了一个未登记、按代码注释不用于 on-prem 的变量。它只对这一次升级进程生效，而且要改 wrapper，才能传进经 WMI 起的升级进程（上面「怎么设」）。按名核对（§2.4）时，预期名单是 2 条，而不是命令算出的 4 条。仍要做 C2。
 
 ### 1.5 选项 C：从 `b433ac814` 拉发布分支，拣选客户修复
 
-- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试），再拣 `cd89c74dd`（#6146）。#6139 可拣可不拣，界面都无变化。
-- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）；在这四次的结果上再模拟拣选 `cd89c74dd`，同样无冲突。四次拣选后的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
+- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试），再拣 `cd89c74dd`（#6146）、`e48d3307b`（#6147）。#6139 可拣可不拣，界面都无变化。
+- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）；在这四次的结果上再依次模拟拣选 `cd89c74dd`、`e48d3307b`，同样无冲突（2026-09-29 重做了整条链）。`2888addb4`（#6141）没有模拟：它改的 `apps/web/scripts/run-required-web-tests.tokens` 是 #5974 新建的文件，不拣 #5974 时这棵树里没有这个文件。四次拣选后的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
 - **迁移：** 2 条（复制数据表的两条）。
 - **与已验证流程的偏差：** R59、R60 都切在 main 的 first-parent 提交上（§1.2），选项 C 的包提交不在 main 上，main 的 CI 从没对这棵树整体跑过。打包工作流可以在任意 ref 上 `workflow_dispatch`，`expected_sha` 照样能钉住提交，但 tag 要打在发布分支的提交上。
 
@@ -92,8 +102,8 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 
 | 选项 | 迁移条数 | 客户会看到（详见 §5） | 与 R59/R60 做法的偏差 |
 |---|---|---|---|
-| A | 4 | 复制数据表；「通知下一步」修复（切在 `cd89c74dd` 时含 #6146）；「任务」入口（管理员、默认外壳）；审批「审批表单」页改动 | 无；需做 C2 |
-| B | 2（两条任务迁移留待以后） | 与 A 相同，包括「任务」入口 | 未登记变量、只在一次会话里设；以后的某次 migrate 会补跑两条任务迁移 |
+| A | 4 | 复制数据表；「通知下一步」修复（切在 `cd89c74dd` 或之后时含 #6146）；「任务」入口（管理员、默认外壳）；审批「审批表单」页改动 | 无；需做 C2 |
+| B | 2（两条任务迁移留待以后） | 与 A 相同，包括「任务」入口 | 未登记变量；要改 wrapper 才传得进经 WMI 起的升级进程，上机前要先证明传到了；以后的某次 migrate 会补跑两条任务迁移；需做 C2 |
 | C | 2 | 复制数据表；「通知下一步」修复（拣了 #6146 时含它）；没有「任务」入口，也没有审批页改动 | 包提交不在 main 上；整树未经 CI |
 
 ---
@@ -118,7 +128,7 @@ git diff --name-status --diff-filter=DRM 583dfdf1a "$C" -- packages/core-backend
 - Kysely 版本是 0.28.8（`pnpm-lock.yaml:3222`）。它的 Migrator 把全部迁移名排序（`#resolveMigrations`：`Object.keys(...).sort()`），把历史表里没有的那些按这个顺序执行。
 - 在 PostgreSQL 上，一次 migrate 的**全部**待执行迁移在同一个事务里跑（Migrator 的 `#runMigrations` 在适配器支持事务型 DDL 时包一层 `db.transaction()`，PostgresAdapter 对此返回 true）。任何一条失败，这一批都不生效。
 
-### 2.2 在 `cd89c74dd` 上的输出（执行顺序）
+### 2.2 在 `2888addb4` 上的输出（执行顺序；与 `cd89c74dd` 上相同）
 
 `--diff-filter=DRM` 那条无输出。新增的 4 条：
 
@@ -141,7 +151,7 @@ gh pr list --state open --limit 500 --json number,files \
 | while read n p; do git cat-file -e "origin/main:$p" 2>/dev/null || echo "$n $p"; done | sort -n
 ```
 
-`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-29 约 00:30Z 的结果（与 2026-09-28 约 21:50Z 那次相同）：
+`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-29 约 02:40Z 的结果（与约 00:30Z 那次相比只有 #5866 变了，现在只带一条迁移）：
 
 | PR | 状态 | 会新增的迁移 |
 |---|---|---|
@@ -151,7 +161,7 @@ gh pr list --state open --limit 500 --json number,files \
 | #5650 | OPEN | `zzzz20260912120000_add_data_source_sharing_permissions` |
 | #5611 | OPEN | `zzzz20260910120000_add_integration_permissions` |
 | #6051、#6063 | OPEN，draft | `zzzz20260924180000_attendance_roster_org_gate_job_reason` |
-| #5866 | OPEN，draft | `zzzz20260918090000_create_approval_template_groups`、`zzzz20260919090000_create_approval_template_group_backfill_batches`（main 上已有 `zzzz20260918090100_create_approval_template_groups`，R60 已执行） |
+| #5866 | OPEN，draft | `zzzz20260919090000_create_approval_template_group_backfill_batches`（main 上已有 `zzzz20260918090100_create_approval_template_groups`，R60 已执行） |
 | #5703 | OPEN，draft | `zzzz20260914120000_create_approval_form_drafts` |
 | #5412 | OPEN，draft | `zzzz20260901100000_create_elearning_offline_training`、`zzzz20260901150000_create_elearning_offline_registration` |
 | #5395 | OPEN，draft | `zzzz20260831120000_create_elearning_onboarding` |
@@ -176,7 +186,7 @@ gh pr list --state open --limit 500 --json number,files \
   SELECT count(*) AS kysely_migration_rows FROM kysely_migration;
   ROLLBACK;
   ```
-  也可以用 `node packages/core-backend/dist/src/db/migrate.js --confirm <名字>`（`migrate.ts:85-103`：退出码 0 已执行、1 待执行、2 不认识），但要带与升级脚本相同的环境。
+  也可以用 `node packages/core-backend/dist/src/db/migrate.js --confirm <名字>`（`migrate.ts:85-103`：退出码 0 已执行、1 待执行、2 不认识），但要带与升级脚本相同的环境。选项 B 的两条任务迁移用上面的 SQL 核对：环境里带着 `MIGRATION_EXCLUDE` 时，provider 把这两条整条丢掉（`migration-provider.ts:309-311`），`--confirm` 对它们报 2，而不是 1。
 - **通过：** 每条 `applied = t`；行数 = 421 + 新增条数。
 - **不通过：** 不要重跑、不要手工补迁移，回帖列出 `applied = f` 的名字。
 - **R60 的教训：** 开发机清单写的是 4 条（#6079 2026-09-28T09:01:43Z），旧机按名核对时 git 实际是 6 条，多出 `create_approval_template_groups` 和 `add_approval_product_permissions`（#6079 2026-09-28T10:34:09Z）。所以名单一律在打包提交上用命令现算。
@@ -201,9 +211,9 @@ gh pr list --state open --limit 500 --json number,files \
 - **通过：** `1`、`Running`、`1`、`200`。
 - **不通过：** 停下，不升级。先查后端为什么没在运行（`handoff-r59-two-machine-20260924.md:50`），回帖四个值。
 
-### C2 四张任务表与八个索引都不存在（仅当包里有任务迁移，即选项 A）
+### C2 四张任务表与八个索引都不存在（包里有任务迁移就做：选项 A 和选项 B）
 
-- **目的：** `zzzz20260926120000_create_task_p0a_tables` 用不带 `IF NOT EXISTS` 的 `CREATE TABLE`、`CREATE INDEX`。只要同名关系已存在，migrate 就失败。整批迁移在同一个事务里回滚（§2.1），升级脚本进处理器、停后端、打印 `RESTORE REQUIRED`（`:1972-1990`），站点要等恢复。
+- **目的：** `zzzz20260926120000_create_task_p0a_tables` 用不带 `IF NOT EXISTS` 的 `CREATE TABLE`、`CREATE INDEX`。只要同名关系已存在，migrate 就失败。整批迁移在同一个事务里回滚（§2.1），升级脚本进处理器、停后端、打印 `RESTORE REQUIRED`（`:1972-1990`），站点要等恢复。选项 B 也要做：排除变量没传进升级进程时（§1.4），这条迁移照样会跑。
 - **语句**（12 个名字取自该迁移 `:57`、`:97`、`:113`、`:124`、`:140-161`；`to_regclass` 按 `search_path` 解析，与迁移里不带 schema 的 `CREATE` 同口径）：
   ```sql
   BEGIN READ ONLY;
@@ -252,6 +262,7 @@ gh pr list --state open --limit 500 --json number,files \
 ### C5 目标表归属（「通知下一步」、结转、物料导出）
 
 - **目的：** 结转与物料导出在 R60 已经过这道墙（导出那一路是 #6109 加的，在 R60 包内；PR #6140 正文：三条路由用同一道墙）。R61 起「通知下一步」也先过这道墙（#6140，MERGED，`03202a1e9`；`http-routes.cjs:828-856`）。墙放行有两种情况：绑定的表在归属登记表里登记在本租户名下；或者表 id 正是按本租户派生出的 id（`stock-preparation-target-provisioning.cjs:1205-1220`）。
+- **已知的部分：** owner 会话调备料预检，得到 `carryTargetBinding.ownershipState = owned_by_this_project`、`carryWouldRefuseWith = null`（#6079 2026-09-29T01:26:41Z）。预检用的是按调用方身份得出的项目（`stock-preparation-preflight.cjs:448`、`:669`），所以结转与导出这一侧，对这个会话所属的租户已经有答案。下面的 SQL 仍要跑一次：「通知下一步」按交接链配置里的 `tenantId` 判，这个租户是否与上面那个相同，本文不知道。C4 为未配置时，只跑 `chain_tenant` 取操作员租户的那一次，用来复核上面的结果。
 - **语句**：下面的主体直接取自已合入 PR #6140 正文「上机说明」一节，最后一行派生 id 核对是本文按 `http-routes.cjs:849-852` 与 `packages/core-backend/src/multitable/provisioning.ts:191-201` 补上的。变量值在旧机本地从部署配置里读：`sheet_id` 与 `object_id` 取拉取动作 `plm.stock-preparation.pull-bom.v1` 的 `target.sheetId` 与 `target.objectId`（表动作 JSON 所在的环境变量见 `plugin-runtime-config.ts:2-3`）；`tenant` 对「通知下一步」取交接链配置文件里的 `tenantId`，对结转与导出取操作员所属租户。值只经 `-v` 传入，不回帖。
   ```sql
   -- psql -X -q -A -v sheet_id=... -v chain_tenant=... -v object_id=... -f check.sql
@@ -271,11 +282,18 @@ gh pr list --state open --limit 500 --json number,files \
   - 结转与导出照 R60 同样被拒。
   - 「看看还缺什么」预检报 `STOCK_PREP_CARRY_TARGET_NOT_OWNED`，并多出 `detail.handoffRouteCode`（`stock-preparation-preflight.cjs:699-704`）。
   - 这等于把 R60 上「每次都 400」的按钮换成「每次都 409、换一句话」。
-- **不通过时怎么办：** 回帖上面的布尔与计数。PR #6140 的修法是「重跑 sandbox target ensure」，这是写操作，先回帖，由开发机与 owner 决定。
+- **不通过时怎么办：** 回帖上面的布尔与计数。PR #6140 的修法是「重跑 sandbox target ensure」，这是写操作，先回帖，由开发机与 owner 决定，升级当天不自行做。
+- **对升级的判定：不阻断升级。** 照常升级，回帖。理由：结转与导出的墙在 R60 已经上线，R61 不改它；「通知下一步」在这种部署上从每次 400 变成每次 409，处理函数先过墙（`http-routes.cjs:9484`），之后才写游标（`:9509` 的 `store.advance`），审计行与钉钉通知都在这之后。C5 不通过时，§6.2 的 #6142、#6140、#6146 三行按「C5 不通过」记录，不算回归失败。
 
 ### C6 加密存储普查（R60 第一次写入密钥之后）
 
-- **目的：** R60 之前 `app.env` 里没有 `ENCRYPTION_KEY`、`ENCRYPTION_SALT`，旧代码退回到仓库内置默认值；R60 第一次写入了新的密钥（#6079 2026-09-28T02:03:25Z、10:34:09Z）。凡是 R60 之前用 `enc:` 格式（`packages/core-backend/src/security/encrypted-secrets.ts:10`、`:204-205`、`:236-242`）封存的值，现在都解不开。PLM 连接已知是这种情况（10:37:13Z）。
+- **目的：** R60 之前 `app.env` 里没有 `ENCRYPTION_KEY`、`ENCRYPTION_SALT`，旧代码退回到仓库内置默认值；R60 第一次写入了新的密钥（#6079 2026-09-28T02:03:25Z、10:34:09Z）。R60 之前用 `enc:` 格式（`packages/core-backend/src/security/encrypted-secrets.ts:10`、`:204-205`、`:236-242`）封存的值，用新密钥解不开。
+- **已知的部分：** PLM 连接原先就是这种情况（10:37:13Z）。2026-09-29 旧机在演示机上用内置默认密钥解出它的口令，用新密钥就地重新加密，只改这一个键；重启后日志是 `Loaded 1 data sources from database`、没有 skipped、解密失败 0（#6079 2026-09-29T01:26:41Z）。本项现在要回答的是：**其余**存储里，还有没有 R60 之前用默认密钥封存、至今没人用到过的值。
+- **与 R61 的关系：** R61 不改任何加解密代码，下面的检索无输出。所以这是 R60 留下的状态，不是 R61 带进来的：
+  ```text
+  $ git diff --stat -G 'encrypted-secrets|ENCRYPTION_KEY|ENCRYPTION_SALT|decryptStoredSecretValue|encryptStoredSecretValue|isEncryptedSecretValue' 583dfdf1a 2888addb4 -- . ':!*.md' ':!docs'
+  （无输出）
+  ```
 - **范围**：`git grep -l encrypted-secrets origin/main -- packages/core-backend/src plugins` 列出的每个存储，逐个看代码后得到：
   | 存储 | 位置 | 依据 |
   |---|---|---|
@@ -307,14 +325,18 @@ gh pr list --state open --limit 500 --json number,files \
   ROLLBACK;
   ```
   `v1:` 用的是另一把密钥 `INTEGRATION_ENCRYPTION_KEY`（`credential-store.cjs:32`、`:62-78`），不受 R60 写入 `ENCRYPTION_KEY` 的影响。有 `v1:` 行时，另报 `app.env` 里有没有这个键（只报有或无）。
-- **日志计数**：用 R60 复核时读过的同一份后端日志，只数 R60 重启之后的部分（切分方法同 #6079 2026-09-28T10:37:13Z 的 §4.6 日志检查），分别报下面四个固定串各自的行数，不贴行内容：
+- **日志计数**：用 R60 复核时读过的同一份后端日志，从 R60 重启起算（切分方法同 #6079 2026-09-28T10:37:13Z 的 §4.6 日志检查），再以 2026-09-29 就地重加密之后那次重启（日志里出现 `Loaded 1 data sources` 的那次）为界分成**前段**和**后段**，分别报下面四个固定串在两段里各自的行数，不贴行内容：
   - `Unsupported state or unable to authenticate data`：Node 的 GCM 鉴权失败，10:37:13Z 回帖里见过；
   - `Failed to decrypt credential`（`DataSourceManager.ts:402`）；
   - `has unreadable credentials (decrypt failed)`（`dingtalk-group-destination-service.ts:70`）；
   - `Decryption failed:`（`ConfigService.ts:469`）。
 - **为什么启动日志看不出来：** 启动时逐行解密的只有数据源管理器，解不开就记进「Loaded … (N skipped)」（`DataSourceManager.ts:320-358`）；其余各处都是用到时才解密，所以 R60 启动日志里的「1 skipped」只说明数据源这一家。其余存储里用旧默认密钥封存的值，要等第一次被用到时才失败；其中审批卡片链接密钥解不开时直接当作未配置，不写日志（`approval-card-config.ts:76-79`、`:105-108`）。
-- **通过：** 除 `data_sources.password` 外（R60 启动日志「Loaded 0 … (1 skipped)」，即只有 1 条在用的数据源且解不开，10:37:13Z），其余计数都为 0。日志里 `has unreadable credentials (decrypt failed)` 与 `Decryption failed:` 为 0；`Unsupported state or unable to authenticate data` 的行数等于 `Failed to decrypt credential` 的行数。数据源装载失败时，这两串出现在同一行（`DataSourceManager.ts:353` 打印错误，`:402` 把原错误信息接在后面），每次后端启动各记一次。
+- **通过：**
+  - SQL：`data_sources.*` 三项不作判据。数据源在启动时逐条解密，重加密之后的启动日志已经说明全部装载成功（01:26:41Z）；经 `encrypted-secrets` 重新封存的值仍以 `enc:` 开头（`encrypted-secrets.ts:236-238`），会被计进 `data_sources.password`。其余各项计数都为 0。
+  - 日志后段：四个串都为 0。
+  - 日志前段：`has unreadable credentials (decrypt failed)` 与 `Decryption failed:` 为 0。前段里 `Unsupported state or unable to authenticate data` 与 `Failed to decrypt credential` 预期成对出现、行数相等：PLM 连接装载失败时，这两串出现在同一行（`DataSourceManager.ts:353` 打印错误，`:402` 把原错误信息接在后面），重加密之前每次后端启动各记一次。
 - **不通过：** 回帖各项计数。计数不为 0 不等于解不开：R60 之后写入的值是用新密钥封存的，也带 `enc:`。由开发机按存储逐一判断并给出处理办法，不要自行改库。
+- **对升级的判定：不阻断升级。** 照常升级，回帖计数。R61 不改加解密代码（上面的检索），只要 `app.env` 里的密钥两行不变（C7），升级前后这些值能不能解开不会变。
 
 ### C7 `app.env` 重复键（卫生项）
 
@@ -342,12 +364,19 @@ gh pr list --state open --limit 500 --json number,files \
   $ident | Group-Object | Where-Object Count -gt 1 | Select-Object Name, Count
   ```
   打出来的键名若不认识，先不要照抄进回帖，改报「不认识的键名 N 个」。全大写的折行密文仍可能漏过这道过滤。
-- **处置规则**（照抄 #6079 2026-09-28T14:02:47Z 的订正版；13:52:05Z 的「保留第一次」已作废）：
+- **处置规则**（以 #6079 2026-09-28T14:02:47Z 的订正版为底；13:52:05Z 的「保留第一次」已作废。本文订正了其中「删空值行，两种取值规则下都安全」一条，见下）。**先判密钥，再判其它键：**
   - 无输出：无重复，什么都不用做。
-  - 某键重复、其中一行值为空：删掉**空值**那一行（两种取值规则下都安全）。
-  - 某键重复、各行值相同：删掉任意一行。
-  - `ENCRYPTION_KEY` 或 `ENCRYPTION_SALT` 出现两行且值不同：**两行都先别删**，先回帖（只报「两行、值不同」），由开发机协助判定哪一对在用。已加密落库的值只能用当初加密它们的那对密钥解开。
-  - 其它键重复且值不同：先回帖键名，不要自行删。
+  - `ENCRYPTION_KEY` 或 `ENCRYPTION_SALT` 出现不止一行，**其中一行是空值也算**：哪一行都先别删，先回帖，只报「几行、其中空值几行、非空的几行值是否相同」，由开发机协助判定哪一对在用。已加密落库的值只能用当初加密它们的那对密钥解开。空值不等于没设：
+    - 经 `ecosystem.config.cjs` 启动时，第一行若是空值，空串就进了进程环境，后面的行不再生效（`ecosystem.config.cjs:42-44`）。
+    - `encrypted-secrets.ts` 在非 production 下把空值当作内置默认值（`:170-174`）；`NODE_ENV=production` 时空值算「未配置」（`:84-85`），直接拒绝加解密（`:132-150`）。
+    - 四份 `docker/` 模板都带空的 `ENCRYPTION_KEY=`、`ENCRYPTION_SALT=` 行（`docker/app.env.multitable-onprem.template:21-22`、`docker/app.env.attendance-onprem.template:16-17`、`docker/app.env.example:19-20`、`docker/app.env.attendance-onprem.ready.env:20-21`）。在这样的文件末尾追加真值，就成了「空值在前、真值在后」。这时删掉空值行，经 `ecosystem.config.cjs` 启动的那条路径下次启动会从空值改用真值。
+    - R60 的密钥预检报「无重复」（#6079 2026-09-28T10:34:09Z），演示机上预计不会命中这一条。
+  - 其它键重复、各行值相同：删掉任意一行。
+  - 其它键重复、其中一行值为空：先回帖键名，并说明空值行在前还是在后，不要自行删。删空值行不是「两种取值规则下都安全」，它会改变现在读到空值的那条启动路径：
+    - 空值行在前：受影响的是经 `ecosystem.config.cjs` 启动的后端，它取第一次出现的行（`ecosystem.config.cjs:42`）。
+    - 空值行在后：受影响的是升级脚本导入的环境，它取最后一次出现的行（升级脚本 `:1367-1391`）。PS 5.1 下 `Set-Item Env:X ''` 会把这个变量删掉（开发机 PS 5.1 实测），所以升级脚本起的 migrate 看不到这个键。
+    - 演示机的后端实际经哪条路径读 `app.env` 没有核对（§8），所以两种位置都先回帖。
+  - 其它键重复、非空值不同：先回帖键名，不要自行删。
 - **给旧机的两个问题：** R61 的 wrapper 调不调用 `scripts/ops/multitable-onprem-preflight.sh`？wrapper 自己的重复键检查覆盖所有键，还是只查密钥键？如果覆盖所有键，这次普查在 R60 上机时实际上已经做过。
 
 ### C8 升级脚本「停服之后、变更窗口之前」的缺口：说明与手工恢复
@@ -364,7 +393,22 @@ gh pr list --state open --limit 500 --json number,files \
   4. C1 第四行 health 应为 `200`。
   5. 维护标志正常情况下已被 `finally` 删掉。只有升级进程被杀、`finally` 没跑到时，才手工删 `<部署根目录>\output\maintenance.flag`（默认位置见 `:164-172`）。
   6. 回帖，查清备份失败的原因后再重试。
-- **修复计划：** 开发机已排期修这个缺口，截至本文还没开 PR（在开 PR 里改到 `scripts/ops/` 上机脚本的只有 #6138，改的是预检脚本）。**如果该修复在打包点之前合入**，R61 跑的就不再是 R60 验证过的那份脚本：旧机必须用新版替换本地那份升级脚本副本，重跑本地门禁（R60 的门禁见 #6079 2026-09-28T10:34:09Z：字节、BOM、预检自测、sha256/gitSha），然后才能上机。
+- **修复：** #6157（OPEN，draft，2026-09-29T02:17:33Z 开）修这个缺口，只改升级脚本和它的测试：停服之后、第一次写入线上文件之前失败时，脚本把后端重新拉起，并打印 `UPGRADE NOT APPLIED`（该 PR 正文）。打包提交不含 #6157 时，上面的手工恢复照旧适用。
+- **升级脚本从哪里取、按什么顺序（不管 #6157 进不进包，都这样做）：**
+  1. **只从打包提交取**，不从 `git pull` 到 main 之后的工作区复制，因为 main 可能比打包提交新：
+     ```bash
+     C=<打包提交>
+     git show "$C:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1" > <本地副本>
+     git hash-object --no-filters <本地副本>   # 必须等于下一行的输出
+     git rev-parse "$C:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1"
+     ```
+     在 bash 里执行：PowerShell 5.1 的 `>` 会把输出改写成 UTF-16，两行就对不上。开发机在 `2888addb4` 上跑过这三条，两个值相同，也等于 `583dfdf1a`（R60）上该文件的值。
+     包里没有这个脚本，没法拿包里的副本比对，只能对打包提交：`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS`（`:37-186`）里没有它，`git grep -n upgrade-inplace origin/main -- scripts/ops/multitable-onprem-package-build.sh` 无输出。
+     为什么要同一个提交：脚本的 `MustExistManifest`、`BackupPaths`、`ReplaceDirs` 默认值（`:216-246`）是按包的目录结构写的。脚本与包出自不同提交时，这几份清单与包对不对得上，没人验证过。对不上的话，会在停服之后、替换进行中报错（第 4、5 步，`:1863-1867`），进 `RESTORE REQUIRED`。
+  2. 用它替换旧机本地的升级脚本副本。
+  3. 重跑本地门禁（R60 的门禁见 #6079 2026-09-28T10:34:09Z：字节、BOM、预检自测、sha256/gitSha）；传到演示机后，两端的 sha256 一致。
+  4. 然后才上机。
+  #6157 在打包点之前合入：打包提交上的就是修过的脚本，第 3 步的门禁针对的是它，它不是 R60 验证过的那一份。在打包点之后合入：打包提交上仍是 R60 那一份，不要从 main 取新版。
 
 ---
 
@@ -389,7 +433,7 @@ gh pr list --state open --limit 500 --json number,files \
 - **复制数据表入口：**
   - 入口①：表侧栏「复制数据表」，只出现在当前选中的那张表的行上（`apps/web/src/multitable/components/MetaSheetViewRail.vue:114-120`）。
   - 入口②：「存为模板」弹窗里的「改为复制数据表（含数据）」（`apps/web/src/multitable/views/MultitableWorkbench.vue:192`）。
-  - 两处都只在 `/context` 返回 `canCopySheet === true` 时出现。`canCopySheet` = 目标 Base 可写 **且** 对源表有全表读（`packages/core-backend/src/routes/univer-meta.ts:9250-9268`）。目标 Base 可写是指：平台管理员角色，或 `resolveBaseWritable`（Base 属主或持 Base 写权限码，`permission-service.ts:2019-2020`、`:2032-2059`）。审批投影与 e-learning 投影 Base 对谁都不可写（`:2041`）。
+  - 两处都只在 `/context` 返回 `canCopySheet === true` 时出现。`canCopySheet` = 目标 Base 可写 **且** 对源表有全表读（`packages/core-backend/src/routes/univer-meta.ts:9259-9279`）。目标 Base 可写是指：平台管理员角色，或 `resolveBaseWritable`（Base 属主或持 Base 写权限码，`permission-service.ts:2019-2020`、`:2032-2059`）。审批投影与 e-learning 投影 Base 对谁都不可写（`:2041`）。
   - 复制出的表带徽标「快照副本」；源为托管表时再加「不随 PLM 刷新」（`meta-sheet-view-rail-labels.ts:32`、`:37`）。
   - 复制没有开关（§4）。
   - 以上是读代码得出的，没有实际运行（§8）。
@@ -412,6 +456,8 @@ gh pr list --state open --limit 500 --json number,files \
 
 **只有 C 没有：** 上面两项。
 
+**只看切点：** 切在 `2888addb4` 或之后时，超长的正则输入会被新拒绝（§6.2 的 #6141 行），一般数据看不到变化。§1.5 的选项 C 例子不含它。
+
 ---
 
 ## 6. 上机后验收与回归
@@ -420,13 +466,17 @@ gh pr list --state open --limit 500 --json number,files \
 
 按 `copy-sheet-r61-acceptance-checklist.md` 执行，回帖格式见该文 §7。复制演示时源表保持 ≤ 2000 行；复制同一张表或其关联表期间不要手动触发 PLM 刷新（该文 §5）。
 
-**需 owner 放行：**
+**需 owner 放行**（下面每一步都在演示机上建表、写数据或删表。源是客户的备料主表时，复制出的新表里就是客户整张表的数据）：
 
-- 该文 §4 第 3 项（`:85`）要在复制进行中改动源表的一条记录，而它的源表是客户的备料主表（`:29`、`:42`），这是对客户演示数据的写入。
+- 该文 §2（`:42`）：复制「55 列备料主表」（含数据），在演示机上新建一张装着客户整表数据的表。§5（`:96`）的计时用的也是这一次复制。
+- 该文 §3（`:75`）：对复制出的表再复制一次（二代复制），又是一份整表拷贝。
+- 该文 §4 第 3 项（`:85`）：复制进行中改动源表的一条记录。源表是客户的备料主表（`:29`、`:42`），这是对客户演示数据的写入。
+- 该文 §4 第 4 项（`:86`）：快速连续点两次「复制」，预期再建出一张表。
+- 该文 §6（`:104`）：在演示机上删除复制出来的表。
 - 该文 §1 要三个测试身份（`:29`），§2.2 还要一个受限账号和一个 write-own 账号（`:58-59`）。这些身份在演示机上是否已经存在不知道，新建账号或授权也是服务器写入。
 - #6079 正文「不做」：不在未经批准的情况下写客户演示表的数据。
 
-**替代做法（不需要改客户数据）：** §4 第 3 项改用一张临时表当源：在测试 Base 里新建一张非托管表，放若干行，复制它，复制期间编辑这张临时表的一条记录，预期 409 `COPY_SOURCE_CHANGED` 并整体回滚。其余步骤不变。这样不改客户的备料主表。三个身份的问题仍需 owner 决定：用已有账号，还是新建。
+**替代做法（不改、不复制客户数据）：** 在测试 Base 里新建一张临时的非托管表，放若干行，用它当源：§4 第 3 项（复制期间编辑这张临时表的一条记录，预期 409 `COPY_SOURCE_CHANGED` 并整体回滚）、§4 第 4 项、§6 的删表都改用它和它的副本。§2、§3 里只有源是托管表才有意义的几项（「不随 PLM 刷新」徽标 `:55`、PLM 刷新不碰新表 `:73`、二代副本仍带该徽标 `:75`）换不了源，只能等 owner 放行，否则回帖记「未做」。三个身份的问题仍需 owner 决定：用已有账号，还是新建。
 
 ### 6.2 R60 之后已合入、客户能看到的修复：每条一行回归
 
@@ -435,48 +485,51 @@ gh pr list --state open --limit 500 --json number,files \
 | PR（`gh` 现状） | 回归 |
 |---|---|
 | #6116、#6112（MERGED；`8a6746428`、`0185b00a5`） | 见 §6.1。 |
-| #6136（MERGED 2026-09-28T14:27:17Z，`5ac5b3ed1`） | 迁移按名核对通过后，复制（含数据）应成功。若提示「复制暂不可用：服务器需要先完成数据库升级，请联系管理员。」（503 `COPY_TEMPORARILY_UNAVAILABLE`，`meta-copy-sheet-labels.ts:160-163`；`copy-sheet-service.ts:1189-1190`、`:1234-1237`），说明账本迁移没生效；此时零写入，回到 §2.4。 |
+| #6136（MERGED 2026-09-28T14:27:17Z，`5ac5b3ed1`） | 迁移按名核对通过后，复制（含数据）应成功。若提示「复制暂不可用：服务器需要先完成数据库升级，请联系管理员。」（503 `COPY_TEMPORARILY_UNAVAILABLE`，`meta-copy-sheet-labels.ts:160-163`；`copy-sheet-service.ts:1190-1191`、`:1235-1238`），说明账本迁移没生效；此时零写入，回到 §2.4。 |
 | #6142（MERGED 2026-09-28T16:37:34Z，`5e97c7116`）+ #6143（MERGED 2026-09-28T17:50:06Z，`33047ef94`，仅测试） | 前提是 C4 已配置、C5 通过。当前处理人在项目备料页按「通知下一步」，不再回 400 `STOCK_PREPARATION_HANDOFF_REQUEST_INVALID`，页面给出一句结果。服务器回 409 `STOCK_PREPARATION_HANDOFF_STEP_MISMATCH` 时，页面重读「轮到谁」并显示该拒绝的专门说明，不显示通用的「过一会儿再点一次」（#6143 钉住的两条分支）。回帖：状态码 + 是否显示了结果句（布尔）。 |
 | #6140（MERGED 2026-09-28T16:51:44Z，`03202a1e9`） | 正确配置的部署行为不变。C5 不通过的部署上，「通知下一步」回 409（`…_TARGET_TENANT_MISMATCH` 或 `…_TARGET_OWNER_UNKNOWN`；宿主缺端口时回 501 `…_PROVISIONING_UNAVAILABLE`），页面显示专门说明，不邀请重试（`plainLanguage.ts:717-734`）。回帖：实际拒绝码与 C5 的布尔是否一致。 |
 | #6146（MERGED 2026-09-28T23:10:28Z，`cd89c74dd`） | 前提同 #6142 行（C4 已配置、C5 通过）。① 当前处理人持有最后一步时，按钮是「通知仓库和采购」，可以按，「下一步」条里的按钮同词（`apps/web/src/components/integration/stockPreparation/StockPreparationProjectBoardView.vue:1053-1067`，词取自 `apps/web/src/services/integration/stockPreparation/operatorNextStep.ts:54-57`，「下一步」条经视图 `:1101` 与 `operatorNextStep.ts:135-140` 用同一个词）。② 交接成功但群消息没发出去时，页面说「已经交给下一步了,但群里的消息没有发出去 —— 请您自己跟下一位说一声。」，并说明交接本身已成功、不用再点；只发出去一部分群时，说「……有一个群没发出去 —— 请您自己跟对方说一声。」（`plainLanguage.ts:1886-1897`）。③ 欠着上一跳群通知的人，可以在看板上按「通知下一步(补发上一步的群消息)」补发（`StockPreparationProjectBoardView.vue:1061-1064`；谁能按与确认队列同一规则，`confirmationQueue.ts:621-627`）。另：项目选择器里本机记住的项目写作「这台电脑最近开过的项目」（`StockPreparationProjectBoardView.vue:130`）。回帖：①②③ 各自是否符合（布尔）。 |
 | #6139（MERGED 2026-09-28T17:47:15Z，`68578b56f`） | 客户看不到任何变化（开关默认关、无界面）。字段设置里把文本改成单选，仍是原来的 400 `FIELD_RETYPE_NOT_LOSSLESS`（`scripts/ops/global-history-flag-manifest.mjs:61-79` 该条目所述）。不需要回归。 |
+| #6147（MERGED 2026-09-29T02:05:57Z，`e48d3307b`） | 客户看不到变化，不需要回归。两条配置恢复路由在 `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` 与 `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY` 后面，两个开关都默认关（该 PR 正文）。它改的是共享函数 `hasFullTableReadAccess`，先查 `canRead`（`univer-meta.ts:7465`）；复制入口的 `canCopySheet` 也调用它（`:9272`）。按该 PR 正文的调用点表（第 10 行），这个调用点在调用之前已经要求能读该表，所以复制入口的可见人群不变。 |
+| #6141（MERGED 2026-09-29T02:18:18Z，`2888addb4`） | 一般数据看不到变化，不需要专门回归。新的拒绝只针对超长输入（`docs/development/input-regex-redos-route-ii-design-20260925.md` §9.1）：字段规则里有 `pattern`、没有 `maxLength` 时，写入超过 10000 字符的值被拒；超过 4000 字符的正则（公式参数、校验规则、管道映射）被拒；`REGEXMATCH`、`REGEXEXTRACT`、`REGEXREPLACE` 对超限输入返回 `#ERROR!`，`SUBSTITUTE` 让整条公式变成 `#ERROR!`。上机后客户若报这几类错误，先对照这里。 |
 | 仅选项 A、B：#6062、#6092、#6123、#5878，以及切在 `6cddab3e5` 或之后时的 #5927 | 不是客户修复，但会被看到：「任务」入口与「!」角标（§5）；「审批表单」页改动。回帖：演示机外壳（枚举）、管理员账号是否看到「任务」入口（布尔）。 |
 
 ### 6.3 合入后才适用（只在该 PR 进了打包提交时适用）
 
 | PR（`gh` 现状） | 适用时的上机动作或回归 |
 |---|---|
-| #6151（OPEN，draft；带两项待 owner 确认的决定，核验中） | 「数据来源与体检」的「检查这个源」不再对所有人回 409，改为只从已验证令牌的租户声明取租户：带声明且能读该源的账号得到报告，令牌不带租户声明的账号得到 403 `TENANT_CLAIM_REQUIRED`（该 PR 正文的主体表与「上机说明」）。先看 §7 的「普通账号登录令牌是否带租户声明」。 |
-| #6144（OPEN） | 数据源页出现「无法装载」分组。属主或平台管理员在「重新输入凭据」里原地重封，属主、租户、作用域、连接、选项都不变，无需重启。之后 #6079 2026-09-28T12:51:17Z 的「新建同 id 覆盖原行」绕行会回 409，不要再用（见该 PR 正文「上机说明」）。前提：客户 DBA 已轮换 PLM 只读口令（owner 口径，#6079 2026-09-28T02:03:25Z 第 3 步），新口令只由属主在界面输入。 |
-| #6138（OPEN，draft） | 只改 `scripts/ops/multitable-onprem-preflight.sh`：任何重复键都判 FAIL。只有旧机 R61 wrapper 调用这个脚本时才相关（C7）。 |
+| #6151（OPEN，draft；带两项待 owner 确认的决定，核验中） | 「数据来源与体检」的「检查这个源」不再对所有人回 409，改为只从已验证令牌的租户声明取租户：带声明且能读该源的账号得到报告，令牌不带租户声明的账号得到 403 `TENANT_CLAIM_REQUIRED`（该 PR 正文的主体表与「上机说明」）。**owner 裁决**（#6079 2026-09-29T02:27:53Z）：这处缺陷只合 #6151 一支；它进 R61 要同时满足两条：① 修复轮通过最终核验；② 演示机上没有生效组织成员关系的活跃账号为 0（同帖的只读计数，见 §7）。任一条不满足，R61 不带它，「现在检查」保持 R60 的样子。 |
+| #6153（OPEN，draft） | **按 owner 裁决不合**（#6079 2026-09-29T02:27:53Z）：保持草稿，独有的测试并入 #6151 后关闭。它修的是同一个 409（源就绪预检取表动作的同一次调用），01:34:20Z 回帖里「随 R61 上机」的说法已被这次裁决取代。无上机动作。 |
+| #6144（OPEN） | 数据源页在有装载失败的源时出现「无法装载」分组，属主或平台管理员在「重新输入凭据」里原地重封（该 PR 正文「上机说明」）。演示机上 R60 启动时唯一被跳过的那条（10:34:09Z「1 skipped」）就是 PLM 连接，它已在 2026-09-29 就地重加密，重启后 `Loaded 1 data sources`、没有 skipped（#6079 01:26:41Z）。所以上机后预期这个分组不出现；出现就回帖分组里的条数。PLM 只读口令 owner 已决定不轮换（01:56:03Z）。 |
+| #6138（OPEN，已不是 draft） | 只改 `scripts/ops/multitable-onprem-preflight.sh`：任何重复键都判 FAIL。只有旧机 R61 wrapper 调用这个脚本时才相关（C7）。 |
 | #6145（OPEN，draft） | 开关不是精确的 `'true'` 时零变化（见该 PR 正文）。不需要回归。 |
 | #6149（OPEN，draft） | 端点在开关后面，也没有界面；但它带 3 条迁移（§2.3），迁移不受开关控制，其中 `…150200_backfill_approval_projection_system_kind` 对 `meta_sheets` 做 UPDATE。按 §2.4 按名核对。 |
-| #6147（OPEN，draft） | 两个配置恢复开关默认关，无可见变化。它改的是共享函数 `hasFullTableReadAccess`，复制入口的 `canCopySheet` 也调用它（`univer-meta.ts:9261`）：对不能读该表的账号只会更早返回 false。 |
+| #6157（OPEN，draft，2026-09-29T02:17:33Z 开） | 只改升级脚本与它的测试（C8）。不管它在不在打包提交里，都按 C8「升级脚本从哪里取、按什么顺序」做。打包提交含它时，停服之后、第一次写入线上文件之前的失败，由脚本自己把后端拉起并打印 `UPGRADE NOT APPLIED`；不含它时，照 C8 的手工恢复。 |
 
 ---
 
 ## 7. 旧机侧状态未知的事项
 
-2026-09-29 约 00:25Z 查 #6079：共 24 条评论，最后一条是 2026-09-28T14:02:47Z。之后旧机没有回帖，下列状态都没有更新。
+2026-09-29 约 03:10Z 查 #6079：共 30 条评论，最后一条是 2026-09-29T02:27:53Z。2026-09-28T14:02:47Z 之后的六条（2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z）结清或改写了下表的几行。已结清的行留在表里、注明出处，方便对照；交给旧机前再查一次 #6079，有新回帖就按同样办法更新。
 
 | 事项 | 怎样算结清 |
 |---|---|
-| PLM 连接「新建同 id」绕行前的只读预检（12:51:17Z） | 旧机回帖预检的布尔、枚举、键名。先绕行还是等 R61（#6144）由 owner 定；#6144 进 R61 的话，绕行在 R61 后回 409。 |
-| 客户 DBA 是否已轮换 PLM 只读口令 | owner 确认。 |
-| 混表清理 2b（11:56:06Z 已定：保留与表名后缀一致的项目，另一项目的行置为无效） | 旧机回帖计数与状态词。执行前先只读计数该表上启用的自动化规则，按触发类型分组：`SELECT trigger_type, count(*) FROM automation_rules WHERE sheet_id = :'sid' AND enabled IS TRUE GROUP BY 1 ORDER BY 1;`（列名见 `zzzz20260413120000_create_automation_rules.ts:27-33`）。回帖还要写明走的是界面还是 SQL：行修订由应用写（`multitable/record-history-service.ts`），`meta_records` 上没有写修订的触发器，所以直接 SQL `UPDATE` 不会留下 06:39:16Z 回滚说明所依赖的行修订。 |
+| PLM 连接「新建同 id」绕行前的只读预检（12:51:17Z） | **已结清，不再需要。** 没有走「新建同 id」，旧机在演示机上就地重新加密了这条连接的口令（#6079 2026-09-29T01:26:41Z）。 |
+| 客户 DBA 是否已轮换 PLM 只读口令 | **已结清。** owner 2026-09-29 裁决不轮换，已接受风险（01:56:03Z）。 |
+| 混表清理 2b（11:56:06Z 已定：保留与表名后缀一致的项目，另一项目的行置为无效） | **已结清。** 2026-09-29 已执行，走的是 SQL（00:37:05Z）。按本文原先的说明，直接 SQL 不留行修订（行修订由应用写，`multitable/record-history-service.ts`）；回滚靠同帖所说演示机上保存的 id 清单与回滚脚本。执行中停用又恢复的自动化规则，在界面上重新启用会被拒，已另立 issue #6155（01:49:32Z）。 |
 | BOM 层级 0 根选择规则的客户预设是否已配 | 旧机只报拉取动作 `plm.stock-preparation.pull-bom.v1` 的配置里有没有 `rootSelection` 块（布尔）。客户对该规则尚未确认（`customer-anomaly-triage-20260918.md:9`「规则待确认」）；在演示机加配置并重启由 owner 定，重启方式见 `stock-prep-root-selection-config.md`。 |
 | R60 之后客户反馈各项修复的界面逐项回归 | 旧机或 owner 逐项回帖通过或不通过。 |
 | 确认账本表头改中文（2c） | owner 在旧机亲自执行后回帖计数。 |
-| R60 收口：定时试拉 200 ready、非属主操作员 dry-run 通过 | PLM 连接恢复后，旧机回帖四项结果（12:51:17Z「绕行后的核对」）。 |
-| 备料预检 `checks.carryTargetBinding.ownershipState` | owner 以管理员登录后在浏览器读（10:37:13Z 只定位了端点，没有调用）。现在还决定 C5 与 §6.2 的 #6142 行。 |
-| R60 wrapper 细节：pm2 命令解析到的路径、日志首段 `pm2 home:` 那一行、是否传了 `-Pm2Home` | 旧机在 R61 预检笔记里补上（10:34:09Z 回帖里没有）。 |
+| R60 收口：定时试拉 200 ready、非属主操作员 dry-run 通过 | **大部分已结清**（01:26:41Z）：PLM 连接已恢复，启动日志 `Loaded 1 data sources`、没有 skipped；定时试拉不再报 `CONNECTION_CANONICAL_UNAVAILABLE`，改报 409 `TARGET_SHEET_FOREIGN_PROJECT`（同帖：它拉的项目号不在该表里，守卫按设计拒绝），所以只要它还拉这个项目号，就不会是 200 ready；owner 会话对保留项目的试算回 200、`manual_confirm_required`。**还缺一项**：12:51:17Z「绕行后的核对」第 2 项要的是**非属主操作员**的试算，01:26:41Z 用的是 owner 会话。旧机回帖一个布尔。 |
+| 备料预检 `checks.carryTargetBinding.ownershipState` | **已结清**（01:26:41Z）：`owned_by_this_project`，`carryWouldRefuseWith = null`，`ready true`，`blockerCount 0`。结转与导出一侧因此已有答案；「通知下一步」一侧仍看 C5。 |
+| R60 wrapper 细节：pm2 命令解析到的路径、日志首段 `pm2 home:` 那一行、是否传了 `-Pm2Home`；**经 WMI 起升级子进程时，环境变量怎么传进去** | 旧机在 R61 预检笔记里补上（10:34:09Z 回帖里没有）。最后一项决定选项 B 能不能用（§1.4）。 |
 | `app.env` 重复键普查（13:52:05Z 请求） | 旧机回帖 C7 的输出，并回答 C7 末尾的两个问题。 |
 | 演示机是否配置了交接链 | C4。 |
 | 加密存储普查 | C6。 |
 | 演示机的产品模式（决定「任务」入口出不出现） | 旧机报一个枚举（默认、考勤专注、PLM 工作台）。 |
 | 复制验收要用的测试身份是否存在 | 旧机报三个身份各自是否存在（布尔）。新建需要 owner 放行（§6.1）。 |
 | 上机当月是十月时的次月审计分区 | C3。R60 时 2026-09、2026-10 两个分区都在（10:37:13Z）。 |
-| 普通账号的登录令牌是否带租户声明 `tenantId` | 旧机回报一个布尔。登录时只有两种情况会写入这项声明：账号恰好有一条启用的 `user_orgs` 成员关系，或登录时点名了一个自己所属的组织（`packages/core-backend/src/auth/AuthService.ts:309`、`:359-360`、`:387-421`）。所以不看任何令牌，用库里的计数就能判断：`SELECT CASE WHEN n = 0 THEN '0' WHEN n = 1 THEN '1' ELSE '2+' END AS active_memberships, count(*) AS active_users FROM (SELECT (SELECT count(*) FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active) AS n FROM users u WHERE u.is_active) t GROUP BY 1 ORDER BY 1;`（只读事务，只出计数）。「0」或「2+」的账号，按上面的规则登录令牌不带这项声明。#6151 若进包，这些账号在「检查这个源」上得到 403 `TENANT_CLAIM_REQUIRED`。PR #6140 正文把「无租户声明」称为演示机形态，但没有给出处。任何令牌都不贴出来。 |
+| 普通账号的登录令牌是否带租户声明 `tenantId` | **开发机已在 #6079 2026-09-29T02:27:53Z 请旧机跑四条只读计数（Q1–Q4），按那一帖回帖**；它同时是 #6151 进 R61 的条件 ②（§6.3）。下面这条计数与该帖的 Q2 口径相同，留作对照，不必重复跑。依据：登录时只有两种情况会写入这项声明：账号恰好有一条启用的 `user_orgs` 成员关系，或登录时点名了一个自己所属的组织（`packages/core-backend/src/auth/AuthService.ts:309`、`:359-360`、`:387-421`）。所以不看任何令牌，用库里的计数就能判断：`SELECT CASE WHEN n = 0 THEN '0' WHEN n = 1 THEN '1' ELSE '2+' END AS active_memberships, count(*) AS active_users FROM (SELECT (SELECT count(*) FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active) AS n FROM users u WHERE u.is_active) t GROUP BY 1 ORDER BY 1;`（只读事务，只出计数）。「0」或「2+」的账号，按上面的规则登录令牌不带这项声明。#6151 若进包，这些账号在「检查这个源」上得到 403 `TENANT_CLAIM_REQUIRED`。PR #6140 正文把「无租户声明」称为演示机形态，但没有给出处。任何令牌都不贴出来。 |
 
 ---
 
@@ -484,15 +537,17 @@ gh pr list --state open --limit 500 --json number,files \
 
 - **Kysely 的排序与单事务：** 读的是公开发布的 kysely 0.28.8 源码（`dist/cjs/migration/migrator.js`、`dist/cjs/dialect/postgres/postgres-adapter.js`），版本取自 `pnpm-lock.yaml:3222`。演示机包里实际装的版本没有核对。
 - **421 → 425（或 423）：** 421 来自 #6079 2026-09-28T10:37:13Z。终值取决于打包点、是否排除任务迁移，以及打包前有没有别的迁移合入。
-- **复制入口谁能看到：** 读了门控代码（`univer-meta.ts:9250-9268`、`permission-service.ts:2032-2059`），没有实际运行。
+- **复制入口谁能看到：** 读了门控代码（`univer-meta.ts:9259-9279`、`permission-service.ts:2032-2059`），没有实际运行。#6147 之后可见人群不变，依据是该 PR 正文的调用点分析，本文没有另外核对。
 - **「任务」入口只在默认外壳出现：** 读了 `App.vue`。演示机用哪种外壳不知道。
 - **审批「审批表单」页的改动：** 只确认了改动文件，没有核对具体控件和可见人群。
 - **G14 真库用例：** #6112 正文说当年的红是测试夹具问题，已拆成 G14a、G14b。main `68578b56f` 的 Plugin System Tests 里，test (20.x)「Run multitable real-DB integration」这一步成功，宿主文件 `multitable-conditional-rule-enforce-realdb.test.ts` 32 例通过。CI 该步只输出到文件级，没有逐例核对 G14a、G14b 的名字。
 - **选项 C 的可行性：** 只做了文本合并模拟。没有构建，没有跑 CI，也没有算出发布分支上 `s6a-package-provenance-pins.json` 是否自洽。
 - **pm2 在演示机上的行为**（pm2-runtime 无在线应用约 8–11 秒自退、命名管道对所有 home 通用）：来自 `handoff-r59-two-machine-20260924.md:34`、`:39` 在开发机上的实测。该文自己写明演示机上的 pm2 版本没有核对。
-- **C6 的推断**（「R60 之前封存的 `enc:` 值现在都解不开」）：来自 #6079 2026-09-28T02:03:25Z 对密钥历史的叙述，加上 `encrypted-secrets.ts` 的代码，没有按存储逐条实测。计数只是可能受影响的值的上限。
+- **C6 的推断**（「R60 之前封存的 `enc:` 值用新密钥解不开」）：来自 #6079 2026-09-28T02:03:25Z 对密钥历史的叙述，加上 `encrypted-secrets.ts` 的代码。PLM 连接这一条已被实际证实：先是解不开，就地重加密后能装载（01:26:41Z）。其余存储没有逐条实测，计数只是可能受影响的值的上限。
 - **C6 的日志切分方法与日志文件位置：** 沿用旧机 R60 复核的做法。pm2-runtime 主机上后端日志是否写到 `ecosystem.config.cjs:71-72` 配置的文件，没有核对。
-- **根选择订正里「演示机不用 `pm2 restart`」：** 依据是交接文档对托管方式的描述。在运行中的 pm2-runtime 上执行 `pm2 restart --update-env` 能否读到 `app.env` 的改动，没有核对，订正也不依赖这一点。
+- **选项 B 的变量传不进经 WMI 起的进程（§1.4）：** 依据是 Windows 的进程创建方式（经 WMI 创建的进程由 WMI 服务一侧创建，不继承调用方会话里设的变量），加上 #6079 2026-09-28T10:34:09Z 对 wrapper 的描述。wrapper 不在仓库里，本文没见过它怎么拼命令，也没在演示机上试过。§1.4 的布尔探针能直接回答。
+- **演示机上后端的环境从哪里来：** 计划任务起的是 `start-pm2-runtime-persistent.bat`，再由它起 pm2-runtime（`handoff-r59-two-machine-20260924.md:22`）。这个 .bat 不在仓库里：`git grep -l 'MetaSheet-PM2\|pm2-runtime' origin/main -- scripts ':!*.md'` 只列出升级脚本和它的测试。它是否用 `ecosystem.config.cjs` 启动（从而「同一个键取第一次出现的那行」），要看这个 .bat 才能定。C7 与 `stock-prep-root-selection-config.md` 都受这一点影响。
+- **根选择订正里「改了 `app.env` 之后不能只用 `pm2 restart`」：** 依据是升级脚本 `:1360-1362` 的注释（单纯 restart 时 pm2 不能可靠地重读环境），没有在演示机上核对。01:26:41Z 那次 `pm2 restart`（`PM2_HOME` 指向 `.pm2-runtime`）让后端 33 秒恢复，说明在运行中的 pm2-runtime 上 restart 能把后端拉起来；那次没有改 `app.env`，回答不了重读环境的问题。
 - **#6146 的三条回归：** 读的是 `cd89c74dd` 上的界面代码与该 PR 正文，没有在浏览器里看过。
 - **#6144 会进 R61：** `gh` 显示它是 OPEN。合入前的核验是否已经完成，本文没有核对，不能当作事实。
 
@@ -502,5 +557,5 @@ gh pr list --state open --limit 500 --json number,files \
 
 - 上机手册：`handoff-r59-two-machine-20260924.md` §2–§3。
 - 复制数据表验收：`copy-sheet-r61-acceptance-checklist.md`。
-- 上机沟通：issue #6079（本文引用的评论：2026-09-28T02:03:25Z、06:39:16Z、08:24:49Z、09:01:43Z、10:34:09Z、10:37:13Z、11:56:06Z、12:51:17Z、13:52:05Z、14:02:47Z）。
+- 上机沟通：issue #6079（本文引用的评论：2026-09-28T02:03:25Z、06:39:16Z、08:24:49Z、09:01:43Z、10:34:09Z、10:37:13Z、11:56:06Z、12:51:17Z、13:52:05Z、14:02:47Z；2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z）。
 - 决策登记：`decision-register.md` R-18、R-19、R-20。

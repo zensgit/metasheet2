@@ -45,7 +45,7 @@
 
 脚本模板在运维机 `%LOCALAPPDATA%\Temp\claude-auto24\rNN\`（不入库：含主机地址）。以 r59 为模板复制成 `r60`：
 
-1. **准备**：`sed 's/r59/r60/g'` 生成 `r60-build-and-ship.sh` 与 `upgrade-222-r60.ps1`；`multitable-onprem-package-upgrade-inplace.ps1` **从 `scripts/ops/` 重新复制**（自 #6131 起该脚本是纯 ASCII，PS 5.1 下不需要 BOM；要加就只加一次，见第 2 节订正）。旧拷贝没有 pm2-runtime 探测，不能再用。wrapper 里**不要**再加 `PM2_HOME`（见第 2 节「下次上机改法」）。
+1. **准备**：`sed 's/r59/r60/g'` 生成 `r60-build-and-ship.sh` 与 wrapper `upgrade-<演示机>-r60.ps1`（文件名按运维机本地模板）；`multitable-onprem-package-upgrade-inplace.ps1` **从打包提交重新取**：`git show <打包提交>:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`，不要从 `git pull` 到 main 之后的工作区复制（main 可能比打包提交新；包里不带这个脚本，只能对打包提交核对；做法与原因见 `r61-release-checklist-draft-20260928.md` C8）。顺序固定为：替换本地副本 → 重跑本地门禁 → 上机（自 #6131 起该脚本是纯 ASCII，PS 5.1 下不需要 BOM；要加就只加一次，见第 2 节订正）。旧拷贝没有 pm2-runtime 探测，不能再用。wrapper 里**不要**再加 `PM2_HOME`（见第 2 节「下次上机改法」）。
 2. **标记**：只加本批 diff 里真实存在的标识符或文件哈希；新迁移按名字数 `kysely_migration`。带反斜杠的内容用文件写、别用 heredoc（会折叠成控制字符），写完按字节扫控制字符。
 3. **只读预检**：审计分区（当月+下月）、最近迁移、磁盘、`pm2 list`（手工执行时先设 `$env:PM2_HOME='<用户目录>\.pm2-runtime'`），另查一次 `Get-ScheduledTask -TaskName 'MetaSheet-PM2' | Select-Object TaskPath, TaskName, State`，确认计划任务恰好一个，并记下它的 `TaskPath`。升级脚本靠它探测托管方式、在 restart not found 后回退拉起。若 `pm2 list` 输出里出现 `Spawning PM2 daemon`，说明 pm2-runtime 此刻没在跑，这条命令刚在本会话里拉起了一个空 daemon：先停下来查后端为什么没在跑，别在这个状态下升级。
 4. **打包上机**：`bash r60-build-and-ship.sh all`（CI 打包 → 校验 sha256 / gitSha / base path `/assets/` → scp → 远端 sha 复核 → wrapper：pg_dump 备份 → 就地升级含 migrate → health → 标记 → 前端 smoke → 定时试拉 → pm2）。
@@ -59,7 +59,7 @@
 | | 开发机（新） | 运维机（能连演示机） |
 |---|---|---|
 | 职责 | 写代码、PR、反驳、终审、合并 | 上机、上机验证、演示机日志 |
-| 同步 | 推 PR → main | 上机前 `git pull` 到 main |
+| 同步 | 推 PR → main | 上机前 `git pull` 到 main（上机用的升级脚本仍取打包提交上的版本，见第 3 节第 1 步） |
 
 1. 一支 PR 只在一台机器上改；换机先推、再拉。
 2. 在 issue/PR 上注明归属（「开发机进行中」「待上机 R60」）。
