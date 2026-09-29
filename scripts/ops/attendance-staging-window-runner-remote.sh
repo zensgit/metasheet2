@@ -1937,44 +1937,43 @@ action_migrate_rehearse() {
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} SET session_replication_role = 'replica';"
 
-  # pg_restore pins each worker's search_path to the empty string. One already-applied
-  # attendance SQL function calls another public function by bare name, so COPY of a table whose
-  # CHECK constraint invokes it fails even though both functions are present. Restore pre-data
-  # first, apply a clone-only function search_path for that exact legacy shape, then restore data
-  # and post-data. Reset the clone function afterward so the rehearsal migration starts from the
-  # same function configuration as the source DB. The real staging DB is queried read-only and is
-  # never altered by this compatibility shim.
+  # pg_restore pins each worker's search_path to the empty string. Already-applied attendance
+  # SQL/PL/pgSQL functions call other public functions by bare name (for example
+  # attendance_w4_scheduled_name_bytes -> attendance_w4_canonical_date_text, and
+  # attendance_w4_job_proof_vector_valid -> attendance_w4c3a_exact_object_keys), so COPY of a
+  # table whose CHECK constraint invokes one fails even though every function is present (run
+  # 36539805352: attendance_import_jobs). A shim for one named function does not keep up with new
+  # ones, so the shim is general: restore pre-data, give every candidate function a clone-only
+  # search_path, restore data and post-data (expression indexes also evaluate them), then RESET
+  # the same functions so the rehearsal migration starts from the source DB's exact function
+  # configuration. Candidates are read READ-ONLY from the real staging DB: public-schema sql and
+  # plpgsql functions that are not extension members and do not already pin a search_path (a
+  # pinned one is left untouched). The real staging DB is never altered by this shim. After the
+  # RESET a digest of every public function's (signature, proconfig) must match the source, or the
+  # rehearsal stops. Limit: the shim goes on after pre-data, so a function body executed while
+  # pre-data itself is being restored is not covered.
   local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
-  local legacy_fn_signature="public.attendance_w4_scheduled_name_bytes(uuid, uuid, date)"
-  local legacy_fn_present legacy_fn_def legacy_fn_config legacy_fn_shim="no"
+  local shim_list="${OUTPUT_DIR}/rehearsal-search-path-shim.txt"
+  local shim_count
   : > "$restore_log"
 
-  legacy_fn_present="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
-    -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_proc WHERE oid = to_regprocedure('${legacy_fn_signature}');" \
-    2>/dev/null | tr -d '[:space:]')"
-  [[ "$legacy_fn_present" =~ ^[01]$ ]] \
-    || fail "rehearsal restore compatibility probe returned a non-boolean function count"
-  if [[ "$legacy_fn_present" == "1" ]]; then
-    legacy_fn_def="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
-      -v ON_ERROR_STOP=1 -c "SELECT pg_get_functiondef(to_regprocedure('${legacy_fn_signature}'));" 2>/dev/null)"
-    legacy_fn_config="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
-      -v ON_ERROR_STOP=1 -c "SELECT COALESCE(array_to_string(proconfig, ','), '') FROM pg_proc WHERE oid = to_regprocedure('${legacy_fn_signature}');" \
-      2>/dev/null | tr -d '[:space:]')"
-    if [[ "$legacy_fn_def" == *"attendance_w4_canonical_date_text(work_date)"* \
-       && "$legacy_fn_def" != *"public.attendance_w4_canonical_date_text(work_date)"* \
-       && "$legacy_fn_config" != *"search_path="* ]]; then
-      legacy_fn_shim="yes"
-    fi
-  fi
+  docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_candidates_sql)" \
+    > "$shim_list" \
+    || fail "rehearsal restore compatibility: candidate function query against the source DB failed"
+  shim_count="$(rehearsal_shim_validate_signatures "$shim_list")" \
+    || fail "rehearsal restore compatibility: a candidate function signature has an unexpected shape (see rehearsal-search-path-shim.txt); refusing to build ALTER statements from it"
+  log "rehearsal: ${shim_count} function(s) get a clone-only search_path during restore (list: rehearsal-search-path-shim.txt)"
 
   log "rehearsal: restoring pre-data"
   docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=pre-data -U "$pg_user" \
     -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
-  if [[ "$legacy_fn_shim" == "yes" ]]; then
-    log "rehearsal: applying clone-only legacy function search_path compatibility"
-    docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 \
-      -c "ALTER FUNCTION ${legacy_fn_signature} SET search_path = pg_catalog, public;" \
-      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+  if [[ "$shim_count" -gt 0 ]]; then
+    log "rehearsal: applying clone-only function search_path compatibility"
+    rehearsal_shim_sql set "$shim_list" \
+      | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
+      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: applying the clone-only search_path shim failed"
   fi
   log "rehearsal: restoring data"
   docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=data -U "$pg_user" \
@@ -1982,12 +1981,23 @@ action_migrate_rehearse() {
   log "rehearsal: restoring post-data"
   docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=post-data -U "$pg_user" \
     -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
-  if [[ "$legacy_fn_shim" == "yes" ]]; then
-    log "rehearsal: resetting clone-only legacy function compatibility"
-    docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 \
-      -c "ALTER FUNCTION ${legacy_fn_signature} RESET search_path;" \
-      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+  if [[ "$shim_count" -gt 0 ]]; then
+    log "rehearsal: resetting clone-only function search_path compatibility"
+    rehearsal_shim_sql reset "$shim_list" \
+      | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
+      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log" \
+      || fail "rehearsal restore compatibility: resetting the clone-only search_path shim failed"
   fi
+  local source_fn_digest clone_fn_digest
+  source_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the source DB failed"
+  clone_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the rehearsal DB failed"
+  [[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]] \
+    || fail "rehearsal restore compatibility: the clone's public function configuration differs from the source after the shim reset (source=${source_fn_digest:-<none>} clone=${clone_fn_digest:-<none>}); refusing to rehearse on a drifted clone"
+  log "rehearsal: clone function configuration matches the source (digest ${source_fn_digest})"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} RESET session_replication_role;"
 
