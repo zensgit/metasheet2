@@ -4391,7 +4391,7 @@ export class AutomationService {
     const wrote = await this.withTransaction(sheetId, async (query) => {
       // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
       // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
-      // unless the convert flag is 'true'.
+      // unless the conversion flag AND the writer fence are both on.
       await assertFieldSchemaUnchangedAfterFence(query, sheetId, opts.schemaSnapshot ?? null, Object.keys(patch))
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',

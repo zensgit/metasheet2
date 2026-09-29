@@ -3227,7 +3227,7 @@ export class AutomationExecutor {
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
       // Field retype slice 3a (ADR §3.11 row 6): this writer keeps no field-type snapshot of its own, so take one
-      // here, BEFORE the fence (flag-gated: convert flag off ⇒ null, no query). The handler below re-reads the
+      // here, BEFORE the fence (gated: conversion flag or writer fence off ⇒ null, no query). The handler below re-reads the
       // same fields after the fence and refuses if a conversion retyped one while this write was queued.
       const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, effectiveSheetId, Object.keys(patch))
 

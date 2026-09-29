@@ -3,11 +3,13 @@
  * 设计锁：docs/development/multitable-field-retype-first-batch-adr-20260926.md §2「门」与文末「增补 B」。
  *
  * ── 为什么要收成一个函数 ───────────────────────────────────────────────────────────────────────────────
- * 三个端点各抄一份门，抄的时候最容易丢的就是 ⑤ 里的 `canRead`：
- *   - `hasFullTableReadAccess` **不看** `capabilities.canRead`——它只看行级拒读、字段遮罩、公式遮罩三个轴；
- *   - `canManageFields` 单凭 `multitable:manage-schema` 即可为真，与 `canRead` 无关。
- * 于是照着「⑤ = hasFullTableReadAccess」写出来的路由，会让一个只有改结构权、读不了本表的主体过全部五门：预览把每条
- * 记录的 id 交给他，执行让他改写一整列他读不了的数据。⑤ 的完整定义是 **`canRead` 且全表读**，写在这里，只写一次。
+ * 三个端点各抄一份门，抄的时候最容易丢的就是 ⑤ 里的 `canRead`。`canManageFields` 单凭 `multitable:manage-schema`
+ * 即可为真，与 `canRead` 无关；少了 `canRead`，一个只有改结构权、读不了本表的主体会过全部五门：预览把每条记录的 id
+ * 交给他，执行让他改写一整列他读不了的数据。⑤ 的完整定义是 **`canRead` 且全表读**，写在这里，只写一次。
+ *
+ * 这一条是**纵深防御，不是唯一防线**：回调通常是路由的 `hasFullTableReadAccess`，它自 #6147 起自己也先查 `canRead`
+ * （此前只看行级拒读、字段遮罩、公式遮罩三个轴）。本函数**不依赖**回调里的那次检查——回调是调用方给的，换一个实现、
+ * 或者那边的检查被重构掉，这里的判定都不该变。单测用恒真的回调钉住这一行：路由级测试钉不住它，因为真回调会替它拒。
  *
  * ── 顺序锁定 ───────────────────────────────────────────────────────────────────────────────────────────
  * ③ 先于 ④：没有改结构权的人不该从「404 还是 403」里得知这张表是否还在。④ 先于 ⑤：全表读判定要读本表的字段与
@@ -36,7 +38,11 @@ export const FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE =
 export async function judgeFieldRetypeConvertGates(input: {
   capabilities: FieldRetypeConvertGateCapabilities
   sheetLiveness: SheetLiveness
-  /** Axes 1-3 of the full-table read (row-level deny, field mask, formula taint). Called only after ③ and ④ pass. */
+  /**
+   * The caller's full-table read check (the route's `hasFullTableReadAccess`: read on the sheet, then row-level
+   * deny, field mask, formula taint). Called only after ③ and ④ pass AND `canRead` is true — this function does
+   * not rely on the callback looking at `canRead` itself.
+   */
   hasFullTableReadAccess: () => Promise<boolean>
 }): Promise<FieldRetypeConvertGateRefusal | null> {
   // ③ schema authority — the PATCH /fields/:fieldId gate.

@@ -268,9 +268,11 @@ describe('POST /fields/:fieldId/retype-preview (ADR §2)', () => {
   })
 
   test('⑤ checks canRead itself: multitable:manage-schema alone (canManageFields without canRead) ⇒ 403, no scope/scan query, no recordId', async () => {
-    // hasFullTableReadAccess never reads capabilities.canRead, and canManageFields holds on manage-schema alone
-    // (access.ts deriveCapabilities / manage-schema-permission.ts deriveCanManageFields). Without the explicit
-    // canRead check this principal passes all five gates and is handed every rejected recordId of a sheet it cannot read.
+    // canManageFields holds on manage-schema alone (access.ts deriveCapabilities / manage-schema-permission.ts
+    // deriveCanManageFields); without a canRead check this principal passes all five gates and is handed every
+    // rejected recordId of a sheet it cannot read. NOTE: since #6147 the real hasFullTableReadAccess checks canRead
+    // too, so THIS route-level test would stay green if the gate's own check were removed — the gate's line is
+    // pinned where the callback can be stubbed: tests/unit/multitable-field-retype-convert-gates.test.ts.
     const w = () => world({ records: [{ id: 'rec_ok', version: 1, data: { [FIELD]: 'A' } }, { id: 'rec_trail', version: 1, data: { [FIELD]: 'B ' } }] })
     const { res, log, transaction } = await preview(w(), undefined, ['multitable:manage-schema'])
     expect(res.status).toBe(403)

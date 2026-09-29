@@ -102,7 +102,7 @@ export async function applyFencedDerivedDataMerge(
       // Field retype slice 3a (ADR §3.11 row 13, derived variant): `updates` were computed OUTSIDE this fence
       // from formula fields. If a key's field was retyped meanwhile (e.g. formula → string, then string →
       // select), refuse with a SheetWriterBlockedError subclass — the callers' existing skip branch drops the
-      // materialization AND its echo. No query unless the convert flag is 'true'.
+      // materialization AND its echo. No query unless the conversion flag AND the writer fence are both on.
       await assertDerivedMergeTargetsStillDerived(fq, sheetId, Object.keys(updates))
       // lock-exempt: system derived-value materialization — no user actor (a record lock is read-only to system recompute)
       // revision-exempt: derived materialization, no version bump — pure fn of stored inputs, recomputed on next write
