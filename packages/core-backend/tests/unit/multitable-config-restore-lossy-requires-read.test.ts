@@ -328,5 +328,17 @@ describe('config-restore lossy retype-revert requires read on the sheet', () => 
       expect(withRead).toMatchObject({ canRead: true, canManageFields: true })
       expect(await hasFullTableReadAccess(undefined, pool.query, SHEET_ID, access(SCHEMA_AND_READ), withRead)).toBe(true)
     })
+
+    it('refuses when canRead is ABSENT (not just false), before any DB access — only an explicit true reads', async () => {
+      const { hasFullTableReadAccess } = await import('../../src/routes/univer-meta')
+      const { deriveCapabilities } = await import('../../src/multitable/access')
+      const pool = createMockPool()
+      const { canRead: _dropped, ...withoutRead } = deriveCapabilities(SCHEMA_AND_READ.perms, false)
+      const capabilities = withoutRead as unknown as Parameters<typeof hasFullTableReadAccess>[4]
+      const access = { userId: SCHEMA_AND_READ.id, permissions: SCHEMA_AND_READ.perms, isAdminRole: false }
+
+      expect(await hasFullTableReadAccess(undefined, pool.query, SHEET_ID, access, capabilities)).toBe(false)
+      expect(pool.sqlLog).toEqual([])
+    })
   })
 })

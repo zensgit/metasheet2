@@ -9259,7 +9259,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
       // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
       // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
-      // in-transaction re-check) ∧ hasFullTableReadAccess (source, three axes, no counts). The target gate runs
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source: read on the sheet plus the three axes, no counts;
+      // the read is this handler's own `capabilities.canRead`, and /context does not apply the projection fences —
+      // see the #5936 note above — while the copy route's gate reads it as the fences leave it). The target gate runs
       // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
       // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
       // entry, never 500s the load, and logs values-free.
