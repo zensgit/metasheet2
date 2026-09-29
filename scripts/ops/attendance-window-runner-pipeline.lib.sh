@@ -165,3 +165,72 @@ rehearsal_shim_sql() {
     printf 'ALTER FUNCTION %s %s;\n' "$line" "$clause"
   done < "$file"
 }
+
+# Owner-ruled staging migration exclusions (owner 2026-09-29: A-3 stays off staging until the
+# owner approves applying it; "Add owner-ruled exclude"). These are the ONLY names that ever
+# reach migrate.js as MIGRATION_EXCLUDE on the staging runner; an inherited MIGRATION_EXCLUDE is
+# still a hazard that aborts. Removing an entry is a separate owner-ruled change, made together
+# with applying that migration. Each migration lists the tables it would create; the runner
+# proves they are still absent before and after every migration step.
+STAGING_OWNER_EXCLUDED_MIGRATIONS=(
+  zzzz20260919090000_create_approval_template_group_backfill_batches
+)
+STAGING_OWNER_EXCLUDED_TABLES=(
+  approval_template_group_backfill_batches
+  approval_template_group_backfill_batch_groups
+  approval_template_group_backfill_batch_links
+)
+
+# staging_owner_excluded_names
+#   One excluded migration name per line (nothing for an empty list). Returns 1, printing
+#   nothing, if any name is not a plain [A-Za-z0-9_] migration basename.
+staging_owner_excluded_names() {
+  local name re='^[A-Za-z0-9_]+$' out=""
+  for name in ${STAGING_OWNER_EXCLUDED_MIGRATIONS[@]+"${STAGING_OWNER_EXCLUDED_MIGRATIONS[@]}"}; do
+    [[ "$name" =~ $re ]] || return 1
+    out="${out}${name}"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# staging_owner_exclude_csv
+#   The MIGRATION_EXCLUDE value (comma-separated, empty for an empty list). Same validation.
+staging_owner_exclude_csv() {
+  local names
+  names="$(staging_owner_excluded_names)" || return 1
+  printf '%s' "$names" | tr '\n' ',' | sed 's/,$//'
+}
+
+# staging_owner_excluded_tables_present_sql
+#   SQL returning how many of the owner-excluded tables exist (must be 0). Returns 1 if a table
+#   name is not a plain lower-case identifier.
+staging_owner_excluded_tables_present_sql() {
+  local table re='^[a-z_][a-z0-9_]*$' values=""
+  for table in ${STAGING_OWNER_EXCLUDED_TABLES[@]+"${STAGING_OWNER_EXCLUDED_TABLES[@]}"}; do
+    [[ "$table" =~ $re ]] || return 1
+    values="${values}${values:+, }('public.${table}')"
+  done
+  if [[ -z "$values" ]]; then
+    printf '%s' 'SELECT 0;'
+    return 0
+  fi
+  printf 'SELECT count(*) FROM (VALUES %s) AS t(n) WHERE pg_catalog.to_regclass(t.n) IS NOT NULL;' "$values"
+}
+
+# owner_excluded_only_pending <migrate --list output file>
+#   Exit 0 when the listed Pending count is nonzero AND every pending name is an owner-excluded
+#   migration (the pending set is exactly what the owner ruled to keep unapplied); exit 1
+#   otherwise (nothing pending, any other name pending, or an unreadable list). Prints nothing.
+#   Used only to explain a strict pending=0 refusal accurately — it never turns one into a pass.
+owner_excluded_only_pending() {
+  local file="$1" count names name listed=0
+  count="$(sed -n 's/^Pending: \([0-9][0-9]*\)$/\1/p' "$file" | tail -n 1)"
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || return 1
+  names="$(staging_owner_excluded_names)" || return 1
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    grep -qxF -- "$name" <<< "$names" || return 1
+    listed=$((listed + 1))
+  done < <(sed -n 's/^  - \(.*\)$/\1/p' "$file")
+  [[ "$listed" == "$count" ]]
+}
