@@ -27,6 +27,10 @@
 | **R-19** | 「复制数据表（含数据）」目标 Base 门认平台管理员角色（ADR #6094 CS-3 / §4.2） | **目标侧谓词 = 平台管理员角色（`ResolvedRequestAccess.isAdminRole`，仓库唯一口径）∨ `resolveBaseWritable`**，封装为 `resolveCopyTargetWritable`，路由快速拒 / 事务内 DB-fresh 终审 / `/context` `canCopySheet` 三处共用。动因：源侧门轴 ① 在行级开关开着的表上只放行管理员，而 `resolveBaseWritable` 只看 owner 与 base-write 码 → 他人 Base 里的行级表谁都复制不了。管理员臂仍 fail-closed（无身份 / 投影 Base / 目标 Base 缺失或软删 → 拒）；`resolveBaseWritable` 本身与其它调用方不改。放宽方向：owner 2026-09-28 批复「同意」协调方建议第 5 项，非默认前进；按册例标记并留 24h 否决窗 | T（owner 已批） | RULED（`Ratified-by-default-2026-09-28`，24h 可否决） | ADR #6094 CS-3 / §4.2；PR #6112 的堆叠 PR（base `feat/multitable-copy-sheet-s1`） |
 | **R-20** | 「复制数据表（含数据）」去重账本不可用时的姿态（ADR #6094 CS-16 / §7.7 / §8） | **fail-closed**：账本缺表（42P01）或缺 `intent_kind` 列（42703，迁移 `zzzz20260927121000` 未跑）时，复制回 503 `COPY_TEMPORARILY_UNAVAILABLE`、零写入；路由的 warn 日志带 SQLSTATE 分诊并点名待查迁移，响应体不带。取代 S1 的 fail-open——S1 在第二个事务里**不带意图锁**重跑复制，同意图并发各建一张表，违反 CS-16「窗口内同意图只建一张表」。备选 (a)「回退事务保留意图锁」也被否：内存探针实测两个并发同意图仍建出 **2 张表**（锁只让后到者排队，拿到锁后读不了账本，找不到先到者的结果可重放）。收紧方向；模板安装的 fail-open 不变（那边多一个 Base 是被接受的代价）。上线仍须先跑迁移，窗口内复制不可用、不会多建表 | T | RULED（`Ratified-by-default-2026-09-28`，24h 可否决） | ADR #6094 §7.7（2026-09-28 修订）/ §8；PR #6136（PR #6112 终审后续 3） |
 | **R-06** | 通用备料线 G0 | **从未 ratify**;该线继续 PARKED。但其 P2-3 修复原语**其后经接管线 pack-install 路由接线启用**(#5101/#5108),属接管章程管辖,**V3 抽取债已记账** | T | RULED | 账本 O-5(措辞已修正:原"零 arm 纪律仍成立"会误导) |
+| **R-24** | R61 打包点 | **main 原样**，打包提交为同时含 #6144 与 #6162 的 first-parent 提交（PACKAGE_COMMIT_TBD）；#6157、#6151 不进 R61；任务线两条迁移随包执行，上机前 C2 必做 | O | RULED（owner 2026-09-29 在开发机窗口批复「同意」） | #6079 2026-09-29T03:53:39Z；R61 上机清单（`r61-release-checklist-draft-20260928.md` §1.0） |
+| **R-25** | 合并前免重跑 CI 的范围 | **仅限文档、前端、测试类 PR**，且同时满足两条：main 自该 PR 合并基以来的提交没有改动该 PR 的任何文件；`git merge-tree` 无冲突。权限、租户、锁、迁移、凭据类与带 pin 文件的 PR 照旧在合并前重跑。这是对章程「main 前进后合并前 rebase 重跑」（`AGENTS.md:59`）的收窄例外，只用于备料接管线的开发机窗口；另一开发窗口不采用 | T（owner 已批） | RULED（owner 2026-09-29 批复「同意」；按册例留 24h 否决窗） | 本册 |
+
+编号 R-21、R-22、R-23 已由在开的 PR #6149、#6145、#6162 占用（三者都在 R-20 之后插行），所以本表接着 R-06 之后用 R-24、R-25。
 
 ## 二、待裁(owner)
 
