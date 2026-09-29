@@ -1330,12 +1330,13 @@ const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles
 const STOCK_PREP_OPERATOR = Object.freeze({ id: 'u_sp', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_ADMIN] })
 
 // THE VERIFIED TENANT CLAIM EACH PRINCIPAL'S TOKEN CARRIES — what the host sets as
-// `req.authenticatedTenantId`, and only when the token really has one. The route takes its tenant
-// from this and from nothing else, so a principal that is meant to be tenant-bound names its claim
-// HERE, per principal. It is deliberately not derived from `user.tenantId`: that field is what the
-// host fills from the `x-tenant-id` header for a claimless token, and a harness that promoted it to
-// a claim would pass the very gate it is supposed to exercise. The claimless and cross-tenant
-// principals live in stock-preparation-source-preflight-tenant-scope.test.cjs.
+// `req.authenticatedTenantId`, and only when the token really has one. The route proves its tenant
+// from this claim (or, for a claimless token, from a carried tenant the host directory vouches for),
+// so a principal that is meant to be tenant-bound names its claim HERE, per principal. It is
+// deliberately not derived from `user.tenantId`: that field is what the host fills from the
+// `x-tenant-id` header for a claimless token, and a harness that promoted it to a claim would pass
+// the very gate it is supposed to exercise. The claimless and cross-tenant principals live in
+// stock-preparation-source-preflight-tenant-scope.test.cjs.
 const TOKEN_TENANT_CLAIMS = new Map([
   [LOGGED_IN, TENANT_ID],
   [INTEGRATION_READER, TENANT_ID],
@@ -1437,6 +1438,13 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
       readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+      // The host membership directory the route's tenant proof asks (resolveProvenOwnTenant). Every
+      // principal this suite names is a member of TENANT_ID and of nothing else; the claimless,
+      // cross-tenant and directory-absent principals live in
+      // stock-preparation-source-preflight-tenant-scope.test.cjs.
+      tenantPrincipalDirectory: {
+        async verifyTenantMembership({ tenantId }) { return { member: tenantId === TENANT_ID } },
+      },
     },
     // A caller may inject a recording logger (see `createRecordingLogger` below, R-08) to observe
     // what `routeLogger` is wired with, or explicitly pass `logger: null` to mean NO logger at all

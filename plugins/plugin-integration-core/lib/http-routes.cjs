@@ -666,6 +666,7 @@ const {
 const {
   StockPreparationOperatorScopeError,
   resolveOperatorValueScope,
+  resolveProvenOwnTenant,
 } = require('./stock-preparation-operator-scope.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
@@ -7020,7 +7021,7 @@ function requireStockPreparationAudit() {
     // unconfigured deployment falls back to the shipped default plan and still gets a useful answer —
     // reachability, data presence and detected shape do not depend on the comparison.
     //
-    // TENANT: THE VERIFIED TOKEN CLAIM ONLY, RESOLVED ONCE, BEFORE ANYTHING IS LOOKED AT.
+    // TENANT: PROVEN, RESOLVED ONCE, BEFORE ANYTHING IS LOOKED AT.
     //
     // The lookup below used to be `getTableAction({ actionId })` — no tenant. With the persisted
     // binding store wired (index.cjs wires it wherever there is a SQL db) the registry refuses a
@@ -7036,13 +7037,28 @@ function requireStockPreparationAudit() {
     // fills from the `x-tenant-id` REQUEST HEADER for a claimless token, and it lets a tenantless
     // platform admin name `?tenantId=`. Resolving the BOUND source under that tenant would have
     // turned "you must already know another tenant's source id" into "you need only name the
-    // tenant". So the tenant is `resolveVerifiedClaimTenantId`: the claim in the verified token, or a
-    // refusal that is the same sentence whichever tenant was named and costs no lookup at all.
+    // tenant".
     //
-    // WHY NOT `resolveOperatorValueScope`. Its first check is a stock-prep tier, and this route is
-    // deliberately NOT in that namespace (see the route table): routing it through the scope would
-    // refuse the `integration:read` holders the route exists for. That is a permission change, and
-    // it is not this fix's to make.
+    // So the tenant is PROVEN, with the proof every value-bearing stock-prep read already uses:
+    // `resolveProvenOwnTenant` (stock-preparation-operator-scope.cjs, the tenant half of
+    // `resolveOperatorValueScope`, without its stock-prep tier). It prefers the verified token claim
+    // and refuses a carried tenant that contradicts it; a principal with no tenant of its own is
+    // refused; a tenant named in the request that is not the principal's is refused; and the HOST
+    // must vouch, through its membership directory, that this principal belongs to that tenant.
+    // A claimless token whose header names a tenant is therefore served only for a tenant the host
+    // says the principal is a member of, and refused for any other — before any lookup, with a
+    // refusal that does not depend on whether the named tenant has a source, has nothing, or does
+    // not exist. With no directory wired the route refuses (501); it never falls back to the header.
+    //
+    // WHY THE PROOF AND NOT THE SCOPE. The scope's first check is a stock-prep tier, and this route
+    // is deliberately NOT in that namespace (see the route table): the tier check would refuse the
+    // `integration:read` holders the route exists for. `requireAccess(req, 'read')` stays the only
+    // permission gate; the proof grants nothing and only decides WHICH tenant.
+    //
+    // THE STAGED CLAIM DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED, default off) is checked
+    // right after the proof. It is a no-op while the flag is off. With it on, the load below would
+    // already refuse a claimless caller through `resolveTenantId`; checking it here moves that
+    // refusal in front of the lookup instead of after it, so no refusal on this route costs a lookup.
     //
     // ONE VALUE. The lookup, the binding peek and the load all take `tenantId` from here. The scoped
     // helpers below still run their own resolver, but they are handed this value first, so they can
@@ -7054,7 +7070,13 @@ function requireStockPreparationAudit() {
         VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS,
         'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
       )
-      const tenantId = resolveVerifiedClaimTenantId(req, input)
+      const { tenantId } = await resolveProvenOwnTenant({
+        user: getUser(req),
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      assertVerifiedTenantClaim(req, tenantId)
       const workspaceId = resolveWorkspaceId(req, input)
 
       // Server config plus this tenant's persisted binding, never a request input. An unconfigured

@@ -17,9 +17,16 @@
 // no tenant claim. The report is not values-free: `checks.projectData.livenessSamples` carries up to
 // two observed project numbers. Resolving the bound source under a header-chosen tenant would
 // therefore have made an existing cross-tenant read easier (no source id needed) rather than fixing
-// anything. So the route now takes its tenant from the VERIFIED token claim only
-// (`resolveVerifiedClaimTenantId`), once, before it looks at anything — and that one value drives the
-// lookup, the binding peek and the load.
+// anything. So the route now PROVES its tenant, once, before it looks at anything — and that one
+// value drives the lookup, the binding peek and the load.
+//
+// THE PROOF IS THE ONE EVERY VALUE-BEARING STOCK-PREP READ ALREADY USES: `resolveProvenOwnTenant`
+// (stock-preparation-operator-scope.cjs), the tenant half of `resolveOperatorValueScope` without its
+// stock-prep tier. It prefers the verified claim and refuses a carried tenant that contradicts it,
+// refuses a principal with no tenant and a request-named tenant that is not the principal's, and makes
+// the HOST DIRECTORY vouch for the (principal, tenant) pairing. So a claimless token whose header names
+// the caller's OWN tenant is served when the directory says "member", and a header naming any other
+// tenant is refused — before any lookup, with the same answer whatever that tenant holds.
 //
 // WHAT THIS SUITE PINS (each has a RED witness — see the PR body's mutation table):
 //   TS-01 REPRODUCTION. Binding store wired, the binding owner, the four query shapes the two web
@@ -28,20 +35,29 @@
 //   TS-03 A NON-OWNER WITH THE RIGHT PERMISSION. The lookup resolves the bound source; the load is
 //         handed the REQUESTER's identity (no delegation); the host's refusal is what they get, and
 //         nothing was read. A stock-prep operator without an integration tier is still 403.
-//   TS-04 THE PRINCIPAL TABLE: claim, no claim + own header, no claim + another tenant's header, no
-//         claim and no header, platform admin (claimed / tenantless / header).
-//   TS-05 NAMING ANOTHER TENANT TEACHES NOTHING. A tenant that has a source and a binding and a tenant
-//         that has nothing answer with the same status, code and body, and neither costs any IO.
+//   TS-04 THE PRINCIPAL TABLE: claim; no claim + own header with the directory vouching / refusing /
+//         absent; no claim + another tenant's header; no claim and no header; a claim the directory
+//         refuses; two memberships; platform admin (claimed / tenantless / header). Each row names
+//         exactly which (principal, tenant) pairs the directory was asked about.
+//   TS-05 NAMING ANOTHER TENANT TEACHES NOTHING. A tenant that has a source and a binding, a tenant
+//         that has nothing and a tenant that never existed answer with the same status, code and body,
+//         and none of them costs a lookup.
 //   TS-06 THE SOURCE-NAMING (API) SHAPE IS HELD TO THE SAME TENANT.
 //   TS-07 ONE TENANT VALUE: the binding lookup, the binding peek and the load all carry it.
 //   TS-08 THE SWALLOW IS GONE. "Not configured" still degrades to the default plan; a binding store
 //         that cannot answer is a fixed, values-free refusal and nothing is read.
 //   TS-09 REFUSALS ARE VALUES-FREE: no tenant id, no source id, no principal, no store message.
-//   TS-10 STRUCTURE: the handler resolves the claim tenant before the lookup and reaches for no
-//         request-steerable resolver.
+//   TS-10 STRUCTURE: the handler proves the tenant (and applies the staged claim door) before the
+//         lookup, hands the proof the verified claim, every request-carried tenant and the host
+//         directory, and reaches for no request-steerable resolver.
+//   TS-11 THE STAGED CLAIM DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED). Armed, a claimless
+//         caller the directory vouches for is refused BEFORE the lookup; a claim-bearing one is
+//         served. Disarmed, the same claimless caller is served.
 //
 // Hermetic: no DB, no network. The binding store is the REAL one over an in-memory db; the external
-// system registry, the adapter, the host directory and the logger are spies.
+// system registry, the adapter, the host directory and the logger are spies. The directory spy answers
+// from a membership table, the way the host's (packages/core-backend/src/services/
+// tenant-principal-directory-boundary.ts) answers from `user_orgs`: "member" only for a listed pair.
 //
 // WHAT THE REGISTRY SPY DOES AND DOES NOT PROVE. It refuses a `data-source:*` load whose principal is
 // not the stamped owner, which is the host facade's rule, restated here so a non-owner's answer can be
@@ -73,6 +89,19 @@ const SYS_DEPLOY_DEFAULT = 'sys_deploy_default'
 const SYS_INVENTED = 'sys_invented'
 
 const OWNER_OF_OWN = 'u_owner_own'
+
+// THE HOST DIRECTORY'S MEMBERSHIP TABLE, as `user_orgs` would hold it: one row per (principal, tenant)
+// pair. A principal not listed has no membership at all — the shape of an account created by a
+// bootstrap script or by the user-management screen without an organisation.
+const MEMBERSHIPS = Object.freeze({
+  [OWNER_OF_OWN]: Object.freeze([TENANT_OWN]),
+  u_reader_own: Object.freeze([TENANT_OWN]),
+  u_reader_empty: Object.freeze([TENANT_EMPTY]),
+  u_floor_own: Object.freeze([TENANT_OWN]),
+  u_member_own: Object.freeze([TENANT_OWN]),
+  u_prober: Object.freeze([TENANT_OWN]),
+  u_admin: Object.freeze([TENANT_OWN]),
+})
 
 // Made-up project numbers. They exist so a leak is OBSERVABLE: a response that carries one of
 // tenant-other's says whose source was read.
@@ -227,6 +256,8 @@ async function mount({
   systems = DEFAULT_SYSTEMS,
   withBindingStore = true,
   bindingStoreFails = false,
+  memberships = MEMBERSHIPS,
+  withDirectory = true,
   actions,
   bindings = [
     { tenantId: TENANT_OWN, workspaceId: null, externalSystemId: SYS_OWN },
@@ -306,11 +337,13 @@ async function mount({
     set: realStore.set,
   }
 
-  // Wired so that a fix which started consulting it would be visible; this route must not.
+  // The host directory the route's tenant proof asks. It answers from `memberships` only, and records
+  // every question, so each case can say exactly which (principal, tenant) pairs were asked about.
   const tenantPrincipalDirectory = {
     async verifyTenantMembership(input) {
       calls.directory.push({ userId: input.userId, tenantId: input.tenantId })
-      return { member: true }
+      const tenants = Object.prototype.hasOwnProperty.call(memberships, input.userId) ? memberships[input.userId] : []
+      return { member: tenants.includes(input.tenantId) }
     },
   }
 
@@ -347,7 +380,7 @@ async function mount({
       readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
-      tenantPrincipalDirectory,
+      ...(withDirectory ? { tenantPrincipalDirectory } : {}),
       ...(withBindingStore ? { stockPreparationSourceBindingStore: bindingStore } : {}),
     },
     logger,
@@ -555,53 +588,95 @@ async function main() {
   // TS-04 — the principal table
   // -------------------------------------------------------------------------
   await run('TS-04 each principal ends up with the documented tenant and answer', async () => {
-    const REFUSED_NO_CLAIM = { status: 403, code: 'TENANT_CLAIM_REQUIRED' }
-    const REFUSED_MISMATCH = { status: 403, code: 'TENANT_MISMATCH' }
+    const refused = (code, status = 403) => ({ status, code })
+    const TENANT_REQUIRED = 'OPERATOR_SCOPE_TENANT_REQUIRED'
+    const MEMBERSHIP_DENIED = 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED'
+    const MISMATCH = 'OPERATOR_SCOPE_TENANT_MISMATCH'
+    const CONTRADICTED = 'OPERATOR_SCOPE_TENANT_CONTRADICTED'
+    const DIRECTORY_UNAVAILABLE = 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE'
+    const asked = (...pairs) => pairs.map(([userId, tenantId]) => ({ userId, tenantId }))
+    const TWO_MEMBERSHIPS = Object.freeze({ ...MEMBERSHIPS, [OWNER_OF_OWN]: Object.freeze([TENANT_OWN, TENANT_OTHER]) })
     const table = [
-      // [label, principal, expected]
+      // [label, principal, expected, mount options]
       ['token with a tenant claim', { ...OWNER, query: { tenantId: TENANT_OWN } },
-        { status: 200, tenant: TENANT_OWN }],
+        { status: 200, tenant: TENANT_OWN, directory: asked([OWNER_OF_OWN, TENANT_OWN]) }],
       ['token with a tenant claim + an x-tenant-id header naming another tenant (the host ignores the header)',
         { ...OWNER, header: TENANT_OTHER },
-        { status: 200, tenant: TENANT_OWN }],
-      ['no claim + header naming its own tenant', { id: 'u_claimless', permissions: READ, header: TENANT_OWN, query: { tenantId: TENANT_OWN } },
-        REFUSED_NO_CLAIM],
-      ['no claim + header naming ANOTHER tenant', { id: 'u_claimless', permissions: READ, header: TENANT_OTHER, query: { tenantId: TENANT_OTHER } },
-        REFUSED_NO_CLAIM],
+        { status: 200, tenant: TENANT_OWN, directory: asked([OWNER_OF_OWN, TENANT_OWN]) }],
+      // THE RESCUE M1 IS FOR: a member whose token carries no claim (a token minted before the
+      // membership row existed, or an account with two memberships and no organisation chosen).
+      ['no claim + header naming its own tenant, the directory vouches (the binding owner)',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN, query: { tenantId: TENANT_OWN } },
+        { status: 200, tenant: TENANT_OWN, directory: asked([OWNER_OF_OWN, TENANT_OWN]) }],
+      ['no claim + header naming its own tenant, the directory vouches (not the connection owner)',
+        { id: 'u_member_own', permissions: READ, header: TENANT_OWN },
+        { status: 400, tenant: TENANT_OWN, directory: asked(['u_member_own', TENANT_OWN]) }],
+      ['no claim + header naming a tenant, the directory says no (an account with no membership)',
+        { id: 'u_no_membership', permissions: READ, header: TENANT_OWN, query: { tenantId: TENANT_OWN } },
+        { ...refused(MEMBERSHIP_DENIED), directory: asked(['u_no_membership', TENANT_OWN]) }],
+      ['no claim + header naming its own tenant, NO directory wired',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN },
+        { ...refused(DIRECTORY_UNAVAILABLE, 501), directory: [] }, { withDirectory: false }],
+      ['no claim + header naming ANOTHER tenant',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OTHER, query: { tenantId: TENANT_OTHER } },
+        { ...refused(MEMBERSHIP_DENIED), directory: asked([OWNER_OF_OWN, TENANT_OTHER]) }],
+      ['no claim + header naming its own tenant + a query naming another',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN, query: { tenantId: TENANT_OTHER } },
+        { ...refused(MISMATCH), directory: [] }],
       ['no claim, no header', { id: 'u_claimless', permissions: READ },
-        REFUSED_NO_CLAIM],
-      ['no claim, no header, a tenant named in the query', { id: 'u_claimless', permissions: READ, query: { tenantId: TENANT_OWN } },
-        REFUSED_NO_CLAIM],
+        { ...refused(TENANT_REQUIRED), directory: [] }],
+      ['no claim, no header, a tenant named in the query', { id: OWNER_OF_OWN, permissions: READ, query: { tenantId: TENANT_OWN } },
+        { ...refused(TENANT_REQUIRED), directory: [] }],
+      ['a claim the directory does not vouch for (membership gone since sign-in)',
+        { id: 'u_no_membership', permissions: READ, claim: TENANT_OWN },
+        { ...refused(MEMBERSHIP_DENIED), directory: asked(['u_no_membership', TENANT_OWN]) }],
+      ['a claim, NO directory wired', { ...OWNER },
+        { ...refused(DIRECTORY_UNAVAILABLE, 501), directory: [] }, { withDirectory: false }],
+      ['two memberships, no organisation chosen at sign-in (no claim), no header',
+        { id: OWNER_OF_OWN, permissions: READ },
+        { ...refused(TENANT_REQUIRED), directory: [] }, { memberships: TWO_MEMBERSHIPS }],
+      ['two memberships, no claim, the header names one of them',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN },
+        { status: 200, tenant: TENANT_OWN, directory: asked([OWNER_OF_OWN, TENANT_OWN]) }, { memberships: TWO_MEMBERSHIPS }],
+      ['two memberships, no claim, the header names the other one (a tenant it IS a member of)',
+        { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OTHER },
+        { status: 200, tenant: TENANT_OTHER, directory: asked([OWNER_OF_OWN, TENANT_OTHER]) }, { memberships: TWO_MEMBERSHIPS }],
       ['platform admin with a tenant claim, who owns the source', { id: OWNER_OF_OWN, roles: ['admin'], claim: TENANT_OWN },
-        { status: 200, tenant: TENANT_OWN }],
+        { status: 200, tenant: TENANT_OWN, directory: asked([OWNER_OF_OWN, TENANT_OWN]) }],
       ['platform admin with a tenant claim, naming another tenant', { id: 'u_admin', roles: ['admin'], claim: TENANT_OWN, query: { tenantId: TENANT_OTHER } },
-        REFUSED_MISMATCH],
+        { ...refused(MISMATCH), directory: [] }],
       ['tenantless platform admin', { id: 'u_admin', roles: ['admin'] },
-        REFUSED_NO_CLAIM],
+        { ...refused(TENANT_REQUIRED), directory: [] }],
       ['tenantless platform admin naming a tenant in the query', { id: 'u_admin', roles: ['admin'], query: { tenantId: TENANT_OTHER } },
-        REFUSED_NO_CLAIM],
-      ['platform admin, no claim + header naming another tenant', { id: 'u_admin', roles: ['admin'], header: TENANT_OTHER },
-        REFUSED_NO_CLAIM],
+        { ...refused(TENANT_REQUIRED), directory: [] }],
+      ['platform admin, no claim + header naming a tenant it is not a member of', { id: 'u_admin', roles: ['admin'], header: TENANT_OTHER },
+        { ...refused(MEMBERSHIP_DENIED), directory: asked(['u_admin', TENANT_OTHER]) }],
       ['token with a claim, a query naming another tenant', { ...OWNER, query: { tenantId: TENANT_OTHER } },
-        REFUSED_MISMATCH],
+        { ...refused(MISMATCH), directory: [] }],
       ['token with a claim, a carried tenant that contradicts it', { ...OWNER, carried: TENANT_OTHER },
-        REFUSED_MISMATCH],
+        { ...refused(CONTRADICTED), directory: [] }],
     ]
-    for (const [label, principal, expected] of table) {
-      const mounted = await mount()
+    for (const [label, principal, expected, options] of table) {
+      const mounted = await mount(options)
       const res = await callRoute(mounted, principal)
       assert.equal(res.statusCode, expected.status, `${label}: status (got ${res.statusCode} ${codeOf(res)})`)
+      assert.deepEqual(mounted.calls.directory, expected.directory, `${label}: the (principal, tenant) pairs the host directory was asked about`)
       if (expected.status === 200) {
         assert.deepEqual(mounted.calls.bindingGets.map((call) => call.tenantId), [expected.tenant], `${label}: lookup tenant`)
         assert.deepEqual(mounted.calls.loads.map((call) => call.tenantId), [expected.tenant], `${label}: load tenant`)
         assert.ok(mounted.calls.reads.every((read) => read.tenantId === expected.tenant), `${label}: read tenant`)
         assert.deepEqual(res.body.data.checks.projectData.livenessSamples, [...PROJECTS_OF[expected.tenant]], `${label}: whose evidence`)
+      } else if (expected.status === 400) {
+        // Admitted to its own tenant, then refused by the host's owner check at the load — the same
+        // answer TS-03 pins for a claim-bearing non-owner. Nothing was read.
+        assert.deepEqual(mounted.calls.bindingGets.map((call) => call.tenantId), [expected.tenant], `${label}: lookup tenant`)
+        assert.deepEqual(mounted.calls.loads.map((call) => [call.tenantId, call.principal]), [[expected.tenant, principal.id]], `${label}: loaded as the requester`)
+        assert.deepEqual(mounted.calls.reads, [], `${label}: nothing was read`)
       } else {
         assert.equal(codeOf(res), expected.code, `${label}: code`)
         assertNoIo(mounted, label)
         assertCarriesNoHandle(res, label)
       }
-      assert.deepEqual(mounted.calls.directory, [], `${label}: this route does not ask the host directory`)
     }
   })
 
@@ -609,10 +684,14 @@ async function main() {
   // TS-05 — naming another tenant teaches nothing
   // -------------------------------------------------------------------------
   await run('TS-05 a tenant with a source and a tenant with nothing give the same answer, at the same cost', async () => {
+    // Every prober is a member of tenant-own and of nothing else. The ones that carry the named tenant
+    // in a header reach the host directory — the directory is the proof — and are refused on its
+    // answer; nothing is looked up for any of them.
     const probers = [
       ['no claim, the header names it', (tenant) => ({ id: 'u_prober', permissions: READ, header: tenant })],
       ['no claim, header and query name it', (tenant) => ({ id: 'u_prober', permissions: READ, header: tenant, query: { tenantId: tenant } })],
       ['no claim, only the query names it', (tenant) => ({ id: 'u_prober', permissions: READ, query: { tenantId: tenant } })],
+      ['no claim, own header, the query names it', (tenant) => ({ id: 'u_prober', permissions: READ, header: TENANT_OWN, query: { tenantId: tenant } })],
       ['own claim, the query names it', (tenant) => ({ ...NON_OWNER_READER, query: { tenantId: tenant } })],
       ['tenantless platform admin, the query names it', (tenant) => ({ id: 'u_admin', roles: ['admin'], query: { tenantId: tenant } })],
       ['platform admin, no claim, the header names it', (tenant) => ({ id: 'u_admin', roles: ['admin'], header: tenant })],
@@ -632,9 +711,14 @@ async function main() {
           const res = await callRoute(mounted, { ...base, query: { ...(base.query || {}), ...sourceOf(tenant) } })
           assert.equal(res.statusCode, 403, `${label}: refused (got ${res.statusCode} ${codeOf(res)})`)
           assertNoIo(mounted, label)
-          assert.deepEqual(mounted.calls.directory, [], `${label}: the host directory was not asked either`)
+          // The directory is asked about the named tenant or not at all — never about anything a
+          // lookup produced, because there was no lookup.
+          assert.ok(
+            mounted.calls.directory.every((call) => call.tenantId === tenant),
+            `${label}: the directory was asked only about the tenant the request named`,
+          )
           assertCarriesNoHandle(res, label)
-          answers.push({ status: res.statusCode, body: plain(res.body) })
+          answers.push({ status: res.statusCode, body: plain(res.body), directoryQuestions: mounted.calls.directory.length })
         }
         assert.deepEqual(answers[0], answers[1], `${proberLabel} / ${sourceLabel}: a tenant with a source answers like a tenant with nothing`)
         assert.deepEqual(answers[1], answers[2], `${proberLabel} / ${sourceLabel}: ...and like a tenant that never existed`)
@@ -657,13 +741,14 @@ async function main() {
     assert.deepEqual(answers[0], answers[1], 'a source that exists in another tenant is indistinguishable from one that exists nowhere')
     assert.equal(answers[0].status, 404)
 
-    // And the claimless header principal, who could name tenant-other's source and read it before.
+    // And the claimless header principal, who could name tenant-other's source and read it before
+    // (on main). It is a member of tenant-own only, so the host refuses the pairing it carried.
     const mounted = await mount()
     const res = await callRoute(mounted, {
       id: 'u_prober', permissions: READ, header: TENANT_OTHER, query: { tenantId: TENANT_OTHER, externalSystemId: SYS_OTHER },
     })
     assert.equal(res.statusCode, 403)
-    assert.equal(codeOf(res), 'TENANT_CLAIM_REQUIRED')
+    assert.equal(codeOf(res), 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
     assertNoIo(mounted, 'header + named source')
     assert.equal(JSON.stringify(res.body).includes(PROJECTS_OF[TENANT_OTHER][0]), false, 'no evidence from the other tenant travels')
   })
@@ -730,14 +815,18 @@ async function main() {
   // -------------------------------------------------------------------------
   await run('TS-09 every tenant refusal is a code and a fixed sentence — no details, no echo', async () => {
     const refusals = [
+      // the membership refusal, the steering refusal, the no-tenant refusal, the contradiction refusal
       { id: 'u_prober', permissions: READ, header: TENANT_OTHER, query: { tenantId: TENANT_OTHER, externalSystemId: SYS_OTHER } },
       { ...OWNER, query: { tenantId: TENANT_OTHER, externalSystemId: SYS_OTHER } },
       { id: 'u_admin', roles: ['admin'], query: { tenantId: TENANT_OTHER } },
+      { ...OWNER, carried: TENANT_OTHER, query: { externalSystemId: SYS_OTHER } },
     ]
+    const codes = []
     for (const principal of refusals) {
       const mounted = await mount()
       const res = await callRoute(mounted, principal)
       assert.equal(res.statusCode, 403)
+      codes.push(codeOf(res))
       assert.deepEqual(Object.keys(res.body).sort(), ['error', 'ok'])
       for (const key of Object.keys(res.body.error)) {
         assert.ok(['code', 'details', 'message'].includes(key), `an error carries code/message/details only, found ${key}`)
@@ -745,7 +834,21 @@ async function main() {
       assert.deepEqual(plain(res.body.error.details) || {}, {}, 'no details')
       assertCarriesNoHandle(res, 'tenant refusal')
       assert.equal(JSON.stringify(res.body).includes('u_prober'), false)
+      assert.equal(JSON.stringify(res.body).includes('u_admin'), false)
     }
+    assert.deepEqual(codes, [
+      'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED',
+      'OPERATOR_SCOPE_TENANT_MISMATCH',
+      'OPERATOR_SCOPE_TENANT_REQUIRED',
+      'OPERATOR_SCOPE_TENANT_CONTRADICTED',
+    ], 'the four tenant refusals were each exercised')
+
+    // The missing-directory refusal carries ONE detail, a method name from a closed list.
+    const absent = await mount({ withDirectory: false })
+    const noDirectory = await callRoute(absent, { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN })
+    assert.equal(noDirectory.statusCode, 501)
+    assert.deepEqual(plain(noDirectory.body.error.details), { requiredMethods: ['verifyTenantMembership'] })
+    assertCarriesNoHandle(noDirectory, 'directory refusal')
   })
 
   // -------------------------------------------------------------------------
@@ -758,14 +861,24 @@ async function main() {
       .split('\n')
       .filter((line) => !line.trim().startsWith('//'))
       .join('\n')
-    const proof = body.indexOf('resolveVerifiedClaimTenantId(req, input)')
+    const proof = body.indexOf('await resolveProvenOwnTenant({')
+    const door = body.indexOf('assertVerifiedTenantClaim(req, tenantId)')
     const lookup = body.indexOf('tableActions.getTableAction(')
     const load = body.indexOf('loadSystem(')
-    assert.notEqual(proof, -1, 'the tenant is the verified claim')
+    assert.notEqual(proof, -1, 'the tenant is proven by the shared tenant proof')
+    assert.notEqual(door, -1, 'the staged claim door is applied to the proven tenant')
     assert.notEqual(lookup, -1, 'the table action is looked up')
     assert.notEqual(load, -1, 'the system is loaded')
     assert.ok(proof < lookup, 'the tenant is proven BEFORE the lookup')
+    assert.ok(proof < door && door < lookup, 'the claim door runs on the proven tenant, BEFORE the lookup')
     assert.ok(lookup < load, 'the lookup precedes the load')
+    // The proof is handed the three inputs it is specified over — the verified claim, every tenant the
+    // request carried, and the host directory — and nothing the request could substitute for them.
+    const proofCall = body.slice(proof, body.indexOf('})', proof))
+    assert.match(proofCall, /authenticatedTenantId: req\.authenticatedTenantId,/, 'the proof reads the verified claim')
+    assert.match(proofCall, /explicitTenantIds: collectExplicitTenantIds\(req, input\),/, 'the proof sees every request-carried tenant')
+    assert.match(proofCall, /\btenantPrincipalDirectory,/, 'the proof is handed the host directory')
+    assert.equal((body.match(/resolveProvenOwnTenant\(/g) || []).length, 1, 'the tenant is proven exactly once')
     assert.equal(/resolveTenantId\(/.test(body), false, 'no request-steerable resolveTenantId in the handler')
     assert.equal(/user\.tenantId/.test(body), false, 'no direct read of the header-fillable user.tenantId')
     assert.equal(/resolveAuthUserTenantId\(/.test(body), false, 'nor through resolveAuthUserTenantId')
@@ -777,6 +890,40 @@ async function main() {
     assert.ok(scoped.length >= 2, 'the load and the peek are both scoped')
     for (const call of scoped) {
       assert.match(call, /\btenantId\b/, `${call} must carry the resolved tenant`)
+    }
+  })
+
+  // -------------------------------------------------------------------------
+  // TS-11 — the staged claim door
+  // -------------------------------------------------------------------------
+  await run('TS-11 with the claim door armed a claimless member is refused before the lookup; disarmed it is served', async () => {
+    const FLAG = 'MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED'
+    const had = Object.prototype.hasOwnProperty.call(process.env, FLAG)
+    const previous = process.env[FLAG]
+    const CLAIMLESS_MEMBER_OWNER = { id: OWNER_OF_OWN, permissions: READ, header: TENANT_OWN }
+    try {
+      process.env[FLAG] = 'true'
+      const armed = await mount()
+      const refusedRes = await callRoute(armed, CLAIMLESS_MEMBER_OWNER)
+      assert.equal(refusedRes.statusCode, 403, `armed, claimless: got ${refusedRes.statusCode} ${codeOf(refusedRes)}`)
+      assert.equal(codeOf(refusedRes), 'OPERATOR_SCOPE_TENANT_REQUIRED')
+      assertNoIo(armed, 'armed door, claimless member')
+      assert.deepEqual(armed.calls.directory, [{ userId: OWNER_OF_OWN, tenantId: TENANT_OWN }], 'the proof ran first')
+      assertCarriesNoHandle(refusedRes, 'armed door refusal')
+
+      const armedClaim = await mount()
+      const served = await callRoute(armedClaim, OWNER)
+      assert.equal(served.statusCode, 200, `armed, claim-bearing owner: got ${served.statusCode} ${codeOf(served)}`)
+      assert.deepEqual(served.body.data.checks.projectData.livenessSamples, [...PROJECTS_OF[TENANT_OWN]])
+
+      delete process.env[FLAG]
+      const disarmed = await mount()
+      const open = await callRoute(disarmed, CLAIMLESS_MEMBER_OWNER)
+      assert.equal(open.statusCode, 200, `disarmed, claimless member: got ${open.statusCode} ${codeOf(open)}`)
+      assert.deepEqual(disarmed.calls.bindingGets.map((call) => call.tenantId), [TENANT_OWN])
+    } finally {
+      if (had) process.env[FLAG] = previous
+      else delete process.env[FLAG]
     }
   })
 
