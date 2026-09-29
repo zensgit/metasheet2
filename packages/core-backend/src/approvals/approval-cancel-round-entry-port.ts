@@ -124,13 +124,27 @@ export type CancelRoundLaunchResultV1 =
   | { readonly ok: false; readonly status: number; readonly code: string; readonly message: string }
 
 /**
+ * The MINIMAL success shape of `decide` / `withdraw` (owner 2026-09-29 14:3x, 「Minimal action
+ * response (Recommended)」): which round was acted on, and where it now stands — nothing else. The
+ * round summary is NOT built on this path: it is a read model the summary route serves behind lock
+ * I7 alone, and the approver route deliberately has no I7 in front of its seat check (a seat holder
+ * need not be a reader of the original document), so handing the summary back here would put the
+ * same read model behind a second predicate.
+ */
+export interface CancelRoundActionOutcomeV1 {
+  readonly roundId: string
+  readonly outcome: CancelRoundOutcomeV1
+  readonly status: CancelRoundSummaryStatusV1
+}
+
+/**
  * A2 — the closed result of `decide` / `withdraw`. `noRound` means the document has no cancel round
  * at all (the plugin answers it with the entry's not-found body). A refusal carries ONLY the service
  * entry's own `(status, code, message)` — `ServiceError.details` never crosses this boundary. Any
  * other error is rethrown for the caller's generic 500.
  */
 export type CancelRoundActionResultV1 =
-  | { readonly ok: true; readonly summary: CancelRoundSummaryV1 }
+  | { readonly ok: true; readonly round: CancelRoundActionOutcomeV1 }
   | { readonly ok: false; readonly noRound: true }
   | { readonly ok: false; readonly noRound?: false; readonly status: number; readonly code: string; readonly message: string }
 
@@ -166,7 +180,8 @@ export interface ApprovalCancelRoundEntryPort {
    * A2 — an approver's `approve` / `reject` on the document's latest cancel round, dispatched AS the
    * caller through `ApprovalProductService.dispatchAction` (the service entry of
    * `POST /api/approvals/:id/actions`). The seat check, the §2-G3 seat rules and the §9-9 action set
-   * are that entry's; a caller with no seat gets its existing refusal.
+   * are that entry's; a caller with no seat gets its existing refusal. Success carries only
+   * `CancelRoundActionOutcomeV1` — never the round summary.
    */
   decide(
     documentInstanceId: string,
@@ -481,7 +496,21 @@ async function dispatchOnLatestCancelRound(
     }
     throw error
   }
-  return { ok: true, summary: await readCancelRoundSummaryForDocumentV1(query, documentInstanceId, actor.userId) }
+  return { ok: true, round: await readActedRoundOutcome(query, row.round_id) }
+}
+
+/**
+ * The minimal post-action read: the SAME round the action was dispatched on (by id — not a fresh
+ * 「latest」 pick, which a relaunch racing in could move), its outcome and the P-2 status token. An
+ * outcome outside the ratified six fails loudly, exactly as the summary reader does.
+ */
+async function readActedRoundOutcome(query: Queryable, roundId: string): Promise<CancelRoundActionOutcomeV1> {
+  const result = await query.query('SELECT outcome FROM approval_rounds WHERE id = $1', [roundId])
+  const outcome = result.rows[0]?.outcome
+  if (!isRoundOutcome(outcome)) {
+    throw new Error(`cancel-round entry: unrecognised round outcome ${JSON.stringify(outcome)} on round ${roundId}`)
+  }
+  return { roundId, outcome, status: statusTokenFor(outcome) }
 }
 
 export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPort {

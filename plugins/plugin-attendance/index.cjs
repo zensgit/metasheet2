@@ -37092,10 +37092,31 @@ module.exports = {
         })
       }
 
+      // Owner 2026-09-29 14:3x 「Minimal action response (Recommended)」: an approve / reject / withdraw
+      // success names the round acted on and where it now stands — `{ requestId, roundId, outcome,
+      // status }` and nothing else. The round summary is served ONLY by the summary route, behind lock
+      // I7; the approver route has no I7 in front of its seat check, so it must not hand the summary
+      // back. Fields are copied one by one so nothing else the port returns can ride along.
+      const respondCancelRoundActionOutcome = (res, requestId, round) => {
+        if (!round || typeof round.roundId !== 'string' || typeof round.outcome !== 'string' || typeof round.status !== 'string') {
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to act on cancellation' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: { requestId, roundId: round.roundId, outcome: round.outcome, status: round.status },
+        })
+      }
+
       const cancelRoundLaunchBodySchema = z.object({
         reason: z.string().max(2000).optional().nullable(),
       })
 
+      // The summary also carries `entryEnabled` (owner 2026-09-29 14:3x, 「Summary exposes entryEnabled
+      // (Recommended)」): the GLOBAL state of the launch flag and nothing per user, so the client can
+      // tell 「entry switched off」 apart from 「this document cannot be cancelled」 — the OFF launch itself
+      // answers the not-found body and cannot say which. The launch's 201 carries the same field so the
+      // two bodies keep one shape.
       context.api.http.addRoute(
         'GET',
         '/api/attendance/requests/:id/cancel-round',
@@ -37117,7 +37138,10 @@ module.exports = {
               return
             }
             const summary = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
-            res.json({ ok: true, data: { requestId: request.requestId, ...summary } })
+            res.json({
+              ok: true,
+              data: { requestId: request.requestId, ...summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
           } catch (error) {
             if (isDatabaseSchemaError(error)) {
               res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -37209,7 +37233,10 @@ module.exports = {
               respondCancelRoundPortRefusal(res, result, 'Failed to start cancellation')
               return
             }
-            res.status(201).json({ ok: true, data: { requestId: request.requestId, ...result.summary } })
+            res.status(201).json({
+              ok: true,
+              data: { requestId: request.requestId, ...result.summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
           } catch (error) {
             if (isDatabaseSchemaError(error)) {
               res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -37281,7 +37308,7 @@ module.exports = {
               respondCancelRoundPortRefusal(res, result, 'Failed to act on cancellation')
               return
             }
-            res.json({ ok: true, data: { requestId: request.requestId, ...result.summary } })
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
           } catch (error) {
             if (isDatabaseSchemaError(error)) {
               res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -37351,7 +37378,7 @@ module.exports = {
               respondCancelRoundPortRefusal(res, result, 'Failed to withdraw cancellation')
               return
             }
-            res.json({ ok: true, data: { requestId: request.requestId, ...result.summary } })
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
           } catch (error) {
             if (isDatabaseSchemaError(error)) {
               res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })

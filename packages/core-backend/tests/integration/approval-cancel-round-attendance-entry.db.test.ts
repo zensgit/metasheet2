@@ -456,13 +456,16 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
 
     const before = await http('GET', entryPath(requestId), token)
     expect(before.status, before.text).toBe(200)
-    expect(before.json).toEqual({ ok: true, data: { requestId, documentInstanceId: documentId, round: null } })
+    expect(before.json).toEqual({ ok: true, data: { requestId, documentInstanceId: documentId, round: null, entryEnabled: true } })
 
     const launch = await http('POST', entryPath(requestId), token, { reason: '行程取消' })
     expect(launch.status, launch.text).toBe(201)
     const round = launch.json.data.round
     expect(launch.json.data.requestId).toBe(requestId)
     expect(launch.json.data.documentInstanceId).toBe(documentId)
+    // The launch body keeps the summary's shape, `entryEnabled` included (owner 14:3x ②).
+    expect(Object.keys(launch.json.data).sort()).toEqual(['documentInstanceId', 'entryEnabled', 'requestId', 'round'])
+    expect(launch.json.data.entryEnabled).toBe(true)
     expect(round).toMatchObject({
       outcome: 'pending',
       status: 'cancellation_pending_approval',
@@ -1147,10 +1150,11 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           expect(off.status, off.text).toBe(404)
           expect(off.text).toBe(NOT_FOUND_BODY)
           expect(off.text).toBe(absent.text)
-          // The read is not gated.
+          // The read is not gated, and it reports the flag's GLOBAL state (owner 14:3x ②): false.
           const read = await http('GET', entryPath(requestId), token)
           expect(read.status, read.text).toBe(200)
           expect(read.json.data.round).toBeNull()
+          expect(read.json.data.entryEnabled).toBe(false)
         }
         // Zero writes: no round, no engine instance, no seat, no audit row — anywhere, not just here.
         expect(await roundsFor(documentId)).toHaveLength(0)
@@ -1160,6 +1164,9 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       }
       const on = await http('POST', entryPath(requestId), token, {})
       expect(on.status, on.text).toBe(201)
+      expect(on.json.data.entryEnabled).toBe(true)
+      const readOn = await http('GET', entryPath(requestId), token)
+      expect(readOn.json.data.entryEnabled).toBe(true)
       expect(await roundsFor(documentId)).toHaveLength(1)
       const after = await countWriteSet()
       expect(after.approval_instances).toBe(before.approval_instances + 1)
@@ -1209,9 +1216,16 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       } finally {
         stub.stop()
       }
-      expect(approved.json.data.requestId).toBe(fixture.requestId)
-      expect(approved.json.data.documentInstanceId).toBe(fixture.documentId)
-      expect(approved.json.data.round).toMatchObject({
+      // Owner 14:3x ① 「Minimal action response」: the success body names the round and where it now
+      // stands — exactly these four keys; the summary is read behind I7 on the summary route only.
+      expect(approved.json).toEqual({
+        ok: true,
+        data: { requestId: fixture.requestId, roundId: fixture.roundId, outcome: 'applied', status: 'leave_cancelled' },
+      })
+
+      const employeeRead = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+      expect(employeeRead.status).toBe(200)
+      expect(employeeRead.json.data.round).toMatchObject({
         roundId: fixture.roundId,
         outcome: 'applied',
         status: 'leave_cancelled',
@@ -1220,11 +1234,6 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         blockCode: null,
         canWithdraw: false,
       })
-      expect(approved.json.data.round.cancellationOutcome).toEqual(expectedCancelled)
-
-      const employeeRead = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
-      expect(employeeRead.status).toBe(200)
-      expect(employeeRead.json.data.round.outcome).toBe('applied')
       expect(employeeRead.json.data.round.cancellationOutcome).toEqual(expectedCancelled)
       const approvalSide = await http('GET', `/api/approvals/${fixture.roundInstanceId}`, approverFixtureToken)
       expect(approvalSide.status, approvalSide.text).toBe(200)
@@ -1253,7 +1262,13 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
 
         const rejected = await http('POST', actionsPath(fixture.requestId), approverToken, { action: 'reject', comment: '不同意' })
         expect(rejected.status, rejected.text).toBe(200)
-        expect(rejected.json.data.round).toMatchObject({
+        expect(rejected.json).toEqual({
+          ok: true,
+          data: { requestId: fixture.requestId, roundId: fixture.roundId, outcome: 'rejected', status: 'cancellation_rejected' },
+        })
+        const summary = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+        expect(summary.json.data.round).toMatchObject({
+          roundId: fixture.roundId,
           outcome: 'rejected',
           status: 'cancellation_rejected',
           closedBySystem: false,
@@ -1332,7 +1347,12 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       const fixture = await launchedRound('withdraw')
       const withdrawn = await http('POST', withdrawPath(fixture.requestId), fixture.employeeToken, {})
       expect(withdrawn.status, withdrawn.text).toBe(200)
-      expect(withdrawn.json.data.round).toMatchObject({
+      expect(withdrawn.json).toEqual({
+        ok: true,
+        data: { requestId: fixture.requestId, roundId: fixture.roundId, outcome: 'withdrawn', status: 'cancellation_withdrawn' },
+      })
+      const summary = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+      expect(summary.json.data.round).toMatchObject({
         roundId: fixture.roundId,
         outcome: 'withdrawn',
         status: 'cancellation_withdrawn',
@@ -1481,10 +1501,17 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
 
       const decided = await http('POST', actionsPath(requestId), approverToken, { action: 'approve' })
       expect(decided.status, decided.text).toBe(200)
-      expect(decided.json.data.round).toMatchObject({ outcome: 'applied', status: 'leave_cancelled', closedBySystem: false })
+      expect(decided.json.data).toEqual({
+        requestId,
+        roundId: launch.json.data.round.roundId,
+        outcome: 'applied',
+        status: 'leave_cancelled',
+      })
+      const read = await http('GET', entryPath(requestId), employeeToken)
+      expect(read.json.data.round).toMatchObject({ outcome: 'applied', status: 'leave_cancelled', closedBySystem: false })
       // An unpaid leave type holds no balance lots, so the real boundary reports the C-2 shape with a
       // zero reversal; the balance-bearing shape is pinned by the stand-in approve case above.
-      const outcome = decided.json.data.round.cancellationOutcome
+      const outcome = read.json.data.round.cancellationOutcome
       expect(outcome).toEqual({
         status: 'cancelled',
         reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
