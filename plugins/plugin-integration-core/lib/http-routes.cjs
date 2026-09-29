@@ -527,10 +527,11 @@ const {
   // warning cannot drift apart.
   CARRY_TARGET_OWNERSHIP_STATES,
   decideCarryTargetOwnership,
-  // ...and the two refusal vocabularies that verdict is mapped into: the carry's and the materials
-  // export's. The wall below is ONE function; only the codes differ per route.
+  // ...and the three refusal vocabularies that verdict is mapped into: the carry's, the materials
+  // export's and the handoff advance's. The wall below is ONE function; only the codes differ per route.
   CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
   PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
 } = require('./stock-preparation-target-provisioning.cjs')
 const {
   StockPreparationOptionSyncError,
@@ -665,6 +666,7 @@ const {
 const {
   StockPreparationOperatorScopeError,
   resolveOperatorValueScope,
+  resolveProvenOwnTenant,
 } = require('./stock-preparation-operator-scope.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
@@ -814,13 +816,16 @@ function sendError(res, error) {
 // Values-free: refusals name the objectId (a public config identifier) and nothing else — never a
 // sheet id, never a project id, never a row.
 //
-// ONE WALL, TWO ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
+// ONE WALL, THREE ROUTES. The materials export (按项目导出物料) reads the very sheet the carry writes,
 // through the very same deploy-global binding, so it needs the very same answer to "is this the
 // caller's sheet". It gets it from THIS function — the same two facts, gathered in the same order
 // from the same host port, decided by the same `decideCarryTargetOwnership` — and differs only in
-// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). A second
-// copy of the fact-gathering would be a second place for "registry, then derived id" to drift; a
-// change to how ownership is established must land in both routes at once or in neither.
+// the refusal VOCABULARY it answers with (`STOCK_PREPARATION_TARGET_TENANT_WALLS` below). The
+// handoff advance (通知下一步) is the third: it probes that same sheet for "does this project have any
+// row" before it writes a cursor, an audit row and a DingTalk ping, and the probe's answer is itself
+// a fact about the sheet, so it runs this wall first (#6121). A second copy of the fact-gathering
+// would be a second place for "registry, then derived id" to drift; a change to how ownership is
+// established must land in every route at once or in none.
 async function assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall } = {}) {
   if (!wall || !wall.refusalCodes || !wall.portUnavailableCode) {
     // A programming error, never a request-shaped one: every caller passes a frozen wall below.
@@ -852,8 +857,9 @@ async function assertStockPreparationTargetBelongsToTenant({ provisioning, targe
 }
 
 // The per-route refusal vocabularies. The carry keeps EXACTLY the codes it always answered (the
-// preflight quotes them back, and the runbook tells a deployer what they mean); the export gets its
-// own family, so an export click is never reported as a 结转 refusal.
+// preflight quotes them back, and the runbook tells a deployer what they mean); the export and the
+// handoff advance each get their own family, so neither click is ever reported as a 结转 refusal.
+// The handoff family stays inside the route's existing STOCK_PREPARATION_HANDOFF_* prefix.
 const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
   carry: Object.freeze({
     label: 'carry',
@@ -865,6 +871,11 @@ const STOCK_PREPARATION_TARGET_TENANT_WALLS = Object.freeze({
     refusalCodes: PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
     portUnavailableCode: 'PREP_LINE_EXPORT_PROVISIONING_UNAVAILABLE',
   }),
+  handoffAdvance: Object.freeze({
+    label: 'handoff advance',
+    refusalCodes: STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
+    portUnavailableCode: 'STOCK_PREPARATION_HANDOFF_PROVISIONING_UNAVAILABLE',
+  }),
 })
 
 function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
@@ -873,6 +884,10 @@ function assertCarryTargetBelongsToTenant({ provisioning, targetProjectId, targe
 
 function assertPrepLineExportTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
   return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.prepLineExport })
+}
+
+function assertHandoffAdvanceTargetBelongsToTenant({ provisioning, targetProjectId, target } = {}) {
+  return assertStockPreparationTargetBelongsToTenant({ provisioning, targetProjectId, target, wall: STOCK_PREPARATION_TARGET_TENANT_WALLS.handoffAdvance })
 }
 
 // One message per refusing state. Values-free: they name no sheet id and no project id.
@@ -7005,6 +7020,49 @@ function requireStockPreparationAudit() {
     // point of check 7 is to compare the source against what this deployment will actually run. An
     // unconfigured deployment falls back to the shipped default plan and still gets a useful answer —
     // reachability, data presence and detected shape do not depend on the comparison.
+    //
+    // TENANT: PROVEN, RESOLVED ONCE, BEFORE ANYTHING IS LOOKED AT.
+    //
+    // The lookup below used to be `getTableAction({ actionId })` — no tenant. With the persisted
+    // binding store wired (index.cjs wires it wherever there is a SQL db) the registry refuses a
+    // tenant-less lookup, the blanket `catch` that stood here turned that refusal into "not
+    // configured", and because neither web entry point sends `externalSystemId` the route answered
+    // 409 SOURCE_PREFLIGHT_NO_SOURCE to the binding owner and to everyone else, before it loaded
+    // anything.
+    //
+    // Giving the lookup a tenant means choosing which one, and the one this route already used for
+    // its load — `resolveTenantId`, through `scopedAdapterInput` — is not good enough for what this
+    // route returns. The report is NOT values-free: `checks.projectData.livenessSamples` carries up
+    // to two observed project numbers. `resolveTenantId` accepts `user.tenantId`, which the host
+    // fills from the `x-tenant-id` REQUEST HEADER for a claimless token, and it lets a tenantless
+    // platform admin name `?tenantId=`. Resolving the BOUND source under that tenant would have
+    // turned "you must already know another tenant's source id" into "you need only name the
+    // tenant".
+    //
+    // So the tenant is PROVEN, with the proof every value-bearing stock-prep read already uses:
+    // `resolveProvenOwnTenant` (stock-preparation-operator-scope.cjs, the tenant half of
+    // `resolveOperatorValueScope`, without its stock-prep tier). It prefers the verified token claim
+    // and refuses a carried tenant that contradicts it; a principal with no tenant of its own is
+    // refused; a tenant named in the request that is not the principal's is refused; and the HOST
+    // must vouch, through its membership directory, that this principal belongs to that tenant.
+    // A claimless token whose header names a tenant is therefore served only for a tenant the host
+    // says the principal is a member of, and refused for any other — before any lookup, with a
+    // refusal that does not depend on whether the named tenant has a source, has nothing, or does
+    // not exist. With no directory wired the route refuses (501); it never falls back to the header.
+    //
+    // WHY THE PROOF AND NOT THE SCOPE. The scope's first check is a stock-prep tier, and this route
+    // is deliberately NOT in that namespace (see the route table): the tier check would refuse the
+    // `integration:read` holders the route exists for. `requireAccess(req, 'read')` stays the only
+    // permission gate; the proof grants nothing and only decides WHICH tenant.
+    //
+    // THE STAGED CLAIM DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED, default off) is checked
+    // right after the proof. It is a no-op while the flag is off. With it on, the load below would
+    // already refuse a claimless caller through `resolveTenantId`; checking it here moves that
+    // refusal in front of the lookup instead of after it, so no refusal on this route costs a lookup.
+    //
+    // ONE VALUE. The lookup, the binding peek and the load all take `tenantId` from here. The scoped
+    // helpers below still run their own resolver, but they are handed this value first, so they can
+    // agree with it or refuse — never pick another.
     async stockPreparationSourcePreflight(req, res) {
       requireAccess(req, 'read')
       const input = normalizeStockPreparationConfirmBody(
@@ -7012,14 +7070,51 @@ function requireStockPreparationAudit() {
         VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS,
         'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
       )
+      const { tenantId } = await resolveProvenOwnTenant({
+        user: getUser(req),
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      assertVerifiedTenantClaim(req, tenantId)
+      const workspaceId = resolveWorkspaceId(req, input)
 
-      // Server config, never a request input. An unconfigured deployment throws here — that is the
-      // "not plugged in yet" state, and it must degrade to the default plan rather than 5xx the whole
-      // check, exactly as the hub overview treats the same throw.
+      // Server config plus this tenant's persisted binding, never a request input. An unconfigured
+      // deployment throws TABLE_ACTION_NOT_CONFIGURED — that is the "not plugged in yet" state, and
+      // it must degrade to the default plan rather than 5xx the whole check.
+      //
+      // ONLY that state degrades. Anything else — the binding store could not answer, a stored
+      // binding did not normalize — used to be swallowed here too, which is how the tenant-less
+      // lookup went unnoticed, and which would measure a source against the DEFAULT plan while the
+      // pull runs the configured one. It is refused instead, with one fixed sentence: the store's
+      // own text can name a host or a login, so it goes nowhere, and the log gets one closed word.
       let action = null
       try {
-        action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
-      } catch {
+        action = await tableActions.getTableAction({ tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+      } catch (error) {
+        const notConfigured = error instanceof StockPreparationTableActionError
+          && error.code === 'TABLE_ACTION_NOT_CONFIGURED'
+        if (!notConfigured) {
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            try {
+              routeLogger.warn(
+                '[plugin-integration-core] stock-prep source preflight could not resolve its source binding',
+                {
+                  reason: error instanceof StockPreparationTableActionError
+                    ? error.code
+                    : loggableRouteFailureCode(error),
+                },
+              )
+            } catch {
+              // A broken logger must not change the refusal.
+            }
+          }
+          throw new HttpRouteError(
+            503,
+            'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE',
+            'the source this deployment is bound to could not be resolved, so nothing was checked',
+          )
+        }
         action = null
       }
       const configuredSystemId = action && action.source ? firstString(action.source.externalSystemId) : undefined
@@ -7052,7 +7147,9 @@ function requireStockPreparationAudit() {
       }
 
       const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
+      // The REQUESTER's identity, as before: this route borrows nobody's. Whether a non-owner may
+      // read through the binding owner is an open owner decision and is not taken here.
+      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId, tenantId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
         throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
@@ -7064,7 +7161,7 @@ function requireStockPreparationAudit() {
       // the guard accessor that decrypts nothing, and reduced to a boolean plus two closed
       // vocabulary words before it goes anywhere near the report.
       const pullDelegation = describeTableActionReadDelegation(
-        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId })),
+        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId, tenantId })),
       )
 
       try {
@@ -9449,6 +9546,32 @@ function requireStockPreparationAudit() {
       const action = assertStockPreparationTargetReady(
         await tableActions.getTableAction({ tenantId, actionId: PLM_STOCK_PREPARATION_ACTION_ID }),
       )
+      // ...BUT THAT SHEET IS DEPLOY-GLOBAL, SO IT MUST BE PROVEN TO BE THE CALLER'S OWN FIRST (#6121).
+      //
+      // `getTableAction` is keyed by actionId alone, so `action.target` is the same sheet for every
+      // tenant on the deployment. Without this wall the existence probe below answered "does this
+      // project number have rows in that sheet" to a caller whose sheet it is not — one bit per click,
+      // 404 PROJECT_NOT_FOUND versus carrying on — and on carrying on went on to write a cursor row and
+      // an audit row for that project number and send a DingTalk ping about it. The chain-for-tenant check above does
+      // not close this: it proves the CHAIN is the caller's, never the SHEET, and its policy for a
+      // chain is an owner decision this wall deliberately does not depend on.
+      //
+      // The SAME wall the 结转 write and the 按项目导出物料 read run
+      // (assertStockPreparationTargetBelongsToTenant), answering in this route's own
+      // STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary. It runs BEFORE the probe and therefore before
+      // every write: a refused caller gets one answer that does not depend on the project number,
+      // and the refusal costs one registry read (plus, on a registry miss, a pure id derivation) —
+      // zero records IO against the sheet, no cursor row, no audit row, no notification. The staging project is derived from the RESOLVED scope and
+      // nothing in the request, exactly as the export derives it, so the claimless (demo-machine)
+      // shape is walled on the directory-vouched tenant just as the claim-bearing one is.
+      await assertHandoffAdvanceTargetBelongsToTenant({
+        // The RAW host surface, as on the carry and the export: `getMultitableProvisioning()` would
+        // throw its own generic 503 for a host lacking `findObjectSheet`, masking this check's typed
+        // 501 about the ownership port it actually needs.
+        provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
+        targetProjectId: resolveIntegrationStagingProjectId(scope.tenantId, undefined),
+        target: action.target,
+      })
       const projectExists = await stockPreparationProjectHasMainRows({
         recordsApi: getMultitableRecordsApi(),
         target: action.target,
@@ -10443,7 +10566,8 @@ module.exports = {
     stockPreparationExportSafeToken,
     stockPreparationExportTimestamp,
     // The ONE stock-prep target tenant wall and its per-route vocabularies, exported so a suite can
-    // witness that the carry and the export answer one verdict in two vocabularies.
+    // witness that the carry, the export and the handoff advance answer one verdict in three
+    // vocabularies.
     assertStockPreparationTargetBelongsToTenant,
     STOCK_PREPARATION_TARGET_TENANT_WALLS,
   },

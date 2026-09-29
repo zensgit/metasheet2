@@ -193,7 +193,7 @@ jobs:
       # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
-        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
 
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
@@ -387,6 +387,51 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
+      # Approval form grouping design lock v2.13 phase 2 slice A-3 — CI two-point wiring contract
+      # (no DB): the backfill-batch DDL schema suite (design-gate changesRequired #4 FK proof)
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the atgbbl_link_fk CASCADE proof.
+      - name: A3 backfill-schema CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs
+
+      # Same slice, W7 preview unit — the read-only `previewApprovalTemplateGroupBackfill` suite
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the "preview never writes" proof.
+      - name: A3 backfill-preview CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs
+
+      # Same slice, W8 execute unit — the write `executeApprovalTemplateGroupBackfill` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the changesRequired #2/#3 idempotency and
+      # cross-verification proofs.
+      - name: A3 backfill-execute CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs
+
+      # Same slice, W9 rollback unit — the `rollbackApprovalTemplateGroupBackfillBatch` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the §4.2 token-match / §4.3
+      # created_new+remaining=0 archive-precision proofs.
+      - name: A3 backfill-rollback CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs
+
+      # Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5) — the read-only
+      # `listApprovalTemplateGroupBackfillBatches` suite must stay wired into BOTH
+      # vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step). Dropping either
+      # point silently disables the ordering/pagination/org-scoping/rolledBackAt-round-trip proofs
+      # — the only reachability path to a rollback-able batchId once execute's own response is gone.
+      - name: A3 backfill-batches-list CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
+
+      # Same slice, batch DDL `down()` data-retention guard (candidate, not yet ratified) — round-2
+      # implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): this suite
+      # existed since round 1 but was deliberately deferred out of both vitest.config.ts (exclude)
+      # and this real-DB step while round 1's own hard constraint required plugin-tests.yml/s6a to
+      # stay byte-identical that round. Wired here (with the allowlist exemption's removal and the
+      # s6a re-pin, same commit). Dropping either point silently disables the fail-closed/strictness/
+      # 42P01-regression proofs.
+      - name: A3 backfill-down-guard CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -457,6 +502,12 @@ jobs:
       - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
         run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
 
+      # Tasks auth gate wiring (no DB): dedicated config + setup + whole-file
+      # gate must stay pinned on the 20.x post-migrate step. Runs before
+      # install so dropping the step fails the required check without a build.
+      - name: Tasks auth CI wiring contract
+        run: node --test scripts/ops/tasks-auth-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract
@@ -513,6 +564,14 @@ jobs:
       # default no-DB collection and invoked as whole files in a required real-DB step.
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
+
+      # Approval form grouping (design lock v2.13) CI two-point wiring contract: all four
+      # approval-template-groups real-DB suites (phase-1 lifecycle/serialization, phase-3
+      # sections/reorder) must stay wired into BOTH vitest.config.ts (exclude) AND the approval
+      # real-DB step here (whole-file, on the required 20.x leg). Step-id-anchored (never by
+      # title), so a name-prefix decoy cannot stand in for the real step.
+      - name: Approval template-groups CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs
 
       # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
       # only ever exercises the verify script against a NORMAL package — it never proves the
@@ -1200,6 +1259,24 @@ jobs:
             tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
             --reporter=verbose
 
+      # Tasks auth gate: trust-off harness, whole file, after migrate.
+      # Do not fold this into vitest.integration.config.ts (that setup caches trust).
+      - name: Run tasks auth gate
+        id: tasks-auth-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+          RBAC_OPTIONAL: ''
+          TASKS_ENABLED: 'true'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for tasks auth gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.tasks-auth.config.ts run \
+            tests/tasks-auth/tasks-auth-gate.ts \
+            --reporter=verbose
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'
@@ -1552,6 +1629,7 @@ jobs:
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
+            tests/integration/data-source-reseal-load-failed-realdb.test.ts \
             tests/integration/multitable-personal-views-slice1-realdb.test.ts \
             tests/integration/multitable-personal-views-slice2-fieldorder-realdb.test.ts \
             tests/integration/multitable-personal-views-slice3-context-overlay-realdb.test.ts \
@@ -1612,6 +1690,16 @@ jobs:
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # Arms this step's embedded anti-skip-green sentinels (module-top-level
+          # `itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip`, e.g.
+          # approval-comments.db.test.ts:56, approval-instance-readability-s1.db.test.ts:50,
+          # approval-lock9-process-attachments-realdb.db.test.ts:35): second in-worker door —
+          # a DATABASE_URL that is set in this step's shell but falsy by the time it reaches
+          # the vitest worker goes RED instead of a silent skipped-green. A truthy-but-wrong
+          # DATABASE_URL reds either way, armed or not, from the suites' own connection
+          # failures — this arming does not specifically catch that case. The other files
+          # this step runs do not reference EXPECT_DB, so this is a no-op for them.
+          EXPECT_DB: '1'
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -1702,6 +1790,14 @@ jobs:
             tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
             tests/integration/approval-template-groups-lifecycle.db.test.ts \
             tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-sections.db.test.ts \
+            tests/integration/approval-template-groups-reorder.db.test.ts \
+            tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+            tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+            tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+            tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+            tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+            tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)

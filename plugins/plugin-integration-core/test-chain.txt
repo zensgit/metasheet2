@@ -70,6 +70,7 @@ node __tests__/stock-preparation-confirm-writes.test.cjs
 node __tests__/stock-preparation-confirm-reads.test.cjs
 node __tests__/stock-preparation-generation-runtime.test.cjs
 node __tests__/stock-preparation-handoff.test.cjs
+node __tests__/stock-preparation-handoff-advance-tenant-wall.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
@@ -86,6 +87,7 @@ node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs
 node __tests__/stock-preparation-source-preflight.test.cjs
+node __tests__/stock-preparation-source-preflight-tenant-scope.test.cjs
 node __tests__/stock-preparation-production-policy.test.cjs
 node __tests__/stock-preparation-prod-gate.test.cjs
 node __tests__/stock-preparation-extension-namespace.test.cjs

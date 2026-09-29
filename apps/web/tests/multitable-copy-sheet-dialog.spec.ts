@@ -630,6 +630,9 @@ describe('MetaCopySheetDialog', () => {
     { code: 'RECOVERY_IN_PROGRESS', status: 409, zh: '数据表正被其他操作占用，请稍后重试。' },
     // #6112 fix head: dedupe-lock timeout / retryable lock SQLSTATE (40P01, 55P03, 40001) -> 409 CONFLICT
     { code: 'CONFLICT', status: 409, zh: '数据表正被其他操作占用，请稍后重试。' },
+    // PR #6136 / decision register R-20: the dedupe ledger is unmigrated -> the copy refuses 503 (fail-closed); its own
+    // sentence (a database upgrade, not "retry"), not the generic 5xx line
+    { code: 'COPY_TEMPORARILY_UNAVAILABLE', status: 503, zh: '复制暂不可用：服务器需要先完成数据库升级，请联系管理员。' },
     { code: 'SOMETHING_NEW', status: 500, zh: '复制失败，请稍后重试。' },
   ]
 

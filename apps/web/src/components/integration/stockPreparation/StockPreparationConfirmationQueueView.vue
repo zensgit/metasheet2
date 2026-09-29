@@ -140,15 +140,16 @@
            The server decides both (it holds the monotonic claim column and the step rosters); the
            page only renders what it is told. `completed` is deliberately NOT a bar on this branch: a
            terminal hop whose claim was interrupted leaves the chain finished and the 仓库/采购 notice
-           still owed, which is the single most important message this feature sends. -->
+           still owed, which is the single most important message this feature sends.
+           The rule itself is confirmationQueue.ts `stockPreparationHandoffMayPress`, shared with
+           项目备料页 so the two buttons cannot disagree about who may press. -->
       <!-- P1-2: EMBEDDED MODE hides this for the same G1 reason as 导出 above, plus a sharper one —
            the host renders its OWN 通知下一步 fed by its OWN `readStockPreparationHandoff` call. Two
            independently-fetched copies of "whose turn is it" on one screen do not refresh each other,
            so advancing from one leaves the other showing the previous holder until something else
            reloads it. One turn signal per screen; the tab keeps its own. -->
       <button
-        v-if="!embedded && can('handoff.advance') && handoff.configured
-          && ((handoff.isCurrentHandler && !handoff.completed) || handoffResendableStepKey)"
+        v-if="!embedded && can('handoff.advance') && stockPreparationHandoffMayPress(handoff)"
         type="button"
         data-testid="stock-prep-handoff-advance"
         :disabled="busy || !projectNo"
@@ -598,6 +599,10 @@ import {
   readStockPreparationHandoff,
   readStockPreparationOperatorDirectory,
   readStockPreparationValueEntry,
+  stockPreparationHandoffAdvanceWasReplay,
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
   type StockPreparationDecisionReadiness,
   type StockPreparationDecisionRow,
@@ -1035,14 +1040,12 @@ const handoffAdvance = ref<StockPreparationHandoffAdvanceResult | null>(null)
 const handoffNoticeText = computed<string>(() => {
   const result = handoffAdvance.value
   if (!result) return ''
-  const attempted = result.notifyOutcome === 'sent'
-    || result.notifyOutcome === 'partial'
-    || result.notifyOutcome === 'failed'
   // J2: `resumed` is the COMMITTED verdict that this click took the claim, so a request carrying it
   // may never render the replay sentence — whatever the outcome. The first cut checked only
   // `attempted`, which left one outcome ('not_configured', now 'no_destination') reaching the
   // 「没什么要发」 wording on a click that had just spent the hop's one chance to be announced.
-  if (result.changed === false && !attempted && result.resumed !== true) {
+  // The predicate lives in confirmationQueue.ts, shared with 项目备料页, so the two cannot disagree.
+  if (stockPreparationHandoffAdvanceWasReplay(result)) {
     return bi(
       '这一步之前已经交接过了,没有重复通知。',
       'This step had already been handed on, so nobody was notified a second time.',
@@ -1080,12 +1083,11 @@ const handoffLostStepKeys = computed<string[]>(() => {
   return Array.isArray(state.lostStepKeys) ? state.lostStepKeys : []
 })
 
-/** The step whose notice is still owed AND still sendable by this caller. Server-computed. */
-const handoffResendableStepKey = computed<string | null>(() => {
-  const state = handoff.value
-  if (!state.configured) return null
-  return typeof state.resendableStepKey === 'string' && state.resendableStepKey ? state.resendableStepKey : null
-})
+/**
+ * The step whose notice is still owed AND still sendable by this caller. Server-computed. The
+ * derivation is shared with 项目备料页 (confirmationQueue.ts) so the two buttons cannot disagree.
+ */
+const handoffResendableStepKey = computed<string | null>(() => stockPreparationHandoffResendableStepKey(handoff.value))
 
 /** The committed labels for the lost hops, so the sentence names them rather than counting them. */
 const handoffLostStepLabels = computed<string>(() =>
@@ -1239,8 +1241,9 @@ async function advanceHandoff(): Promise<void> {
   // FINISH WHAT IS OWED BEFORE MOVING ON. When a hop's notice is still unsent, replaying THAT hop is
   // what sends it; advancing the current one instead would claim the next step and push the monotonic
   // max past the owed hop, losing it for good. So the resend wins when both are possible — which is
-  // also what the invitation on screen promises the click will do.
-  const fromStepKey = handoffResendableStepKey.value ?? handoff.value.currentStepKey
+  // also what the invitation on screen promises the click will do. The shared helper is the same one
+  // 项目备料页 presses with.
+  const fromStepKey = stockPreparationHandoffFromStepKey(handoff.value)
   if (!projectNo.value || !fromStepKey) return
   handoffAdvance.value = null
   await run(async () => {

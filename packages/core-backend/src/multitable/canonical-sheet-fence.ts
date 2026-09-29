@@ -142,13 +142,21 @@ export function isWriterBlockState(v: unknown): v is WriterBlockState {
 }
 
 /** Thrown by a fenced writer that observes a durable recovery block. Values-free (no state details leaked to
- * the client beyond the coarse code); callers map it to a 409-class refusal. */
+ * the client beyond the coarse code); callers map it to a 409-class refusal.
+ *
+ * `state` is null only for a subclass that refuses for another reason and must reuse the callers' existing
+ * `instanceof SheetWriterBlockedError` skip branch (field retype slice 3a: the derived-merge target re-check,
+ * `DerivedMergeTargetRetypedError` in field-schema-fence-recheck.ts). Every durable-block throw passes a state. */
 export class SheetWriterBlockedError extends Error {
   readonly code = 'SHEET_WRITER_BLOCKED'
   readonly sheetId: string
-  readonly state: WriterBlockState
-  constructor(sheetId: string, state: WriterBlockState) {
-    super(`Sheet is temporarily locked for writes by a recovery operation`)
+  readonly state: WriterBlockState | null
+  constructor(
+    sheetId: string,
+    state: WriterBlockState | null,
+    message = 'Sheet is temporarily locked for writes by a recovery operation',
+  ) {
+    super(message)
     this.name = 'SheetWriterBlockedError'
     this.sheetId = sheetId
     this.state = state

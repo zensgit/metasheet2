@@ -72,6 +72,82 @@ import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
 } from '../attendance/w4c0-identity'
+import { Logger } from '../core/logger'
+import { getCorrelationId } from '../context/request-context'
+import { isValidCorrelationId } from '../middleware/correlation'
+
+const logger = new Logger('AdminUsersRoutes')
+
+/**
+ * #6163 — how a 500 branch of this router answers.
+ *
+ * The RESPONSE keeps the router's jsonError shape `{ ok: false, error: { code, message } }` with the
+ * branch's own error code and a FIXED sentence written here, plus one additional field,
+ * `error.correlationId`: the id the correlation middleware gave this request (the same value it
+ * returns in the X-Correlation-ID response header and writes on every log line). Once the raw text
+ * is gone, that id is the one thing an administrator can hand to support.
+ *
+ * The LOG gets exactly one line per failed request: a fixed event name, the response's error code,
+ * the class name of the caught value, and the correlation id. The caught value itself is never
+ * handed to the logger (the repo logger copies `error.message` and `error.stack` into the line when
+ * it is given an error object), and nothing read from it but its class name is written anywhere: a
+ * crypto, driver or library message can carry a host, a role or a stored value (the demo-server
+ * fault behind #6163 put Node's GCM text on /admin/users).
+ */
+const ADMIN_USERS_FAILURE_EVENT = 'admin-users.server-failure'
+const SAFE_ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+
+function describeCaughtClass(error: unknown): string {
+  try {
+    if (error === null) return 'null'
+    if (typeof error !== 'object' && typeof error !== 'function') return typeof error
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name
+    return typeof name === 'string' && SAFE_ERROR_CLASS.test(name) ? name : 'unknown'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+/**
+ * The request's correlation id, only when it has the shape the correlation middleware gives it: the
+ * value on `req`, else the one in the request context. Anything else (e.g. a raw header another
+ * middleware copied onto `req`) is never echoed into a body.
+ */
+function readFailureCorrelationId(req: Request): string | undefined {
+  for (const candidate of [req.correlationId, getCorrelationId()]) {
+    if (isValidCorrelationId(candidate)) return candidate
+  }
+  return undefined
+}
+
+function sendAdminUsersServerFailure(
+  req: Request,
+  res: Response,
+  code: string,
+  message: string,
+  error: unknown,
+): void {
+  const correlationId = readFailureCorrelationId(req)
+  try {
+    logger.error(
+      `${ADMIN_USERS_FAILURE_EVENT} code=${code} errorClass=${describeCaughtClass(error)}`
+      + (correlationId ? ` correlationId=${correlationId}` : ''),
+    )
+  } catch {
+    // Logging must never keep the fixed 500 from being sent.
+  }
+  res.status(500).json({
+    ok: false,
+    error: correlationId ? { code, message, correlationId } : { code, message },
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:userId/dingtalk-grant can fail AFTER its transaction committed and its
+ * audit row was written (the snapshot read that builds the reply comes last), so its 500 must not
+ * claim the change failed. The page shows this sentence verbatim in its (Chinese) status banner.
+ */
+const DINGTALK_GRANT_UNCONFIRMED_MESSAGE = '钉钉扫码登录的更新结果未能确认，请刷新页面后查看当前状态'
 
 type AdminUserProfile = {
   id: string
@@ -2168,7 +2244,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SUMMARY_FAILED', (error as Error)?.message || 'Failed to load delegated role summary')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SUMMARY_FAILED', 'Failed to load delegated role summary', error)
     }
   })
 
@@ -2185,7 +2261,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_DEPARTMENT_LIST_FAILED', 'Failed to list delegation departments', error)
     }
   })
 
@@ -2202,7 +2278,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', (error as Error)?.message || 'Failed to list platform member groups')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_LIST_FAILED', 'Failed to list platform member groups', error)
     }
   })
 
@@ -2244,7 +2320,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'PLATFORM_MEMBER_GROUP_NAME_CONFLICT', 'Platform member group name already exists')
       }
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', (error as Error)?.message || 'Failed to create platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_CREATE_FAILED', 'Failed to create platform member group', error)
     }
   })
 
@@ -2264,7 +2340,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_READ_FAILED', (error as Error)?.message || 'Failed to load platform member group')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_READ_FAILED', 'Failed to load platform member group', error)
     }
   })
 
@@ -2281,7 +2357,7 @@ export function adminUsersRouter(): Router {
         query: q,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', (error as Error)?.message || 'Failed to list scope templates')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_LIST_FAILED', 'Failed to list scope templates', error)
     }
   })
 
@@ -2323,7 +2399,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseUniqueConstraintError(error)) {
         return jsonError(res, 409, 'ROLE_DELEGATION_SCOPE_TEMPLATE_NAME_CONFLICT', 'Scope template name already exists')
       }
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', (error as Error)?.message || 'Failed to create scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_CREATE_FAILED', 'Failed to create scope template', error)
     }
   })
 
@@ -2343,7 +2419,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', (error as Error)?.message || 'Failed to load scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_READ_FAILED', 'Failed to load scope template', error)
     }
   })
 
@@ -2421,7 +2497,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template departments')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_UPDATE_FAILED', 'Failed to update scope template departments', error)
     }
   })
 
@@ -2497,7 +2573,7 @@ export function adminUsersRouter(): Router {
         item,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', (error as Error)?.message || 'Failed to update scope template member groups')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_GROUP_UPDATE_FAILED', 'Failed to update scope template member groups', error)
     }
   })
 
@@ -2527,7 +2603,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_READ_FAILED', (error as Error)?.message || 'Failed to load delegated admin scopes')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_READ_FAILED', 'Failed to load delegated admin scopes', error)
     }
   })
 
@@ -2613,7 +2689,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin scope', error)
     }
   })
 
@@ -2691,7 +2767,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated admin member-group scope')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_GROUP_SCOPE_UPDATE_FAILED', 'Failed to update delegated admin member-group scope', error)
     }
   })
 
@@ -2756,7 +2832,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', (error as Error)?.message || 'Failed to update platform member group membership')
+      return sendAdminUsersServerFailure(req, res, 'PLATFORM_MEMBER_GROUP_MEMBER_UPDATE_FAILED', 'Failed to update platform member group membership', error)
     }
   })
 
@@ -2863,7 +2939,7 @@ export function adminUsersRouter(): Router {
         groupAssignments: groupAssignments.filter((assignment) => adminNamespaces.includes(assignment.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', (error as Error)?.message || 'Failed to apply scope template')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_SCOPE_TEMPLATE_APPLY_FAILED', 'Failed to apply scope template', error)
     }
   })
 
@@ -2921,7 +2997,7 @@ export function adminUsersRouter(): Router {
         groupAssignments,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_USER_LIST_FAILED', (error as Error)?.message || 'Failed to list delegation users')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_USER_LIST_FAILED', 'Failed to list delegation users', error)
     }
   })
 
@@ -2982,7 +3058,7 @@ export function adminUsersRouter(): Router {
           : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ACCESS_FAILED', (error as Error)?.message || 'Failed to load delegated user access')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACCESS_FAILED', 'Failed to load delegated user access', error)
     }
   })
 
@@ -3060,7 +3136,7 @@ export function adminUsersRouter(): Router {
           : namespaceAdmissions.filter((admission) => delegation.delegableNamespaces.includes(admission.namespace)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_DELEGATION_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update delegated namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ADMISSION_FAILED', 'Failed to update delegated namespace admission', error)
     }
   })
 
@@ -3178,7 +3254,7 @@ export function adminUsersRouter(): Router {
       // admission-controlled — so this arm is reachable and is the seam's real answer for it.
       if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_UPDATE_FAILED', 'Failed to update delegated role', error)
     }
   })
 
@@ -3257,7 +3333,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'USER_LIST_FAILED', (error as Error)?.message || 'Failed to list users')
+      return sendAdminUsersServerFailure(req, res, 'USER_LIST_FAILED', 'Failed to list users', error)
     }
   })
 
@@ -3367,7 +3443,7 @@ export function adminUsersRouter(): Router {
           degraded: true,
         })
       }
-      return jsonError(res, 500, 'INVITE_LEDGER_LIST_FAILED', (error as Error)?.message || 'Failed to load invite ledger')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_LEDGER_LIST_FAILED', 'Failed to load invite ledger', error)
     }
   })
 
@@ -3421,7 +3497,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_REVOKE_FAILED', 'Failed to revoke invite', error)
     }
   })
 
@@ -3534,7 +3610,7 @@ export function adminUsersRouter(): Router {
       if (isDatabaseSchemaError(error)) {
         return jsonError(res, 503, 'INVITE_LEDGER_UNAVAILABLE', 'Invite ledger is not available until migrations are applied')
       }
-      return jsonError(res, 500, 'INVITE_RESEND_FAILED', (error as Error)?.message || 'Failed to resend invite')
+      return sendAdminUsersServerFailure(req, res, 'INVITE_RESEND_FAILED', 'Failed to resend invite', error)
     }
   })
 
@@ -4002,7 +4078,7 @@ export function adminUsersRouter(): Router {
         return jsonError(res, 503, 'USER_CREATE_SCHEMA_UNAVAILABLE', 'Required user or attendance tables are not available until migrations are applied')
       }
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'USER_CREATE_FAILED', (error as Error)?.message || 'Failed to create user')
+      return sendAdminUsersServerFailure(req, res, 'USER_CREATE_FAILED', 'Failed to create user', error)
     }
   })
 
@@ -4256,7 +4332,7 @@ export function adminUsersRouter(): Router {
         }
         return jsonError(res, 500, 'LOGIN_ALIAS_FAILED', error.message)
       }
-      return jsonError(res, 500, 'USER_PROFILE_UPDATE_FAILED', (error as Error)?.message || 'Failed to update user profile')
+      return sendAdminUsersServerFailure(req, res, 'USER_PROFILE_UPDATE_FAILED', 'Failed to update user profile', error)
     }
   })
 
@@ -4273,7 +4349,7 @@ export function adminUsersRouter(): Router {
 
       return jsonOk(res, { ...snapshot, actorId: adminUserId })
     } catch (error) {
-      return jsonError(res, 500, 'USER_ACCESS_FAILED', (error as Error)?.message || 'Failed to load user access')
+      return sendAdminUsersServerFailure(req, res, 'USER_ACCESS_FAILED', 'Failed to load user access', error)
     }
   })
 
@@ -4294,7 +4370,7 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_ACCESS_FAILED', 'Failed to load DingTalk access', error)
     }
   })
 
@@ -4314,7 +4390,7 @@ export function adminUsersRouter(): Router {
         ...snapshot,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_ADMISSION_FAILED', (error as Error)?.message || 'Failed to load member admission snapshot')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_ADMISSION_FAILED', 'Failed to load member admission snapshot', error)
     }
   })
 
@@ -4365,7 +4441,7 @@ export function adminUsersRouter(): Router {
         namespaceAdmissions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_FAILED', (error as Error)?.message || 'Failed to update namespace admission')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_FAILED', 'Failed to update namespace admission', error)
     }
   })
 
@@ -4430,7 +4506,7 @@ export function adminUsersRouter(): Router {
         userIds,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', (error as Error)?.message || 'Failed to update namespace admission in bulk')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_NAMESPACE_ADMISSION_BULK_FAILED', 'Failed to update namespace admission in bulk', error)
     }
   })
 
@@ -4477,7 +4553,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_GRANT_UPDATE_FAILED', DINGTALK_GRANT_UNCONFIRMED_MESSAGE, error)
     }
   })
 
@@ -4530,7 +4606,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_BULK_GRANT_UPDATE_FAILED', 'Failed to update DingTalk access in bulk', error)
     }
   })
 
@@ -4580,7 +4656,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_ASSIGN_FAILED', 'Failed to assign role', error)
     }
   })
 
@@ -4631,7 +4707,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_UNASSIGN_FAILED', 'Failed to unassign role', error)
     }
   })
 
@@ -4719,7 +4795,7 @@ export function adminUsersRouter(): Router {
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
-      return jsonError(res, 500, 'USER_STATUS_FAILED', (error as Error)?.message || 'Failed to update user status')
+      return sendAdminUsersServerFailure(req, res, 'USER_STATUS_FAILED', 'Failed to update user status', error)
     }
   })
 
@@ -4775,7 +4851,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'PASSWORD_RESET_FAILED', (error as Error)?.message || 'Failed to reset password')
+      return sendAdminUsersServerFailure(req, res, 'PASSWORD_RESET_FAILED', 'Failed to reset password', error)
     }
   })
 
@@ -4819,7 +4895,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke user sessions', error)
     }
   })
 
@@ -4835,7 +4911,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ROLE_LIST_FAILED', (error as Error)?.message || 'Failed to list roles')
+      return sendAdminUsersServerFailure(req, res, 'ROLE_LIST_FAILED', 'Failed to list roles', error)
     }
   })
 
@@ -4928,7 +5004,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_LIST_FAILED', (error as Error)?.message || 'Failed to load admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_LIST_FAILED', 'Failed to load admin audit activity', error)
     }
   })
 
@@ -5024,7 +5100,7 @@ export function adminUsersRouter(): Router {
 
       return res.end()
     } catch (error) {
-      return jsonError(res, 500, 'ADMIN_AUDIT_EXPORT_FAILED', (error as Error)?.message || 'Failed to export admin audit activity')
+      return sendAdminUsersServerFailure(req, res, 'ADMIN_AUDIT_EXPORT_FAILED', 'Failed to export admin audit activity', error)
     }
   })
 
@@ -5045,7 +5121,7 @@ export function adminUsersRouter(): Router {
         items: sessions,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_LIST_FAILED', (error as Error)?.message || 'Failed to load user sessions')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_LIST_FAILED', 'Failed to load user sessions', error)
     }
   })
 
@@ -5103,7 +5179,7 @@ export function adminUsersRouter(): Router {
         reason,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOKE_FAILED', (error as Error)?.message || 'Failed to revoke session')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOKE_FAILED', 'Failed to revoke session', error)
     }
   })
 
@@ -5188,7 +5264,7 @@ export function adminUsersRouter(): Router {
         actorId: adminUserId,
       })
     } catch (error) {
-      return jsonError(res, 500, 'SESSION_REVOCATION_LIST_FAILED', (error as Error)?.message || 'Failed to load session revocations')
+      return sendAdminUsersServerFailure(req, res, 'SESSION_REVOCATION_LIST_FAILED', 'Failed to load session revocations', error)
     }
   })
 
@@ -5320,7 +5396,7 @@ export function adminUsersRouter(): Router {
         cutoverEnabled: isAuthLoginAliasCutoverEnabled(),
       })
     } catch (error) {
-      return jsonError(res, 500, 'ALIAS_BACKFILL_FAILED', (error as Error)?.message || 'Backfill failed')
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_BACKFILL_FAILED', 'Backfill failed', error)
     }
   })
 
@@ -5356,7 +5432,7 @@ export function adminUsersRouter(): Router {
           message: (error as Error).message,
         })
       }
-      return jsonError(res, 500, 'ALIAS_CUTOVER_STATUS_FAILED', (error as Error)?.message || 'Status failed')
+      return sendAdminUsersServerFailure(req, res, 'ALIAS_CUTOVER_STATUS_FAILED', 'Status failed', error)
     }
   })
 

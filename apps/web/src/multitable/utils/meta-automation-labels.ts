@@ -235,6 +235,8 @@ export type AutomationLabelKey =
   | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
+  // #6155: non-blocking notice on a rule that is on (or being switched on) with an action that can only no-op.
+  | 'manager.deletedTriggerSkipNotice'
   | 'manager.allowedAudiencePrefix'
   | 'manager.statOk'
   | 'manager.statFail'
@@ -611,6 +613,7 @@ export const AUTOMATION_LABEL_KEYS: readonly AutomationLabelKey[] = [
   'recipe.fieldChangedUpdateDesc',
   'manager.enabled',
   'manager.disabled',
+  'manager.deletedTriggerSkipNotice',
   'manager.allowedAudiencePrefix',
   'manager.statOk',
   'manager.statFail',
@@ -1099,6 +1102,16 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'recipe.fieldChangedUpdateDesc': { en: 'When a field changes, write a value into another field.', zh: '字段变更时，向另一字段写入值。' },
   'manager.enabled': { en: 'Enabled', zh: '已启用' },
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
+  // #6155: shown (never blocking) on the automation panel card of a rule that is on or being switched on while its
+  // trigger is record.deleted and its action updates/deletes/locks the trigger record — the same shape the editor
+  // refuses to save ('actionConfig.deletedTriggerSelfMutation'). An existing rule of it runs, and each such action
+  // changes no table record: a delete_record step ends as skipped, an update_record / lock_record step as success,
+  // and the rule's other actions still run — so the sentence names no run status, and it reads the same for one
+  // such action or several.
+  'manager.deletedTriggerSkipNotice': {
+    en: 'This rule runs when a record is deleted, so any update, delete or lock action in it aimed at that deleted record has no effect. If that is not intended, change the action or the trigger.',
+    zh: '此规则在记录删除时运行，所以其中针对这条已删除记录的修改、删除或锁定动作不会生效。如非预期，请改用其他动作，或换一个触发条件。',
+  },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
   'manager.statOk': { en: 'ok', zh: '成功' },
   'manager.statFail': { en: 'fail', zh: '失败' },

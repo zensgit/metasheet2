@@ -10,7 +10,8 @@ import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { Logger } from '../core/logger'
 import { IPLMAdapter } from '../di/identifiers'
-import { pool, query } from '../db/pg'
+import { randomUUID } from 'node:crypto'
+import { pool, query, transaction } from '../db/pg'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 // Lock-1 §K1 fix-round P1 — the curated bind/unbind path is gated STRICTER than the rest of this
@@ -89,13 +90,27 @@ import {
 import { resolveApprovalRequesterOrgRelations } from '../services/ApprovalDirectoryOrg'
 import {
   archiveApprovalTemplateGroup,
+  beginApprovalTemplateGroupTxn,
+  classifyBackfillCategory,
   createApprovalTemplateGroup,
+  createApprovalTemplateGroupWithClient,
   linkApprovalTemplateToGroup,
+  linkApprovalTemplateToGroupWithClient,
+  listApprovalTemplateGroupBackfillBatches,
   listApprovalTemplateGroups,
+  mapGroupConstraintError,
   renameApprovalTemplateGroup,
+  rollbackApprovalTemplateGroupBackfillBatch,
   unarchiveApprovalTemplateGroup,
   unlinkApprovalTemplateFromGroup,
+  type AtgTxClient,
+  type BackfillCategorySkipReason,
 } from '../services/ApprovalTemplateGroupService'
+import {
+  listApprovalTemplatesBySection,
+  parseApprovalTemplateSectionToken,
+} from '../services/ApprovalTemplateGroupSectionService'
+import { reorderApprovalTemplateGroups } from '../services/ApprovalTemplateGroupReorderService'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
 import {
@@ -376,6 +391,49 @@ function isOrgIdValuePresent(value: unknown): boolean {
   return true
 }
 
+// Approval form grouping — daily-ops fix round (P3-1, groups-daily-ops-real-browser-acceptance-
+// 20260920.md). `:id` on the link/unlink endpoints is bound into a query against a `uuid` column
+// on BOTH sides (`approval_templates.id` in `isApprovalTemplateVisibleForGroupLink`'s SELECT,
+// `approval_template_group_links.template_id` in the link/unlink service functions —
+// `zzzz20260918090000_create_approval_template_groups.ts`). A malformed id (e.g. "not-a-uuid")
+// never reaches `mapGroupConstraintError`: Postgres raises `22P02 invalid_text_representation` on
+// the query itself, which is not a `ServiceError` and falls through `handleApprovalsError`'s
+// generic branch as a bare 500 `*_FAILED` code — a client input error mis-filed as a server
+// failure (measured pre-fix, real DB: 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED` /
+// `APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED`). Checked BEFORE either query fires — same
+// "validate request shape before any DB access" discipline as `resolveApprovalTemplateGroupOrgId`
+// just below.
+//
+// Scope, stated as measured (P3-1a, impl-gate-A5-daily-ops-round1-20260920.md — an earlier draft
+// of this comment claimed this predicate "is not narrower than any real id, only narrower than the
+// strings that could never have been one", and that claim is FALSE, withdrawn here): this accepts
+// the canonical 8-4-4-4-12 hex form and nothing else, case-insensitively. Postgres' own `uuid`
+// input parser accepts more textual forms of the SAME value — an A/B run of this head against the
+// pre-fix head on one database measured `383f976ea2f24757ac25b6f501bbb0ef` (no hyphens) and
+// `{383f976e-a2f2-4757-ac25-b6f501bbb0ef}` (braces) both LINKING successfully (201/204) before this
+// check and both 400 after it, and `SELECT 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid` /
+// `SELECT '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid` both normalize to the canonical string.
+// Those are alternative spellings of a real id, not strings that "could never have been one", so
+// this IS a deliberate narrowing of the accepted request shape — chosen over normalizing (strip
+// braces / re-insert hyphens) because one canonical spelling per id keeps the endpoint's input
+// space equal to what the product's own clients send: the UI only ever passes ids it read back
+// from these APIs, which are always canonical.
+//
+// The real-DB census (`SELECT count(*) FROM approval_templates WHERE id::text !~
+// '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'` = 0 on a freshly migrated
+// database, where every id is `DEFAULT gen_random_uuid()`) is kept, with its scope corrected: it
+// shows no STORED id fails this pattern, i.e. no existing row becomes unaddressable. It says
+// nothing about which INPUT spellings are accepted — those are two different sets, and conflating
+// them is exactly what the withdrawn sentence did.
+//
+// A well-formed-but-nonexistent id is UNAFFECTED — it still reaches the pre-existing 404
+// `APPROVAL_TEMPLATE_NOT_FOUND` (link) / idempotent 204 (unlink) path.
+const WELL_FORMED_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isWellFormedUuid(value: string): boolean {
+  return WELL_FORMED_UUID_PATTERN.test(value)
+}
+
 function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
   const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
   const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
@@ -487,6 +545,342 @@ export async function isApprovalTemplateVisibleForGroupLink(
   applyTemplateVisibilityFilter(conditions, params, 2, actor)
   const result = await query(`SELECT 1 FROM approval_templates WHERE ${conditions.join(' AND ')} LIMIT 1`, params)
   return (result.rowCount ?? 0) > 0
+}
+
+// ── A-3 backfill — design-gate A3-phase2, W7 preview ────────────────────────────────────────────
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5. Read-only: no lock,
+// no write — the candidate population is §5.1's I2′ predicate (`NOT EXISTS` in
+// `approval_template_group_links` for this org) plus the SAME `applyTemplateVisibilityFilter`
+// every other template read in this router uses (defined here, not the service file, for the SAME
+// reason `isApprovalTemplateVisibleForGroupLink` above lives here rather than in
+// `ApprovalTemplateGroupService.ts`: it needs `applyTemplateVisibilityFilter`, which that file does
+// not import, to avoid a cross-service import for a single query).
+
+export interface ApprovalTemplateGroupBackfillBucket {
+  category: string
+  action: 'create' | 'attach'
+  existingGroupId: string | null
+  templateIds: string[]
+  templateCount: number
+}
+
+export interface ApprovalTemplateGroupBackfillSkip {
+  category: string
+  reason: BackfillCategorySkipReason
+  templateIds: string[]
+  templateCount: number
+}
+
+export interface ApprovalTemplateGroupBackfillPreview {
+  scope: 'org-complete' | 'visible-to-you'
+  // design-gate-A3-phase2 changesRequired #12 (P2-2, cap branch): "…超出返回 400 …
+  // _BACKFILL_TOO_LARGE,并在 preview 里提前给出 candidateCount,让管理员先收窄". This is the
+  // SAME population execute's `eligible` query counts and caps at
+  // `APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES` below — the sum of every non-skipped
+  // bucket's `templateCount` (skipped rows are never candidates; execute's `eligible` query
+  // filters them out via the identical `btrim(category) ~ '[!-~]'` predicate, changesRequired
+  // #3) — not a separate count computed from a second query, so the two cannot drift apart.
+  candidateCount: number
+  buckets: ApprovalTemplateGroupBackfillBucket[]
+  skipped: ApprovalTemplateGroupBackfillSkip[]
+}
+
+const EMPTY_EXISTING_GROUP_MAP: ReadonlyMap<string, string> = new Map()
+
+export async function previewApprovalTemplateGroupBackfill(
+  orgId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+): Promise<ApprovalTemplateGroupBackfillPreview> {
+  // §5.1: "从未被这个 org 关联过" — the identical I2′ NOT EXISTS predicate execute's `eligible`
+  // query (§3.1) uses, plus the same visibility filter every other template read applies.
+  const conditions: string[] = [
+    'NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)',
+  ]
+  const params: unknown[] = [orgId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const candidates = await query<{ id: string; category: string | null }>(
+    `SELECT t.id, t.category FROM approval_templates t WHERE ${conditions.join(' AND ')}`,
+    params,
+  )
+
+  // Pass 1 — skip/eligible determination never depends on which groups already exist (§5.2:
+  // `classifyBackfillCategory`'s skip branch ignores `existingGroupIdByTrimmedName`), so an empty
+  // map is safe here; it only collects the set of trimmed category names pass 2 needs to look up.
+  const firstPass = candidates.rows.map((row) => ({
+    row,
+    classification: classifyBackfillCategory(row.category, EMPTY_EXISTING_GROUP_MAP),
+  }))
+  const eligibleTrimmedCategories = new Set<string>()
+  for (const { classification } of firstPass) {
+    if (classification.action !== 'skip') eligibleTrimmedCategories.add(classification.trimmedCategory)
+  }
+
+  const existingGroupIdByTrimmedName = new Map<string, string>()
+  if (eligibleTrimmedCategories.size > 0) {
+    const existing = await query<{ id: string; name: string }>(
+      `SELECT id, name FROM approval_template_groups
+        WHERE org_id = $1 AND archived_at IS NULL AND name = ANY($2::text[])`,
+      [orgId, Array.from(eligibleTrimmedCategories)],
+    )
+    for (const g of existing.rows) existingGroupIdByTrimmedName.set(g.name, g.id)
+  }
+
+  const bucketsByCategory = new Map<string, ApprovalTemplateGroupBackfillBucket>()
+  const skippedByCategory = new Map<string, ApprovalTemplateGroupBackfillSkip>()
+
+  for (const { row, classification: firstClassification } of firstPass) {
+    if (firstClassification.action === 'skip') {
+      const key = row.category ?? ''
+      let bucket = skippedByCategory.get(key)
+      if (!bucket) {
+        bucket = { category: key, reason: firstClassification.reason, templateIds: [], templateCount: 0 }
+        skippedByCategory.set(key, bucket)
+      }
+      bucket.templateIds.push(row.id)
+      bucket.templateCount++
+      continue
+    }
+    // Pass 2 — same category, now with the real existing-group map, to resolve create vs attach.
+    const classification = classifyBackfillCategory(row.category, existingGroupIdByTrimmedName)
+    if (classification.action === 'skip') continue // unreachable: pass 1 already proved this row's category non-skip
+    let bucket = bucketsByCategory.get(classification.trimmedCategory)
+    if (!bucket) {
+      bucket = {
+        category: classification.trimmedCategory,
+        action: classification.action,
+        existingGroupId: classification.action === 'attach' ? classification.existingGroupId : null,
+        templateIds: [],
+        templateCount: 0,
+      }
+      bucketsByCategory.set(classification.trimmedCategory, bucket)
+    }
+    bucket.templateIds.push(row.id)
+    bucket.templateCount++
+  }
+
+  // changesRequired #12 (P2-2 cap branch): summed from the SAME bucket accumulator the `buckets`
+  // array below is built from — not a third independent count — so `candidateCount` cannot drift
+  // from `buckets`' own `templateCount` fields (a reader who sums `buckets[].templateCount`
+  // themselves must get this exact number back; asserted in the preview `.db.test.ts`).
+  let candidateCount = 0
+  for (const bucket of bucketsByCategory.values()) candidateCount += bucket.templateCount
+
+  return {
+    // §5.2 changesRequired #16: "org-complete" iff `applyTemplateVisibilityFilter` is a no-op for
+    // this actor (the SAME condition that function itself short-circuits on) — not "actor is a
+    // manager" restated, but the literal predicate this preview's own candidate query just ran.
+    scope: !actor || actor.isTemplateManager ? 'org-complete' : 'visible-to-you',
+    candidateCount,
+    // §3.1 "categories ← … 按字典序排序" — plain code-point order (NOT `localeCompare`, which is
+    // locale/ICU-dependent and can disagree with SQL `ORDER BY` under a C-collation database; see
+    // `finding_prod_pg15_never_tested` for this repo's live glibc/musl collation gap), so preview's
+    // ordering cannot silently drift from whatever ORDER BY W8's execute eventually uses.
+    buckets: Array.from(bucketsByCategory.values()).sort(byCategoryCodePoint),
+    skipped: Array.from(skippedByCategory.values()).sort(byCategoryCodePoint),
+  }
+}
+
+function byCategoryCodePoint(a: { category: string }, b: { category: string }): number {
+  return a.category < b.category ? -1 : a.category > b.category ? 1 : 0
+}
+
+// ── A-3 backfill — design-gate A3-phase2, W8 execute (2026-09-18 续做步骤 17) ────────────────────
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §3 / §13.2 (unified lock
+// order, verbatim). Lives here — not `ApprovalTemplateGroupService.ts` — for the SAME reason
+// `previewApprovalTemplateGroupBackfill` and `isApprovalTemplateVisibleForGroupLink` do: it needs
+// `applyTemplateVisibilityFilter`, which that service file deliberately does not import.
+
+const APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES = 500
+
+export interface ApprovalTemplateGroupBackfillExecuteGroup {
+  groupId: string
+  category: string
+  action: 'create' | 'attach'
+  templateIds: string[]
+}
+
+export interface ApprovalTemplateGroupBackfillExecuteResult {
+  batchId: string | null
+  scope: 'org-complete' | 'visible-to-you'
+  groups: ApprovalTemplateGroupBackfillExecuteGroup[]
+}
+
+/**
+ * §3.1's single `transaction(...)` callback, `beginApprovalTemplateGroupTxn` called exactly once
+ * at the top (file-header note on that function: a second call on the same client re-issues the
+ * SET after other statements have run on the connection — nothing here does that). Every write
+ * this function performs is either an inlined statement (L0, the eligible/existing-group reads,
+ * the batch header/detail inserts — none of these have a `...WithClient` primitive to call) or a
+ * call to `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient`
+ * (§13.2 changesRequired #9 — "must call the primitives, must not copy their statements").
+ *
+ * **Reconciling changesRequired #9 against changesRequired #2 (a tension the pseudocode's own
+ * inlined-CTE text did not have to face, because it never called the primitive)**: #2 requires
+ * `linked_at` to never round-trip through JS (a `timestamptz`'s microsecond precision is lost the
+ * moment node-postgres parses it into a `Date`, then again through `toIso()`'s `toISOString()`,
+ * making a later `AND linked_at = $token` compare 100% false — design-gate M4). Calling
+ * `linkApprovalTemplateToGroupWithClient` and using ITS RETURNED `linkedAt` string for the
+ * `..._batch_links` insert would reintroduce exactly that bug. Instead: call the primitive for
+ * its actual job (the L1 `FOR UPDATE` + `archived_at` guard + the upsert itself — reused, not
+ * copied, satisfying #9), then write the batch-link detail row with a SEPARATE statement whose
+ * `linked_at` column is populated by a correlated `SELECT … FROM approval_template_group_links`
+ * against the row that upsert just committed to THIS SAME transaction — the value is copied
+ * server-side, inside one more SQL statement, and never materializes as a JS value at any point.
+ * This is one extra round trip per linked template (not present in the pseudocode's inlined-CTE
+ * text) in exchange for reusing the primitive verbatim rather than forking its statement — the
+ * `.db.test.ts` below asserts byte-for-byte equality between the two tables' `linked_at` columns
+ * via a raw SQL comparison (`l.linked_at = b.linked_at`), not JS equality, so a regression back to
+ * a JS-round-tripped token would redden it the same way M4 would.
+ */
+export async function executeApprovalTemplateGroupBackfillWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+  createdBy: string,
+): Promise<ApprovalTemplateGroupBackfillExecuteResult> {
+  const scope: 'org-complete' | 'visible-to-you' = !actor || actor.isTemplateManager ? 'org-complete' : 'visible-to-you'
+
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`]) // L0
+
+  // §13 changesRequired #3: the storability predicate lives INSIDE this query, not a loop
+  // `continue` — an ineligible row that instead relied on a post-query skip would still satisfy
+  // `NOT EXISTS`, so `eligible` would never be empty, so the "eligible empty ⇒ batchId: null"
+  // branch below would never fire, and a CJK-only-category org would grow one empty batch header
+  // row per execute call (the exact mechanism design-gate M5/changesRequired #3 names).
+  // Collation caveat: this `~ '[!-~]'` range match's SQL/JS equivalence with
+  // `STORABLE_GROUP_NAME_PATTERN` (ApprovalTemplateGroupService.ts) is only measured against
+  // glibc/`en_US.utf8` collation — see that constant's doc-comment for the musl/`15-alpine` axis,
+  // which is unverified (`finding_prod_pg15_never_tested`).
+  const conditions: string[] = [
+    'NOT EXISTS (SELECT 1 FROM approval_template_group_links l WHERE l.org_id = $1 AND l.template_id = t.id)',
+    "btrim(t.category) ~ '[!-~]'",
+  ]
+  const params: unknown[] = [orgId]
+  applyTemplateVisibilityFilter(conditions, params, 2, actor)
+  const eligibleResult = await client.query(
+    `SELECT t.id AS id, btrim(t.category) AS category FROM approval_templates t WHERE ${conditions.join(' AND ')}`,
+    params,
+  )
+  const eligible = eligibleResult.rows as Array<{ id: string; category: string }>
+
+  if (eligible.length === 0) {
+    return { batchId: null, scope, groups: [] } // §3.2: same code path both "second sequential call" and "concurrent loser" take
+  }
+  if (eligible.length > APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES) {
+    // §13 changesRequired #12 — zero rows written; the `transaction()` wrapper below rolls back.
+    throw new ServiceError(
+      `Backfill candidate count ${eligible.length} exceeds the ${APPROVAL_TEMPLATE_GROUP_BACKFILL_MAX_CANDIDATES} limit`,
+      400,
+      'APPROVAL_TEMPLATE_GROUP_BACKFILL_TOO_LARGE',
+    )
+  }
+
+  const templateIdsByCategory = new Map<string, string[]>()
+  for (const row of eligible) {
+    const list = templateIdsByCategory.get(row.category)
+    if (list) list.push(row.id)
+    else templateIdsByCategory.set(row.category, [row.id])
+  }
+  const categories = Array.from(templateIdsByCategory.keys()).sort(
+    (a, b) => (a < b ? -1 : a > b ? 1 : 0), // §3.1 "按字典序排序" — same code-point comparator as `byCategoryCodePoint`
+  )
+
+  const existingResult = await client.query(
+    `SELECT id, name FROM approval_template_groups
+      WHERE org_id = $1 AND archived_at IS NULL AND name = ANY($2::text[])`,
+    [orgId, categories],
+  )
+  const existingIdByName = new Map(
+    (existingResult.rows as Array<{ id: string; name: string }>).map((row) => [row.name, row.id]),
+  )
+  const existingIds = Array.from(existingIdByName.values())
+
+  // §13.2 unified lock order, verbatim: L0 (above) → ONE statement, deterministic `ORDER BY id`,
+  // pre-locking every EXISTING group row this call will touch → all L2 writes below. This is the
+  // fix for design-gate M2 (the pre-fix per-category loop took L1 → L2 → L1, deadlocking against
+  // a concurrent plain link/unlink request that takes L1 → L2 the other way).
+  if (existingIds.length > 0) {
+    await client.query(
+      `SELECT id FROM approval_template_groups WHERE org_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`,
+      [orgId, existingIds],
+    )
+  }
+
+  const batchId = `atgbb_${randomUUID()}`
+  await client.query(
+    `INSERT INTO approval_template_group_backfill_batches (id, org_id, created_by) VALUES ($1, $2, $3)`,
+    [batchId, orgId, createdBy],
+  )
+
+  const groups: ApprovalTemplateGroupBackfillExecuteGroup[] = []
+  for (const category of categories) {
+    const templateIds = templateIdsByCategory.get(category) ?? []
+    const existingGroupId = existingIdByName.get(category)
+    let groupId: string
+    let action: 'create' | 'attach'
+    if (existingGroupId) {
+      // Pre-locked above — this is a re-take of a row lock this transaction already holds, not a
+      // new L1 acquire (§13.2's "预锁之后…退化成对本事务已持有行锁的再取").
+      groupId = existingGroupId
+      action = 'attach'
+    } else {
+      // §13 changesRequired #9: call the primitive, do not copy its statement body. New row, no
+      // L1 contention (nothing else can see an uncommitted id).
+      const created = await createApprovalTemplateGroupWithClient(client, orgId, category, createdBy)
+      groupId = created.id
+      action = 'create'
+    }
+    await client.query(
+      `INSERT INTO approval_template_group_backfill_batch_groups (batch_id, org_id, group_id, created_new)
+       VALUES ($1, $2, $3, $4)`,
+      [batchId, orgId, groupId, action === 'create'],
+    )
+
+    for (const templateId of templateIds) {
+      // §13 changesRequired #9: call the primitive (reuses its L1 `FOR UPDATE` + `archived_at`
+      // guard + upsert) rather than inlining the upsert text a second time in this file.
+      await linkApprovalTemplateToGroupWithClient(client, orgId, templateId, groupId, createdBy)
+      // See this function's file-header note above: the batch-link detail row's `linked_at` is
+      // populated by a server-side correlated SELECT against the row the upsert above just wrote
+      // in THIS transaction — never through the primitive's JS-mapped return value — so the token
+      // `..._batch_links.linked_at` will later `AND linked_at = …` match exactly in §4.2's
+      // rollback (changesRequired #2's "全程不经 JS", satisfied without forking the upsert text).
+      await client.query(
+        `INSERT INTO approval_template_group_backfill_batch_links (batch_id, org_id, template_id, group_id, linked_at)
+         SELECT $1, $2, $3, $4, l.linked_at
+           FROM approval_template_group_links l
+          WHERE l.org_id = $2 AND l.template_id = $3`,
+        [batchId, orgId, templateId, groupId],
+      )
+    }
+
+    groups.push({ groupId, category, action, templateIds })
+  }
+
+  return { batchId, scope, groups }
+}
+
+/**
+ * Thin wrapper — opens the ONE `transaction(...)` call this composed operation runs on, exactly
+ * like `createApprovalTemplateGroup` / `archiveApprovalTemplateGroup` / `linkApprovalTemplateToGroup`
+ * do over their own `...WithClient` primitive. §13 changesRequired #11 (front half): the
+ * `mapGroupConstraintError` catch wraps this ENTIRE `await transaction(...)` call, not any
+ * statement inside the callback — `atg_sort_unique` is DEFERRABLE INITIALLY DEFERRED, so a real
+ * collision only raises 23505 at COMMIT time, after the callback has already returned.
+ */
+export async function executeApprovalTemplateGroupBackfill(
+  orgId: string,
+  actor: ApprovalTemplateVisibilityActor | undefined,
+  createdBy: string,
+): Promise<ApprovalTemplateGroupBackfillExecuteResult> {
+  try {
+    return await transaction(async (client) => {
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return executeApprovalTemplateGroupBackfillWithClient(txClient, orgId, actor, createdBy)
+    })
+  } catch (error) {
+    throw mapGroupConstraintError(error)
+  }
 }
 
 function approvalVersionConflictResponse(currentVersion: number) {
@@ -959,6 +1353,57 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const page = parsePaging(req.query.page, 1, Number.MAX_SAFE_INTEGER)
       const pageSize = parsePaging(req.query.pageSize, 20)
       const { limit, offset } = resolveApprovalListPaging(page, pageSize)
+
+      // Approval form grouping lock v2.13 §6 phase 3 (A-4), §4 rows C/J — this two-clause request
+      // shape check was requested up from A-1/A-2 (supplementary checklist lane-A #5) and lands
+      // here: `section=` and `?category=` are mutually exclusive, and an unrecognized `section=`
+      // token is a 400, never a silent fall-through to the unsectioned list (that fall-through is
+      // literally row C's own mutation target — "去掉 section 过滤 ⇒ 分页跨桶"). Both checks run
+      // BEFORE any DB access. Category-conflict is checked first (a structural shape conflict,
+      // same footing as `resolveApprovalTemplateGroupOrgId`'s own body/query `orgId` check ahead
+      // of its session check) so a request combining both never depends on which order errors
+      // happen to surface in.
+      const sectionRaw = req.query.section
+      if (sectionRaw !== undefined) {
+        if (isOrgIdValuePresent(req.query.category)) {
+          return res.status(400).json(
+            approvalErrorResponse(
+              'APPROVAL_TEMPLATE_SECTION_CATEGORY_CONFLICT',
+              'section and category cannot be combined',
+            ),
+          )
+        }
+        // A repeated `?section=a&section=b` query key parses to an ARRAY, not a string — treating
+        // that (or any other non-string) as "no section" would silently degrade to the unsectioned
+        // list, the same fail-open shape the category check above guards against.
+        const sectionToken = typeof sectionRaw === 'string' && sectionRaw.length > 0
+          ? parseApprovalTemplateSectionToken(sectionRaw)
+          : null
+        if (!sectionToken) {
+          return res.status(400).json(
+            approvalErrorResponse('APPROVAL_TEMPLATE_SECTION_TOKEN_INVALID', 'Unknown section token'),
+          )
+        }
+        const sectionOrgId = resolveApprovalTemplateGroupOrgId(req, res)
+        if (!sectionOrgId) return
+        const sectioned = await listApprovalTemplatesBySection({
+          orgId: sectionOrgId,
+          token: sectionToken,
+          actor,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
+          search: typeof req.query.search === 'string' ? req.query.search : undefined,
+          limit,
+          offset,
+        })
+        return res.json({
+          data: sectioned.data,
+          total: sectioned.total,
+          limit,
+          offset,
+          section: sectionRaw,
+        })
+      }
+
       // Wave 2 WP4 slice 1 — `?category=xxx` equality filter. Empty / missing
       // leaves the filter unset, which matches all categories AND uncategorized
       // rows (same semantics as before the slice).
@@ -1551,11 +1996,43 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
+  // Reorder — design lock v2.13 §6 phase 3 (A-4), §3 I3 / §4 acceptance E (phase-3 leg) / §6 表第
+  // 3 行. Body is the ORG'S FULL permutation of its currently-active group ids (§3 I3: "分期 3
+  // 拖拽后整体重排 1..n", a full re-rank, not a delta). Shape (array of non-blank strings) is
+  // checked here, BEFORE any DB access (same "org resolved / request validated before any write"
+  // discipline as every other handler in this block); the SET-equality check against the org's
+  // actual active ids happens inside the service's own L0 critical section (no TOCTOU window
+  // between validating the set and writing it) and raises the dedicated `GROUP_REORDER_SET_MISMATCH`
+  // code for every shape of mismatch (missing / extra / duplicate / archived id).
+  r.post('/api/approval-template-groups/reorder', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const rawIds = req.body?.groupIds
+      if (!Array.isArray(rawIds) || rawIds.some((id) => typeof id !== 'string' || id.trim().length === 0)) {
+        return res.status(400).json(
+          approvalErrorResponse('GROUP_REORDER_IDS_REQUIRED', 'groupIds must be an array of group ids'),
+        )
+      }
+      const groups = await reorderApprovalTemplateGroups(orgId, rawIds)
+      res.json({ groups })
+    } catch (error) {
+      handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_REORDER_FAILED', 'Failed to reorder approval template groups')
+    }
+  })
+
   // Link (first link and re-link are the SAME atomic upsert, §2 v2.3) — always 201 on success.
   r.post('/api/approval-templates/:id/group', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — validate shape before the visibility SELECT or the upsert ever touch the uuid
+      // columns; see the doc comment on `isWellFormedUuid` above.
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       const actorId = resolveApprovalActorId(req)
       if (!actorId) {
         return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
@@ -1583,10 +2060,117 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — see the doc comment on `isWellFormedUuid` above (link handler applies the same
+      // check for the same reason: `template_id` is a `uuid` column here too).
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
       res.status(204).end()
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED', 'Failed to unlink approval template from group')
+    }
+  })
+
+  // ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2 W7 ───────────────────
+  // Phase 2 design doc §6.1/§6.2 (changesRequired #8/Q2, ownerLevel=true, default applied):
+  // preview is READ-ONLY but gated by `approvalTemplateAdminGuard` (the SAME writer-only guard as
+  // execute/rollback below it), not `rbacGuard('approvals:read')` — a deliberate, disclosed
+  // deviation from I7's literal read/write guard split (see the design doc §6.2 / §13.1 #8 for the
+  // three-part rationale and the owner-confirmation obligation this carries).
+  r.get('/api/approval-template-groups/backfill/preview', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const preview = await previewApprovalTemplateGroupBackfill(orgId, actor)
+      res.json(preview)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_GROUP_BACKFILL_PREVIEW_FAILED',
+        'Failed to preview approval template group backfill',
+      )
+    }
+  })
+
+  // W8 execute (design doc §3 / §6.1). Same guard as preview — see §6.2's three-part rationale
+  // above, unchanged for this write endpoint (execute was never ambiguous under I7: it is a write
+  // path, so `approvalTemplateAdminGuard` is I7's own literal rule here, not a disclosed
+  // deviation).
+  r.post('/api/approval-template-groups/backfill/execute', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const actorId = resolveApprovalActorId(req)
+      if (!actorId) {
+        return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
+      }
+      const actor = resolveApprovalTemplateVisibilityActor(req)
+      const result = await executeApprovalTemplateGroupBackfill(orgId, actor, actorId)
+      res.status(result.batchId ? 201 : 200).json(result)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_GROUP_BACKFILL_EXECUTE_FAILED',
+        'Failed to execute approval template group backfill',
+      )
+    }
+  })
+
+  // W9 rollback (design doc §4 / §13.1 changesRequired #1/#2/#4/#7). Same guard as execute — a
+  // write endpoint, so `approvalTemplateAdminGuard` is I7's own literal rule here, not a disclosed
+  // deviation (unlike preview's §6.2 situation). No actor id is required: rollback writes no
+  // actor-attributed column (the batch header already carries `created_by` from execute).
+  r.post(
+    '/api/approval-template-groups/backfill/batches/:batchId/rollback',
+    authenticate,
+    approvalTemplateAdminGuard,
+    async (req: Request, res: Response) => {
+      try {
+        const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+        if (!orgId) return
+        const batchId = String(req.params.batchId ?? '')
+        const result = await rollbackApprovalTemplateGroupBackfillBatch(orgId, batchId)
+        res.status(200).json(result)
+      } catch (error) {
+        handleApprovalsError(
+          res,
+          error,
+          'APPROVAL_TEMPLATE_GROUP_BACKFILL_ROLLBACK_FAILED',
+          'Failed to rollback approval template group backfill batch',
+        )
+      }
+    },
+  )
+
+  // Batch list (design doc §2.1 index / §6.1 endpoint row / §13.1 changesRequired #5, design-gate
+  // P1-5). Registered after rollback rather than before preview so the literal `/backfill/batches`
+  // path and the parameterised `/backfill/batches/:batchId/rollback` path sit next to each other in
+  // source order — Express itself does not care about registration order between a GET and a POST
+  // on different literal/parameterised path shapes, this ordering is for readability only. Same
+  // guard as the other three backfill endpoints — see §6.2's three-part rationale (item ③: this
+  // endpoint exposes "which write-plans have taken effect / been undone", the same "write's read
+  // companion" category as preview, not a `rbacGuard('approvals:read')` browse view).
+  r.get('/api/approval-template-groups/backfill/batches', authenticate, approvalTemplateAdminGuard, async (req: Request, res: Response) => {
+    try {
+      const orgId = resolveApprovalTemplateGroupOrgId(req, res)
+      if (!orgId) return
+      const limit = parsePaging(req.query.limit, 20, 100)
+      const offset = parsePaging(req.query.offset, 0, Number.MAX_SAFE_INTEGER)
+      const page = await listApprovalTemplateGroupBackfillBatches(orgId, limit, offset)
+      res.json(page)
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCHES_LIST_FAILED',
+        'Failed to list approval template group backfill batches',
+      )
     }
   })
 

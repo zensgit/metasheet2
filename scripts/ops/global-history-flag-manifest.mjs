@@ -59,6 +59,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
   },
   {
+    key: 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
+    danger: 'high',
+    purpose:
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. It also gates the fenced writers' post-fence field-schema re-check (ADR §3.11, slice 3a): every record writer that validated a write against a field snapshot taken before the canonical sheet fence re-reads the touched fields FOR SHARE after the fence and refuses 409 FIELD_SCHEMA_CHANGED (automation step fails; approval write-back throws) if a field's type or option set changed while it waited, and a non-scoped derived-value merge whose target is no longer formula/lookup/rollup is skipped. Off: none of those re-reads runs and every writer issues exactly its pre-existing statements. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview; packages/core-backend/src/multitable/field-schema-fence-recheck.ts#isFieldSchemaFenceRecheckEnabled (writer re-check, slice 3a)',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'field-retype-convert-with-legacy-manage-schema',
+        description:
+          'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT is active while MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA is active — the legacy switch lets multitable:write hold schema authority, below the gate field type conversion requires, so every conversion endpoint refuses 409 FIELD_RETYPE_TRUST_REQUIRED. Field type conversion cannot function in this state.',
+      },
+    ],
+  },
+  {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
     type: 'boolean',
     activationValue: 'true',
@@ -643,6 +662,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
     source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
+  },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
 ])
 

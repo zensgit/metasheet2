@@ -64,7 +64,11 @@ const mockTemplates = ref<any[]>([])
 const mockLoading = ref(false)
 const mockError = ref<string | null>(null)
 const mockTotal = ref(0)
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 
 vi.mock('../src/approvals/templateStore', () => ({
   useApprovalTemplateStore: () => ({
@@ -107,12 +111,18 @@ vi.mock('../src/approvals/api', () => ({
   getTemplateUsage: (id: string) => getTemplateUsageSpy(id),
   archiveTemplate: (id: string) => archiveTemplateSpy(id),
   unarchiveTemplate: (id: string) => unarchiveTemplateSpy(id),
-  // A-2 scope item 2 (design lock v2.13 §6 phase 1) — TemplateCenterView.vue now always mounts
+  // A-2 scope item 2 (design lock v2.13 §6 phase 1) — TemplateCenterView.vue mounts
   // ApprovalTemplateGroupsPanel.vue when canManageTemplates is true (the default in this file),
   // and that panel calls these two on mount/submit plus does an `instanceof ApprovalApiError`
   // check in its catch branch — all three must exist on this replacement mock or the panel's
   // onMounted throws unhandled (this spec makes no assertions about groups, so an empty resolved
   // list is enough).
+  //
+  // A-2 x A-4 convergence (2026-09-20): that mount is now GROUPED-view-only and behind the
+  // group-manager disclosure toggle, so the rendered-page CJK sweeps below (all flat view) no
+  // longer cover the panel's own markup. The panel keeps its dedicated file-level guard at the
+  // bottom of this file ("guard: ApprovalTemplateGroupsPanel.vue has no CJK literal outside a
+  // paired tr(en, zh) call"), which reads the file from disk and is unaffected by mounting.
   ApprovalApiError: class ApprovalApiError extends Error {},
   listApprovalTemplateGroups: () => Promise.resolve([]),
   createApprovalTemplateGroup: (name: string) => Promise.resolve({

@@ -291,7 +291,7 @@ test('the entire mutation window is wrapped in one failure handler that stops pm
   assert.ok(mainStart > -1)
   const main = scriptSource.slice(mainStart)
 
-  // One OUTER try/catch wraps steps 4 through 7 (extract through health check) —
+  // One OUTER try/catch wraps steps 3 through 7 (backup through health check) —
   // not one handler per assertion. It also nests exactly ONE defensive try/catch
   // of its own, around the Stop-Pm2App call inside it (so a failure THERE cannot
   // prevent the restore block from still printing) — so exactly two `} catch {`
@@ -2152,14 +2152,22 @@ function runUpgradeScriptAsync(args, envOverrides = {}) {
 // That pair is the runtime witness for the r29 ordering fix: the backend-direct
 // probe must arrive while the flag is still up, and the nginx probe must arrive
 // after it is gone.
-function startHealthServer({ flagPath = null, backendUp = () => true } = {}) {
+// gateWired: answer 503 to everything but the backend-direct /health while the flag
+// exists, the way a host whose nginx reads the gate does.
+// preStopProbes: the one silent backend-direct request step 2 makes right before the
+// stop (Test-BackendAnswersNow, tagged X-Upgrade-Prestop-Probe) is recorded there and
+// NOT in `requests`, which stays the health POLLING the tests below count.
+function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false } = {}) {
   return new Promise((resolve) => {
     const requests = []
+    const preStopProbes = []
     const server = http.createServer((req, res) => {
       // backendUp only governs the backend-direct /health path: it lets the R59
       // fixtures model "the backend is down until the scheduled task starts it".
-      const up = req.url === '/health' ? Boolean(backendUp()) : true
-      requests.push({
+      const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
+      const up = req.url === '/health' ? Boolean(backendUp()) : !gated
+      const log = req.headers['x-upgrade-prestop-probe'] === '1' ? preStopProbes : requests
+      log.push({
         url: req.url,
         flagExists: flagPath ? fs.existsSync(flagPath) : null,
         // The one-shot "is the gate actually wired on this host" probe tags
@@ -2179,7 +2187,7 @@ function startHealthServer({ flagPath = null, backendUp = () => true } = {}) {
     })
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address()
-      resolve({ server, port, requests, url: `http://127.0.0.1:${port}/api/health` })
+      resolve({ server, port, requests, preStopProbes, url: `http://127.0.0.1:${port}/api/health` })
     })
   })
 }
@@ -2706,12 +2714,14 @@ function childEnv(overrides = {}, removals = []) {
   return { ...env, ...overrides }
 }
 
-function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams) {
+// extraStubSource: more PowerShell the wrapper runs after the task stubs and before the
+// script (the stop-gap tests below define a failing Copy-Item there).
+function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams, extraStubSource = '') {
   const wrapperPath = path.join(root, 'run-upgrade-with-task-stubs.ps1')
   const splat = Object.entries(upgradeParams).map(([key, value]) => `  ${key} = ${psSingleQuote(value)}`)
   fs.writeFileSync(
     wrapperPath,
-    [scheduledTaskStubSource(taskStub), '$upgradeParams = @{', ...splat, '}', `& ${psSingleQuote(scriptExecPath)} @upgradeParams`, ''].join('\n'),
+    [scheduledTaskStubSource(taskStub), extraStubSource, '$upgradeParams = @{', ...splat, '}', `& ${psSingleQuote(scriptExecPath)} @upgradeParams`, ''].join('\n'),
   )
   return wrapperPath
 }
@@ -3756,6 +3766,626 @@ test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pi
     fs.rmSync(scratch, { recursive: true, force: true })
   }
 })
+
+// ── 3d. The stop gap: a failure after the step 2 stop, before anything was replaced ──
+//
+// Recorded in #6079 (comment of 2026-09-28T08:24:49Z): the script stopped the backend
+// at step 2 and made the backup at step 3 OUTSIDE the failure handler, so a failed
+// backup left the site down with no restart and no guidance. Now the handler covers
+// everything after the stop and decides on one recorded fact -- whether anything of the
+// installed version has been replaced yet (Register-LiveTreeReplacement, set right
+// before the first write to a live path):
+//   nothing replaced -> start the backend again the way step 7 does (pm2 restart, then
+//                       the scheduled-task fallback), check it answers, say so, exit
+//                       non-zero, no restore block;
+//   anything replaced -> as before: stop, restore block, never start the backend.
+
+// PowerShell for a Copy-Item stand-in the wrapper defines before the script runs: the
+// script's Copy-Item calls resolve to it (a function wins over a cmdlet of the same
+// name). A copy whose -Destination lies under failUnder throws, the way a full disk or
+// a locked file would; every other copy is the real cmdlet.
+function copyItemFailureStubSource(failUnder) {
+  return [
+    `$global:StubCopyFailUnder = ${psSingleQuote(failUnder)}`,
+    'function global:Copy-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [string]$Destination, [switch]$Recurse, [switch]$Force)',
+    "  $dest = ([string]$Destination) -replace '[\\\\/]+', '/'",
+    "  $under = (($global:StubCopyFailUnder -replace '[\\\\/]+', '/').TrimEnd('/')) + '/'",
+    '  if ($dest.StartsWith($under, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    throw "STUB_COPY_FAILED: cannot write $Destination"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Copy-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
+// PowerShell for a Remove-Item stand-in, defined like the Copy-Item one above: removing
+// exactly failPath deletes partialFile first (with the real cmdlet) and then throws, the
+// way a recursive delete that meets a locked file stops halfway. Every other call is
+// the real cmdlet.
+function removeItemFailureStubSource(failPath, partialFile) {
+  return [
+    `$global:StubRemoveFailPath = ${psSingleQuote(failPath)}`,
+    `$global:StubRemovePartialFile = ${psSingleQuote(partialFile)}`,
+    'function global:Remove-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [switch]$Recurse, [switch]$Force)',
+    "  $target = (([string]($LiteralPath | Select-Object -First 1)) -replace '[\\\\/]+', '/').TrimEnd('/')",
+    "  $fail = ($global:StubRemoveFailPath -replace '[\\\\/]+', '/').TrimEnd('/')",
+    '  if ($target.Equals($fail, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $global:StubRemovePartialFile -Force',
+    '    throw "STUB_REMOVE_FAILED: stopped halfway through deleting $LiteralPath"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
+// The run must end on the ORIGINAL error, uncaught, on stderr. Both shells wrap it
+// (pwsh 7: colour codes and a "     | " gutter; Windows PowerShell 5.1: hard wraps at
+// the buffer width), so it is compared with those and all whitespace taken out.
+function assertEndsOnError(result, message) {
+  const compact = (text) =>
+    text
+      .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+      .replace(/\r?\n[ \t]*\|/g, '')
+      .replace(/\s+/g, '')
+  assert.ok(compact(result.stderr).includes(compact(message)), `the run must end on the original error "${message}".\nstderr:\n${result.stderr}`)
+}
+
+// The installed version's own files (the pm2 stub excluded: the harness wrote it).
+function liveInstallSnapshot(liveRoot) {
+  const files = snapshotFiles(liveRoot)
+  for (const rel of Object.keys(files)) {
+    if (rel.startsWith('node_modules/.bin/')) delete files[rel]
+  }
+  return files
+}
+
+// The backend-direct /health of a pm2-runtime host as an upgrade meets it: answering
+// until the first `pm2 stop` (the pm2 stub's home log shows it), then down -- and, with
+// comesBackWithTask, up again once the scheduled task has started pm2-runtime (the task
+// stub's marker). Step 2's silent pre-stop probe therefore sees it up; every poll after
+// the stop sees it down until the task started. Across two runs of one fixture the
+// first run's stop keeps it down for the second.
+function backendUpUntilStopped(fx, { comesBackWithTask = true } = {}) {
+  return () => !readPm2HomeLog(fx.homeLogPath).some((entry) => entry.command === 'stop') || (comesBackWithTask && fs.existsSync(fx.runtimeStartedMarker))
+}
+
+test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing replaced -- brings the backend back the way step 7 does (pm2 restart, "not found", pm2 kill, the MetaSheet-PM2 task), checks it answers, says so and exits non-zero; no restore block (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // The backend answers until the step 2 stop, then stays DOWN until the scheduled task
+  // has started pm2-runtime again.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, `a failed upgrade must exit non-zero.\n${report}`)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.doesNotMatch(result.stdout, /BACKUP_PATH=/, 'the run must have failed inside the backup step')
+
+    // The step 2 stop, then exactly the step 7 start path: the restart answers "not
+    // found" (pm2-runtime exited after the stop), the empty daemon it started is killed,
+    // and the task is started with no daemon left -- all under the one resolved home.
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], `the backend must be started again after the stop.\n${report}`)
+    for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+    // The evidence for the start: step 2 asked the backend once, silently, right before
+    // it stopped it, and it answered (review F1: no answer there, no start).
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true'], `step 2 must ask the backend once, before the stop.\n${report}`)
+    // It checked the backend answers, directly (the gate is still up), after the start.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 1, `the backend-direct probe must run after the start.\n${report}`)
+    assert.equal(probes[0].url, '/health')
+    assert.equal(probes[0].backendUp, true, 'the probe must come after the task started the backend')
+
+    // What the operator reads: nothing was replaced, the backend is back, no restore.
+    assert.match(result.stdout, /NOTHING_REPLACED: /)
+    assert.match(result.stdout, /=+ UPGRADE NOT APPLIED =+/)
+    assert.match(result.stdout, /Backend: started again \(scheduled-task\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./)
+    assert.match(result.stdout, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
+    assert.doesNotMatch(combined, /RESTORE REQUIRED/, 'nothing was replaced: there is nothing to restore, and the backup may be incomplete')
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'the failure handler\'s stop is for a replaced install only')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap wiring (#6079): everything after the step 2 stop sits in the one handler, whose FIRST decision is the replace journal -- nothing replaced starts the backend and rethrows before the task lookup, the stop or the restore block; the journal is marked before the first live write in Update-ReplaceDirs and Update-Plugins', () => {
+  // LF throughout: a Windows checkout (core.autocrlf) has CRLF on disk.
+  const source = scriptSource.split('\r\n').join('\n')
+  const main = source.slice(source.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
+  const stopIdx = main.indexOf('Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home\n')
+  const innerTryIdx = main.indexOf('try {', stopIdx)
+  const backupIdx = main.indexOf('$backupPath = New-TimestampedBackup -RootDir')
+  const catchIdx = main.indexOf('} catch {')
+  assert.ok(stopIdx > -1 && innerTryIdx > stopIdx && catchIdx > innerTryIdx, 'the handler\'s try must open after the step 2 stop')
+  assert.deepEqual(
+    main.slice(stopIdx, innerTryIdx).split('\n').slice(1).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')),
+    [],
+    'nothing may run between the step 2 stop and the handler\'s try',
+  )
+  assert.ok(innerTryIdx < backupIdx && backupIdx < catchIdx, 'the step 3 backup must run inside the handler\'s try')
+  const journalInitIdx = main.indexOf('$replaceJournal = @{ Replaced = $false }')
+  assert.ok(journalInitIdx > -1 && journalInitIdx < main.indexOf('try {'), 'the journal must exist before the outer try, unmarked')
+  // Review F1: the evidence that the backend was running. $false until step 2's silent
+  // probe, taken after the gate probe and right before the stop, says otherwise; no
+  // probe at all with RestartService=0 (nothing is started then anyway).
+  const evidenceInitIdx = main.indexOf('$backendAnsweredBeforeStop = $false\n')
+  assert.ok(evidenceInitIdx > -1 && evidenceInitIdx < main.indexOf('try {'), 'the pre-stop evidence must start $false, before the outer try')
+  const probeMatch = main.match(/\n(\s*)if \(\$RestartService -ne '0'\) \{\n\s*\$backendAnsweredBeforeStop = Test-BackendAnswersNow -HealthUrl \$resolvedBackendHealthUrl\n\s*\}\n(?:\s*\n)?\s*Stop-Pm2App -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home\n/)
+  assert.ok(probeMatch, 'step 2 must probe the backend (RestartService other than 0) immediately before its stop, with nothing in between')
+  assert.ok(main.indexOf('Test-MaintenanceGateWired -ProbeUrl $HealthUrl') < main.indexOf('Test-BackendAnswersNow -HealthUrl'), 'the pre-stop probe comes after the gate probe')
+  assert.equal((main.match(/\$backendAnsweredBeforeStop\s*=/g) || []).length, 2, 'the evidence is set twice only: $false, then the probe')
+  assert.match(main, /Update-ReplaceDirs -PackageRoot \$packageRoot -RootDir \$resolvedRoot -RelativeDirs \$ReplaceDirs -Journal \$replaceJournal\n/)
+  assert.match(main, /Update-Plugins -PackageRoot \$packageRoot -RootDir \$resolvedRoot -Journal \$replaceJournal\n/)
+
+  const handler = main.slice(catchIdx)
+  assert.match(
+    handler,
+    /^\} catch \{\s*\n\s*Write-Err \$_\.Exception\.Message\s*\n\s*if \(-not \$replaceJournal\.Replaced\) \{\s*\n(?:\s*#[^\n]*\n)*\s*\$null = Start-BackendAfterUnappliedUpgrade -Pm2Command \$pm2Command -Name \$Pm2AppName -Pm2Home \$resolvedPm2Home -ScheduledTaskName \$Pm2ScheduledTaskName -RestartService \$RestartService -BackendAnsweredBeforeStop \$backendAnsweredBeforeStop -BackendHealthUrl \$resolvedBackendHealthUrl [^\n]*\n\s*throw\s*\n\s*\}\s*\n/,
+    'the handler must first report the error, then -- nothing replaced -- start the backend again and rethrow, before anything else',
+  )
+  const branchEnd = handler.search(/\n\s*throw\s*\n/)
+  for (const later of ['$restoreTask = Get-Pm2ScheduledTask', 'Stop-Pm2App -Pm2Command', 'Write-RestoreBlock -BackupPath']) {
+    assert.ok(handler.indexOf(later) > branchEnd, `${later} belongs to the replaced branch only`)
+  }
+
+  const code = stripPowerShellBlockComments(source)
+  const fnBody = (name) => {
+    const start = code.indexOf(`function ${name} {`)
+    const nextFunction = code.indexOf('\nfunction ', start + 1)
+    const end = nextFunction > -1 ? nextFunction : code.indexOf("\nif ($MyInvocation.InvocationName -ne '.') {", start + 1)
+    assert.ok(start > -1 && end > start, `function ${name} not found`)
+    return code.slice(start, end)
+  }
+  const replaceDirs = fnBody('Update-ReplaceDirs')
+  const markIdx = replaceDirs.indexOf('Register-LiveTreeReplacement -Journal $Journal')
+  assert.ok(markIdx > replaceDirs.indexOf('throw "PACKAGE_MISSING_REPLACE_DIR'), 'a package check that refuses before any write is still "nothing replaced"')
+  assert.ok(markIdx > -1 && markIdx < replaceDirs.indexOf('Remove-Item -LiteralPath $dst') && markIdx < replaceDirs.indexOf('Copy-TreeExcludingNodeModules'), 'the journal must be marked BEFORE the delete and the copy')
+  const plugins = fnBody('Update-Plugins')
+  const pluginMarkIdx = plugins.indexOf('Register-LiveTreeReplacement -Journal $Journal')
+  assert.ok(pluginMarkIdx > -1 && pluginMarkIdx < plugins.indexOf('New-Item -ItemType Directory -Force -Path $livePluginsDir') && pluginMarkIdx < plugins.indexOf('Copy-Item') && pluginMarkIdx < plugins.indexOf('Copy-TreeExcludingNodeModules'), 'Update-Plugins must mark the journal before its first write')
+
+  const unapplied = fnBody('Start-BackendAfterUnappliedUpgrade')
+  assert.match(unapplied, /Restart-Pm2AppOrScheduledTask -Pm2Command \$Pm2Command -Name \$Name -Pm2Home \$Pm2Home -ScheduledTaskName \$ScheduledTaskName\n/, 'the backend must be started the way step 7 starts it')
+  assert.doesNotMatch(unapplied, /Write-RestoreBlock|Stop-Pm2App|Remove-Item|Copy-Item/, 'nothing replaced: no restore, no stop, no file operation')
+  assert.match(unapplied, /\[Parameter\(Mandatory = \$true\)\]\[bool\]\$BackendAnsweredBeforeStop/, 'the pre-stop evidence has no default: every caller must say what it saw')
+  assert.equal((unapplied.match(/Restart-Pm2AppOrScheduledTask/g) || []).length, 1)
+  assert.ok(unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') > -1 && unapplied.indexOf('} elseif (-not $BackendAnsweredBeforeStop) {') < unapplied.indexOf('Restart-Pm2AppOrScheduledTask'), 'no pre-stop answer, no start: the start sits in the branch after that refusal')
+
+  // The pre-stop probe: one tagged request, silent, never throws.
+  const probe = fnBody('Test-BackendAnswersNow')
+  assert.equal((probe.match(/Invoke-WebRequest/g) || []).length, 1, 'exactly one request')
+  assert.match(probe, /-Headers @\{ 'X-Upgrade-Prestop-Probe' = '1' \}/)
+  assert.doesNotMatch(probe, /Write-(Host|Info|Err|Output|Warning)/, 'the probe prints nothing: the success path output must not change')
+  assert.match(probe, /\} catch \{\s*\n\s*return \$false\s*\n\s*\}/, 'any failure is "did not answer"')
+})
+
+// Rebuilds the fixture archive (and its sidecar) from a stage the test has edited.
+function rezipStage(stageDir, archivePath) {
+  const rezip = spawnSync(
+    PWSH,
+    ['-NoProfile', '-NonInteractive', '-Command', `Compress-Archive -Path '${stageDir}' -DestinationPath '${archivePath}' -Force`],
+    { encoding: 'utf8' },
+  )
+  assert.equal(rezip.status, 0, rezip.stderr || rezip.stdout)
+  fs.writeFileSync(`${archivePath}.sha256`, `${sha256File(archivePath)}  ${path.basename(archivePath)}\n`)
+}
+
+test('stop gap (#6079): the decision rests on the first write, not on the step -- a package missing packages/core-backend/dist fails INSIDE step 4 but before any live write, so the backend is started again (pm2 restart) and the install is untouched', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  // pm2-runtime still holds the app: the plain `pm2 restart` brings it back.
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    buildAcidLiveRoot(fx.liveRoot, {
+      pm2LogPath: fx.pm2LogPath,
+      backendPort: health.port,
+      witness: fx.witness,
+      pm2Behavior: { homeLogPath: fx.homeLogPath, restartNeedsHomeMarker: true, strayDaemonMarkerPath: fx.strayDaemonMarker },
+    })
+    const { archivePath, stageDir } = buildAcidArchive(root)
+    // ReplaceDirs' FIRST entry: Update-ReplaceDirs refuses it before writing anything.
+    fs.rmSync(path.join(stageDir, 'packages/core-backend/dist'), { recursive: true, force: true })
+    rezipStage(stageDir, archivePath)
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      HealthUrl: health.url,
+      HealthcheckAttempts: '3',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.match(result.stdout, /=== Step 4\/8: extract \+ replace runtime paths ===/, 'the failure must come from inside step 4')
+    assertEndsOnError(result, 'PACKAGE_MISSING_REPLACE_DIR: packages/core-backend/dist not found under extracted package')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`), [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'a restart that worked must not also start the task')
+    assert.match(result.stdout, /Backend: started again \(pm2-restart\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./, report)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): once the first live path is being replaced, the backend is NEVER started by the script -- a copy that fails right after packages/core-backend/dist was deleted gets the failure handler\'s stop and RESTORE REQUIRED, no restart, no task start, no health polling', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      // The first copy INTO the live tree: Update-ReplaceDirs has just deleted the live
+      // dist (ReplaceDirs' first entry) and fails on the first file it copies back.
+      copyItemFailureStubSource(liveDist),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.match(result.stdout, /BACKUP_PATH=/, 'the backup must have completed')
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.ok(!fs.existsSync(path.join(liveDist, 'src', 'db', 'migrate.js')), 'the fixture must really have replaced (deleted) the live dist before the failure')
+
+    // The replaced branch, exactly as before this fix: the failure handler's stop
+    // (on Windows skipped, no daemon pipe), the restore block, and nothing that starts
+    // the backend -- no restart, no pm2 kill, no task start, no health polling.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...FAILURE_HANDLER_PM2_CALLS], `the backend must not be started once anything was replaced.\n${report}`)
+    assertFailureHandlerPm2Stop(combined)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling')
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.ok(restoreRecipeCommands(result.stdout).some((command) => command.startsWith('Remove-Item -LiteralPath ') && command.includes(liveDist)), 'the restore block must put the replaced dist back')
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a delete that stops halfway through the first live directory has already replaced something -- the fact is recorded BEFORE the delete, so the backend is never started and RESTORE REQUIRED is printed', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    // A second file, so "halfway" leaves one deleted and one still there.
+    writeFixtureFile(fx.liveRoot, 'packages/core-backend/dist/keep-me.js', 'KEEP_ME')
+    const deletedFirst = path.join(liveDist, 'src', 'db', 'migrate.js')
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      removeItemFailureStubSource(liveDist, deletedFirst),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_REMOVE_FAILED: stopped halfway through deleting')
+    assert.ok(!fs.existsSync(deletedFirst) && fs.existsSync(path.join(liveDist, 'keep-me.js')), 'the fixture must leave the live dist half-deleted')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...FAILURE_HANDLER_PM2_CALLS], `a half-deleted install must never be started.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [], 'the task must never be started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling')
+    assert.match(result.stdout, /RESTORE REQUIRED/)
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|started again/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): when starting the backend again itself fails (the task cannot be started), the operator is told the site is DOWN, with the commands to start it by hand -- the pm2 home, pm2 restart, pm2 kill, the task by its folder -- and the run fails on the original error; no restore block', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub({ startBehavior: 'throw', taskPath: '\\MetaSheet\\' }),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill'], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\MetaSheet\\', 'start-saw-daemon=no'])
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling after a start that failed')
+
+    const block = result.stdout.slice(result.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(result.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(block, /Backend: NOT started -- starting it again failed: PM2_SCHEDULED_TASK_START_FAILED: could not start scheduled task '\\MetaSheet\\MetaSheet-PM2'/)
+    assert.match(block, /THE SITE IS DOWN until the backend is started\. Start it by hand:/)
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const killIdx = block.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\MetaSheet\\'")
+    assert.ok(homeIdx > -1 && restartIdx > -1 && killIdx > -1 && taskIdx > -1, `the block must print every start command.\n${block}`)
+    assert.ok(homeIdx < restartIdx && restartIdx < killIdx && killIdx < taskIdx, 'order: PM2_HOME, pm2 restart, pm2 kill, Start-ScheduledTask')
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a backend that is started again but never answers is reported as started and NOT answering, after the normal number of backend-direct attempts -- the site is DOWN, and the commands to start it by hand come with the pm2 home first (review F2: never a bare pm2 command)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // Answering until the step 2 stop; the task starts pm2-runtime, but the backend never
+  // answers again (a crash loop, or a start slower than the attempts).
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx, { comesBackWithTask: false }) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', 'restart', 'kill'], report)
+    assert.equal(health.requests.filter((entry) => entry.url === '/health').length, 2, 'the backend-direct polling must run its attempts')
+    assert.match(result.stdout, /Backend: started again \(scheduled-task\), but it did NOT answer http:\/\/127\.0\.0\.1:\d+\/health in 2 attempts\./, report)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+
+    // Review F2. The finally drops the gate, so nginx answers 502 while the backend does
+    // not answer: the operator must read that the site is down, and get the start
+    // commands with the pm2 home FIRST -- on a pm2-runtime host whose runtime exited, a
+    // pm2 command without it starts an empty daemon in the operator's session (the
+    // caveat printed with `pm2 kill`). No bare pm2 advice at all.
+    const block = result.stdout.slice(result.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(result.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(block, /THE SITE IS DOWN until the backend answers\./, report)
+    assert.doesNotMatch(block, /pm2 status/, 'no bare `pm2 status` advice')
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const caveatIdx = block.indexOf('started an empty pm2 daemon in THIS session')
+    const killIdx = block.search(/\n\s*pm2 kill\s*\r?\n/)
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && restartIdx > -1 && caveatIdx > -1 && killIdx > -1 && taskIdx > -1, `the block must print every start command and the kill caveat.\n${block}`)
+    assert.ok(homeIdx < restartIdx && restartIdx < caveatIdx && caveatIdx < killIdx && killIdx < taskIdx, 'order: PM2_HOME, pm2 restart, the caveat, pm2 kill, Start-ScheduledTask')
+    const firstPm2Idx = block.search(/\n\s*pm2 /)
+    assert.ok(firstPm2Idx > homeIdx, 'no pm2 command may be printed before the PM2_HOME line')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079, review F1): a re-run that meets a backend which does NOT answer (an earlier run replaced files, failed, and was never restored) and then fails before replacing anything does NOT start the backend -- the half-replaced tree stays stopped, and the operator is told why and to restore that run first', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
+    const env = r59ChildEnv(fx.profileDir, {}, ['PM2_HOME'])
+    const params = { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1' }
+
+    // Run 1: the first copy into the live dist fails right after it was deleted (a full
+    // disk): RESTORE REQUIRED, the backend left stopped.
+    const run1 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(liveDist)), env)
+    const report1 = `run 1 stdout:\n${run1.stdout}\nrun 1 stderr:\n${run1.stderr}`
+    assert.notEqual(run1.status, 0, report1)
+    assert.match(run1.stdout, /RESTORE REQUIRED/, report1)
+    assert.ok(!fs.existsSync(path.join(liveDist, 'src', 'db', 'migrate.js')), 'run 1 must leave the live dist half-replaced')
+    const halfReplaced = liveInstallSnapshot(fx.liveRoot)
+    const pm2CallsBefore = readPm2HomeLog(fx.homeLogPath).length
+    const taskCallsBefore = readLogLines(fx.taskLogPath).length
+
+    // The operator does not restore. Run 2: the backup fails (the same full disk).
+    const run2 = await runPwshFileAsync(writeStubbedUpgradeWrapper(root, fx.taskStub(), params, copyItemFailureStubSource(fx.backupRoot)), env)
+    const combined = run2.stderr + run2.stdout
+    const report = `run 2 stdout:\n${run2.stdout}\nrun 2 stderr:\n${run2.stderr}`
+    assert.notEqual(run2.status, 0, report)
+    assertEndsOnError(run2, 'STUB_COPY_FAILED: cannot write')
+    assert.doesNotMatch(run2.stdout, /BACKUP_PATH=/, 'run 2 must have failed inside the backup step')
+
+    // Nothing starts run 1's half-replaced tree: run 2's step 2 stop, and no pm2 call,
+    // no task start and no health polling after it.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).slice(pm2CallsBefore).map((entry) => entry.command), ['stop'], `the backend must not be started on a tree an earlier run half-replaced.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).slice(taskCallsBefore).filter((line) => line.startsWith('start')), [], 'the task must not be started')
+    assert.ok(!fs.existsSync(fx.runtimeStartedMarker), 'pm2-runtime must not have been started')
+    assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling in either run')
+    // Why: run 1 met the backend answering before its stop, run 2 did not.
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true', '/health up=false'], report)
+
+    // What the operator reads.
+    const block = run2.stdout.slice(run2.stdout.indexOf('UPGRADE NOT APPLIED'))
+    assert.ok(run2.stdout.includes('UPGRADE NOT APPLIED'), report)
+    assert.match(run2.stdout, /NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version\. The backend did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so it is NOT started/, report)
+    assert.match(block, /This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored\./)
+    assert.match(block, /Backend: NOT started -- it did not answer http:\/\/127\.0\.0\.1:\d+\/health right before step 2 stopped it, so nothing shows the installed files are a version that runs\./)
+    assert.match(block, /THE SITE IS DOWN until the backend is started\./)
+    assert.match(block, /If an earlier upgrade run printed RESTORE REQUIRED and that restore was not done, restore from THAT run's backup first/)
+    const homeIdx = block.indexOf(`$env:PM2_HOME = '${fx.runtimeHome}'`)
+    const restartIdx = block.indexOf('pm2 restart metasheet-backend --update-env')
+    const taskIdx = block.indexOf("Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'")
+    assert.ok(homeIdx > -1 && homeIdx < restartIdx && restartIdx < taskIdx, `the block must print the start commands, pm2 home first.\n${block}`)
+    assert.doesNotMatch(combined, /started again|so that version is intact|Nothing needs to be restored|=+ RESTORE REQUIRED =+/, 'run 2 must neither start the backend nor vouch for the installed files, and prints no restore block of its own (its backup holds run 1\'s half-replaced tree)')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), halfReplaced, 'run 2 changed no file')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): with -RestartService 0 a failure before anything was replaced starts nothing -- the operator is told the site is DOWN and how to start it', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // Only a witness here: with RestartService=0 step 2 must not probe the backend at all.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, RestartService: '0', HealthUrl: 'http://127.0.0.1:1/api/health', HealthcheckAttempts: '1', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assertEndsOnError(result, 'STUB_COPY_FAILED: cannot write')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop'], report)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [])
+    assert.match(result.stdout, /Backend: NOT started \(-RestartService 0\)\. THE SITE IS DOWN until the backend is started\. Start it by hand:/, report)
+    assert.match(result.stdout, /Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'/)
+    assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+    assert.deepEqual(health.preStopProbes, [], 'RestartService=0: no pre-stop probe')
+    assert.deepEqual(health.requests, [], 'RestartService=0: no request to the backend at all')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('stop gap (#6079): a failure BEFORE the step 2 stop (the gate cannot be raised) leaves the backend alone -- no pm2 call, no start, no restore, the install untouched', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: true })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx)
+    // The flag's folder is a FILE: New-MaintenanceFlag, the first statement of the try,
+    // cannot create it.
+    const blocker = path.join(root, 'flag-parent-is-a-file')
+    fs.writeFileSync(blocker, 'not a directory')
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+      ...fx.baseParams,
+      PackageArchive: archivePath,
+      MaintenanceFlagPath: path.join(blocker, 'maintenance.flag'),
+      HealthUrl: 'http://127.0.0.1:1/api/health',
+      HealthcheckAttempts: '1',
+      HealthcheckDelaySec: '1',
+    })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, report)
+    assert.doesNotMatch(result.stdout, /MAINTENANCE_FLAG=/, 'the gate must not have gone up')
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath), [], `no pm2 call at all: the backend was never stopped.\n${report}`)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), [])
+    assert.doesNotMatch(combined, /NOTHING_REPLACED|UPGRADE NOT APPLIED|RESTORE REQUIRED|Step 3\/8/)
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before)
+    assert.equal(fs.readFileSync(blocker, 'utf8'), 'not a directory')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ── 3e. The success path is unchanged, byte for byte ─────────────────────────────
+//
+// The stop-gap fix moved the step 3 backup inside the failure handler and added the
+// replace journal; an operator must see exactly what R60 printed. The golden files
+// under scripts/ops/fixtures/multitable-onprem-upgrade-inplace/ are the output of the
+// script at origin/main cd89c74dd (before the fix), run through this same fixture and
+// normalized by normalizeRunOutput -- which replaces ONLY what differs between runs
+// (the temp root, the ports, the backup timestamp, the staging suffix, the package
+// hash), separators, line ends and trailing blanks. Everything else must match.
+
+const SUCCESS_GOLDEN_DIR = path.join(repoRoot, 'scripts/ops/fixtures/multitable-onprem-upgrade-inplace')
+
+function normalizeRunOutput(text, root) {
+  let out = text.replace(/\r\n?/g, '\n').replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
+  for (const spelling of [root, root.split(path.sep).join('/')]) {
+    out = out.replace(new RegExp(spelling.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '<ROOT>')
+  }
+  return out
+    .replace(/\\/g, '/')
+    .replace(/upgrade-backup-\d{8}-\d{6}/g, 'upgrade-backup-<TIMESTAMP>')
+    .replace(/mspui-[0-9a-f]{12}/g, 'mspui-<ID>')
+    .replace(/sha256=[0-9a-f]{64}/g, 'sha256=<SHA256>')
+    .replace(/127\.0\.0\.1:\d+/g, '127.0.0.1:<PORT>')
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+$/, ''))
+    .join('\n')
+}
+
+const SUCCESS_SHAPES = [
+  // The demo host's shape since R59: pm2-runtime exited after the stop, the restart
+  // answers "not found", the fallback kills the empty daemon and starts the task.
+  // Migrations run (step 6), so their output is part of the comparison.
+  { name: 'pm2-runtime-task-fallback', runtimeAlive: false, params: { RunMigrations: '1' } },
+  // pm2 still holds the app: the plain restart.
+  { name: 'pm2-restart', runtimeAlive: true, params: {} },
+]
+
+for (const shape of SUCCESS_SHAPES) {
+  test(`success path unchanged (${shape.name}): the full output of a successful upgrade is byte-for-byte the output of the script before the stop-gap fix (origin/main cd89c74dd), after normalizing only run-specific values`, async () => {
+    const root = mkLongTempDir('ms2-upgrade-golden-')
+    const fx = setUpR59Fixture(root, { runtimeAlive: shape.runtimeAlive })
+    // A host whose nginx reads the gate: the gate probe gets 503, so the output
+    // carries no text that depends on the console code page.
+    const health = await startHealthServer({
+      flagPath: fx.witness.flagPath,
+      gateWired: true,
+      backendUp: () => shape.runtimeAlive || fs.existsSync(fx.runtimeStartedMarker),
+    })
+    try {
+      // No stray-daemon model: that makes the pm2 stub print on stdout AND stderr in
+      // one call, and the order in which a shell merges the two is not guaranteed.
+      const archivePath = buildR59LiveRootAndArchive(fx, health.port, { strayDaemonMarkerPath: null })
+      const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), {
+        ...fx.baseParams,
+        ...shape.params,
+        PackageArchive: archivePath,
+        HealthUrl: health.url,
+        HealthcheckAttempts: '3',
+        HealthcheckDelaySec: '1',
+      })
+      const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+      assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+      const actual = `=== stdout ===\n${normalizeRunOutput(result.stdout, root)}=== stderr ===\n${normalizeRunOutput(result.stderr, root)}`
+      const expected = fs.readFileSync(path.join(SUCCESS_GOLDEN_DIR, `success-output-${shape.name}.txt`), 'utf8').replace(/\r\n/g, '\n')
+      assert.equal(actual, expected, 'the success-path output must not change')
+    } finally {
+      health.server.close()
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
 
 // ── 4. END-TO-END: replay both canonical -Exclude patterns against the acid fixture
 

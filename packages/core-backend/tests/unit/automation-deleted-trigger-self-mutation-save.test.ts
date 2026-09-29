@@ -3,10 +3,15 @@
  *
  * Under a `record.deleted` trigger the trigger record no longer exists, so a same-base update_record /
  * delete_record / lock_record of it can only ever no-op (and, before the executor fix, self-chained into three
- * execution logs). createRule and every SHAPE-changing (or re-enabling) updateRule refuse it with ONE stable code
- * and ONE fixed Chinese message. The escape hatches the customer needs are pinned just as hard:
+ * execution logs). createRule and every SHAPE-changing updateRule refuse it with ONE stable code and ONE fixed
+ * Chinese message — including an update that sends `enabled: true` TOGETHER with a shape field. The escape
+ * hatches the customer needs are pinned just as hard:
  *   - a DISABLE-only update `{ enabled: false }` of an existing such rule SUCCEEDS (setRuleEnabled routes
  *     through updateRule — otherwise the rule could never be turned off);
+ *   - #6155: an ENABLE-only update `{ enabled: true }` of it SUCCEEDS too (switching off and on again brings
+ *     back the state it had; the shape does not change; an enabled rule of this shape already runs and its
+ *     self-targeting action changes no table record — #6078: a delete_record step ends as skipped, an update_record /
+ *     lock_record step as success). This reverses #6078's "re-enabling is checked like a save";
  *   - a rename / conditions-only edit succeeds (no shape change);
  *   - deleteRule succeeds (it validates nothing).
  * Final review F4 (bottom of the file): a COMPLETE triple that the executor's cross-base gate resolves as
@@ -299,13 +304,76 @@ describe('updateRule — refuses shape changes INTO the combination, lets the op
     expect(h.updateSets()).toHaveLength(1)
   })
 
-  it('RE-ENABLING an existing such rule is refused (enabled is not a bypass for arming a rule that can only no-op)', async () => {
+  it('#6155: RE-ENABLING an existing such rule is admitted (an on/off switch restores the state it had and changes no shape; the enabled rule already runs and its self-targeting action changes no table record)', async () => {
     h.setStored(storedRow({ enabled: false }))
+    h.pushExecute([storedRow({ enabled: true })])
 
-    const err = await rejection(h.service.setRuleEnabled(RULE_ID, SHEET_ID, true))
+    const updated = await h.service.setRuleEnabled(RULE_ID, SHEET_ID, true)
 
-    expectSelfMutationRefusal(err)
-    expect(h.updateSets()).toHaveLength(0)
+    expect(updated?.enabled).toBe(true)
+    expect(h.updateSets()).toHaveLength(1)
+    // Only the flag (and the timestamp) is written — the shape stays exactly as stored.
+    expect(Object.keys(h.updateSets()[0]).sort()).toEqual(['enabled', 'updated_at'])
+    expect(h.updateSets()[0]).toMatchObject({ enabled: true })
+  })
+
+  it('#6155: the same enable-only PATCH through updateRule (the panel toggle body `{ enabled: true }`) is admitted', async () => {
+    h.setStored(storedRow({ enabled: false }))
+    h.pushExecute([storedRow({ enabled: true })])
+
+    const updated = await h.service.updateRule(RULE_ID, SHEET_ID, { enabled: true })
+
+    expect(updated?.enabled).toBe(true)
+    expect(h.updateSets()).toEqual([expect.objectContaining({ enabled: true })])
+  })
+
+  // #6155: the exemption is for a PURE switch. `enabled: true` sent together with ANY of the five shape fields is
+  // a save of that shape and is refused exactly as before — each field alone must open the gate.
+  const shapeFieldsWithEnable: Array<[string, Record<string, unknown>]> = [
+    ['triggerType', { triggerType: 'record.deleted' }],
+    ['actionType', { actionType: 'delete_record' }],
+    ['actionConfig', { actionConfig: {} }],
+    ['actions', { actions: [{ type: 'delete_record', config: {} }] }],
+    ['executionMode', { executionMode: null }],
+  ]
+  for (const [field, patch] of shapeFieldsWithEnable) {
+    it(`#6155: enable TOGETHER with ${field} is still refused (a shape field makes it a save of the shape)`, async () => {
+      h.setStored(storedRow({ enabled: false }))
+
+      const err = await rejection(h.service.updateRule(RULE_ID, SHEET_ID, { enabled: true, ...patch } as never))
+
+      expectSelfMutationRefusal(err)
+      expect(h.updateSets()).toHaveLength(0)
+    })
+  }
+
+  it('#6155: enable-only on a rule of a HARMLESS shape is unchanged (admitted, only the flag written)', async () => {
+    const harmless = storedRow({
+      enabled: false,
+      action_type: 'send_webhook',
+      action_config: { url: 'https://example.test/hook', method: 'POST' },
+      actions: [{ type: 'send_webhook', config: { url: 'https://example.test/hook', method: 'POST' } }],
+    })
+    h.setStored(harmless)
+    h.pushExecute([{ ...harmless, enabled: true }])
+
+    const updated = await h.service.setRuleEnabled(RULE_ID, SHEET_ID, true)
+
+    expect(updated?.enabled).toBe(true)
+    expect(h.updateSets()).toEqual([expect.objectContaining({ enabled: true })])
+  })
+
+  it('#6155: enable + rename / enable + conditions (no shape field) are admitted like the switch itself', async () => {
+    h.setStored(storedRow({ enabled: false }))
+    h.pushExecute([storedRow({ enabled: true, name: 'renamed' })])
+    h.pushExecute([storedRow({ enabled: true })])
+
+    expect((await h.service.updateRule(RULE_ID, SHEET_ID, { enabled: true, name: 'renamed' }))?.name).toBe('renamed')
+    expect(await h.service.updateRule(RULE_ID, SHEET_ID, {
+      enabled: true,
+      conditions: { conjunction: 'AND', conditions: [{ fieldId: 'status', operator: 'equals', value: 'x' }] } as never,
+    })).not.toBeNull()
+    expect(h.updateSets()).toHaveLength(2)
   })
 
   it('re-saving the EXISTING shape from the editor (full payload) is refused until the action or trigger changes', async () => {
@@ -526,10 +594,26 @@ describe('final review F4 — updateRule: shape changes are checked, the way out
     expect(h.updateSets()).toHaveLength(0)
   })
 
-  it('RE-ENABLING an existing same-base-triple rule is refused', async () => {
+  it('#6155: RE-ENABLING an existing same-base-triple rule is admitted without resolving a base (a pure switch changes no shape)', async () => {
     h.setStored({ ...sameBaseStored(), enabled: false })
-    expectSelfMutationRefusal(await rejection(h.service.setRuleEnabled(RULE_ID, SHEET_ID, true)))
+    h.pushExecute([{ ...sameBaseStored(), enabled: true }])
+
+    const updated = await h.service.setRuleEnabled(RULE_ID, SHEET_ID, true)
+
+    expect(updated?.enabled).toBe(true)
+    expect(h.updateSets()).toEqual([expect.objectContaining({ enabled: true })])
+    expect(h.sheetBaseLookups()).toBe(0)
+  })
+
+  it('#6155: enable TOGETHER with the same-base triple as actionConfig is still refused (the F4 half runs for a shape field)', async () => {
+    h.setStored({ ...sameBaseStored(), enabled: false })
+    const err = await rejection(h.service.updateRule(RULE_ID, SHEET_ID, {
+      enabled: true,
+      actionConfig: SAME_BASE_OTHER_SHEET_TRIPLE,
+    }))
+    expectSelfMutationRefusal(err)
     expect(h.updateSets()).toHaveLength(0)
+    expect(h.sheetBaseLookups()).toBeGreaterThanOrEqual(1)
   })
 
   it('DISABLE-only `{ enabled: false }` of it SUCCEEDS without even resolving a base', async () => {

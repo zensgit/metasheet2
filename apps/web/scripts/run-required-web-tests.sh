@@ -1463,6 +1463,7 @@ exec npx vitest run \
   approvalResubmitButton \
   approvalTemplateAuthoring \
   approvalTemplateCenterCategory \
+  approvalTemplateCenterSections \
   approvalTemplateGovernance \
   approvalTemplateGroupsClient \
   ApprovalTemplateGroupsPanel \
@@ -1500,12 +1501,14 @@ exec npx vitest run \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
   data-sources-ui \
+  dataSourcesLoadFailedReseal \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
+  formViewValidation \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
   lineDerivation \
@@ -1786,6 +1789,15 @@ exec npx vitest run \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
   stockPrepPermissionMatrix \
+  tasks-api.spec.ts \
+  tasks-badge.spec.ts \
+  tasks-context.spec.ts \
+  tasks-detail-view.spec.ts \
+  tasks-list-view.spec.ts \
+  tasks-nav-badge.spec.ts \
+  tasks-routes.spec.ts \
+  tasks-view-transitions.spec.ts \
+  tasks-view.spec.ts \
   templateArchiveConfirm \
   templateCenterI18n \
   templateDetailI18n \
@@ -1802,6 +1814,7 @@ exec npx vitest run \
   useAttendanceAdminUsers \
   useAutoSumTotal \
   usePlmExportActions \
+  userManagementView \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \

@@ -48,8 +48,15 @@ function mockClient(
     rulesErrorMessage?: string | null
     stats?: Record<string, unknown>
     dingTalkGroups?: Array<Record<string, unknown>>
+    /** #6155: the rule PATCH answers this error body (`{ ok:false, error:{ code, message } }`) instead of 204. */
+    patchError?: { status: number; code: string; message: string }
+    /** #6155: once a PATCH has been attempted, the rule list the SERVER answers (what it really stored). */
+    rulesAfterPatch?: AutomationRule[]
+    /** #6155: the rule PATCH does not answer until this settles (lets a spec look at the in-flight state). */
+    patchGate?: Promise<void>
   } = {},
 ) {
+  let patchAttempted = false
   const ok = (body: unknown) => new Response(JSON.stringify({ data: body }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const apiError = (message: string) => new Response(
     JSON.stringify({ error: { code: 'INTERNAL_ERROR', message } }),
@@ -160,7 +167,7 @@ function mockClient(
         }
         return apiError(options.rulesErrorMessage)
       }
-      return ok({ rules })
+      return ok({ rules: patchAttempted && options.rulesAfterPatch ? options.rulesAfterPatch : rules })
     }
     if (method === 'POST' && url.includes('/automations')) {
       const body = JSON.parse(init?.body as string)
@@ -176,6 +183,15 @@ function mockClient(
       })
     }
     if (method === 'PATCH' && url.includes('/automations/')) {
+      patchAttempted = true
+      if (options.patchGate) await options.patchGate
+      if (options.patchError) {
+        const { status, code, message } = options.patchError
+        return new Response(
+          JSON.stringify({ ok: false, error: { code, message } }),
+          { status, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
       return noContent()
     }
     if (method === 'DELETE' && url.includes('/automations/')) {
@@ -992,6 +1008,156 @@ describe('MetaAutomationManager', () => {
     expect(patchCalls.length).toBe(1)
     const body = JSON.parse(patchCalls[0][1]?.body as string)
     expect(body.enabled).toBe(false)
+  })
+
+  // #6155: a refused toggle used to leave the native checkbox CHECKED (the click flipped it and nothing re-synced
+  // it, because the rule's `enabled` never changed) while the text still said the rule was off.
+  describe('#6155 — the panel toggle and notice for a record-deleted rule', () => {
+    const SERVER_SENTENCE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
+    const deletedTriggerRule = (overrides: Partial<AutomationRule> = {}) => fakeRule({
+      name: 'On delete, delete record',
+      triggerType: 'record.deleted',
+      actionType: 'delete_record',
+      actionConfig: {},
+      actions: [{ type: 'delete_record', config: {} }],
+      enabled: false,
+      ...overrides,
+    })
+    // Re-queried every time: the fix re-creates the control after a failed toggle.
+    const toggleInput = (container: HTMLElement) => container.querySelector('[data-automation-toggle] input') as HTMLInputElement
+    const toggleRoot = (container: HTMLElement) => container.querySelector('[data-automation-toggle]') as HTMLElement
+    const listCallsAfterPatch = (fetchFn: ReturnType<typeof vi.fn>) => {
+      const calls = fetchFn.mock.calls as Array<[string, RequestInit | undefined]>
+      const patchIndex = calls.findIndex(([, init]) => init?.method === 'PATCH')
+      return calls.filter(([url, init], index) => (
+        index > patchIndex && (init?.method ?? 'GET') === 'GET' && /\/sheets\/sheet_1\/automations$/.test(url)
+      )).length
+    }
+
+    it('a refused switch-on: the request carries only `enabled`; checkbox, text and stored state agree (off) and the server sentence is shown', async () => {
+      const { client, fetchFn } = mockClient([deletedTriggerRule()], {
+        patchError: { status: 400, code: 'DELETED_TRIGGER_SELF_MUTATION', message: SERVER_SENTENCE },
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(toggleInput(container).checked).toBe(false)
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      const patchCalls = fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH')
+      expect(patchCalls.length).toBe(1)
+      expect(JSON.parse(patchCalls[0][1]?.body as string)).toEqual({ enabled: true })
+
+      expect(toggleInput(container).checked).toBe(false)
+      expect(toggleRoot(container).classList.contains('is-checked')).toBe(false)
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+      expect(toggleRoot(container).textContent).not.toContain('Enabled')
+      // The server's own sentence, verbatim — not a generic "failed to update".
+      expect(container.querySelector('.meta-automation__error[role="alert"]')?.textContent?.trim()).toBe(SERVER_SENTENCE)
+      // The panel asked the server what it stored instead of trusting its own copy.
+      expect(listCallsAfterPatch(fetchFn)).toBe(1)
+    })
+
+    it('a switch-on that failed in transit but was stored: the panel shows what the SERVER has (on), not what it assumed', async () => {
+      const { client } = mockClient([deletedTriggerRule({ triggerType: 'record.created' })], {
+        patchError: { status: 503, code: 'SERVICE_UNAVAILABLE', message: 'Automation service is not available' },
+        rulesAfterPatch: [deletedTriggerRule({ triggerType: 'record.created', enabled: true })],
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(toggleInput(container).checked).toBe(false)
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      expect(toggleInput(container).checked).toBe(true)
+      expect(toggleRoot(container).classList.contains('is-checked')).toBe(true)
+      expect(toggleRoot(container).textContent).toContain('Enabled')
+      expect(container.querySelector('.meta-automation__error[role="alert"]')?.textContent?.trim()).toBe('Automation service is not available')
+    })
+
+    // #6155 panel notice: a rule of this shape that is on (or being switched on) runs, and an update/delete/lock
+    // action of it aimed at the deleted trigger record changes no table record; the panel says so without blocking
+    // anything. The shape is decided by the editor's own save-block detector.
+    const NOTICE_EN = 'This rule runs when a record is deleted, so any update, delete or lock action in it aimed at that deleted record has no effect. If that is not intended, change the action or the trigger.'
+    const NOTICE_ZH = '此规则在记录删除时运行，所以其中针对这条已删除记录的修改、删除或锁定动作不会生效。如非预期，请改用其他动作，或换一个触发条件。'
+    const notice = (container: HTMLElement) => container.querySelector('[data-automation-deleted-trigger-notice]') as HTMLElement | null
+
+    it('an ENABLED rule of this shape shows the notice, in English and in Chinese', async () => {
+      const { client } = mockClient([deletedTriggerRule({ enabled: true })])
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+      expect(notice(container)?.getAttribute('role')).toBe('note')
+
+      useLocale().setLocale('zh-CN')
+      await nextTick()
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_ZH)
+    })
+
+    it('a switched-OFF rule shows none; switching it on shows the notice while the request is in flight and after, and is not blocked', async () => {
+      let release!: () => void
+      const patchGate = new Promise<void>((resolve) => { release = resolve })
+      const { client, fetchFn } = mockClient([deletedTriggerRule({ enabled: false })], { patchGate })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+      expect(notice(container)).toBeNull()
+
+      toggleInput(container).click()
+      await nextTick()
+      // Not blocking: the request left immediately (no confirm step), and the notice is up while it is in flight.
+      expect(fetchFn.mock.calls.filter(([, init]: [string, RequestInit | undefined]) => init?.method === 'PATCH').length).toBe(1)
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+
+      release()
+      await flushPromises()
+      expect(toggleRoot(container).textContent).toContain('Enabled')
+      expect(notice(container)?.textContent?.trim()).toBe(NOTICE_EN)
+    })
+
+    it('a REFUSED switch-on takes the notice down again (the rule stays off)', async () => {
+      const { client } = mockClient([deletedTriggerRule({ enabled: false })], {
+        patchError: { status: 400, code: 'DELETED_TRIGGER_SELF_MUTATION', message: SERVER_SENTENCE },
+      })
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      toggleInput(container).click()
+      await flushPromises()
+
+      expect(toggleRoot(container).textContent).toContain('Disabled')
+      expect(notice(container)).toBeNull()
+    })
+
+    it('decides the shape like the editor: nested branch mutation and the v0 alias count; other triggers, other actions and a complete cross-base target do not', async () => {
+      const complete = { targetBaseId: 'base_b', targetSheetId: 'sheet_b', targetRecordId: 'rec_b' }
+      const branchConfig = {
+        branches: [{ key: 'hit', conditions: { conjunction: 'AND', conditions: [] }, actions: [{ type: 'update_record', config: { fields: { fld_1: 'x' } } }] }],
+        defaultBranch: { key: 'fallback', actions: [] },
+      }
+      const rules: AutomationRule[] = [
+        deletedTriggerRule({ id: 'r_nested', enabled: true, actionType: 'condition_branch', actionConfig: branchConfig, actions: [{ type: 'condition_branch', config: branchConfig }] }),
+        deletedTriggerRule({ id: 'r_alias', enabled: true, actionType: 'update_field' as never, actionConfig: { fieldId: 'fld_1', value: 'x' }, actions: undefined }),
+        deletedTriggerRule({ id: 'r_lock_legacy_pair', enabled: true, actionType: 'lock_record', actionConfig: { locked: true }, actions: [] }),
+        deletedTriggerRule({ id: 'r_created', enabled: true, triggerType: 'record.created' }),
+        deletedTriggerRule({ id: 'r_webhook', enabled: true, actionType: 'send_webhook', actionConfig: { url: 'https://example.test/hook' }, actions: [{ type: 'send_webhook', config: { url: 'https://example.test/hook' } }] }),
+        deletedTriggerRule({ id: 'r_cross_base', enabled: true, actionConfig: complete, actions: [{ type: 'delete_record', config: complete }] }),
+      ]
+      const { client } = mockClient(rules)
+      const { container } = mount({ visible: true, sheetId: 'sheet_1', fields, views, client })
+      await flushPromises()
+
+      const hasNotice = (id: string) => Boolean(container.querySelector(`[data-automation-rule="${id}"] [data-automation-deleted-trigger-notice]`))
+      expect(hasNotice('r_nested')).toBe(true)
+      expect(hasNotice('r_alias')).toBe(true)
+      expect(hasNotice('r_lock_legacy_pair')).toBe(true)
+      expect(hasNotice('r_created')).toBe(false)
+      expect(hasNotice('r_webhook')).toBe(false)
+      expect(hasNotice('r_cross_base')).toBe(false)
+    })
   })
 
   it('deletes rule after confirmation naming the rule', async () => {

@@ -30,6 +30,10 @@
 //   S-06 THE AUDIT ROW CARRIES NO PROJECT NUMBER, and that is a CHOICE rather than an accident of
 //        validation: the audit store's SAFE_STRING_PATTERN would happily accept `230920006`.
 //   S-07 NO AUDIT STORE, NO VALUES. `requireStockPreparationAudit`'s 501 was untested on this route.
+//   S-09 THE SPLIT. The tenant half of the scope is exported as `resolveProvenOwnTenant` for the
+//        source preflight, which rides an integration tier. Over a matrix of principals, claims,
+//        request-carried tenants and directory answers, the proof and the scope must return the same
+//        refusal or the same tenant, and ask the host the same questions, whenever the tier is held.
 //
 // THIRD-ROUND ADDITION — S-03d. `ownTenantId`'s resolved `tenantId` (verified-claim-preferred) is what
 // scope.cjs:279 must send the host, not `user.tenantId` re-read at the call site: a mutant
@@ -944,6 +948,89 @@ async function main() {
       async isSheetOwnedByProject() { return false },
     }, STAGING, handBound)
     assert.equal(unclaimed, null, 'no registry claim and no hash match ⇒ still nothing')
+  })
+
+  // S-09 — THE SPLIT. `resolveProvenOwnTenant` is the tenant half of `resolveOperatorValueScope`,
+  // exported on its own for the one route outside the stock-prep namespace (the source preflight).
+  // For a principal that holds the tier, the two must agree on EVERY input: the same refusal
+  // (status, code, message, details) or the same tenant/actor/claim flag, and the same questions put
+  // to the host. For a principal that lacks the tier, the scope refuses before the host is asked and
+  // the proof goes on without asking about a tier at all — which is the whole difference.
+  await run('S-09 the exported tenant proof and the operator scope agree on every input once the tier is held', async () => {
+    const { resolveOperatorValueScope, resolveProvenOwnTenant } = require(path.join(LIB, 'stock-preparation-operator-scope.cjs'))
+    const OPERATOR = [STOCK_PREP_READ, STOCK_PREP_OPERATE]
+    const users = [
+      ['no principal', null],
+      ['claim-shaped operator', { id: 'u_op', permissions: OPERATOR, tenantId: TENANT_A }],
+      ['operator with no user.tenantId', { id: 'u_op', permissions: OPERATOR }],
+      ['operator carrying another tenant', { id: 'u_op', permissions: OPERATOR, tenantId: 'tenant-b' }],
+      ['operator with only an email', { email: 'op@example.invalid', permissions: OPERATOR, tenantId: TENANT_A }],
+      ['operator with no handle at all', { permissions: OPERATOR, tenantId: TENANT_A }],
+      ['tenant-bound platform admin', { id: 'u_admin', roles: ['admin'], tenantId: TENANT_A }],
+    ]
+    const claims = [undefined, '', '  ', TENANT_A, 'tenant-b']
+    const carried = [[], [TENANT_A], ['tenant-b'], ['', TENANT_A], [TENANT_A, 'tenant-b']]
+    const directories = [
+      ['absent', () => null],
+      ['not a function', () => ({ verifyTenantMembership: true })],
+      ['member', () => ({ async verifyTenantMembership() { return { member: true } } })],
+      ['not a member', () => ({ async verifyTenantMembership() { return { member: false } } })],
+      ['truthy but not true', () => ({ async verifyTenantMembership() { return { member: 'yes' } } })],
+      ['member of tenant-a only', () => ({ async verifyTenantMembership({ tenantId }) { return { member: tenantId === TENANT_A } } })],
+    ]
+    async function outcome(fn, directory, input) {
+      const asked = []
+      const port = directory && typeof directory.verifyTenantMembership === 'function'
+        ? { async verifyTenantMembership(question) { asked.push({ ...question }); return directory.verifyTenantMembership(question) } }
+        : directory
+      try {
+        const value = await fn({ ...input, tenantPrincipalDirectory: port })
+        return { ok: true, value, asked }
+      } catch (error) {
+        return { ok: false, error: { name: error.name, status: error.status, code: error.code, message: error.message, details: error.details }, asked }
+      }
+    }
+    let compared = 0
+    let served = 0
+    for (const [userLabel, user] of users) {
+      for (const authenticatedTenantId of claims) {
+        for (const explicitTenantIds of carried) {
+          for (const [directoryLabel, makeDirectory] of directories) {
+            const input = { user, authenticatedTenantId, explicitTenantIds }
+            const label = `${userLabel} / claim ${JSON.stringify(authenticatedTenantId)} / carried ${JSON.stringify(explicitTenantIds)} / directory ${directoryLabel}`
+            const viaScope = await outcome(resolveOperatorValueScope, makeDirectory(), input)
+            const viaProof = await outcome(resolveProvenOwnTenant, makeDirectory(), input)
+            assert.deepEqual(viaProof.asked, viaScope.asked, `${label}: the host is asked the same questions`)
+            if (viaScope.ok) {
+              served += 1
+              assert.equal(viaProof.ok, true, `${label}: the proof refused what the scope admitted`)
+              assert.deepEqual(
+                { ...viaProof.value, tier: viaScope.value.tier },
+                viaScope.value,
+                `${label}: the same tenant, actor and claim flag`,
+              )
+              assert.deepEqual(Object.keys(viaProof.value).sort(), ['actorId', 'tenantClaimVerified', 'tenantId'], `${label}: the proof carries no tier`)
+            } else {
+              assert.deepEqual(viaProof, viaScope, `${label}: the same refusal`)
+            }
+            compared += 1
+          }
+        }
+      }
+    }
+    assert.ok(served > 0 && served < compared, `the matrix exercises both outcomes (served ${served} of ${compared})`)
+
+    // The one place they differ, stated: without the tier the scope refuses FIRST and asks nothing.
+    const reader = { id: 'u_reader', permissions: ['integration:read'], tenantId: TENANT_A }
+    const directory = hostDirectory([{ member: true }, { member: true }])
+    const scoped = await outcome(resolveOperatorValueScope, directory, { user: reader, authenticatedTenantId: TENANT_A })
+    assert.equal(scoped.ok, false)
+    assert.equal(scoped.error.code, 'OPERATOR_SCOPE_TIER_REQUIRED')
+    assert.deepEqual(scoped.asked, [], 'the scope refuses the tier before the host is asked')
+    const proven = await outcome(resolveProvenOwnTenant, directory, { user: reader, authenticatedTenantId: TENANT_A })
+    assert.equal(proven.ok, true, 'the proof asks no tier')
+    assert.deepEqual(proven.value, { tenantId: TENANT_A, actorId: 'u_reader', tenantClaimVerified: true })
+    assert.deepEqual(proven.asked, [{ userId: 'u_reader', tenantId: TENANT_A }])
   })
 
   if (failures > 0) {

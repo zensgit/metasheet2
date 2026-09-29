@@ -307,33 +307,148 @@ test('rehearsal restore keeps the replica-role trigger suppression (load-bearing
   assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })
 
-test('rehearsal restore splits archive sections around a clone-only legacy function compatibility shim', () => {
+test('rehearsal restore splits archive sections around a general clone-only function search_path shim', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
   const rehearseStart = remote.indexOf('action_migrate_rehearse() {')
   const rehearseEnd = remote.indexOf('\naction_migrate_apply() {', rehearseStart)
   assert.ok(rehearseStart >= 0 && rehearseEnd > rehearseStart, 'expected rehearsal function bounds')
   const rehearse = remote.slice(rehearseStart, rehearseEnd)
 
+  const select = rehearse.indexOf('-c "$(rehearsal_shim_candidates_sql)"')
+  const validate = rehearse.indexOf('rehearsal_shim_validate_signatures "$shim_list"')
   const preData = rehearse.indexOf('--section=pre-data')
-  const shim = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} SET search_path = pg_catalog, public')
+  const shim = rehearse.indexOf('rehearsal_shim_sql set "$shim_list"')
   const data = rehearse.indexOf('--section=data')
   const postData = rehearse.indexOf('--section=post-data')
-  const reset = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} RESET search_path')
-  assert.ok(preData >= 0 && shim > preData && data > shim && postData > data && reset > postData,
-    'restore must run pre-data -> clone shim -> data -> post-data -> clone reset')
+  const reset = rehearse.indexOf('rehearsal_shim_sql reset "$shim_list"')
+  assert.ok(select >= 0 && validate > select && preData > validate && shim > preData && data > shim && postData > data && reset > postData,
+    'restore must run: select candidates -> validate -> pre-data -> clone shim -> data -> post-data -> clone reset')
 
-  assert.match(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB" -tA[\s\S]*SELECT pg_get_functiondef/,
-    'legacy-shape detection must query the source DB read-only')
-  assert.match(rehearse, /-d "\$REHEARSAL_DB" -v ON_ERROR_STOP=1[\s\S]*ALTER FUNCTION \$\{legacy_fn_signature\} SET search_path/,
-    'compatibility ALTER must target only the fixed rehearsal DB')
+  // The source DB (the real staging DB) is used exactly twice in the rehearsal, both times as a
+  // read-only SELECT built by a lib function: the candidate list and the parity digest.
+  const sourceUses = rehearse.match(/-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*\n[^\n]*/g) || []
+  assert.equal(sourceUses.length, 2, `the source DB must be touched exactly twice in the rehearsal, got ${sourceUses.length}`)
+  assert.equal((rehearse.match(/MIGRATE_BACKUP_PG_DB/g) || []).length, 2,
+    'the source DB variable appears exactly twice in the rehearsal, in any spelling (braced, unquoted, --dbname=)')
+  assert.match(sourceUses[0], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_candidates_sql\)" \\$/,
+    'first source use: the read-only candidate SELECT')
+  assert.match(sourceUses[1], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)" \| tr -d '\[:space:\]'\)" \\$/,
+    'second source use: the read-only parity digest')
   assert.doesNotMatch(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*ALTER FUNCTION/,
     'compatibility shim must never alter the real staging DB')
-  assert.match(rehearse, /legacy_fn_def.*attendance_w4_canonical_date_text\(work_date\)/s,
-    'shim must be gated on the exact known unqualified legacy call shape')
-  assert.match(rehearse, /legacy_fn_config.*search_path=/s,
-    'shim must not override a source function that already pins its search_path')
+
+  // Exactly one SET and one RESET, each gated on a nonempty list, each piped only to the clone
+  // in one transaction, SET before RESET.
+  const setUses = rehearse.match(/rehearsal_shim_sql\s+set\b/g) || []
+  const resetUses = rehearse.match(/rehearsal_shim_sql\s+reset\b/g) || []
+  assert.equal(setUses.length, 1, 'exactly one SET pipeline')
+  assert.equal(resetUses.length, 1, 'exactly one RESET pipeline')
+  assert.ok(rehearse.lastIndexOf('rehearsal_shim_sql set') < rehearse.indexOf('rehearsal_shim_sql reset'), 'no SET may follow the RESET')
+  for (const mode of ['set', 'reset']) {
+    assert.match(rehearse, new RegExp(`if \\[\\[ "\\$shim_count" -gt 0 \\]\\]; then\\n\\s+log "[^"\\n]*"\\n\\s+rehearsal_shim_sql ${mode} "\\$shim_list" \\\\\\n\\s+\\| docker exec -i "\\$POSTGRES_CONTAINER" psql -U "\\$pg_user" -d "\\$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \\\\\\n`),
+      `the ${mode} pipeline must be gated on shim_count > 0 and go only to the rehearsal DB, in one transaction`)
+  }
+
+  // After the RESET the clone's function configuration must equal the source's, or the rehearsal stops.
+  const parity = rehearse.indexOf('[[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]]')
+  assert.ok(parity > rehearse.indexOf('rehearsal_shim_sql reset'), 'the parity check must run after the RESET')
+  const cloneDigest = rehearse.indexOf('clone_fn_digest="$(docker exec')
+  assert.ok(cloneDigest > rehearse.indexOf('rehearsal_shim_sql reset'), 'the clone digest must be MEASURED after the RESET')
+  assert.ok(cloneDigest < parity, 'the clone digest must be measured before it is compared')
+  assert.equal((rehearse.match(/source_fn_digest=/g) || []).length, 1, 'exactly one source digest assignment')
+  assert.equal((rehearse.match(/clone_fn_digest=/g) || []).length, 1, 'exactly one clone digest assignment')
+  assert.match(rehearse, /tee "\$\{OUTPUT_DIR\}\/rehearsal-restore-compat\.log" \\\n\s+\|\| fail "rehearsal restore compatibility: applying the clone-only search_path shim failed"/,
+    'a failed SET pipeline must fail the rehearsal')
+  assert.match(rehearse, /tee -a "\$\{OUTPUT_DIR\}\/rehearsal-restore-compat\.log" \\\n\s+\|\| fail "rehearsal restore compatibility: resetting the clone-only search_path shim failed"/,
+    'a failed RESET pipeline must fail the rehearsal')
+  assert.match(rehearse, /\[\[ "\$source_fn_digest" =~ \^\[0-9a-f\]\{32\}\$ && "\$source_fn_digest" == "\$clone_fn_digest" \]\] \\\n\s+\|\| fail "rehearsal restore compatibility: the clone's public function configuration differs/,
+    'a digest mismatch (or a non-digest) must fail the rehearsal')
+  assert.match(rehearse, /clone_fn_digest="\$\(docker exec "\$POSTGRES_CONTAINER" psql -U "\$pg_user" -d "\$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)"/)
+
+  // Fail closed on a bad query or an unexpected signature shape.
+  assert.match(rehearse, /> "\$shim_list" \\\n\s+\|\| fail "rehearsal restore compatibility: candidate function query/)
+  assert.match(rehearse, /shim_count="\$\(rehearsal_shim_validate_signatures "\$shim_list"\)" \\\n\s+\|\| fail "rehearsal restore compatibility: a candidate function signature has an unexpected shape/)
+
   assert.equal((rehearse.match(/pg_restore -j 2 --exit-on-error --section=/g) || []).length, 3,
     'all three archive sections must fail closed on the first restore error')
+})
+
+test('rehearsal shim SQL is pinned byte for byte (candidate filter direction and parity ordering are load-bearing)', () => {
+  const candidates = runPipefailBash(`source '${LIB}'\nrehearsal_shim_candidates_sql`)
+  assert.equal(candidates.status, 0, candidates.stderr)
+  assert.equal(candidates.stdout,
+    "SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' "
+    + 'FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang '
+    + "WHERE n.nspname = 'public' AND p.prokind = 'f' AND l.lanname IN ('sql', 'plpgsql') "
+    + "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid = p.oid AND d.deptype = 'e') "
+    + "AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search_path=%') "
+    + 'ORDER BY 1;')
+  const parity = runPipefailBash(`source '${LIB}'\nrehearsal_shim_parity_sql`)
+  assert.equal(parity.status, 0, parity.stderr)
+  assert.equal(parity.stdout,
+    "SELECT md5(coalesce(string_agg(p.oid::pg_catalog.regprocedure::text || '|' || coalesce(pg_catalog.array_to_string(p.proconfig, ','), '-'), ';' "
+    + 'ORDER BY p.oid::pg_catalog.regprocedure::text COLLATE "C"), \'\')) '
+    + "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public';")
+})
+
+test('EXECUTABLE (rehearsal_shim_validate_signatures): counts real catalog shapes, fails closed on anything else', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-shim-'))
+  const run = (lines) => {
+    const file = join(dir, 'list.txt')
+    writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''))
+    return runPipefailBash(`source '${LIB}'\nrehearsal_shim_validate_signatures '${file}'`)
+  }
+  const good = run([
+    'public.attendance_w4_job_proof_vector_valid(source_kind text, root uuid, vector jsonb, item_count integer, operational_branch text, distinct_target_count integer)',
+    'public.attendance_w4c3a_exact_object_keys(value jsonb, expected text[])',
+    'public.attendance_w4_deny_mutation()',
+    'public.f(VARIADIC args text[], at timestamp with time zone, "Weird" public.custom_type)',
+  ])
+  assert.equal(good.status, 0, good.stderr)
+  assert.equal(good.stdout.trim(), '4')
+  const empty = run([])
+  assert.equal(empty.status, 0)
+  assert.equal(empty.stdout.trim(), '0')
+  for (const bad of [
+    'public.f(); DROP TABLE users; --()',
+    'public.f(a;b)',
+    "public.f(a'b)",
+    'public.f(a\\b)',
+    'public.f(a$$b)',
+    'public.f(a=b)',
+    'public.f(a*/b)',
+    'public.f(a-b)',
+    'public.f(a(b)',
+    'public.f(a)b)',
+    'x public.f(a text)',
+    'public."Weird"(a text)',
+    'other.f(a text)',
+    'public.f(a text) ',
+    "public.f(a text)'",
+    'public.f(a text)\\',
+    'f(a text)',
+  ]) {
+    const r = run(['public.ok(a text)', bad])
+    assert.equal(r.status, 1, `must reject: ${bad}`)
+    assert.equal(r.stdout, '', `must print nothing on rejection: ${bad}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (rehearsal_shim_sql): one ALTER per signature for set and reset; unknown mode fails', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-shim-'))
+  const file = join(dir, 'list.txt')
+  writeFileSync(file, 'public.a(x jsonb)\n\npublic.b(y text[], z integer)\n')
+  const set = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql set '${file}'`)
+  assert.equal(set.status, 0, set.stderr)
+  assert.equal(set.stdout, 'ALTER FUNCTION public.a(x jsonb) SET search_path = pg_catalog, public;\nALTER FUNCTION public.b(y text[], z integer) SET search_path = pg_catalog, public;\n')
+  const reset = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql reset '${file}'`)
+  assert.equal(reset.status, 0, reset.stderr)
+  assert.equal(reset.stdout, 'ALTER FUNCTION public.a(x jsonb) RESET search_path;\nALTER FUNCTION public.b(y text[], z integer) RESET search_path;\n')
+  const bad = runPipefailBash(`source '${LIB}'\nrehearsal_shim_sql drop '${file}'`)
+  assert.equal(bad.status, 1)
+  assert.equal(bad.stdout, '')
+  rmSync(dir, { recursive: true, force: true })
 })
 
 function assertExactTargetMigrationContract({ remote, workflow }) {
@@ -1675,7 +1790,7 @@ test('persistent override: written atomically — mktemp candidate + docker comp
   assert.doesNotMatch(remote, /\}\s*>\s*"\$OVERRIDE_FILE"\n/, 'the override body must be written to the temp candidate, not truncated directly onto the live override')
 })
 
-test('persistent override: set_window_env=none writes NO flag env — the ATTENDANCE_*_ENABLED echoes in the override BODY are gated behind the rd-window branch, so a none redeploy clears prior flags from the persisted file', () => {
+test('persistent override: set_window_env=none writes NO flag env — the override body emits its environment block only via backend_override_environment_lines, whose ATTENDANCE_*_ENABLED echoes sit behind the rd-window gate, so a none redeploy clears prior flags from the persisted file', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
   // scope strictly to the override-write heredoc region (ATTENDANCE_SCHEDULER_ENABLED also
   // appears earlier in the env-flags diagnostic block, which is not the override body)
@@ -1683,14 +1798,24 @@ test('persistent override: set_window_env=none writes NO flag env — the ATTEND
   const end = remote.indexOf('> "$override_tmp"', start)
   assert.ok(start !== -1 && end !== -1 && end > start, 'expected the override-write heredoc region')
   const body = remote.slice(start, end)
-  const rdIdx = body.indexOf('if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then')
-  const fiIdx = body.indexOf('\n    fi', rdIdx)
-  const schedIdx = body.indexOf('ATTENDANCE_SCHEDULER_ENABLED')
-  const workerIdx = body.indexOf('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
-  assert.notEqual(rdIdx, -1, 'expected the rd-window gate inside the override body')
+  assert.match(body, /backend_override_environment_lines "\$SET_WINDOW_ENV" "\$TASKS_WINDOW_ENABLED"/, 'the override body must delegate its environment block to the lib writer')
+  assert.doesNotMatch(body, /ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED|TASKS_ENABLED:|environment:/, 'the override body must not echo flag keys or an environment: header directly')
+  const lib = readFileSync(LIB, 'utf8')
+  const fnStart = lib.indexOf('backend_override_environment_lines() {')
+  assert.notEqual(fnStart, -1, 'expected backend_override_environment_lines in the lib')
+  const fnEnd = lib.indexOf('\n}\n', fnStart)
+  const fn = lib.slice(fnStart, fnEnd)
+  const rdIdx = fn.indexOf('if [[ "$set_window_env" == "rd-window" ]]; then')
+  const fiIdx = fn.indexOf('\n  fi', rdIdx)
+  const schedIdx = fn.indexOf('ATTENDANCE_SCHEDULER_ENABLED')
+  const workerIdx = fn.indexOf('ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED')
+  assert.notEqual(rdIdx, -1, 'expected the rd-window gate inside the lib writer')
   assert.notEqual(fiIdx, -1, 'expected the rd-window gate to be closed with fi')
   assert.ok(rdIdx < schedIdx && schedIdx < fiIdx, 'the scheduler flag echo must sit INSIDE the rd-window gate')
   assert.ok(rdIdx < workerIdx && workerIdx < fiIdx, 'the worker flag echo must sit INSIDE the rd-window gate')
+  const none = runPipefailBash(`source '${LIB}'\nbackend_override_environment_lines 'none' 'false'`)
+  assert.equal(none.status, 0, `none/false must not trip errexit; stderr: ${none.stderr}`)
+  assert.equal(none.stdout, '', 'set_window_env=none + tasks_enabled=false must write no environment block at all')
 })
 
 test('persistent override: the workflow cleanup rm -rf never targets the persistent runner dir, so the override (and the containers config_files label) survives OUTPUT_DIR removal', () => {
@@ -1744,6 +1869,219 @@ test('persistent override re-normalization: force mode adds --force-recreate whi
   )
   assert.match(deploy, /up_args\+=\(backend web\)\n\s+compose_staging "\$\{up_args\[@\]\}"/, 'the only recreated services must be backend and web')
   assert.doesNotMatch(deploy, /up_args\+=\([^\n]*(?:postgres|redis)/, 'postgres/redis must never enter the recreate service list')
+})
+
+test('tasks_enabled: an explicit deploy-only choice input that defaults to false, validated fail-closed, and reaches the remote script', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(
+    workflow,
+    /tasks_enabled:\n\s+description:[^\n]+\n\s+required: false\n\s+type: choice\n\s+options: \['false', 'true'\]\n\s+default: 'false'/,
+    'tasks_enabled must be a choice workflow input (false/true) defaulting to false',
+  )
+  assert.match(
+    workflow,
+    /case "\$TASKS_ENABLED_INPUT" in true\|false\) ;; \*\) echo "tasks_enabled must be true or false/,
+    'workflow input validation must fail closed on an invalid tasks_enabled value',
+  )
+  assert.match(
+    workflow,
+    /if \[\[ "\$ACTION" != "deploy" && "\$TASKS_ENABLED_INPUT" == "true" \]\]; then\n\s+echo "tasks_enabled=true is only allowed for action=deploy/,
+    'workflow input validation must reject tasks_enabled=true on non-deploy actions',
+  )
+  assert.match(workflow, /export TASKS_WINDOW_ENABLED='\$\{TASKS_ENABLED_INPUT\}'/, 'validated tasks_enabled must reach the remote script as TASKS_WINDOW_ENABLED')
+
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /TASKS_WINDOW_ENABLED="\$\{TASKS_WINDOW_ENABLED:-false\}"/, 'remote script must default TASKS_WINDOW_ENABLED to false')
+  assert.match(
+    remote,
+    /case "\$TASKS_WINDOW_ENABLED" in\n\s+true\|false\) ;;\n\s+\*\) fail "TASKS_WINDOW_ENABLED must be true or false/,
+    'remote script must independently fail closed on an invalid TASKS_WINDOW_ENABLED (defense-in-depth, same as FORCE_RECREATE)',
+  )
+  assert.match(
+    remote,
+    /if \[\[ "\$ACTION" != "deploy" && "\$TASKS_WINDOW_ENABLED" == "true" \]\]; then\n\s+fail "TASKS_WINDOW_ENABLED=true is only allowed for action=deploy/,
+    'remote script must independently reject TASKS_WINDOW_ENABLED=true on non-deploy actions',
+  )
+})
+
+test('tasks smoke id is registered: workflow choice list + remote action_smoke case statement', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  assert.match(workflow, /options: \[ae4, rd45, otbank-v18, mp6, hmr5, tasks\]/, 'the smoke input must offer tasks alongside the five bundle window smokes')
+
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const start = remote.indexOf('action_smoke() {')
+  const end = remote.indexOf('\n# residue_check', start)
+  assert.ok(start !== -1 && end > start, 'expected action_smoke() bounds')
+  const smoke = remote.slice(start, end)
+  assert.match(smoke, /tasks\)\n\s+smoke_script="staging-tasks-smoke\.mjs"\n\s+stamp_prefix="tasks-smoke"/, 'action_smoke must map smoke=tasks to staging-tasks-smoke.mjs with stamp_prefix tasks-smoke')
+  assert.match(
+    smoke,
+    /if \[\[ "\$SMOKE_ID" == "tasks" \]\]; then\n(?:\s+#[^\n]*\n)*\s+local tasks_live\n\s+tasks_live="\$\(soak_backend_env TASKS_ENABLED\)"\n\s+\[\[ "\$tasks_live" == "true" \]\] \\\n\s+\|\| fail "smoke=tasks requires TASKS_ENABLED=true/,
+    'action_smoke must fail closed unless the running backend actually has TASKS_ENABLED=true',
+  )
+  assert.match(
+    smoke,
+    /if \[\[ "\$SMOKE_ID" == "tasks" \]\]; then\n(?:\s+#[^\n]*\n)*\s+run_env\+=\("SUBJECT_TOKEN=\$\(mint_token "\$\{stamp\}" 'user' 'tasks:read,tasks:write' 'default'\)"\)\n\s+fi/,
+    'action_smoke must mint a tenant-scoped SUBJECT_TOKEN for the tasks smoke, org default (the same deterministic org every other window smoke uses)',
+  )
+})
+
+test('mint_token: tenant_id stays optional (pre-existing 3-arg callers unaffected) and is argv-passed, never text-spliced', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const start = remote.indexOf('mint_token() {')
+  const end = remote.indexOf('\ncapture_settings() {', start)
+  assert.ok(start !== -1 && end > start, 'expected mint_token() bounds')
+  const fn = remote.slice(start, end)
+  assert.match(fn, /local user_id="\$1" roles="\$2" perms="\$3" tenant_id="\$\{4:-\}"/, 'tenant_id must be the 4th, optional, positional argument')
+  assert.match(fn, /--mint --user-id "\$user_id" --roles "\$roles" --perms "\$perms" --tenant-id "\$tenant_id"/, 'tenant_id, when given, must be passed as its own --tenant-id argv element')
+  assert.match(fn, /--mint --user-id "\$user_id" --roles "\$roles" --perms "\$perms"\n  fi/, 'the pre-existing 3-arg call shape must be preserved byte-for-byte when tenant_id is empty')
+})
+
+test('EXECUTABLE (backend_override_environment_lines): all 4 set_window_env x tasks_window_enabled combos emit AT MOST ONE environment: block with the exact expected keys, never a duplicate key', () => {
+  const cases = [
+    ['none', 'false', ''],
+    ['none', 'true', '    environment:\n      TASKS_ENABLED: "true"\n'],
+    ['rd-window', 'false', '    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n'],
+    ['rd-window', 'true', '    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n      TASKS_ENABLED: "true"\n'],
+  ]
+  for (const [setWindowEnv, tasksEnabled, expected] of cases) {
+    const result = runPipefailBash(`source '${LIB}'\nbackend_override_environment_lines '${setWindowEnv}' '${tasksEnabled}'`)
+    assert.equal(result.status, 0, `set_window_env=${setWindowEnv} tasks=${tasksEnabled}: stderr=${result.stderr}`)
+    assert.equal(result.stdout, expected, `set_window_env=${setWindowEnv} tasks=${tasksEnabled}`)
+    const envBlockCount = (result.stdout.match(/^ {4}environment:$/gm) || []).length
+    assert.ok(envBlockCount <= 1, `set_window_env=${setWindowEnv} tasks=${tasksEnabled}: expected 0 or 1 environment: blocks, found ${envBlockCount}`)
+    const keyOccurrences = (name) => (result.stdout.match(new RegExp(`^ {6}${name}:`, 'gm')) || []).length
+    for (const name of ['ATTENDANCE_SCHEDULER_ENABLED', 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED', 'TASKS_ENABLED']) {
+      assert.ok(keyOccurrences(name) <= 1, `set_window_env=${setWindowEnv} tasks=${tasksEnabled}: key ${name} appeared ${keyOccurrences(name)} times (must never duplicate)`)
+    }
+  }
+})
+
+test('EXECUTABLE (backend_override_environment_lines x classify_runner_override): each combo\'s writer output classifies as the matching shape (none / none+tasks / rd-window / rd-window+tasks), values-free, no errexit trip', () => {
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovtasks-'))
+  const cases = [
+    ['none', 'false', 'none', []],
+    ['none', 'true', 'none+tasks', ['TASKS_ENABLED']],
+    ['rd-window', 'false', 'rd-window', ['ATTENDANCE_SCHEDULER_ENABLED', 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED']],
+    ['rd-window', 'true', 'rd-window+tasks', ['ATTENDANCE_SCHEDULER_ENABLED', 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED', 'TASKS_ENABLED']],
+  ]
+  for (const [setWindowEnv, tasksEnabled, wantShape, liveKeys] of cases) {
+    const overridePath = join(dir, `ov-${setWindowEnv}-${tasksEnabled}.yml`)
+    const script = `#!/bin/bash
+set -euo pipefail
+source '${LIB}'
+{
+  echo "# test fixture"
+  echo "services:"
+  echo "  backend:"
+  echo "    image: ghcr.io/x/metasheet2-backend:deadbeef"
+  backend_override_environment_lines '${setWindowEnv}' '${tasksEnabled}'
+  echo "  web:"
+  echo "    image: ghcr.io/x/metasheet2-web:deadbeef"
+} > '${overridePath}'
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() {
+  local body="$5"
+  shift 6
+  (
+    printenv() {
+      case "$1" in
+        PATH) echo "/usr/bin"; return 0 ;;
+${liveKeys.map((k) => `        ${k}) echo v; return 0 ;;`).join('\n')}
+        *) return 1 ;;
+      esac
+    }
+    eval "$body"
+  )
+}
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `${setWindowEnv}/${tasksEnabled}: stderr=${r.stderr}`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, new RegExp(`^override_shape=${wantShape.replace('+', '\\+')}$`, 'm'), `${setWindowEnv}/${tasksEnabled} report:\n${report}`)
+    assert.match(report, /^file_live_match=true$/m, `${setWindowEnv}/${tasksEnabled} report:\n${report}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (classify_runner_override): a file whose ONLY key is TASKS_ENABLED (none+tasks) does not trip errexit stripping it down to empty', () => {
+  // Regression pin for the exact hazard the sans-tasks extraction was written to avoid: naively
+  // piping file_names through `grep -v '^TASKS_ENABLED$'` when TASKS_ENABLED is the only name
+  // present yields ZERO lines, and grep exits 1 on zero matches — which would abort this
+  // function under the caller's `set -euo pipefail` (the same P3-1 hazard class the awk calls
+  // elsewhere in this function dodge with `|| true`). The shipped extraction uses a plain bash
+  // word loop instead, which has no such exit-code hazard.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovtasksonly-'))
+  const overridePath = join(dir, 'ov.yml')
+  writeFileSync(overridePath, 'services:\n  backend:\n    image: x\n    environment:\n      TASKS_ENABLED: "true"\n  web:\n    image: x\n')
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local body="$5"; shift 6; ( printenv() { case "$1" in PATH|TASKS_ENABLED) echo v; return 0 ;; *) return 1 ;; esac; }; eval "$body" ); }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^override_shape=none\+tasks$/m)
+  assert.match(report, /^file_live_match=true$/m)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (classify_runner_override): soak-w4w7 + TASKS_ENABLED together is unexpected — no writer produces that combination', () => {
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovsoaktasks-'))
+  const overridePath = join(dir, 'ov.yml')
+  writeFileSync(
+    overridePath,
+    `services:\n  backend:\n    image: x\n    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n      ${W7_FLAG_NAME}: "org_secret_alpha"\n      TASKS_ENABLED: "true"\n  web:\n    image: x\n`,
+  )
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local body="$5"; shift 6; ( printenv() { case "$1" in PATH|${W4_FLAG_NAME}|${W7_FLAG_NAME}|TASKS_ENABLED) echo v; return 0 ;; *) return 1 ;; esac; }; eval "$body" ); }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'soak-w4w7+tasks must refuse, not classify')
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^override_shape=unexpected$/m)
+  assert.ok(!report.includes('org_secret'), 'values leaked')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('action=soak-flags guard also refuses to silently drop a live TASKS_ENABLED (extends the existing rd-window protection)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(
+    remote,
+    /if \[\[ -f "\$OVERRIDE_FILE" \]\] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED\|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED\|TASKS_ENABLED' "\$OVERRIDE_FILE"; then\n\s+fail "existing runner override carries/,
+    'soak-flags must refuse to rewrite an override that already carries TASKS_ENABLED, same as it already refuses for the rd-window flags',
+  )
+})
+
+test('assert_window_env_flags: residue-sweep and status pass tasks_mode="false" explicitly (WARN, never FAIL, on an unrequested live TASKS_ENABLED)', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  assert.match(remote, /assert_window_env_flags "\$TASKS_WINDOW_ENABLED"/, 'action_deploy must pass its own TASKS_WINDOW_ENABLED')
+  const residueCalls = (remote.match(/assert_window_env_flags "false" \|\| (env_flags_ok=0|status_rc=1)/g) || []).length
+  assert.equal(residueCalls, 2, 'residue-sweep and status must both pass tasks_mode="false" explicitly')
 })
 
 // --- W4+W7 combined-soak actions (#4556): soak-baseline / soak-seed / soak-flags /
@@ -3434,7 +3772,7 @@ function runWorkflowValidation(env) {
   return spawnSync('bash', ['-c', block], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { ACTION: env.ACTION, SOAK_ORGS: env.SOAK_ORGS ?? '', SOAK_OPTS: env.SOAK_OPTS ?? '', DEPLOY_SHA: '', SET_WINDOW_ENV: 'none', FORCE_RECREATE: 'false', STAMPS: '', PATH: process.env.PATH },
+    env: { ACTION: env.ACTION, SOAK_ORGS: env.SOAK_ORGS ?? '', SOAK_OPTS: env.SOAK_OPTS ?? '', DEPLOY_SHA: '', SET_WINDOW_ENV: 'none', TASKS_ENABLED_INPUT: env.TASKS_ENABLED_INPUT ?? 'false', FORCE_RECREATE: 'false', STAMPS: '', PATH: process.env.PATH },
   })
 }
 
@@ -4205,4 +4543,91 @@ test('raw-control-byte guard: no soak-touched file carries raw control bytes (gi
     const off = hasControlByte(readFileSync(file))
     assert.equal(off, -1, `${file} carries a raw control byte at offset ${off}`)
   }
+})
+
+// --- tasks_enabled: executable checks (runner review round 1) ---------------------------------
+
+function extractAssertWindowEnvFlags() {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  // End at the next top-level function: the embedded node -e body contains column-0 `}` lines,
+  // so a "first column-0 brace" extractor would truncate this function.
+  const start = remote.indexOf('assert_window_env_flags() {')
+  const end = remote.indexOf('snapshot_staging_ps() {', start)
+  assert.ok(start !== -1 && end > start, 'expected assert_window_env_flags() bounds')
+  return remote.slice(start, end)
+}
+
+function runAssertWindowEnvFlags({ requested, live }) {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-envflags-'))
+  const script = `set -euo pipefail
+OUTPUT_DIR='${dir}'
+SET_WINDOW_ENV=none
+staging_exec() {
+  if [[ "$STUB_LIVE" == "<unset>" ]]; then
+    env -u TASKS_ENABLED -u ATTENDANCE_REPORT_DIGEST_ENABLED -u ATTENDANCE_SCHEDULER_ENABLED -u ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED "$@"
+  else
+    env -u ATTENDANCE_REPORT_DIGEST_ENABLED -u ATTENDANCE_SCHEDULER_ENABLED -u ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED TASKS_ENABLED="$STUB_LIVE" "$@"
+  fi
+}
+${extractAssertWindowEnvFlags()}
+assert_window_env_flags "$STUB_REQUESTED"
+`
+  const result = spawnSync('bash', ['-o', 'pipefail', '-c', script], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, STUB_LIVE: live, STUB_REQUESTED: requested },
+  })
+  const flags = existsSync(join(dir, 'env-flags.txt')) ? readFileSync(join(dir, 'env-flags.txt'), 'utf8') : ''
+  rmSync(dir, { recursive: true, force: true })
+  return { ...result, flags }
+}
+
+test('EXECUTABLE (assert_window_env_flags): tasks requested but not live FAILS closed; requested=false only WARNs', () => {
+  const cases = [
+    { requested: 'true', live: '<unset>', rc: 1, out: /FAIL: tasks_enabled=true requested but TASKS_ENABLED=undefined/ },
+    { requested: 'true', live: 'false', rc: 1, out: /FAIL: tasks_enabled=true requested but TASKS_ENABLED=false/ },
+    { requested: 'true', live: 'true', rc: 0, flags: /tasks=true\(requested=true\)/ },
+    { requested: 'false', live: '<unset>', rc: 0, flags: /tasks=<unset>\(requested=false\)/ },
+    { requested: 'false', live: 'true', rc: 0, out: /WARN: tasks_enabled=false/, flags: /tasks=true\(requested=false\)/ },
+  ]
+  for (const c of cases) {
+    const r = runAssertWindowEnvFlags(c)
+    const label = `requested=${c.requested} live=${c.live}`
+    assert.equal(r.status, c.rc, `${label}: rc ${r.status}; stderr: ${r.stderr}`)
+    if (c.out) assert.match(r.stderr + r.stdout, c.out, label)
+    if (c.flags) assert.match(r.flags, c.flags, label)
+  }
+})
+
+test('workflow validation: tasks_enabled rejects non-deploy true and any value other than true|false (exit 2); false passes', () => {
+  const notDeploy = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'true' })
+  assert.equal(notDeploy.status, 2, notDeploy.stderr)
+  assert.match(notDeploy.stderr, /tasks_enabled=true is only allowed for action=deploy/)
+  const badValue = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'TRUE' })
+  assert.equal(badValue.status, 2, badValue.stderr)
+  assert.match(badValue.stderr, /tasks_enabled must be true or false, got: 'TRUE'/)
+  const ok = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'false' })
+  assert.equal(ok.status, 0, ok.stderr)
+})
+
+test('workflow: both the validation step and the remote-action step map TASKS_ENABLED_INPUT from inputs.tasks_enabled', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  for (const step of ['Validate inputs and embedded scripts', 'Run remote action']) {
+    const at = workflow.indexOf(`- name: ${step}`)
+    assert.notEqual(at, -1, `expected workflow step: ${step}`)
+    const runAt = workflow.indexOf('run: |', at)
+    assert.match(workflow.slice(at, runAt), /\n\s+TASKS_ENABLED_INPUT: \$\{\{ inputs\.tasks_enabled \}\}\n/, `${step} must map TASKS_ENABLED_INPUT`)
+  }
+})
+
+test('EXECUTABLE (remote script): TASKS_WINDOW_ENABLED is re-validated fail-closed before any action runs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-tasks-validate-'))
+  const base = { PATH: process.env.PATH, OUTPUT_DIR: dir, RUN_STAMP: 'gh1a1' }
+  const bad = spawnSync('bash', ['-o', 'pipefail', REMOTE_SH], { encoding: 'utf8', env: { ...base, ACTION: 'status', TASKS_WINDOW_ENABLED: 'yes' } })
+  assert.equal(bad.status, 1, bad.stderr)
+  assert.match(bad.stderr, /TASKS_WINDOW_ENABLED must be true or false, got: 'yes'/)
+  const notDeploy = spawnSync('bash', ['-o', 'pipefail', REMOTE_SH], { encoding: 'utf8', env: { ...base, ACTION: 'status', TASKS_WINDOW_ENABLED: 'true' } })
+  assert.equal(notDeploy.status, 1, notDeploy.stderr)
+  assert.match(notDeploy.stderr, /TASKS_WINDOW_ENABLED=true is only allowed for action=deploy/)
+  assert.doesNotMatch(bad.stdout + notDeploy.stdout, /\[window-runner\] (?!.*error)/, 'nothing may run before the validation fails')
+  rmSync(dir, { recursive: true, force: true })
 })
