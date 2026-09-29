@@ -352,5 +352,94 @@ export function defineFieldSchemaFenceRecheckRealDbCases(): void {
       expect(outcome.ok, String((outcome as { error?: unknown }).error ?? '')).toBe(true)
       expect((await recordData(R))?.[F_FORMULA]).toBe(2)
     })
+
+    // ── R-F1 (fix round): convert ON + writer fence OFF must not close a lock cycle with a schema edit ──
+    //
+    // The cycle the verifier reproduced three times (DL-A shape): writer W holds the canonical fence (plugin create
+    // takes it unconditionally), schema edit P locks the `meta_fields` row (PATCH /fields updates it first) and then
+    // asks for the fence (its auto-number backfill takes it unconditionally). If W then asks for `FOR SHARE` on that
+    // field row, each waits for the other: PostgreSQL answers 40P01 on one side. With the writer fence off no
+    // conversion can run (execute refuses), so the re-check must not run — the gate is both flags.
+    // Short lock_timeout on both sessions: a regression fails in seconds instead of hanging the step.
+    async function schemaEditParkedOnFence(): Promise<{ p: import('pg').PoolClient; pDone: Promise<Outcome> }> {
+      const p = await poolManager.get().getInternalPool().connect()
+      await p.query('BEGIN')
+      await p.query("SET LOCAL lock_timeout = '6s'")
+      await p.query('UPDATE meta_fields SET property = property WHERE id = $1', [F_STR]) // PATCH /fields: field row first
+      const pDone = p.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)]) // then the fence
+        .then((value): Outcome => ({ ok: true, value }), (error): Outcome => ({ ok: false, error }))
+      return { p, pDone }
+    }
+    const sqlState = (o: Outcome) => (o.ok ? null : String((o.error as { code?: unknown }).code ?? 'unknown'))
+
+    test('R-F1 CONTROL (the cycle exists): the re-check statement issued after the fence, with the fence flag off, deadlocks with a schema edit', async () => {
+      const w = await poolManager.get().getInternalPool().connect()
+      let p: import('pg').PoolClient | null = null
+      try {
+        await w.query('BEGIN')
+        await w.query("SET LOCAL lock_timeout = '6s'")
+        const wPid = Number((await w.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+        await w.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(SHEET)]) // W holds the fence
+        const parked = await schemaEditParkedOnFence()
+        p = parked.p
+        await waitUntilParkedOnFence(wPid)
+        const wDone = w.query(FIELD_SCHEMA_FENCE_RECHECK_SQL, [SHEET, [F_STR]]) // what an ungated helper would issue
+          .then((value): Outcome => ({ ok: true, value }), (error): Outcome => ({ ok: false, error }))
+        const [wOut, pOut] = await Promise.all([wDone, parked.pDone])
+        expect([sqlState(wOut), sqlState(pOut)]).toContain('40P01')
+      } finally {
+        await w.query('ROLLBACK').catch(() => {})
+        w.release()
+        if (p) {
+          await p.query('ROLLBACK').catch(() => {})
+          p.release()
+        }
+      }
+    })
+
+    test('R-F1: convert ON + writer fence OFF — the real plugin createRecord holding the fence does NOT deadlock with a schema edit', async () => {
+      delete process.env[FENCE_FLAG]
+      process.env[CONVERT_FLAG] = 'true'
+      const before = await recordCount()
+      const w = await poolManager.get().getInternalPool().connect()
+      let p: import('pg').PoolClient | null = null
+      let release!: () => void
+      const gateOpen = new Promise<void>((resolve) => { release = resolve })
+      let pausedOnce = false
+      try {
+        await w.query('BEGIN')
+        await w.query("SET LOCAL lock_timeout = '6s'")
+        const wPid = Number((await w.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+        // Pause the production writer right after it acquired the fence, so the schema edit can park behind it.
+        const wQuery = async (sql: string, params?: unknown[]) => {
+          const result = await w.query(sql, params)
+          if (!pausedOnce && /pg_advisory_xact_lock/i.test(sql)) {
+            pausedOnce = true
+            await gateOpen
+          }
+          return result
+        }
+        const wDone = pluginCreateRecord({ query: wQuery as never, sheetId: SHEET, data: { [F_STR]: 'x' } })
+          .then(async (value): Promise<Outcome> => { await w.query('COMMIT'); return { ok: true, value } }, (error): Outcome => ({ ok: false, error }))
+        while (!pausedOnce) await new Promise((resolve) => setTimeout(resolve, 10))
+        const parked = await schemaEditParkedOnFence()
+        p = parked.p
+        await waitUntilParkedOnFence(wPid)
+        release()
+        const [wOut, pOut] = await Promise.all([wDone, parked.pDone])
+        expect(sqlState(wOut), String((wOut as { error?: unknown }).error ?? '')).toBeNull()
+        expect(sqlState(pOut), String((pOut as { error?: unknown }).error ?? '')).toBeNull()
+        await p.query('ROLLBACK')
+        expect(await recordCount()).toBe(before + 1)
+      } finally {
+        release()
+        await w.query('ROLLBACK').catch(() => {})
+        w.release()
+        if (p) {
+          await p.query('ROLLBACK').catch(() => {})
+          p.release()
+        }
+      }
+    })
   })
 }

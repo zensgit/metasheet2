@@ -19,18 +19,22 @@
  * field rows until the writer commits, so the conversion's own `FOR UPDATE` on the field row waits for the
  * writer instead of the other way round.
  *
- * INERT UNLESS THE CONVERT FLAG IS ON. Both helpers return before issuing any query unless
- * `MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT` is the exact string `'true'` (the ADR §5 flag; same byte-exact
- * comparison as the rest of the retype-convert family). Flag off ⇒ every wired writer issues exactly the
- * statements it issued before this module existed.
+ * INERT UNLESS BOTH FLAGS ARE ON. Every function here returns before issuing any query unless
+ * `isFieldRetypeConvertEnabled()` (the ADR §5 convert flag — the SAME predicate the conversion endpoints use)
+ * AND `isWriterFenceEnabled()` (the canonical writer fence). Execute / undo refuse while the fence is off, so
+ * there is no conversion to protect against in that state — and running the re-check there would close new
+ * lock cycles with schema edits that take a `meta_fields` row lock before the fence (PATCH /fields with an
+ * auto-number backfill, DELETE /fields; reproduced on real PostgreSQL). Either flag off ⇒ every wired writer
+ * issues exactly the statements it issued before this module existed.
  *
  * Row 13 (non-scoped derived merge) uses the DERIVED variant: the merge computes `updates` outside the fence
  * from formula fields; after the fence it asserts every key is still a derived type. Its refusal must be a
  * `SheetWriterBlockedError` subclass, because the three callers route exactly that class to their skip branch
  * and re-throw everything else (ADR §3.11 row 13, r6 N2).
  */
-import { SheetWriterBlockedError } from './canonical-sheet-fence'
+import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
 import { serializeFieldRow, mapFieldType } from './field-codecs'
+import { isFieldRetypeConvertEnabled } from './field-retype-convert'
 
 /** Minimal query shape shared by the writers' QueryFn / FenceQuery / AutomationQueryFn aliases. */
 export type FieldSchemaRecheckQuery = (
@@ -38,15 +42,12 @@ export type FieldSchemaRecheckQuery = (
   params?: unknown[],
 ) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-/** The env flag (ADR §5). Registered in scripts/ops/global-history-flag-manifest.mjs. */
-export const FIELD_SCHEMA_FENCE_RECHECK_FLAG_ENV = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
-
 /**
- * Same predicate as the retype-convert endpoints' gate (`isFieldRetypeConvertEnabled`, slice 2): exact literal
- * `'true'`, no trim, no case folding.
+ * THE gate for everything in this module: the convert flag (one predicate, owned by the conversion endpoints)
+ * AND the canonical writer fence. See the module note for why both.
  */
-export function isFieldSchemaFenceRecheckEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT === 'true'
+export function isFieldSchemaFenceRecheckEnabled(): boolean {
+  return isFieldRetypeConvertEnabled() && isWriterFenceEnabled()
 }
 
 export const FIELD_SCHEMA_CHANGED_CODE = 'FIELD_SCHEMA_CHANGED'
@@ -73,14 +74,15 @@ export type FieldSchemaSnapshot = ReadonlyMap<string, FieldSchemaSnapshotEntry>
 
 /**
  * The post-fence re-read. Exported so the real-DB race cases can derive their `pg_stat_activity` pattern from
- * the production statement instead of copying it.
+ * the production statement instead of copying it. `ORDER BY id` gives a deterministic row-lock order and keeps
+ * the text distinct from the link-writer fence plan's own `FOR SHARE` read.
  */
 export const FIELD_SCHEMA_FENCE_RECHECK_SQL =
-  'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) FOR SHARE'
+  'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) ORDER BY id FOR SHARE'
 
 /** Pre-fence snapshot read for writers that validate nothing by type (automation). Same column set, no lock. */
 export const FIELD_SCHEMA_SNAPSHOT_SQL =
-  'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])'
+  'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) ORDER BY id'
 
 function isSelectType(type: string): boolean {
   return type === 'select' || type === 'multiSelect'
@@ -134,8 +136,8 @@ function touchedIds(snapshot: FieldSchemaSnapshot | null, touchedFieldIds: Itera
 }
 
 /**
- * Flag-gated pre-fence snapshot for writers that do not otherwise keep one (automation `update_record` /
- * `create_record`). Flag off ⇒ `null` and NO query.
+ * Gated pre-fence snapshot for writers that do not otherwise keep one (automation `update_record` /
+ * `create_record`). Gate off ⇒ `null` and NO query.
  */
 export async function loadFieldSchemaSnapshot(
   query: FieldSchemaRecheckQuery,
@@ -195,7 +197,7 @@ export async function assertFieldSchemaUnchangedAfterFence(
 // ── Row 13: the derived-merge variant ─────────────────────────────────────────────────────────────────
 
 export const DERIVED_MERGE_TARGET_RECHECK_SQL =
-  'SELECT id, type FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) FOR SHARE'
+  'SELECT id, type FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[]) ORDER BY id FOR SHARE'
 
 const DERIVED_FIELD_TYPES: ReadonlySet<string> = new Set(['formula', 'lookup', 'rollup'])
 

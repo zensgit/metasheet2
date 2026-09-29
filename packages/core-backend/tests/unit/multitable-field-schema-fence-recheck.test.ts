@@ -5,15 +5,20 @@
  * Each writer is driven through its real code with a fake query that records every statement and answers the
  * field catalogue in two voices: the SNAPSHOT read (what the writer validated against — `string`) and the
  * post-fence RE-READ (the helper's `FOR SHARE` statement — `select` when a conversion committed in between).
- * For every writer:
- *   drift, flag on   → 409 FIELD_SCHEMA_CHANGED (automation: step fails; derived merge: skipped), ZERO
- *                      `meta_records` writes, and the re-read ran on the WRITER'S transactional query;
- *   no drift, flag on → the write proceeds (the re-read ran and passed);
- *   drift, flag off   → the write proceeds exactly as before this slice and the re-read statement is NEVER
- *                      issued — the inertness proof (the change does nothing until the convert flag is 'true').
+ *
+ * The gate is TWO flags (fix round R-F1): the convert flag AND the canonical writer fence. For every writer:
+ *   both on,  drift     → 409 FIELD_SCHEMA_CHANGED (automation: step fails; derived merge: skipped), ZERO
+ *                         `meta_records` writes, and the re-read ran on the WRITER'S transactional query;
+ *   both on,  no drift  → the write proceeds (the re-read ran and passed);
+ *   convert off (fence on), drift → no re-read issued, the stale write lands (legacy behaviour);
+ *   convert on, fence off,  drift → no re-read issued, the stale write lands — the state in which the re-check
+ *                         closed new lock cycles with schema edits on real PostgreSQL (see the module note).
  * The structural guard (multitable-field-schema-fence-recheck.guard.test.ts) proves the call sits after the
  * fence and before the first write; this file proves the call does what it claims at each site.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
@@ -32,11 +37,16 @@ import {
   isFieldSchemaFenceRecheckEnabled,
   loadFieldSchemaSnapshot,
 } from '../../src/multitable/field-schema-fence-recheck'
-import { SheetWriterBlockedError, __resetRecoveryWriterStateColumnProbe } from '../../src/multitable/canonical-sheet-fence'
+import {
+  SheetWriterBlockedError,
+  __resetRecoveryWriterStateColumnProbe,
+  isWriterFenceEnabled,
+} from '../../src/multitable/canonical-sheet-fence'
+import { isFieldRetypeConvertEnabled } from '../../src/multitable/field-retype-convert'
 import { serializeFieldRow } from '../../src/multitable/field-codecs'
 import { usePinnedServer } from '../utils/pinned-server'
 
-const FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
+const CONVERT = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
 const WRITER_FENCE = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const SHEET = 'sheet_fsr_1'
 const FIELD = 'fld_fsr_note'
@@ -46,36 +56,39 @@ const collapse = (s: string) => s.replace(/\s+/g, ' ').trim()
 const RECORDS_WRITE = /^(?:UPDATE|INSERT INTO|DELETE FROM) meta_records\b/i
 
 type Stmt = { sql: string; params: unknown[]; via: string }
-type FieldShape = { type: string; options?: string[] } | null
+type Shape = { type: string; options?: string[]; property?: Record<string, unknown> }
 
-function fieldRow(shape: { type: string; options?: string[] }, id = FIELD) {
+function fieldRow(shape: Shape, id = FIELD) {
   return {
     id,
     sheet_id: SHEET,
     name: 'Note',
     type: shape.type,
-    property: shape.options ? { options: shape.options.map((value) => ({ value })) } : {},
+    property: shape.property ?? (shape.options ? { options: shape.options.map((value) => ({ value })) } : {}),
     order: 0,
   }
 }
 
 /**
  * The shared fake. `snapshot` answers every ordinary field-catalogue read; `recheck` answers the helper's FOR SHARE
- * re-read (and the derived variant's). Everything else gets a permissive default that lets the writer reach its
- * write.
+ * re-read (and the derived variant's). With the writer fence on, the operation ledger probes for its column and
+ * revisions return a seq; the recovery block column is reported absent (no durable block).
  */
-function makeDb(opts: { snapshot: { type: string; options?: string[] }; recheck: FieldShape; derivedType?: string }) {
+function makeDb(opts: { snapshot: Shape; recheck: Shape | null; derivedType?: string }) {
   const stmts: Stmt[] = []
   const handler = (via: string) => async (sqlIn: unknown, params: unknown[] = []) => {
     const sql = collapse(String(sqlIn))
     stmts.push({ sql, params, via })
     if (sql === FIELD_SCHEMA_FENCE_RECHECK_SQL) return { rows: opts.recheck ? [fieldRow(opts.recheck)] : [], rowCount: opts.recheck ? 1 : 0 }
     if (sql === DERIVED_MERGE_TARGET_RECHECK_SQL) return { rows: [{ id: FIELD, type: opts.derivedType ?? 'formula' }], rowCount: 1 }
-    if (/information_schema/i.test(sql)) return { rows: [], rowCount: 0 }
+    if (/information_schema/i.test(sql)) {
+      return /column_name = 'operation_id'/.test(sql) ? { rows: [{ present: 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
+    }
     if (/pg_current_xact_id/i.test(sql)) return { rows: [{ xid: '7' }], rowCount: 1 }
     if (/type = 'longText'/.test(sql)) return { rows: [], rowCount: 0 }
     if (/FROM meta_fields/i.test(sql)) return { rows: [fieldRow(opts.snapshot)], rowCount: 1 }
     if (/FROM meta_sheets WHERE id = \$1/i.test(sql)) return { rows: [{ id: SHEET, base_id: 'base_fsr', name: 'Sheet', description: null, deleted_at: null }], rowCount: 1 }
+    if (/^INSERT INTO meta_record_revisions/i.test(sql)) return { rows: [{ seq: '1' }], rowCount: 1 }
     if (/^UPDATE meta_records/i.test(sql)) return { rows: [{ id: RECORD, version: 2, data: { [FIELD]: 'x' } }], rowCount: 1 }
     if (/^INSERT INTO meta_records /i.test(sql)) return { rows: [{ id: RECORD, version: 1 }], rowCount: 1 }
     if (/FROM meta_records/i.test(sql)) {
@@ -91,23 +104,60 @@ function makeDb(opts: { snapshot: { type: string; options?: string[] }; recheck:
     pool: handler('pool'),
     txn: handler('txn'),
     rechecks: () => stmts.filter((s) => s.sql === FIELD_SCHEMA_FENCE_RECHECK_SQL),
+    snapshotReads: () => stmts.filter((s) => s.sql === FIELD_SCHEMA_SNAPSHOT_SQL),
     derivedRechecks: () => stmts.filter((s) => s.sql === DERIVED_MERGE_TARGET_RECHECK_SQL),
     recordWrites: () => stmts.filter((s) => RECORDS_WRITE.test(s.sql)),
   }
 }
+type Db = ReturnType<typeof makeDb>
 
-const STRING = { type: 'string' }
-const SELECT_B = { type: 'select', options: ['B'] }
+const STRING: Shape = { type: 'string' }
+const SELECT_B: Shape = { type: 'select', options: ['B'] }
+
+function gate(convert: string | undefined, fence: string | undefined): void {
+  if (convert === undefined) delete process.env[CONVERT]
+  else process.env[CONVERT] = convert
+  if (fence === undefined) delete process.env[WRITER_FENCE]
+  else process.env[WRITER_FENCE] = fence
+}
+const bothOn = () => gate('true', 'true')
 
 beforeEach(() => {
-  delete process.env[FLAG]
-  delete process.env[WRITER_FENCE]
+  gate(undefined, undefined)
   __resetRecoveryWriterStateColumnProbe()
 })
 afterEach(() => {
-  delete process.env[FLAG]
-  delete process.env[WRITER_FENCE]
+  gate(undefined, undefined)
   vi.restoreAllMocks()
+})
+
+// ── the gate ────────────────────────────────────────────────────────────────────────────────────────
+
+describe('the gate — convert flag AND writer fence, one predicate', () => {
+  const CONVERT_VALUES = [undefined, '', 'TRUE', '1', ' true', 'true ', 'yes', 'true']
+  const FENCE_VALUES = [undefined, '', 'false', 'true', 'TRUE']
+
+  it('on only when the convert flag is exactly "true" AND the writer fence is on', () => {
+    for (const c of CONVERT_VALUES) {
+      for (const f of FENCE_VALUES) {
+        gate(c, f)
+        const expected = c === 'true' && String(f ?? '').trim().toLowerCase() === 'true'
+        expect(isFieldSchemaFenceRecheckEnabled(), `convert=${JSON.stringify(c)} fence=${JSON.stringify(f)}`).toBe(expected)
+      }
+    }
+  })
+
+  it('C1-F6: it IS the conversion endpoints\' predicate AND the fence predicate — never a copy', () => {
+    for (const c of CONVERT_VALUES) {
+      for (const f of FENCE_VALUES) {
+        gate(c, f)
+        expect(isFieldSchemaFenceRecheckEnabled()).toBe(isFieldRetypeConvertEnabled() && isWriterFenceEnabled())
+      }
+    }
+    const source = readFileSync(join(__dirname, '..', '..', 'src', 'multitable', 'field-schema-fence-recheck.ts'), 'utf8')
+    expect(source).not.toContain('MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT')
+    expect(source).toMatch(/return isFieldRetypeConvertEnabled\(\) && isWriterFenceEnabled\(\)/)
+  })
 })
 
 // ── the helper itself ───────────────────────────────────────────────────────────────────────────────────
@@ -115,28 +165,25 @@ afterEach(() => {
 describe('assertFieldSchemaUnchangedAfterFence — the helper', () => {
   const snapshot = fieldSchemaSnapshotFromRows([fieldRow(STRING)])
 
-  it('flag gate is the exact literal: only "true" turns it on (no trim, no case folding)', () => {
-    for (const v of ['TRUE', ' true', 'true ', '1', 'yes', '']) expect(isFieldSchemaFenceRecheckEnabled({ [FLAG]: v }), v).toBe(false)
-    expect(isFieldSchemaFenceRecheckEnabled({ [FLAG]: 'true' })).toBe(true)
+  it('gate off (either flag) ⇒ no query at all, even when the schema drifted', async () => {
+    for (const [c, f] of [['TRUE', 'true'], ['true', undefined], ['true', 'false'], [undefined, 'true']] as const) {
+      gate(c, f)
+      const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
+      await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD])).resolves.toBeUndefined()
+      expect(db.stmts).toEqual([])
+    }
   })
 
-  it('flag off ⇒ no query at all, even when the schema drifted', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    process.env[FLAG] = 'TRUE'
-    await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD])).resolves.toBeUndefined()
-    expect(db.stmts).toEqual([])
-  })
-
-  it('flag on, unchanged ⇒ exactly one FOR SHARE re-read of the touched ids, passes', async () => {
-    process.env[FLAG] = 'true'
+  it('both on, unchanged ⇒ exactly one ordered FOR SHARE re-read of the touched ids, passes', async () => {
+    bothOn()
     const db = makeDb({ snapshot: STRING, recheck: STRING })
     await assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD, FIELD])
     expect(db.stmts).toEqual([{ sql: FIELD_SCHEMA_FENCE_RECHECK_SQL, params: [SHEET, [FIELD]], via: 'txn' }])
-    expect(FIELD_SCHEMA_FENCE_RECHECK_SQL).toMatch(/FOR SHARE$/)
+    expect(FIELD_SCHEMA_FENCE_RECHECK_SQL).toMatch(/ORDER BY id FOR SHARE$/)
   })
 
-  it('flag on, type changed ⇒ 409 FIELD_SCHEMA_CHANGED, values-free', async () => {
-    process.env[FLAG] = 'true'
+  it('both on, type changed ⇒ 409 FIELD_SCHEMA_CHANGED, values-free', async () => {
+    bothOn()
     const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
     const err = await assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD]).catch((e) => e)
     expect(err).toBeInstanceOf(FieldSchemaChangedError)
@@ -146,20 +193,20 @@ describe('assertFieldSchemaUnchangedAfterFence — the helper', () => {
   })
 
   it('select option set: a removed or added option is drift; the same set in another order is not', async () => {
-    process.env[FLAG] = 'true'
+    bothOn()
     const selectSnapshot = fieldSchemaSnapshotFromRows([fieldRow({ type: 'select', options: ['A', 'B'] })])
-    await expect(assertFieldSchemaUnchangedAfterFence(makeDb({ snapshot: STRING, recheck: { type: 'select', options: ['B', 'A'] } }).txn, SHEET, selectSnapshot, [FIELD])).resolves.toBeUndefined()
+    await expect(assertFieldSchemaUnchangedAfterFence(makeDb({ snapshot: STRING, recheck: { type: 'select', options: ['B', 'A'] } }).txn, SHEET, selectSnapshot, [FIELD])).resolves.not.toThrow()
     await expect(assertFieldSchemaUnchangedAfterFence(makeDb({ snapshot: STRING, recheck: { type: 'select', options: ['A'] } }).txn, SHEET, selectSnapshot, [FIELD])).rejects.toBeInstanceOf(FieldSchemaChangedError)
     await expect(assertFieldSchemaUnchangedAfterFence(makeDb({ snapshot: STRING, recheck: { type: 'select', options: ['A', 'B', 'C'] } }).txn, SHEET, selectSnapshot, [FIELD])).rejects.toBeInstanceOf(FieldSchemaChangedError)
   })
 
   it('a touched field that no longer exists is drift', async () => {
-    process.env[FLAG] = 'true'
+    bothOn()
     await expect(assertFieldSchemaUnchangedAfterFence(makeDb({ snapshot: STRING, recheck: null }).txn, SHEET, snapshot, [FIELD])).rejects.toBeInstanceOf(FieldSchemaChangedError)
   })
 
   it('ids the snapshot does not carry, a null snapshot, or nothing touched ⇒ no query', async () => {
-    process.env[FLAG] = 'true'
+    bothOn()
     const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
     await assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, ['fld_unknown'])
     await assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, null, [FIELD])
@@ -176,32 +223,37 @@ describe('assertFieldSchemaUnchangedAfterFence — the helper', () => {
     expect(fromRows.get('b')).toEqual({ type: 'boolean' })
   })
 
-  it('loadFieldSchemaSnapshot: flag off ⇒ null and no query; on ⇒ one plain (unlocked) read', async () => {
+  it('loadFieldSchemaSnapshot: gate off ⇒ null and no query (convert on + fence off included); on ⇒ one plain (unlocked) read', async () => {
     const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
     expect(await loadFieldSchemaSnapshot(db.pool, SHEET, [FIELD])).toBeNull()
+    gate('true', undefined)
+    expect(await loadFieldSchemaSnapshot(db.pool, SHEET, [FIELD])).toBeNull()
     expect(db.stmts).toEqual([])
-    process.env[FLAG] = 'true'
+    bothOn()
     expect(await loadFieldSchemaSnapshot(db.pool, SHEET, [FIELD])).toEqual(new Map([[FIELD, { type: 'string' }]]))
     expect(db.stmts.map((s) => s.sql)).toEqual([FIELD_SCHEMA_SNAPSHOT_SQL])
   })
 })
 
 describe('assertDerivedMergeTargetsStillDerived — the row 13 variant', () => {
-  it('flag off ⇒ no query', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
-    await assertDerivedMergeTargetsStillDerived(db.txn, SHEET, [FIELD])
-    expect(db.stmts).toEqual([])
+  it('gate off (either flag) ⇒ no query', async () => {
+    for (const [c, f] of [[undefined, 'true'], ['true', undefined]] as const) {
+      gate(c, f)
+      const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
+      await assertDerivedMergeTargetsStillDerived(db.txn, SHEET, [FIELD])
+      expect(db.stmts).toEqual([])
+    }
   })
 
   it('still a formula / lookup / rollup ⇒ passes', async () => {
-    process.env[FLAG] = 'true'
+    bothOn()
     for (const t of ['formula', 'lookup', 'rollup']) {
       await expect(assertDerivedMergeTargetsStillDerived(makeDb({ snapshot: STRING, recheck: null, derivedType: t }).txn, SHEET, [FIELD])).resolves.toBeUndefined()
     }
   })
 
   it('retyped ⇒ a SheetWriterBlockedError subclass (the callers\' skip branch), reason derived_target_retyped, state null, values-free', async () => {
-    process.env[FLAG] = 'true'
+    bothOn()
     const err = await assertDerivedMergeTargetsStillDerived(makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' }).txn, SHEET, [FIELD]).catch((e) => e)
     expect(err).toBeInstanceOf(DerivedMergeTargetRetypedError)
     expect(err).toBeInstanceOf(SheetWriterBlockedError)
@@ -211,9 +263,17 @@ describe('assertDerivedMergeTargetsStillDerived — the row 13 variant', () => {
   })
 })
 
-// ── row 1: RecordWriteService.patchRecords ─────────────────────────────────────────────────────────────
+// ── the writers ───────────────────────────────────────────────────────────────────────────────────────
 
 import { RecordWriteService, type RecordWriteHelpers, type RecordPatchInput } from '../../src/multitable/record-write-service'
+import { createRecord as pluginCreateRecord, patchRecord as pluginPatchRecord } from '../../src/multitable/records'
+import { RecordService } from '../../src/multitable/record-service'
+import { AutomationExecutor, type AutomationDeps, type AutomationRule } from '../../src/multitable/automation-executor'
+import { EventBus } from '../../src/integration/events/event-bus'
+import { AutomationService } from '../../src/multitable/automation-service'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { applyFencedDerivedDataMerge } from '../../src/multitable/derived-write-fence'
+import { MultitableFormulaEngine } from '../../src/multitable/formula-engine'
 
 function writeHelpers(): RecordWriteHelpers {
   return {
@@ -244,136 +304,47 @@ const CAPS = {
   canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: true,
   canManageSheetAccess: true, canManageViews: true, canComment: true, canManageAutomation: true, canExport: true,
 }
+const ACCESS = { userId: 'u_fsr', permissions: ['multitable:write'], isAdminRole: false }
+const txPool = (db: Db) => ({ query: vi.fn(db.pool), transaction: vi.fn(async (fn: (c: { query: unknown }) => unknown) => fn({ query: db.txn })) })
 
-async function runPatchRecords(db: ReturnType<typeof makeDb>) {
-  const pool = { query: vi.fn(db.pool), transaction: vi.fn(async (fn: (c: { query: unknown }) => unknown) => fn({ query: db.txn })) }
-  const svc = new RecordWriteService(pool as never, { emit: vi.fn(), publish: vi.fn() } as never, writeHelpers())
+/** A fieldById built the way routes/univer-meta.ts buildFieldMutationGuardMap builds it (serialised field). */
+function serializedGuardMap(shape: Shape): Map<string, Record<string, unknown>> {
+  const field = serializeFieldRow(fieldRow(shape))
+  return new Map([[FIELD, {
+    type: field.type,
+    readOnly: false,
+    hidden: false,
+    property: field.property,
+    ...(field.type === 'select' || field.type === 'multiSelect' ? { options: (field.options ?? []).map((o) => o.value) } : {}),
+  }]])
+}
+
+async function runPatchRecords(db: Db, fieldById: Map<string, Record<string, unknown>> = serializedGuardMap(STRING), value: unknown = 'B ') {
+  const svc = new RecordWriteService(txPool(db) as never, { emit: vi.fn(), publish: vi.fn() } as never, writeHelpers())
   const field = { id: FIELD, name: 'Note', type: 'string', property: {}, order: 0 }
-  const input = {
+  return svc.patchRecords({
     sheetId: SHEET,
-    changesByRecord: new Map([[RECORD, [{ fieldId: FIELD, value: 'B ' }]]]),
+    changesByRecord: new Map([[RECORD, [{ fieldId: FIELD, value }]]]),
     actorId: 'u_fsr',
     fields: [field],
     visiblePropertyFields: [field],
     visiblePropertyFieldIds: new Set([FIELD]),
     attachmentFields: [],
-    fieldById: new Map([[FIELD, { type: 'string', readOnly: false, hidden: false }]]),
+    fieldById,
     capabilities: CAPS,
-    access: { userId: 'u_fsr', permissions: ['multitable:write'], isAdminRole: false },
-  } as unknown as RecordPatchInput
-  return svc.patchRecords(input)
+    access: ACCESS,
+  } as unknown as RecordPatchInput)
 }
 
-describe('row 1 — RecordWriteService.patchRecords (bulk / AI / OAPI batch)', () => {
-  it('drift + flag on ⇒ FieldSchemaChangedError, zero meta_records writes, re-read on the transaction query', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await expect(runPatchRecords(db)).rejects.toBeInstanceOf(FieldSchemaChangedError)
-    expect(db.recordWrites()).toEqual([])
-    expect(db.stmts.some((s) => /FOR UPDATE/.test(s.sql))).toBe(false) // refused before the first row lock
-    expect(db.rechecks().map((s) => s.via)).toEqual(['txn'])
-  })
-
-  it('no drift + flag on ⇒ the write proceeds', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: STRING })
-    await runPatchRecords(db)
-    expect(db.rechecks()).toHaveLength(1)
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-
-  it('drift + flag off ⇒ legacy behaviour: no re-read issued, the stale write lands', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await runPatchRecords(db)
-    expect(db.rechecks()).toEqual([])
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-})
-
-// ── rows 2 / 3: plugin SDK patchRecord / createRecord ────────────────────────────────────────────────────
-
-import { createRecord as pluginCreateRecord, patchRecord as pluginPatchRecord } from '../../src/multitable/records'
-
-describe('rows 2 / 3 — plugin SDK patchRecord / createRecord', () => {
-  const patch = (db: ReturnType<typeof makeDb>) =>
-    pluginPatchRecord({ query: db.txn as never, sheetId: SHEET, recordId: RECORD, changes: { [FIELD]: 'B ' } })
-  const create = (db: ReturnType<typeof makeDb>) =>
-    pluginCreateRecord({ query: db.txn as never, sheetId: SHEET, data: { [FIELD]: 'B ' } })
-
-  for (const [name, run] of [['row 2 patchRecord', patch], ['row 3 createRecord', create]] as const) {
-    it(`${name}: drift + flag on ⇒ FieldSchemaChangedError, zero meta_records writes`, async () => {
-      process.env[FLAG] = 'true'
-      const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-      await expect(run(db)).rejects.toBeInstanceOf(FieldSchemaChangedError)
-      expect(db.recordWrites()).toEqual([])
-      expect(db.rechecks()).toHaveLength(1)
-    })
-
-    it(`${name}: no drift + flag on ⇒ the write proceeds`, async () => {
-      process.env[FLAG] = 'true'
-      const db = makeDb({ snapshot: STRING, recheck: STRING })
-      await run(db)
-      expect(db.rechecks()).toHaveLength(1)
-      expect(db.recordWrites()).toHaveLength(1)
-    })
-
-    it(`${name}: drift + flag off ⇒ no re-read issued, the write lands`, async () => {
-      const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-      await run(db)
-      expect(db.rechecks()).toEqual([])
-      expect(db.recordWrites()).toHaveLength(1)
-    })
-  }
-})
-
-// ── row 4: RecordService.patchRecord (REST + OAPI single-record PATCH) ───────────────────────────────────
-
-import { RecordService } from '../../src/multitable/record-service'
-
-async function runServicePatch(db: ReturnType<typeof makeDb>) {
-  const pool = { query: vi.fn(db.pool), transaction: vi.fn(async (fn: (c: { query: unknown }) => unknown) => fn({ query: db.txn })) }
-  const svc = new RecordService(pool as never, { emit: vi.fn(), publish: vi.fn() } as never)
-  return svc.patchRecord({
-    recordId: RECORD,
-    sheetId: SHEET,
-    data: { [FIELD]: 'B ' },
-    actorId: 'u_fsr',
-    access: { userId: 'u_fsr', permissions: ['multitable:write'], isAdminRole: false },
-    capabilities: CAPS,
-  } as never)
+async function runServicePatch(db: Db) {
+  const svc = new RecordService(txPool(db) as never, { emit: vi.fn(), publish: vi.fn() } as never)
+  return svc.patchRecord({ recordId: RECORD, sheetId: SHEET, data: { [FIELD]: 'B ' }, actorId: 'u_fsr', access: ACCESS, capabilities: CAPS } as never)
 }
-
-describe('row 4 — RecordService.patchRecord (REST + OAPI PATCH /records/:recordId)', () => {
-  it('drift + flag on ⇒ FieldSchemaChangedError, zero writes, refused before the row lock', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await expect(runServicePatch(db)).rejects.toBeInstanceOf(FieldSchemaChangedError)
-    expect(db.recordWrites()).toEqual([])
-    expect(db.stmts.some((s) => /FOR UPDATE/.test(s.sql))).toBe(false)
-    expect(db.rechecks().map((s) => s.via)).toEqual(['txn'])
-  })
-
-  it('no drift + flag on ⇒ the write proceeds', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: STRING })
-    await runServicePatch(db)
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-
-  it('drift + flag off ⇒ no re-read issued, the write lands', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await runServicePatch(db)
-    expect(db.rechecks()).toEqual([])
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-})
-
-// ── row 5: form submit (route) ───────────────────────────────────────────────────────────────────────────
 
 const pinned = usePinnedServer()
 const VIEW = 'view_fsr_form'
 
-async function formApp(db: ReturnType<typeof makeDb>) {
+async function formSubmit(db: Db) {
   vi.resetModules()
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -382,7 +353,7 @@ async function formApp(db: ReturnType<typeof makeDb>) {
     invalidateUserPerms: vi.fn(),
     getPermCacheStatus: vi.fn(),
   }))
-  const { poolManager } = await import('../../src/integration/db/connection-pool')
+  const { poolManager: freshPoolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
   const viewRow = { id: VIEW, sheet_id: SHEET, name: 'Form', type: 'form', filter_info: {}, sort_info: {}, group_info: {}, hidden_field_ids: [], config: {} }
   const route = (via: 'pool' | 'txn') => async (sql: string, params?: unknown[]) => {
@@ -390,7 +361,7 @@ async function formApp(db: ReturnType<typeof makeDb>) {
     if (/FROM meta_views WHERE id = \$1/.test(sql)) return { rows: [viewRow], rowCount: 1 }
     return (via === 'pool' ? db.pool : db.txn)(sql, params)
   }
-  vi.spyOn(poolManager, 'get').mockReturnValue({
+  vi.spyOn(freshPoolManager, 'get').mockReturnValue({
     query: vi.fn(route('pool')),
     transaction: vi.fn(async (fn: (c: { query: unknown }) => unknown) => fn({ query: route('txn') })),
   } as never)
@@ -402,207 +373,154 @@ async function formApp(db: ReturnType<typeof makeDb>) {
   })
   app.use('/api/multitable', univerMetaRouter())
   pinned.setApp(app)
-}
-
-describe('row 5 — form submit POST /views/:viewId/submit (CREATE branch)', () => {
-  afterEach(() => {
+  try {
+    return await request(pinned.url()).post(`/api/multitable/views/${VIEW}/submit`).send({ data: { [FIELD]: 'B ' } })
+  } finally {
     vi.doUnmock('../../src/rbac/service')
     vi.resetModules()
-  })
+  }
+}
 
-  it('drift + flag on ⇒ 409 FIELD_SCHEMA_CHANGED, zero meta_records writes', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await formApp(db)
-    const res = await request(pinned.url()).post(`/api/multitable/views/${VIEW}/submit`).send({ data: { [FIELD]: 'B ' } })
-    expect(res.status).toBe(409)
-    expect(res.body.error.code).toBe('FIELD_SCHEMA_CHANGED')
-    expect(db.recordWrites()).toEqual([])
-    expect(db.rechecks().map((s) => s.via)).toEqual(['txn'])
-  })
-
-  it('no drift + flag on ⇒ 200 and the record is inserted', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: STRING })
-    await formApp(db)
-    const res = await request(pinned.url()).post(`/api/multitable/views/${VIEW}/submit`).send({ data: { [FIELD]: 'B ' } })
-    expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(db.recordWrites().filter((s) => /^INSERT INTO meta_records /.test(s.sql))).toHaveLength(1)
-  })
-
-  it('drift + flag off ⇒ 200, no re-read issued', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await formApp(db)
-    const res = await request(pinned.url()).post(`/api/multitable/views/${VIEW}/submit`).send({ data: { [FIELD]: 'B ' } })
-    expect(res.status, JSON.stringify(res.body)).toBe(200)
-    expect(db.rechecks()).toEqual([])
-    expect(db.recordWrites().filter((s) => /^INSERT INTO meta_records /.test(s.sql))).toHaveLength(1)
-  })
-})
-
-// ── row 6: automation update_record / create_record ──────────────────────────────────────────────────────
-
-import { AutomationExecutor, type AutomationDeps, type AutomationRule } from '../../src/multitable/automation-executor'
-import { EventBus } from '../../src/integration/events/event-bus'
-
-function automationDeps(db: ReturnType<typeof makeDb>): AutomationDeps {
+function automationDeps(db: Db): AutomationDeps {
   return {
     eventBus: new EventBus(),
     queryFn: vi.fn(db.pool) as never,
     transaction: vi.fn(async (fn) => fn({ query: vi.fn(db.txn) as never })) as never,
   }
 }
-
 function rule(action: { type: string; config: Record<string, unknown> }): AutomationRule {
   return {
     id: 'rule_fsr', name: 'fsr', sheetId: SHEET, trigger: { type: 'record.created', config: {} }, actions: [action as never],
     enabled: true, createdBy: 'u_fsr', createdAt: '2026-09-28T00:00:00Z',
   } as AutomationRule
 }
-
 const TRIGGER = { recordId: RECORD, sheetId: SHEET, actorId: 'u_fsr', data: {} }
-const AUTOMATION_ACTIONS = [
-  { type: 'update_record', config: { fields: { [FIELD]: 'B ' } } },
-  { type: 'create_record', config: { sheetId: SHEET, data: { [FIELD]: 'B ' } } },
-]
+const runAutomation = (db: Db, action: { type: string; config: Record<string, unknown> }) =>
+  new AutomationExecutor(automationDeps(db)).execute(rule(action), TRIGGER)
 
-describe('row 6 — automation update_record / create_record', () => {
-  for (const action of AUTOMATION_ACTIONS) {
-    it(`${action.type}: drift + flag on ⇒ step failed with FIELD_SCHEMA_CHANGED's message, zero writes`, async () => {
-      process.env[FLAG] = 'true'
-      const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-      const exec = await new AutomationExecutor(automationDeps(db)).execute(rule(action), TRIGGER)
-      expect(exec.steps[0]?.status).toBe('failed')
-      expect(exec.steps[0]?.error).toBe(new FieldSchemaChangedError().message)
-      expect(db.recordWrites()).toEqual([])
-      expect(db.stmts.filter((s) => s.sql === FIELD_SCHEMA_SNAPSHOT_SQL).map((s) => s.via)).toEqual(['pool']) // pre-fence
-      expect(db.rechecks().map((s) => s.via)).toEqual(['txn']) // post-fence
-    })
-
-    it(`${action.type}: no drift + flag on ⇒ step succeeds, one write`, async () => {
-      process.env[FLAG] = 'true'
-      const db = makeDb({ snapshot: STRING, recheck: STRING })
-      const exec = await new AutomationExecutor(automationDeps(db)).execute(rule(action), TRIGGER)
-      expect(exec.steps[0]?.status).toBe('success')
-      expect(db.recordWrites()).toHaveLength(1)
-    })
-
-    it(`${action.type}: drift + flag off ⇒ no snapshot read, no re-read, the write lands`, async () => {
-      const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-      const exec = await new AutomationExecutor(automationDeps(db)).execute(rule(action), TRIGGER)
-      expect(exec.steps[0]?.status).toBe('success')
-      expect(db.stmts.filter((s) => s.sql === FIELD_SCHEMA_SNAPSHOT_SQL || s.sql === FIELD_SCHEMA_FENCE_RECHECK_SQL)).toEqual([])
-      expect(db.recordWrites()).toHaveLength(1)
-    })
-  }
-})
-
-// ── row 7: approval resultWriteback ────────────────────────────────────────────────────────────────────
-
-import { AutomationService } from '../../src/multitable/automation-service'
-import { poolManager } from '../../src/integration/db/connection-pool'
-
-type WritebackInternals = {
-  writeApprovalResultBack(bridge: unknown, config: Record<string, unknown>, event: unknown): Promise<unknown>
-}
-
-function writebackService(db: ReturnType<typeof makeDb>): WritebackInternals {
-  const service = new AutomationService(new EventBus(), {} as never, vi.fn(db.pool) as never)
+type WritebackInternals = { writeApprovalResultBack(bridge: unknown, config: Record<string, unknown>, event: unknown): Promise<unknown> }
+function spyPool(db: Db) {
   vi.spyOn(poolManager, 'get').mockReturnValue({
     query: vi.fn(db.pool),
     transaction: (fn: (c: { query: unknown }) => unknown) => fn({ query: db.txn }),
   } as never)
-  return service as unknown as WritebackInternals
 }
-
 const BRIDGE = { id: 'aab_fsr', sheetId: SHEET, recordId: RECORD, triggerEvent: { actorId: 'u_fsr', recordId: RECORD, _automationDepth: 0 } }
 const APPROVED = {
   version: 1, source: 'approval-product', eventType: 'approval.approved', eventId: 'evt_fsr', occurredAt: '2026-09-28T00:00:00.000Z',
   approval: { instanceId: 'ai_fsr', requestNo: 'R-1', templateId: 'tpl', publishedDefinitionId: 'pd' },
   transition: { toStatus: 'approved' }, actor: { id: 'u_fsr' }, requester: { id: 'u_fsr' },
 }
-const WRITEBACK = { templateId: 'tpl', resultWriteback: { statusField: FIELD } }
-
-describe('row 7 — approval resultWriteback (the race form: validated before the fence, re-read after it)', () => {
-  it('drift + flag on ⇒ throws FieldSchemaChangedError, zero writes; the pre-fence check itself passed on `string`', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await expect(writebackService(db).writeApprovalResultBack(BRIDGE, WRITEBACK, APPROVED)).rejects.toBeInstanceOf(FieldSchemaChangedError)
-    expect(db.recordWrites()).toEqual([])
-    expect(db.rechecks().map((s) => s.via)).toEqual(['txn'])
-  })
-
-  it('no drift + flag on ⇒ the write-back lands', async () => {
-    process.env[FLAG] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: STRING })
-    await expect(writebackService(db).writeApprovalResultBack(BRIDGE, WRITEBACK, APPROVED)).resolves.toMatchObject({ kind: 'same-base' })
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-
-  it('drift + flag off ⇒ no re-read issued, the write-back lands', async () => {
-    const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-    await expect(writebackService(db).writeApprovalResultBack(BRIDGE, WRITEBACK, APPROVED)).resolves.toMatchObject({ kind: 'same-base' })
-    expect(db.rechecks()).toEqual([])
-    expect(db.recordWrites()).toHaveLength(1)
-  })
-})
-
-// ── row 13: non-scoped derived merge ─────────────────────────────────────────────────────────────────────
-
-import { applyFencedDerivedDataMerge } from '../../src/multitable/derived-write-fence'
-import { MultitableFormulaEngine } from '../../src/multitable/formula-engine'
-
-function derivedPool(db: ReturnType<typeof makeDb>) {
-  vi.spyOn(poolManager, 'get').mockReturnValue({
-    query: vi.fn(db.pool),
-    transaction: (fn: (c: { query: unknown }) => unknown) => fn({ query: db.txn }),
-  } as never)
+async function runWriteback(db: Db) {
+  const service = new AutomationService(new EventBus(), {} as never, vi.fn(db.pool) as never) as unknown as WritebackInternals
+  spyPool(db)
+  return service.writeApprovalResultBack(BRIDGE, { templateId: 'tpl', resultWriteback: { statusField: FIELD } }, APPROVED)
 }
 
-describe('row 13 — non-scoped derived merge (writer fence ON path)', () => {
-  it('target retyped + flag on ⇒ DerivedMergeTargetRetypedError (a SheetWriterBlockedError), zero writes', async () => {
-    process.env[FLAG] = 'true'
-    process.env[WRITER_FENCE] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
-    derivedPool(db)
-    const err = await applyFencedDerivedDataMerge(db.pool as never, SHEET, RECORD, { [FIELD]: 2 }).catch((e) => e)
-    expect(err).toBeInstanceOf(SheetWriterBlockedError)
-    expect(err).toBeInstanceOf(DerivedMergeTargetRetypedError)
-    expect(db.recordWrites()).toEqual([])
-    expect(db.derivedRechecks().map((s) => s.via)).toEqual(['txn'])
-  })
+async function runDerivedMerge(db: Db) {
+  spyPool(db)
+  return applyFencedDerivedDataMerge(db.pool as never, SHEET, RECORD, { [FIELD]: 2 })
+}
 
-  it('still a formula + flag on ⇒ the merge lands', async () => {
-    process.env[FLAG] = 'true'
-    process.env[WRITER_FENCE] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'formula' })
-    derivedPool(db)
-    await applyFencedDerivedDataMerge(db.pool as never, SHEET, RECORD, { [FIELD]: 2 })
-    expect(db.recordWrites()).toHaveLength(1)
-  })
+type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown }
+const settle = (p: Promise<unknown>): Promise<Outcome> => p.then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }))
 
-  it('target retyped + convert flag off ⇒ no re-read, the merge lands (legacy)', async () => {
-    process.env[WRITER_FENCE] = 'true'
-    const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
-    derivedPool(db)
-    await applyFencedDerivedDataMerge(db.pool as never, SHEET, RECORD, { [FIELD]: 2 })
-    expect(db.derivedRechecks()).toEqual([])
-    expect(db.recordWrites()).toHaveLength(1)
-  })
+type Writer = {
+  name: string
+  run: (db: Db) => Promise<unknown>
+  /** derived merge: drift is the target type, not the re-read */
+  derived?: boolean
+  refused: (o: Outcome) => void
+  landed: (o: Outcome) => void
+}
 
-  it('the formula-engine caller takes its skip branch: returns null (no echo of the refused value), no write', async () => {
-    process.env[FLAG] = 'true'
-    process.env[WRITER_FENCE] = 'true'
+const threw = (cls: unknown) => (o: Outcome) => {
+  expect(o.ok, 'expected a refusal').toBe(false)
+  expect((o as { error: unknown }).error).toBeInstanceOf(cls as never)
+}
+const resolved = (o: Outcome) => expect(o.ok, String((o as { error?: unknown }).error ?? '')).toBe(true)
+const stepFailed = (o: Outcome) => {
+  resolved(o)
+  const step = ((o as { value: { steps: Array<{ status: string; error?: string }> } }).value.steps)[0]
+  expect(step?.status).toBe('failed')
+  expect(step?.error).toBe(new FieldSchemaChangedError().message)
+}
+const stepOk = (o: Outcome) => {
+  resolved(o)
+  expect(((o as { value: { steps: Array<{ status: string }> } }).value.steps)[0]?.status).toBe('success')
+}
+const http = (status: number, code?: string) => (o: Outcome) => {
+  resolved(o)
+  const res = (o as { value: request.Response }).value
+  expect(res.status, JSON.stringify(res.body)).toBe(status)
+  if (code) expect(res.body.error.code).toBe(code)
+}
+
+const WRITERS: Writer[] = [
+  { name: 'row 1 RecordWriteService.patchRecords', run: (db) => runPatchRecords(db), refused: threw(FieldSchemaChangedError), landed: resolved },
+  { name: 'row 2 plugin SDK patchRecord', run: (db) => pluginPatchRecord({ query: db.txn as never, sheetId: SHEET, recordId: RECORD, changes: { [FIELD]: 'B ' } }), refused: threw(FieldSchemaChangedError), landed: resolved },
+  { name: 'row 3 plugin SDK createRecord', run: (db) => pluginCreateRecord({ query: db.txn as never, sheetId: SHEET, data: { [FIELD]: 'B ' } }), refused: threw(FieldSchemaChangedError), landed: resolved },
+  { name: 'row 4 RecordService.patchRecord', run: runServicePatch, refused: threw(FieldSchemaChangedError), landed: resolved },
+  { name: 'row 5 form submit POST /views/:viewId/submit (CREATE)', run: formSubmit, refused: http(409, 'FIELD_SCHEMA_CHANGED'), landed: http(200) },
+  { name: 'row 6 automation update_record', run: (db) => runAutomation(db, { type: 'update_record', config: { fields: { [FIELD]: 'B ' } } }), refused: stepFailed, landed: stepOk },
+  { name: 'row 6 automation create_record', run: (db) => runAutomation(db, { type: 'create_record', config: { sheetId: SHEET, data: { [FIELD]: 'B ' } } }), refused: stepFailed, landed: stepOk },
+  { name: 'row 7 approval resultWriteback', run: runWriteback, refused: threw(FieldSchemaChangedError), landed: resolved },
+  { name: 'row 13 non-scoped derived merge', run: runDerivedMerge, derived: true, refused: threw(DerivedMergeTargetRetypedError), landed: resolved },
+]
+
+const driftDb = (w: Writer) => (w.derived ? makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' }) : makeDb({ snapshot: STRING, recheck: SELECT_B }))
+const calmDb = (w: Writer) => (w.derived ? makeDb({ snapshot: STRING, recheck: null, derivedType: 'formula' }) : makeDb({ snapshot: STRING, recheck: STRING }))
+const recheckStmts = (w: Writer, db: Db) => (w.derived ? db.derivedRechecks() : db.rechecks())
+
+for (const w of WRITERS) {
+  describe(w.name, () => {
+    it('both flags on, drift ⇒ refused, zero meta_records writes, the re-read ran on the transaction query', async () => {
+      bothOn()
+      const db = driftDb(w)
+      w.refused(await settle(w.run(db)))
+      expect(db.recordWrites()).toEqual([])
+      expect(recheckStmts(w, db).map((s) => s.via)).toEqual(['txn'])
+    })
+
+    it('both flags on, no drift ⇒ the write proceeds', async () => {
+      bothOn()
+      const db = calmDb(w)
+      w.landed(await settle(w.run(db)))
+      expect(recheckStmts(w, db)).toHaveLength(1)
+      expect(db.recordWrites()).toHaveLength(1)
+    })
+
+    it('convert flag off (fence on), drift ⇒ no re-read and no snapshot read, the write lands (legacy)', async () => {
+      gate(undefined, 'true')
+      const db = driftDb(w)
+      w.landed(await settle(w.run(db)))
+      expect(recheckStmts(w, db)).toEqual([])
+      expect(db.snapshotReads()).toEqual([])
+      expect(db.recordWrites()).toHaveLength(1)
+    })
+
+    it('R-F1: convert flag on, writer fence OFF, drift ⇒ no re-read and no snapshot read, the write lands', async () => {
+      gate('true', undefined)
+      const db = driftDb(w)
+      w.landed(await settle(w.run(db)))
+      expect(recheckStmts(w, db)).toEqual([])
+      expect(db.snapshotReads()).toEqual([])
+      expect(db.recordWrites()).toHaveLength(1)
+    })
+  })
+}
+
+describe('row 13 — the formula-engine caller takes its skip branch (no echo of the refused value)', () => {
+  it('returns null, no write; the control echoes the value', async () => {
+    bothOn()
     const db = makeDb({ snapshot: STRING, recheck: null, derivedType: 'string' })
-    derivedPool(db)
+    spyPool(db)
     const engine = new MultitableFormulaEngine()
     const formula = serializeFieldRow({ id: FIELD, name: 'F', type: 'formula', property: { expression: '=1+1' }, order: 0 })
-    const out = await engine.recalculateRecordFromData(db.pool as never, SHEET, RECORD, {}, [formula])
-    expect(out).toBeNull()
+    expect(await engine.recalculateRecordFromData(db.pool as never, SHEET, RECORD, {}, [formula])).toBeNull()
     expect(db.recordWrites()).toEqual([])
     const control = makeDb({ snapshot: STRING, recheck: null, derivedType: 'formula' })
-    derivedPool(control)
-    const echoed = await engine.recalculateRecordFromData(control.pool as never, SHEET, RECORD, {}, [formula])
-    expect(echoed).toMatchObject({ [FIELD]: 2 })
+    spyPool(control)
+    expect(await engine.recalculateRecordFromData(control.pool as never, SHEET, RECORD, {}, [formula])).toMatchObject({ [FIELD]: 2 })
   })
 })
