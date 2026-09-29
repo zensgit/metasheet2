@@ -1229,11 +1229,22 @@ export type ApprovalTemplateGroupErrorCode =
   | 'APPROVAL_ACTOR_REQUIRED'
   | 'APPROVAL_GROUP_ID_REQUIRED'
   | 'APPROVAL_TEMPLATE_NOT_FOUND'
+  // P3-1 (daily-ops fix round, 2026-09-20) — link/unlink's shape-validation 400 for a malformed
+  // `:id` (see routes/approvals.ts's `isWellFormedUuid`). Not the 19th ratified code — same
+  // implementer's-choice footing as the other request-shape codes in this union.
+  | 'APPROVAL_TEMPLATE_ID_INVALID'
   | 'GROUP_NOT_FOUND'
   | 'GROUP_ARCHIVED'
   | 'GROUP_NAME_TAKEN'
   | 'GROUP_NOT_ARCHIVED'
   | 'GROUP_NAME_REQUIRED'
+  // P2-2 fix (daily-ops fix round, 2026-09-20) — pre-existing gap, not introduced here: the
+  // backend's `mapGroupConstraintError` (`ApprovalTemplateGroupService.ts`) has raised this 400
+  // code since "design-gate-A3 回流修复" (2026-09-18, per that file's own doc comment) — the SAME
+  // round that put the CHECK-violation message on the wire in the first place — but it was never
+  // added to this union, so `vue-tsc` never caught a missing case here. Adding it is what let the
+  // compiler catch `describeApprovalTemplateGroupError`'s copy-table key below in the first place.
+  | 'GROUP_NAME_UNSUPPORTED'
   | 'GROUP_SORT_CONFLICT'
   | 'APPROVAL_TEMPLATE_GROUP_LIST_FAILED'
   | 'APPROVAL_TEMPLATE_GROUP_CREATE_FAILED'
@@ -1242,6 +1253,80 @@ export type ApprovalTemplateGroupErrorCode =
   | 'APPROVAL_TEMPLATE_GROUP_UNARCHIVE_FAILED'
   | 'APPROVAL_TEMPLATE_GROUP_LINK_FAILED'
   | 'APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED'
+
+/**
+ * P2-2 fix (groups-daily-ops-real-browser-acceptance-20260920.md): product-language copy for the
+ * subset of `ApprovalTemplateGroupErrorCode`s a group-management surface can put in front of a
+ * user (bilingual `[en, zh]`, same `tr(en, zh)` convention this file's callers already use). Keyed
+ * off the real union (`Partial<Record<ApprovalTemplateGroupErrorCode, …>>`) so a code renamed or
+ * removed on the union is a compile error here, not a silent stale key — this is the mechanical
+ * sync the finding asked for, not a copy sitting next to the union hoping to stay in step with it.
+ *
+ * Deliberately NOT exhaustive over the whole union — the B1-04 contract (`approvalRequestError`'s
+ * header comment) is that the server's message is threaded through verbatim so real reasons are
+ * visible instead of collapsed; that is kept as-is for every code NOT listed here (the `*_FAILED`
+ * fallbacks, `APPROVAL_ACTOR_REQUIRED`, `APPROVAL_TEMPLATE_NOT_FOUND`, `APPROVAL_TEMPLATE_ID_INVALID`,
+ * `ORG_ID_NOT_ACCEPTED` — none of these are reachable through today's UI, and the finding never
+ * complained about them). `SESSION_ORG_REQUIRED` is likewise excluded on purpose: every consumer of
+ * this code branches on it to show the shared `SessionOrgSwitcher` (acceptance J) rather than any
+ * text, so a copy entry here would be dead.
+ *
+ * `describeApprovalTemplateGroupError` is the one function callers use: pass the caught error and
+ * a `tr` function, get back display text — falls back to `err.message` (the existing B1-04
+ * behaviour) for any code not in the table below, or when `err` is not an `ApprovalApiError` at all.
+ */
+const APPROVAL_TEMPLATE_GROUP_ERROR_COPY: Partial<Record<ApprovalTemplateGroupErrorCode, [string, string]>> = {
+  // The finding's exact repro (a-02/a-03*.png): a pure-CJK name like "请假"/"采购" — the product's
+  // OWN placeholder text — used to render "当前锁文 CHECK 只接受可打印 ASCII,纯中文名待 owner 勘误"
+  // straight into the page. Replaced with plain, non-jargon product copy.
+  //
+  // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md): round 1 removed the jargon but said nothing
+  // about the rule, so the copy read identically for a zero-width-junk name and for a normal
+  // Chinese one and an admin could not tell that "请假Leave" WOULD be accepted. It now states the
+  // rule the server actually enforces (`ApprovalTemplateGroupService.mapGroupConstraintError`:
+  // "must include at least one ASCII letter, digit, or symbol character") and carries a worked
+  // example of a name that passes, in product language — no constraint name, no "lock"/"owner".
+  // This describes today's behaviour; if the name rule itself is ever widened (#5907, owner's
+  // call) this sentence is one of the things that has to move with it.
+  //
+  // NIT-A (impl-gate-A5-daily-ops-round2-20260920.md): round 2 said "Latin letter", which is
+  // WIDER than the CHECK this describes (`atg_name_nonblank CHECK (name ~ '[!-~]')`, ASCII 33-126
+  // only) — a name made entirely of non-ASCII Latin letters ('Ñ', 'é') reads as covered by this
+  // sentence but is still rejected (`'Ñ' ~ '[!-~]'` is false in the gate's own real-DB probe).
+  // NIT-C (round-2b gate): round 2 wrote "letter (A–Z)" / "英文字母（A–Z）", which narrows the
+  // sentence in the OTHER direction — `[!-~]` accepts `a-z` just as it accepts `A-Z`, but a
+  // capitalised range is ordinarily read as a case restriction, so an admin naming a group
+  // "请假leave" could believe it would be rejected. "English letter" / "英文字母" names the same
+  // ASCII subset the CHECK accepts without implying a case, and the worked example is kept.
+  GROUP_NAME_UNSUPPORTED: [
+    'Group names must contain at least one English letter, digit or symbol — for example, 请假Leave. Add one and try again.',
+    '分组名称需至少包含一个英文字母、数字或符号，例如「请假Leave」。请补充后重试。',
+  ],
+  GROUP_NAME_REQUIRED: ['Enter a group name.', '请填写分组名称。'],
+  GROUP_NAME_TAKEN: [
+    'An active group with this name already exists.',
+    '已存在同名的活跃分组。',
+  ],
+  GROUP_NOT_FOUND: ['This group could not be found. It may have been removed.', '未找到该分组，可能已被删除。'],
+  GROUP_ARCHIVED: ['This group has been archived.', '该分组已归档。'],
+  GROUP_NOT_ARCHIVED: ['This group is not archived.', '该分组未归档。'],
+  GROUP_SORT_CONFLICT: [
+    'The group order changed elsewhere. Please try again.',
+    '分组顺序已被他处更改，请重试。',
+  ],
+  APPROVAL_GROUP_ID_REQUIRED: ['Choose a group.', '请选择分组。'],
+}
+
+export function describeApprovalTemplateGroupError(
+  err: unknown,
+  tr: (en: string, zh: string) => string,
+): string {
+  if (err instanceof ApprovalApiError && err.code) {
+    const copy = APPROVAL_TEMPLATE_GROUP_ERROR_COPY[err.code as ApprovalTemplateGroupErrorCode]
+    if (copy) return tr(...copy)
+  }
+  return err instanceof Error ? err.message : String(err)
+}
 
 /**
  * Lists this org's template groups (`GET /api/approval-template-groups`; org resolved server-side

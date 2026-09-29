@@ -7,6 +7,7 @@ import type { Kysely } from 'kysely'
 import { db as defaultDb } from '../db/db'
 import type { Database } from '../db/types'
 import { Logger } from '../core/logger'
+import { describeUserRegexRefusal, runUserRegex } from './regex-safety'
 
 const logger = new Logger('FormulaEngine')
 
@@ -179,9 +180,25 @@ export class FormulaEngine {
     this.functions.set('UPPER', (text: unknown) => String(text).toUpperCase())
     this.functions.set('LOWER', (text: unknown) => String(text).toLowerCase())
     this.functions.set('TRIM', (text: unknown) => String(text).trim())
-    this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) =>
-      String(text).replace(new RegExp(String(old), 'g'), String(newText))
-    )
+    // SUBSTITUTE compiles its second argument as a global pattern (unchanged from
+    // before). The caller-supplied pattern and the subject pass through the
+    // shared length gate in ./regex-safety.ts; inside the limits the result is
+    // the same replace call as before. A refusal — an invalid pattern, as
+    // before, or a length over the limit, new — is THROWN, not returned as a
+    // sentinel string: the bare `new RegExp` threw on an invalid pattern,
+    // `calculate` catches the throw, and the WHOLE formula is #ERROR!. A
+    // wrapping function (LEN, IFERROR, …) therefore never receives '#ERROR!'
+    // as an ordinary 7-character value. The REGEX* functions below return the
+    // sentinel instead, because that is what they did before.
+    this.functions.set('SUBSTITUTE', (text: unknown, old: unknown, newText: unknown) => {
+      const replaceWith = String(newText)
+      const outcome = runUserRegex(String(old), 'g', String(text), (re, s) => s.replace(re, replaceWith), { site: 'formula:SUBSTITUTE' })
+      if (outcome.status !== 'ok') {
+        const { refusal } = outcome
+        throw new Error(refusal.kind === 'invalid-pattern' ? refusal.message : describeUserRegexRefusal(refusal, 'SUBSTITUTE'))
+      }
+      return outcome.value
+    })
 
     // Logical functions
     this.functions.set('IF', this.ifFunction.bind(this))
@@ -322,14 +339,31 @@ export class FormulaEngine {
       return out.repeat(c)
     })
     this.functions.set('TEXT', (value: unknown, format: unknown) => this.textFormat(value, format))
+    // REGEX* compile a caller-supplied pattern. Every one of them goes through
+    // `runUserRegex` (./regex-safety.ts): a pattern or subject over the shared
+    // length limits is refused and reported as #ERROR! (the same sentinel an
+    // invalid pattern already produced here); inside the limits the call is the
+    // one that was here before, on the same RegExp, with the same flags.
     this.functions.set('REGEXMATCH', (text: unknown, pattern: unknown) => {
-      try { return new RegExp(String(pattern)).test(String(text)) } catch { return '#ERROR!' }
+      try {
+        const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => re.test(s), { site: 'formula:REGEXMATCH' })
+        return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+      } catch { return '#ERROR!' }
     })
     this.functions.set('REGEXEXTRACT', (text: unknown, pattern: unknown) => {
-      try { const m = String(text).match(new RegExp(String(pattern))); return m ? (m[1] ?? m[0]) : '#VALUE!' } catch { return '#ERROR!' }
+      try {
+        const outcome = runUserRegex(String(pattern), undefined, String(text), (re, s) => s.match(re), { site: 'formula:REGEXEXTRACT' })
+        if (outcome.status !== 'ok') return '#ERROR!'
+        const m = outcome.value
+        return m ? (m[1] ?? m[0]) : '#VALUE!'
+      } catch { return '#ERROR!' }
     })
     this.functions.set('REGEXREPLACE', (text: unknown, pattern: unknown, replacement: unknown) => {
-      try { return String(text).replace(new RegExp(String(pattern), 'g'), String(replacement)) } catch { return '#ERROR!' }
+      try {
+        const replaceWith = String(replacement)
+        const outcome = runUserRegex(String(pattern), 'g', String(text), (re, s) => s.replace(re, replaceWith), { site: 'formula:REGEXREPLACE' })
+        return outcome.status === 'ok' ? outcome.value : '#ERROR!'
+      } catch { return '#ERROR!' }
     })
     // Date / time (reuse the timezone-stable date parse used by WEEKDAY, via coerceDateValue)
     this.functions.set('HOUR', (date: unknown) => { const d = this.coerceDateValue(date); return d ? d.getHours() : '#VALUE!' })
