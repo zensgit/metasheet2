@@ -566,7 +566,7 @@ B2 门审 r1 结论:0 P1 / 1 P2 / 4 P3 / 3 NIT,判定 CHANGES-REQUESTED(owner-ga
 |---|---|---|---|
 | 1 | `83f6bcb70` `test(web): pin the cancel-round batch manifest staying open after a fully successful retry` | 批量重试全部成功、带着未确认行时对话框不关 | P3-1 |
 | 2 | `d8b706f9a` `test(web): pin the attendance deep-link scroll leaving a landed approver row in view` | 「卡片先、页面后」次序下的深链滚动守卫 | P3-4 |
-| 3 | 本文件 | §9 第 22 / 23 / 24 项、§1 两行落点列、§11.9、本节 | P2-1 记录、NIT-2 |
+| 3 起 | 本文件(本轮的文档提交,均只改本文件) | §9 第 22 / 23 / 24 项、§1 两行落点列、§11.9、本节;其后一次更正本节 P3-2 行的理由 | P2-1 记录、NIT-2 |
 
 逐条处置:
 
@@ -599,10 +599,10 @@ B2 门审 r1 结论:0 P1 / 1 P2 / 4 P3 / 3 NIT,判定 CHANGES-REQUESTED(owner-ga
 | `attendance-selfservice-dashboard` | 88/88(新增 1) |
 | `attendance-web-guard` 工作流 run-list 原样 68 个 token | 69 文件 / 1370 用例全过 |
 | 邻居 `TodoCenterView` / `todoApi` / `approval-center*` / `run-required-web-tests-shape`(子串过滤) | 6 文件 / 94 用例全过 |
-| `vue-tsc -b`(先清本地 `.tmp`) | 本轮改动前的 HEAD `cc079bef5a` 与两个测试提交之后的 HEAD **逐字节相同**,sha256 `ec44fee420b32b96…`(与 §11.8 同一哈希),EXIT 2,只有已知的 TS2769。本轮不改 `src/**`,`tsconfig.app.json` 也不含 `tests/**` |
+| `vue-tsc -b`(先清本地 `.tmp`) | 本轮改动前的 HEAD `cc079bef5a` 与两个测试提交之后的 HEAD **逐字节相同**,sha256 `ec44fee420b32b96…`(与 §11.8 同一哈希),EXIT 2,只有已知的 TS2769。本轮不改 `src/**`,`tsconfig.app.json` 也不含 `tests/**`;其后的提交只改本文件 |
 | manifest `--check` | 19 gating invocations,543 = 543 MATCHES(无新 spec 文件、无新 token) |
 | core-backend `required-web-lane-registration-shape` + `…-token-manifest-guard` | 63/63 |
-| 私有短语逐提交自扫(三份短语表,大小写不敏感) | 正控命中;本轮 3 个提交各 0 命中 |
+| 私有短语逐提交自扫(三份短语表,大小写不敏感) | 正控命中;本轮每个提交(提交信息 + 新增行 + 所触文件后像的新增命中)各 0 命中 |
 | 提交身份 | 作者与提交者均为 `zensgit <77236085+zensgit@users.noreply.github.com>`,尾行 `Co-Authored-By: Claude Opus 5.5` |
 | required web lane 全量 | 本轮未重跑:只改了两个既有 spec 文件,已分别整文件跑过。B2 门审 r1 已在 `cc079bef5a` 上跑过全量,10/10 块 0 失败 |
 
