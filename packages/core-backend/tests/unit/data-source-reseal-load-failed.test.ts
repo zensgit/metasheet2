@@ -14,7 +14,8 @@
  *   - GET /api/data-sources carries a SIBLING `data.loadFailed` (owner / platform admin only;
  *     omitted when empty) and leaves `items` / `total` untouched;
  *   - PUT /:id/credentials re-seals a credentials_unreadable row IN PLACE, owner / platform admin
- *     only, everyone else getting the byte-identical 404 of a nonexistent id with no DB work;
+ *     only, everyone else getting the byte-identical 404 of a nonexistent id with no DB work —
+ *     whatever their tenant shape (same tenant, another tenant, no tenant claim);
  *   - inside ONE transaction (SELECT … FOR UPDATE), the config is rebuilt from the ROW and only
  *     `config` + `updated_at` are written, under the same guarded WHERE;
  *   - an id armed for SQL write with no LOAD-phase pin is persisted but NOT loaded at runtime
@@ -213,8 +214,21 @@ function makeFakeDb(initial: Row[] = []) {
     return {
       selectFrom(table: string) {
         if (table === 'integration_external_systems') {
-          // The listing's reference counts: nothing references these sources.
-          const refs = { select: () => refs, where: () => refs, groupBy: () => refs, execute: async () => [] }
+          // The listing's reference counts: nothing references these sources. LOGGED like every
+          // other statement, so a "no database statement" assertion also sees a query on this table.
+          const refWhere: Where = []
+          const refs = {
+            select: () => refs,
+            where: (c: string, o: string, v: unknown) => {
+              refWhere.push([c, o, v])
+              return refs
+            },
+            groupBy: () => refs,
+            execute: async () => {
+              log.push({ tag, kind: 'select', table, where: [...refWhere] })
+              return []
+            },
+          }
           return refs
         }
         onlyDataSources(table)
@@ -948,25 +962,81 @@ const ROUTE_ROWS: Row[] = [
 ]
 const routeFake = makeFakeDb(ROUTE_ROWS)
 
+/**
+ * How a caller's tenant reaches the router, modelled on jwt-middleware (hydrateAuthenticatedUser):
+ * a token WITH a tenant claim sets `req.authenticatedTenantId` and `user.tenantId`; a TENANTLESS
+ * token sets no `authenticatedTenantId`, and its `user.tenantId` may be filled from the
+ * caller-controlled x-tenant-id header (`header`; ignored when there is a claim, as there).
+ */
+type Tenancy = { claim: string | null; header?: string }
+const HOME_TENANT = 'tenant-reseal' // every ROUTE_ROWS row lives here (row() above)
+const FOREIGN_TENANT = 'tenant-foreign'
+const HOME: Tenancy = { claim: HOME_TENANT }
+const FOREIGN_CLAIM: Tenancy = { claim: FOREIGN_TENANT }
+const NO_CLAIM: Tenancy = { claim: null }
+const NO_CLAIM_HOME_HEADER: Tenancy = { claim: null, header: HOME_TENANT }
+
+const FOREIGN_ID = 'u_reseal_foreign'
+const TENANTLESS_ID = 'u_reseal_tenantless'
+const FOREIGN = { id: FOREIGN_ID, roles: ['member'], permissions: DS_PERMS }
+const TENANTLESS = { id: TENANTLESS_ID, roles: ['member'], permissions: DS_PERMS }
+
+/**
+ * Callers that are neither the stored owner nor a platform admin, in EVERY tenant shape: each must
+ * be unable to tell a load-failed id from a nonexistent one (a tenant-shaped refusal — a 403 for
+ * another tenant, a 401 for a missing claim — placed before the uniform 404 would disclose it).
+ */
+const REFUSED_CALLERS: Array<[label: string, user: Record<string, unknown>, tenancy: Tenancy]> = [
+  ['another user, same tenant', OTHER, HOME],
+  ['a user of another tenant', FOREIGN, FOREIGN_CLAIM],
+  ['a caller with no tenant claim', TENANTLESS, NO_CLAIM],
+  ['a caller with no tenant claim, x-tenant-id naming the row tenant', TENANTLESS, NO_CLAIM_HOME_HEADER],
+]
+
 let currentUser: Record<string, unknown> | undefined
+let currentTenancy: Tenancy = HOME
 const app = express()
 app.use(express.json())
 app.use((req, _res, next) => {
-  req.user = currentUser as never
-  req.authenticatedTenantId = currentUser ? 'tenant-reseal' : undefined
+  if (!currentUser) {
+    req.user = undefined
+    req.authenticatedTenantId = undefined
+    return next()
+  }
+  const userTenantId = currentTenancy.claim ?? currentTenancy.header
+  req.user = { ...currentUser, ...(userTenantId !== undefined ? { tenantId: userTenantId } : {}) } as never
+  req.authenticatedTenantId = currentTenancy.claim ?? undefined
   next()
+})
+// Harness self-check only (not a product route): echoes the tenant shape the router receives.
+app.get('/__harness/tenancy', (req, res) => {
+  res.json({
+    userId: req.user?.id ?? null,
+    authenticatedTenantId: req.authenticatedTenantId ?? null,
+    userTenantId: (req.user as { tenantId?: string } | undefined)?.tenantId ?? null,
+  })
 })
 app.use(dataSourcesRouter())
 const pinned = usePinnedServer()
 
-function as(user: Record<string, unknown> | undefined) {
+function as(user: Record<string, unknown> | undefined, tenancy: Tenancy = HOME) {
   currentUser = user
+  currentTenancy = tenancy
   pinned.setApp(app)
   return request(pinned.url())
 }
 
 function notFoundBody(id: string) {
   return { ok: false, error: { code: 'NOT_FOUND', message: `Data source '${id}' not found` } }
+}
+
+/** Headers minus the two whose VALUE legitimately differs (clock; a hash of the id-bearing body). */
+function comparableHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.keys(headers)
+      .sort()
+      .map((name) => [name, name === 'date' || name === 'etag' ? '<present>' : headers[name]]),
+  )
 }
 
 function auditCalls(resourceId: string) {
@@ -1045,28 +1115,78 @@ describe('routes — listing, re-seal and the unchanged 404 surface', () => {
     expect((await as(OWNER).get('/api/data-sources/rt-admin')).status).toBe(200)
   })
 
-  it('EXISTENCE NON-DISCLOSURE: another user on a load-failed id ≡ a nonexistent id (status, body, headers), no DB statement, no audit', async () => {
-    auditMock.mockClear()
-    const logBefore = routeFake.log.length
-    // The refusal is decided by the route's single access resolver, BEFORE the re-seal entry point —
-    // exactly where the nonexistent-id path stops too (not by the manager's inner re-check).
-    const resealSpy = vi.spyOn(getDataSourceManager(), 'resealLoadFailedDataSource')
-    const resolveSpy = vi.spyOn(getDataSourceManager(), 'resolveCredentialRouteTarget')
-    const denied = await as(OTHER).put('/api/data-sources/rt-deny01/credentials').send({ credentials: { password: 'x1' } })
-    const missing = await as(OTHER).put('/api/data-sources/rt-miss01/credentials').send({ credentials: { password: 'x1' } })
-    expect(resolveSpy).toHaveBeenCalledTimes(2)
-    expect(resealSpy).not.toHaveBeenCalled()
-    resealSpy.mockRestore()
-    resolveSpy.mockRestore()
-    expect(denied.status).toBe(404)
-    expect(missing.status).toBe(404)
-    expect(denied.body).toEqual(notFoundBody('rt-deny01'))
-    expect(missing.body).toEqual(notFoundBody('rt-miss01'))
-    // Same-length ids, so every byte-bearing header can be compared too.
-    const headerView = (h: Record<string, string>) => ({ type: h['content-type'], length: h['content-length'] })
-    expect(headerView(denied.headers)).toEqual(headerView(missing.headers))
-    expect(routeFake.log.length).toBe(logBefore)
-    expect(auditMock).not.toHaveBeenCalled()
+  it('harness: every caller reaches the router in the tenant shape it claims (so the tenant cases are not vacuous)', async () => {
+    // The load-failed rows the refusal cases name live in the HOME tenant, so FOREIGN_CLAIM is a
+    // genuine cross-tenant caller and NO_CLAIM_HOME_HEADER a header naming the row's own tenant.
+    expect((routeFake.rows.get('rt-deny01') as Row).tenant_id).toBe(HOME_TENANT)
+    expect((routeFake.rows.get('rt-routes') as Row).tenant_id).toBe(HOME_TENANT)
+    for (const [label, user, tenancy] of REFUSED_CALLERS) {
+      const seen = await as(user, tenancy).get('/__harness/tenancy')
+      expect(seen.body, label).toEqual({
+        userId: user.id,
+        authenticatedTenantId: tenancy.claim,
+        userTenantId: tenancy.claim ?? tenancy.header ?? null,
+      })
+    }
+    expect(new Set(REFUSED_CALLERS.map(([, , t]) => JSON.stringify(t))).size).toBe(4)
+    expect(REFUSED_CALLERS.map(([, u]) => u.id)).not.toContain(OWNER_ID)
+  })
+
+  it('EXISTENCE NON-DISCLOSURE: every refused caller — same tenant, another tenant, no tenant claim — on a load-failed id ≡ a nonexistent id (status, body, headers), no DB statement, no audit', async () => {
+    let compared = 0
+    for (const [label, user, tenancy] of REFUSED_CALLERS) {
+      auditMock.mockClear()
+      const logBefore = routeFake.log.length
+      // The refusal is decided by the route's single access resolver, BEFORE the re-seal entry point —
+      // exactly where the nonexistent-id path stops too (not by the manager's inner re-check).
+      const resealSpy = vi.spyOn(getDataSourceManager(), 'resealLoadFailedDataSource')
+      const resolveSpy = vi.spyOn(getDataSourceManager(), 'resolveCredentialRouteTarget')
+      try {
+        const denied = await as(user, tenancy).put('/api/data-sources/rt-deny01/credentials').send({ credentials: { password: 'x1' } })
+        const missing = await as(user, tenancy).put('/api/data-sources/rt-miss01/credentials').send({ credentials: { password: 'x1' } })
+        expect(resolveSpy, label).toHaveBeenCalledTimes(2)
+        expect(resealSpy, label).not.toHaveBeenCalled()
+        expect(denied.status, label).toBe(404)
+        expect(missing.status, label).toBe(404)
+        expect(denied.body, label).toEqual(notFoundBody('rt-deny01'))
+        expect(missing.body, label).toEqual(notFoundBody('rt-miss01'))
+        // Same-length ids: byte-identical once the id is factored out, and every header comparable.
+        expect(denied.text.split('rt-deny01').join('<id>'), label).toBe(missing.text.split('rt-miss01').join('<id>'))
+        expect(comparableHeaders(denied.headers), label).toEqual(comparableHeaders(missing.headers))
+        expect(routeFake.log.length, label).toBe(logBefore)
+        expect(auditMock, label).not.toHaveBeenCalled()
+        compared += 1
+      } finally {
+        resealSpy.mockRestore()
+        resolveSpy.mockRestore()
+      }
+    }
+    expect(compared).toBe(REFUSED_CALLERS.length)
+  })
+
+  it('owner / admin cannot be obtained from request data: spoofed role / owner headers and query fields are refused like a nonexistent id, and list nothing', async () => {
+    const spoof = (test: request.Test) => test
+      .set('x-user-role', 'admin')
+      .set('x-role', 'admin')
+      .set('x-platform-admin', 'true')
+      .set('x-user-id', OWNER_ID)
+      .set('x-owner-id', OWNER_ID)
+      .query({ role: 'admin', platformAdmin: 'true', ownerId: OWNER_ID, userId: OWNER_ID })
+    for (const [label, user, tenancy] of REFUSED_CALLERS) {
+      auditMock.mockClear()
+      const logBefore = routeFake.log.length
+      const denied = await spoof(as(user, tenancy).put('/api/data-sources/rt-deny01/credentials')).send({ credentials: { password: 'x1' } })
+      const missing = await spoof(as(user, tenancy).put('/api/data-sources/rt-miss01/credentials')).send({ credentials: { password: 'x1' } })
+      expect(denied.status, label).toBe(404)
+      expect(denied.body, label).toEqual(notFoundBody('rt-deny01'))
+      expect(denied.text.split('rt-deny01').join('<id>'), label).toBe(missing.text.split('rt-miss01').join('<id>'))
+      expect(comparableHeaders(denied.headers), label).toEqual(comparableHeaders(missing.headers))
+      expect(routeFake.log.length, label).toBe(logBefore)
+      expect(auditMock, label).not.toHaveBeenCalled()
+    }
+    // A caller who owns nothing that failed sees the pre-existing listing shape, spoofing or not.
+    const listed = await spoof(as(FOREIGN, FOREIGN_CLAIM).get('/api/data-sources'))
+    expect(listed.body).toEqual({ ok: true, data: { items: [], total: 0 } })
   })
 
   it('CREDENTIALS_REQUIRED → 400 naming only the missing keys; NOT_RESEALABLE → 409 with the load state', async () => {
@@ -1139,37 +1259,37 @@ describe('routes — listing, re-seal and the unchanged 404 surface', () => {
       .sort()
   }
 
-  /** Headers minus the two whose VALUE legitimately differs (clock; a hash of the id-bearing body). */
-  function comparableHeaders(headers: Record<string, string>): Record<string, string> {
-    return Object.fromEntries(
-      Object.keys(headers)
-        .sort()
-        .map((name) => [name, name === 'date' || name === 'etag' ? '<present>' : headers[name]]),
-    )
-  }
-
   it('the id-route case table covers EVERY id route the router serves (sweep of the router stack)', () => {
     const swept = sweptIdRoutes()
     expect(swept).toContain(RESEAL_ROUTE)
     expect(swept).toEqual([...Object.keys(ID_ROUTE_CASES), RESEAL_ROUTE].sort())
   })
 
-  it('every OTHER id route: a load-failed id ≡ a nonexistent id (status, full body, headers), no DB statement, no audit — for its owner, a platform admin and another user', async () => {
+  it('every OTHER id route: a load-failed id ≡ a nonexistent id (status, full body, headers), no DB statement, no audit — for its owner, a platform admin and every refused caller shape', async () => {
     const rowBefore = clone(routeFake.rows.get(LOAD_FAILED_ID) as Row)
-    const actors: Array<[string, Record<string, unknown>]> = [['owner', OWNER], ['admin', ADMIN], ['other', OTHER]]
+    // [label, user, tenancy, refusedOnReseal]. The owner and the admin are also swept with a token of
+    // another tenant / no tenant claim: no tenant shape may open another route to a load-failed id.
+    const actors: Array<[string, Record<string, unknown>, Tenancy, boolean]> = [
+      ['owner', OWNER, HOME, false],
+      ['admin', ADMIN, HOME, false],
+      ['owner, token of another tenant', OWNER, FOREIGN_CLAIM, false],
+      ['admin, no tenant claim', ADMIN, NO_CLAIM, false],
+      ...REFUSED_CALLERS.map(([label, user, tenancy]): [string, Record<string, unknown>, Tenancy, boolean] => [label, user, tenancy, true]),
+    ]
     const cases = Object.entries(ID_ROUTE_CASES)
-    // A non-owner non-admin must not tell the two ids apart on the re-seal route either.
-    const otherOnly: Array<[string, (agent: Agent, id: string) => request.Test]> = [
+    // A non-owner non-admin — in any tenant shape — must not tell the two ids apart on the re-seal
+    // route either.
+    const refusedOnly: Array<[string, (agent: Agent, id: string) => request.Test]> = [
       [RESEAL_ROUTE, (a, id) => a.put(`/api/data-sources/${id}/credentials`).send({ credentials: { password: 'x1' } })],
     ]
     let compared = 0
-    for (const [actorLabel, actor] of actors) {
-      for (const [routeKey, send] of actorLabel === 'other' ? [...cases, ...otherOnly] : cases) {
+    for (const [actorLabel, actor, tenancy, refusedOnReseal] of actors) {
+      for (const [routeKey, send] of refusedOnReseal ? [...cases, ...refusedOnly] : cases) {
         const label = `${actorLabel} ${routeKey}`
         auditMock.mockClear()
         const logBefore = routeFake.log.length
-        const failed = await send(as(actor), LOAD_FAILED_ID)
-        const missing = await send(as(actor), NONEXISTENT_ID)
+        const failed = await send(as(actor, tenancy), LOAD_FAILED_ID)
+        const missing = await send(as(actor, tenancy), NONEXISTENT_ID)
         expect(failed.status, label).toBe(404)
         expect(missing.status, label).toBe(404)
         expect(failed.body, label).toEqual(notFoundBody(LOAD_FAILED_ID))
@@ -1184,7 +1304,7 @@ describe('routes — listing, re-seal and the unchanged 404 surface', () => {
         compared += 1
       }
     }
-    expect(compared).toBe(actors.length * cases.length + otherOnly.length)
+    expect(compared).toBe(actors.length * cases.length + REFUSED_CALLERS.length * refusedOnly.length)
     // No side effect: still load-failed, still re-sealable, the row untouched.
     expect(getDataSourceManager().listLoadFailedDataSources({ actor: { platformAdmin: true } })
       .find((f) => f.id === LOAD_FAILED_ID)).toMatchObject({ loadState: 'credentials_unreadable', ownerId: OWNER_ID })

@@ -464,29 +464,48 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
     expect([row.owner_id, row.tenant_id, row.scope_kind, row.workspace_id]).toEqual([OWNER_ID, 'tenant-realdb', 'private', 'ws-realdb'])
   })
 
-  it('route: a non-owner on a load-failed id ≡ a nonexistent id — same 404 body, ZERO statements, row byte-identical', async () => {
+  it('route: a non-owner in ANY tenant shape on a load-failed id ≡ a nonexistent id — same 404 body, ZERO statements, row byte-identical', async () => {
     await insertRow('rdb-deny01')
     getDataSourceManager().registerAdapterType('postgres', OkAdapter as never)
     await initializeDataSourceManager(db)
     const before = await rowFingerprint('rdb-deny01')
 
+    // Tenant shapes as jwt-middleware produces them: a claim sets req.authenticatedTenantId and
+    // user.tenantId; a tenantless token sets no authenticatedTenantId, and its user.tenantId may come
+    // from the caller-controlled x-tenant-id header. The row lives in 'tenant-realdb'.
+    const callers: Array<{ label: string; claim: string | null; header?: string }> = [
+      { label: 'same tenant', claim: 'tenant-realdb' },
+      { label: 'another tenant', claim: 'tenant-realdb-foreign' },
+      { label: 'no tenant claim', claim: null },
+      { label: 'no tenant claim, x-tenant-id naming the row tenant', claim: null, header: 'tenant-realdb' },
+    ]
+    let caller = callers[0]
     const app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
-      req.user = { id: OTHER_ID, roles: ['member'], permissions: ['data_sources:write'] } as never
+      const userTenantId = caller.claim ?? caller.header
+      req.user = {
+        id: OTHER_ID, roles: ['member'], permissions: ['data_sources:write'],
+        ...(userTenantId !== undefined ? { tenantId: userTenantId } : {}),
+      } as never
+      req.authenticatedTenantId = caller.claim ?? undefined
       next()
     })
     app.use(dataSourcesRouter())
 
-    sqlLog.length = 0
-    const denied = await request(app).put('/api/data-sources/rdb-deny01/credentials').send({ credentials: { password: SECRET.newPassword } })
-    const missing = await request(app).put('/api/data-sources/rdb-miss01/credentials').send({ credentials: { password: SECRET.newPassword } })
-    expect(sqlLog).toEqual([])
-    expect(denied.status).toBe(404)
-    expect(missing.status).toBe(404)
-    expect(denied.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: "Data source 'rdb-deny01' not found" } })
-    expect(missing.body).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: "Data source 'rdb-miss01' not found" } })
-    expect(denied.headers['content-length']).toBe(missing.headers['content-length'])
+    for (const current of callers) {
+      caller = current
+      sqlLog.length = 0
+      const denied = await request(app).put('/api/data-sources/rdb-deny01/credentials').send({ credentials: { password: SECRET.newPassword } })
+      const missing = await request(app).put('/api/data-sources/rdb-miss01/credentials').send({ credentials: { password: SECRET.newPassword } })
+      expect(sqlLog, current.label).toEqual([])
+      expect(denied.status, current.label).toBe(404)
+      expect(missing.status, current.label).toBe(404)
+      expect(denied.body, current.label).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: "Data source 'rdb-deny01' not found" } })
+      expect(missing.body, current.label).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: "Data source 'rdb-miss01' not found" } })
+      expect(denied.headers['content-type'], current.label).toBe(missing.headers['content-type'])
+      expect(denied.headers['content-length'], current.label).toBe(missing.headers['content-length'])
+    }
     expect(await rowFingerprint('rdb-deny01')).toBe(before)
   })
 })
