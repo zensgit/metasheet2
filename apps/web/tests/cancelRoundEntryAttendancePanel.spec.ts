@@ -387,6 +387,94 @@ describe('P-5 delivery status (「Full status, no raw ids/errors」; 16:5x 「Sh
   })
 })
 
+describe('P-6 on the self-service panel (§15.6): no approver / seat names, no approval-side reads', () => {
+  // Names planted on every wire object the panel receives (summary, round, deliveries, outcome, and the
+  // parent list row). None of them may reach the page — text or attributes — in any state, and the panel
+  // reads only the attendance cancel-round routes (never `/api/approvals/*`, which employees cannot read).
+  const NAMES = ['审批人甲乙丙', 'Approver Zed Quux', 'seat-holder-u-77', '委托人丁戊']
+  const planted = {
+    approverName: NAMES[0],
+    currentApprovers: [{ userId: NAMES[2], name: NAMES[1] }],
+    assignees: [{ assigneeId: NAMES[2], assigneeName: NAMES[0], delegatedFromName: NAMES[3] }],
+    seats: [{ userId: NAMES[2], displayName: NAMES[1] }],
+    currentHandler: NAMES[1],
+    delegatedFrom: NAMES[3],
+  }
+  const plantedDelivery = {
+    channelType: 'dingtalk_todo', status: 'pending', attempts: 1,
+    createdAt: '2026-09-29T01:00:00.000Z', lastAttemptAt: '2026-09-29T01:00:00.000Z', updatedAt: '2026-09-29T01:00:00.000Z',
+    recipientName: NAMES[1], recipientUserId: NAMES[2],
+  }
+  function wire(overrides: Round = {}) {
+    return {
+      ok: true,
+      data: {
+        requestId: 'req-1', documentInstanceId: 'apv_1', entryEnabled: true,
+        approvers: [NAMES[0]], currentApproverNames: [NAMES[1]],
+        round: round({ ...planted, deliveries: [plantedDelivery], ...overrides }),
+      },
+    }
+  }
+  const PLANTED_ROW = { ...LEAVE, approver_name: NAMES[0], approved_by: NAMES[2], approver: { id: NAMES[2], name: NAMES[1] } }
+  function expectNoNames(root: HTMLElement, where: string) {
+    const html = root.innerHTML
+    for (const name of NAMES) expect(html, `${where}: ${name}`).not.toContain(name)
+  }
+
+  it('planted names never render (pending → withdraw → launch dialog → re-launch, and every outcome); only attendance routes are read', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    try {
+      summaries = [
+        () => jsonResponse(200, wire()),
+        () => jsonResponse(200, wire({ outcome: 'withdrawn', status: 'cancellation_withdrawn', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' })),
+        () => jsonResponse(200, wire()),
+      ]
+      writes = [
+        () => jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'apr_1', outcome: 'withdrawn', status: 'cancellation_withdrawn' } }),
+        () => jsonResponse(201, { ok: true, data: { requestId: 'req-1', roundId: 'apr_2', approverName: NAMES[0] } }),
+      ]
+      const root = await mountPanel(PLANTED_ROW)
+      expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请审批中')
+      expect(root.querySelectorAll('[data-cancel-round-delivery]')).toHaveLength(1)
+      expectNoNames(root, 'pending')
+
+      $(root, 'data-cancel-round-withdraw')!.click()
+      await flushUi()
+      expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请已撤回')
+      expectNoNames(root, 'withdrawn')
+
+      $(root, 'data-cancel-round-launch')!.click()
+      await flushUi()
+      expect($(root, 'data-cancel-round-dialog')).not.toBeNull()
+      expectNoNames(root, 'launch dialog')
+      $(root, 'data-cancel-round-confirm')!.click()
+      await flushUi()
+      expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请审批中')
+      expectNoNames(root, 're-launched')
+
+      const outcomes: Array<[Round, string]> = [
+        [{ outcome: 'applied', status: 'leave_cancelled', canWithdraw: false, cancellationOutcome: { status: 'cancelled', reversal: { reversed: 480, lots: 1, unrecoverableExpired: 0, alreadyReversed: false, approverName: NAMES[0] }, decidedBy: NAMES[1] } }, '请假已取消'],
+        [{ outcome: 'rejected', status: 'cancellation_rejected', canWithdraw: false, rejectedBy: NAMES[1] }, '撤销申请被驳回'],
+        [{ outcome: 'expired', status: 'cancellation_window_closed', closedBySystem: true, closeReason: 'round_expired', canWithdraw: false }, '撤销窗口已过,申请自动关闭'],
+        [{ outcome: 'blocked', status: 'cancellation_blocked', closedBySystem: true, closeReason: 'business_blocked:FUTURE_CODE_X', blockCode: 'FUTURE_CODE_X', canWithdraw: false }, CANCEL_ROUND_BLOCK_CATEGORY_COPY.zh],
+      ]
+      for (const [overrides, word] of outcomes) {
+        summaries = [() => jsonResponse(200, wire(overrides))]
+        const r = await mountPanel(PLANTED_ROW)
+        expect(r.textContent).toContain(word)
+        expectNoNames(r, String(overrides.outcome))
+      }
+
+      const paths = apiFetchMock.mock.calls.map((c) => String(c[0]))
+      expect(paths.length).toBeGreaterThanOrEqual(9)
+      for (const p of paths) expect(p).toMatch(/^\/api\/attendance\/requests\/req-1\/cancel-round(\/withdraw)?$/)
+      expect(fetchSpy.mock.calls.map((c) => String(c[0])).filter((u) => u.includes('/api/approvals'))).toEqual([])
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+})
+
 describe('AttendanceView wiring', () => {
   it('the panel is mounted once, on LEAVE rows of 最近申请 — not in the shift-swap list', () => {
     const source = readFileSync(resolve(__dirname, '../src/views/AttendanceView.vue'), 'utf8')
