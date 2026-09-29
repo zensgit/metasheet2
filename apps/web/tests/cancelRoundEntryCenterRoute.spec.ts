@@ -367,7 +367,7 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     expect(loadPendingSpy).toHaveBeenCalled()
   })
 
-  it('batch: a decision attributed to another round lands in the manifest, and 重试失败项 is refused before sending', async () => {
+  it('batch: a decision attributed to another round lands in the manifest, and 重试失败项 never re-sends it', async () => {
     actionResponses.push(() =>
       jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'round-of-cr_other', outcome: 'applied', status: 'leave_cancelled' } }))
     mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1')]
@@ -383,15 +383,18 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     // accepted by the server ⇒ counted on its own, not as a failure (门审 r2 P3-6)
     expect(summaryLine()).toBe('成功 0 项，已提交但未能确认 1 项，失败 0 项：')
     expect(resultKinds()).toEqual(['unconfirmed'])
-    // the leave's round is now decided — a retry must not send a second decision
+    // not a failure ⇒ nothing to retry: 重试失败项 is disabled, a click sends and reads nothing, and the
+    // row keeps its own count (it is never relabelled as failed)
     latestRound['req-1'] = pendingRound('cr_1', { outcome: 'applied', status: 'leave_cancelled' })
-    ;(container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement).click()
+    const retry = container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement
+    expect(retry.disabled).toBe(true)
+    const fetchesBefore = apiFetchMock.mock.calls.length
+    retry.click()
     await flushUi()
+    expect(apiFetchMock.mock.calls.length).toBe(fetchesBefore)
     expect(attendanceCalls()).toHaveLength(1)
-    expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')?.textContent).toContain('未执行任何操作')
-    // refused before sending ⇒ a failure again, with the original header shape
-    expect(summaryLine()).toBe('全部 1 项处理失败：')
-    expect(resultKinds()).toEqual(['failed'])
+    expect(summaryLine()).toBe('成功 0 项，已提交但未能确认 1 项，失败 0 项：')
+    expect(resultKinds()).toEqual(['unconfirmed'])
   })
 
   it('batch header: unconfirmed, succeeded and failed rows are three separate counts; no unconfirmed row keeps the old header', async () => {
@@ -413,6 +416,18 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     await flushUi()
     expect(summaryLine()).toBe('成功 1 项，已提交但未能确认 1 项，失败 1 项：')
     expect(resultKinds().sort()).toEqual(['failed', 'unconfirmed'])
+
+    // 重试失败项 re-sends only the true failure; the accepted-but-unconfirmed row (whose leave still has a
+    // pending round) is not re-sent and stays listed under its own count
+    const retry = container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement
+    expect(retry.disabled).toBe(false)
+    dispatchActionSpy.mockClear()
+    retry.click()
+    await flushUi()
+    expect(dispatchActionSpy.mock.calls.map((c) => c[0])).toEqual(['apv_bad'])
+    expect(attendanceCalls()).toHaveLength(1)
+    expect(summaryLine()).toBe('成功 0 项，已提交但未能确认 1 项，失败 1 项：')
+    expect(resultKinds()).toEqual(['unconfirmed', 'failed'])
 
     // a second batch with no cancel-round row in it: the header keeps its original shape
     ;(container!.querySelector('[data-testid="approval-batch-result-close"]') as HTMLButtonElement).click()

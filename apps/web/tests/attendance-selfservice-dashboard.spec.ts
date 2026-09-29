@@ -12,6 +12,8 @@ const authMockState = vi.hoisted(() => ({
   currentUserId: 'swap-user-a',
   identityPending: null as Promise<string> | null,
   pluginsPending: null as Promise<void> | null,
+  // Absent (null) by default, like the rest of this file assumes: no getAccessSnapshot on the auth mock.
+  accessSnapshot: null as { isAdmin: boolean; permissions: string[] } | null,
 }))
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -33,6 +35,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn(() => authMockState.identityPending ?? Promise.resolve(authMockState.currentUserId)),
+    ...(authMockState.accessSnapshot ? { getAccessSnapshot: () => authMockState.accessSnapshot } : {}),
   }),
 }))
 
@@ -712,6 +715,7 @@ describe('Attendance self-service dashboard', () => {
     authMockState.currentUserId = 'swap-user-a'
     authMockState.identityPending = null
     authMockState.pluginsPending = null
+    authMockState.accessSnapshot = null
     HTMLElement.prototype.scrollIntoView = vi.fn()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
@@ -1990,6 +1994,71 @@ describe('Attendance self-service dashboard', () => {
     const block = rows[0]!.querySelector<HTMLElement>('[data-attendance-cancel-round="request-leave-focused"]')
     expect(block).toBeTruthy()
     expect(block!.querySelector('[data-cancel-round-status]')?.textContent).toBe('Cancellation pending approval')
+  })
+
+  // The person who follows a cancel round's todo item is usually an APPROVER of that round (not the
+  // requester). The decision lives in the attendance-side 「待我审批的撤销申请」 card, whose deep-linked row
+  // is marked and ends up in view — the page's own scroll to the request tools does not leave it behind.
+  it('a cancel-round todo deep link followed by an approver ends with the approver row marked and in view', async () => {
+    authMockState.accessSnapshot = { isAdmin: false, permissions: ['attendance:read', 'attendance:approve'] }
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                requestId: 'request-other', roundId: 'round-0', engineInstanceId: 'cr-0', requesterUserId: 'employee-8',
+                requesterName: 'Other', requestType: 'leave', startAt: null, endAt: null, launchedAt: null,
+              },
+              {
+                requestId: 'request-leave-focused', roundId: 'round-1', engineInstanceId: 'cr-1', requesterUserId: 'employee-7',
+                requesterName: 'Employee Seven', requestType: 'leave', startAt: '2026-04-20T01:00:00.000Z',
+                endAt: '2026-04-20T10:00:00.000Z', launchedAt: '2026-04-15T01:00:00.000Z',
+              },
+            ],
+            total: 2,
+          },
+        })
+      }
+      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            request: {
+              id: 'request-leave-focused', work_date: '2026-04-20', request_type: 'leave',
+              requested_in_at: '2026-04-20T09:00:00+08:00', requested_out_at: '2026-04-20T18:00:00+08:00',
+              reason: 'Leave with a pending cancellation', status: 'approved', user_id: 'employee-7', metadata: {},
+            },
+          },
+        })
+      }
+      if (url.endsWith('/api/attendance/requests/request-leave-focused/cancel-round')) {
+        return jsonResponse(404, { ok: false, error: { code: 'NOT_FOUND', message: 'x' } })
+      }
+      return baseImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+      initialRequestId: 'request-leave-focused',
+    })
+    app.mount(container!)
+    await flushUi(16)
+
+    const card = container!.querySelector<HTMLElement>('[data-cancel-round-pending]')
+    expect(card?.dataset.cancelRoundPendingState).toBe('ready')
+    const marked = [...card!.querySelectorAll<HTMLElement>('[data-cancel-round-pending-focused="true"]')]
+    expect(marked.map(row => row.dataset.cancelRoundPendingItem)).toEqual(['request-leave-focused'])
+    expect(marked[0]!.querySelector('[data-cancel-round-pending-approve]')).toBeTruthy()
+    // the request tools still open on the focused leave (the page's own deep-link landing is kept) …
+    expect(container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')?.open).toBe(true)
+    // … and the last thing scrolled into view is the approver row
+    const scroll = vi.mocked(HTMLElement.prototype.scrollIntoView)
+    expect(scroll.mock.instances.at(-1)).toBe(marked[0])
   })
 
   it('keeps focused attendance rejection comment required before calling the API', async () => {

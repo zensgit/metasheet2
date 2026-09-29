@@ -681,6 +681,7 @@
           :focus-request-id="focusedAttendanceRequestId"
           :format-date-time="formatDateTime"
           :format-request-type="formatRequestType"
+          @focused-row-shown="cancelRoundApproverLandedFor = $event"
         />
 
         <details
@@ -12437,6 +12438,9 @@ const attendanceAdminGlobalUserScope = computed(() => (
 const cancelRoundApproverVisible = computed(() => (
   typeof auth.getAccessSnapshot === 'function' && canDecideCancelRoundWith(auth.getAccessSnapshot())
 ))
+// The deep-linked request id whose row the approver list brought into view (P-11 (a): a cancel round's todo
+// item links here). That row is where this viewer decides, so the deep-link section scroll leaves it in view.
+const cancelRoundApproverLandedFor = ref('')
 // Navigability audit fix 4: `useRouter()` resolves via Vue's provide/inject up to the app root
 // regardless of whether THIS component is the routed match — always available when the real app
 // mounts AttendanceView anywhere under its router-installed tree. Only `undefined` in isolated
@@ -15836,7 +15840,9 @@ async function focusInitialAttendanceSection(): Promise<void> {
   ) ?? overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
     revealOverviewHistoryDetails(target)
-    target.scrollIntoView({ behavior: 'auto', block: 'start' })
+    const approverRowShown = Boolean(cancelRoundApproverLandedFor.value)
+      && cancelRoundApproverLandedFor.value === props.initialRequestId.trim()
+    if (!approverRowShown) target.scrollIntoView({ behavior: 'auto', block: 'start' })
   }
 }
 

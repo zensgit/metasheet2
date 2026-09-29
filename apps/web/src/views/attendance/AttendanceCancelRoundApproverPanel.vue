@@ -16,10 +16,16 @@
     not confirm (not 「failed」, not 「done」). The list is re-read after every attempt.
   - No approver / seat names are rendered (P-6): the list names only the requester and the leave.
   - The launch flag (`entryEnabled`) gates launching a round, not deciding one: this list does not read it.
+  - Deep link (`?requestId=`, e.g. a cancel round's todo item, P-11 (a)): the matching row is marked and,
+    once per request id, brought into view — for an approver this row is where the decision is made — and
+    `focused-row-shown` tells the page, whose own section scroll must then leave it in view.
+  - Decision copy says what the click does (this approver's decision is submitted); the round's outcome is
+    read back, not promised: a countersigned round needs every seat, and an approved round can still block.
 -->
 <template>
   <section
     v-if="canDecide"
+    ref="rootEl"
     class="attendance-cancel-round-approver"
     :aria-labelledby="titleId"
     data-cancel-round-pending
@@ -105,8 +111,8 @@
           >
             <p class="attendance-cancel-round-approver__note">
               {{ confirming.action === 'approve'
-                ? tr('Approve this cancellation? Once approved, the leave is cancelled.', '确认通过这条撤销申请?通过后该请假将被取消。')
-                : tr('Reject this cancellation? The leave stays valid.', '确认驳回这条撤销申请?请假仍然有效。') }}
+                ? tr('Approve this cancellation request? The leave is cancelled only when the cancellation request is fully approved.', '确认通过这条撤销申请?撤销申请全部审批通过后,该请假才会被取消。')
+                : tr('Reject this cancellation request? If it is rejected, the leave stays valid.', '确认驳回这条撤销申请?撤销申请被驳回时,请假仍然有效。') }}
             </p>
             <label v-if="confirming.action === 'reject'" class="attendance-cancel-round-approver__field">
               <span>{{ tr('Comment (optional)', '驳回说明(可选)') }}</span>
@@ -156,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, useId, watch } from 'vue'
+import { nextTick, onMounted, ref, useId, watch } from 'vue'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import {
@@ -179,6 +185,11 @@ const props = withDefaults(defineProps<{
   formatRequestType: undefined,
 })
 
+const emit = defineEmits<{
+  /** The deep-linked row was brought into view (once per request id). */
+  (e: 'focused-row-shown', requestId: string): void
+}>()
+
 const { isZh } = useLocale()
 const tr = (en: string, zh: string): string => (isZh.value ? zh : en)
 const titleId = `${useId()}-title`
@@ -198,7 +209,9 @@ const busy = ref(false)
 const notice = ref<Notice | null>(null)
 const confirming = ref<{ roundId: string; action: 'approve' | 'reject' } | null>(null)
 const comment = ref('')
+const rootEl = ref<HTMLElement | null>(null)
 let generation = 0
+let landedFor = ''
 
 async function load(): Promise<void> {
   if (!props.canDecide) return
@@ -212,6 +225,7 @@ async function load(): Promise<void> {
     items.value = list.items
     total.value = list.total
     loadState.value = 'ready'
+    void landOnFocusedRow()
   } catch {
     if (mine !== generation) return
     items.value = []
@@ -223,6 +237,20 @@ async function load(): Promise<void> {
 function isFocused(item: PendingCancelRoundItem): boolean {
   const focus = props.focusRequestId.trim()
   return focus.length > 0 && item.requestId === focus
+}
+
+/** Deep link: bring the linked row into view once per request id (re-reads after a decision do not scroll). */
+async function landOnFocusedRow(): Promise<void> {
+  const focus = props.focusRequestId.trim()
+  if (!focus || landedFor === focus || loadState.value !== 'ready') return
+  if (!items.value.some((item) => item.requestId === focus)) return
+  landedFor = focus
+  await nextTick()
+  const row = rootEl.value?.querySelector('[data-cancel-round-pending-focused="true"]')
+  if (row instanceof HTMLElement && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ behavior: 'auto', block: 'center' })
+  }
+  emit('focused-row-shown', focus)
 }
 
 function requesterLabel(item: PendingCancelRoundItem): string {
@@ -271,8 +299,8 @@ async function submit(item: PendingCancelRoundItem): Promise<void> {
     notice.value = {
       kind: 'success',
       message: current.action === 'approve'
-        ? tr('The cancellation was approved.', '已通过撤销申请')
-        : tr('The cancellation was rejected.', '已驳回撤销申请'),
+        ? tr('Your approval was submitted.', '已提交通过意见')
+        : tr('Your rejection was submitted.', '已提交驳回意见'),
       presentationKey: null,
     }
   } catch (error) {
@@ -291,6 +319,7 @@ async function submit(item: PendingCancelRoundItem): Promise<void> {
 
 onMounted(() => { void load() })
 watch(() => props.canDecide, () => { void load() })
+watch(() => props.focusRequestId, () => { void landOnFocusedRow() })
 </script>
 
 <style scoped>

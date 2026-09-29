@@ -173,11 +173,41 @@ describe('visibility and read states', () => {
     expect($(root, 'data-cancel-round-pending-error')).toBeNull()
   })
 
-  it('the deep-link request id marks its row', async () => {
-    lists = [() => jsonResponse(200, listBody([item(), item({ requestId: 'req-2', roundId: 'round-2', engineInstanceId: 'cr_2' })]))]
-    const root = await mountPanel({ focusRequestId: 'req-2' })
-    const focused = root.querySelectorAll<HTMLElement>('[data-cancel-round-pending-focused="true"]')
-    expect([...focused].map((r) => r.dataset.cancelRoundPendingItem)).toEqual(['req-2'])
+  it('the deep-link request id marks its row and brings it into view once; the page is told', async () => {
+    const original = HTMLElement.prototype.scrollIntoView
+    const scrolled = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrolled
+    try {
+      lists = [() => jsonResponse(200, listBody([item(), item({ requestId: 'req-2', roundId: 'round-2', engineInstanceId: 'cr_2' })]))]
+      const shown = vi.fn()
+      const root = await mountPanel({ focusRequestId: 'req-2', onFocusedRowShown: shown })
+      const focused = root.querySelectorAll<HTMLElement>('[data-cancel-round-pending-focused="true"]')
+      expect([...focused].map((r) => r.dataset.cancelRoundPendingItem)).toEqual(['req-2'])
+      expect(scrolled).toHaveBeenCalledTimes(1)
+      expect(scrolled.mock.instances[0]).toBe(focused[0])
+      expect(shown.mock.calls).toEqual([['req-2']])
+      // a re-read (e.g. after a decision on another row) does not scroll again
+      await click(root, 'data-cancel-round-pending-reload')
+      expect(scrolled).toHaveBeenCalledTimes(1)
+      expect(shown).toHaveBeenCalledTimes(1)
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original
+    }
+  })
+
+  it('a deep-link id that is not in the list scrolls nothing and tells the page nothing', async () => {
+    const original = HTMLElement.prototype.scrollIntoView
+    const scrolled = vi.fn()
+    HTMLElement.prototype.scrollIntoView = scrolled
+    try {
+      const shown = vi.fn()
+      const root = await mountPanel({ focusRequestId: 'req-elsewhere', onFocusedRowShown: shown })
+      expect(root.querySelector('[data-cancel-round-pending-focused="true"]')).toBeNull()
+      expect(scrolled).not.toHaveBeenCalled()
+      expect(shown).not.toHaveBeenCalled()
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original
+    }
   })
 })
 
@@ -187,6 +217,8 @@ describe('decisions go through the attendance route with the round confirmed', (
     const root = await mountPanel()
     await click(root, 'data-cancel-round-pending-approve')
     expect($(root, 'data-cancel-round-pending-confirm')!.dataset.confirmAction).toBe('approve')
+    // the confirmation says what the click does, not the round's outcome (countersign needs every seat)
+    expect($(root, 'data-cancel-round-pending-confirm')!.textContent).toContain('撤销申请全部审批通过后,该请假才会被取消')
     expect(apiFetchMock).toHaveBeenCalledTimes(1)
     await click(root, 'data-cancel-round-pending-confirm-submit')
     expect(calls()).toEqual([
@@ -197,7 +229,7 @@ describe('decisions go through the attendance route with the round confirmed', (
     ])
     const notice = $(root, 'data-cancel-round-pending-notice')!
     expect(notice.dataset.noticeKind).toBe('success')
-    expect(notice.textContent).toContain('已通过撤销申请')
+    expect(notice.textContent).toContain('已提交通过意见')
     expect($(root, 'data-cancel-round-pending-item')).toBeNull()
     expect($(root, 'data-cancel-round-pending-empty')).not.toBeNull()
   })
@@ -215,7 +247,7 @@ describe('decisions go through the attendance route with the round confirmed', (
     textarea.dispatchEvent(new Event('input'))
     await click(root, 'data-cancel-round-pending-confirm-submit')
     expect(posts()).toEqual([['POST', '/api/attendance/requests/req-1/cancel-round/actions', JSON.stringify({ action: 'reject', comment: '时间冲突' })]])
-    expect($(root, 'data-cancel-round-pending-notice')!.textContent).toContain('已驳回撤销申请')
+    expect($(root, 'data-cancel-round-pending-notice')!.textContent).toContain('已提交驳回意见')
   })
 
   it('a stale row is never decided: another instance, another round id, a closed round, or an unreadable summary ⇒ nothing sent', async () => {
@@ -251,7 +283,7 @@ describe('decisions go through the attendance route with the round confirmed', (
     const notice = $(root, 'data-cancel-round-pending-notice')!
     expect(notice.dataset.noticeKind).toBe('unconfirmed')
     expect(notice.textContent).toContain('操作已提交,但无法确认')
-    expect(notice.textContent).not.toContain('已通过撤销申请')
+    expect(notice.textContent).not.toContain('已提交通过意见')
     expect(notice.textContent).not.toContain('失败')
   })
 
@@ -290,6 +322,14 @@ describe('AttendanceView wiring', () => {
     expect(tag).toContain('v-if="showOverview"')
     expect(tag).toContain(':can-decide="cancelRoundApproverVisible"')
     expect(tag).toContain(':focus-request-id="focusedAttendanceRequestId"')
+    expect(tag).toContain('@focused-row-shown="cancelRoundApproverLandedFor = $event"')
+  })
+
+  it('the deep-link section scroll leaves the approver row in view once the list has shown it', () => {
+    const fn = source.slice(source.indexOf('async function focusInitialAttendanceSection('), source.indexOf('\nfunction ', source.indexOf('async function focusInitialAttendanceSection(')))
+    expect(fn).toContain('cancelRoundApproverLandedFor.value === props.initialRequestId.trim()')
+    expect(fn).toContain("if (!approverRowShown) target.scrollIntoView({ behavior: 'auto', block: 'start' })")
+    expect(fn.match(/scrollIntoView\(/g)).toHaveLength(1)
   })
 
   it('the grant predicate is the shared canDecideCancelRoundWith over the session access snapshot', () => {

@@ -584,7 +584,7 @@
       <p class="approval-center__batch-result-summary">
         <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
              counted on its own — it is not a failure (the row's own line says to refresh and check). -->
-        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchFailureRows.length - batchUnconfirmedCount }} 项：</template>
+        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchTrueFailureCount }} 项：</template>
         <template v-else-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
         <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
       </p>
@@ -601,9 +601,12 @@
       </ul>
       <template #footer>
         <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <!-- 撤销轮: an accepted-but-unconfirmed row is not a failure, so it is never retried; with no true
+             failure left the button is disabled. -->
         <el-button
           type="primary"
           :loading="batchRunning"
+          :disabled="batchTrueFailureCount === 0"
           data-testid="approval-batch-retry"
           @click="retryBatchFailures"
         >
@@ -936,6 +939,7 @@ const batchResultDialogVisible = ref(false)
 const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
 const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
+const batchTrueFailureCount = computed(() => batchFailureRows.value.length - batchUnconfirmedCount.value)
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
@@ -960,6 +964,8 @@ async function dispatchBatchAndHandleResult(
   ids: string[],
   action: 'approve' | 'reject',
   comment: string,
+  // 撤销轮: accepted-but-unconfirmed rows from the previous pass — not re-sent, kept in the manifest.
+  carriedUnconfirmed: ApprovalBatchFailureRow[] = [],
 ): Promise<void> {
   const trimmed = comment.trim()
   const unconfirmedIds = new Set<string>()
@@ -981,7 +987,7 @@ async function dispatchBatchAndHandleResult(
       }
     },
   )
-  if (result.failed.length === 0) {
+  if (result.failed.length === 0 && carriedUnconfirmed.length === 0) {
     ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
     batchResultDialogVisible.value = false
     batchFailureRows.value = []
@@ -991,7 +997,7 @@ async function dispatchBatchAndHandleResult(
     lastBatchAction.value = action
     lastBatchComment.value = comment
     batchSucceededCount.value = result.succeeded.length
-    batchFailureRows.value = buildFailureRows(result.failed, unconfirmedIds)
+    batchFailureRows.value = [...carriedUnconfirmed, ...buildFailureRows(result.failed, unconfirmedIds)]
     batchResultDialogVisible.value = true
   }
   clearPendingSelection()
@@ -1016,14 +1022,17 @@ async function runBatch(action: 'approve' | 'reject', comment: string): Promise<
 // `batchRowSnapshot` already carries these rows' title/requestNo from the original launch, so a
 // still-failing row keeps its label; `dispatchBatchAndHandleResult` overwrites `batchFailureRows`
 // in place with whatever is left (or closes the dialog on full success).
+// 撤销轮: a row the server accepted but the page could not confirm is not a failure — it is not
+// re-sent, and it stays in the manifest (with its own "refresh and check" line) after the retry.
 async function retryBatchFailures(): Promise<void> {
   if (batchRunning.value) return
-  const ids = batchFailureRows.value.map((row) => row.id)
+  const ids = batchFailureRows.value.filter((row) => !row.unconfirmed).map((row) => row.id)
   if (ids.length === 0) return
+  const carried = batchFailureRows.value.filter((row) => row.unconfirmed)
   batchRunning.value = true
   batchAction.value = lastBatchAction.value
   try {
-    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value)
+    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value, carried)
   } finally {
     batchRunning.value = false
     batchAction.value = null
