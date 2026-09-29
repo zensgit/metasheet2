@@ -304,8 +304,11 @@ export async function readCancelRoundSummaryForDocumentV1(
   const row = result.rows[0] as RoundRow | undefined
   if (!row) return { documentInstanceId, round: null }
   if (!isRoundOutcome(row.outcome)) {
-    // The CHECK constraint makes this unreachable; fail closed rather than invent a token.
-    return { documentInstanceId, round: null }
+    // Unreachable while the `approval_rounds` outcome CHECK holds. If that enum is ever widened
+    // without this reader, fail loudly: `round: null` would read as "no round" (P-8 ③ — an unknown
+    // state must not collapse into the empty result), and inventing a status token is not ours to do.
+    // The routes turn this into their generic 500 INTERNAL_ERROR; no new code.
+    throw new Error(`cancel-round summary: unrecognised round outcome ${JSON.stringify(row.outcome)} on round ${row.round_id}`)
   }
 
   const projection = row.engine_instance_id
@@ -347,7 +350,7 @@ const CANCEL_ROUND_SEAT_CLASS_CODES: ReadonlySet<string> = new Set([
   'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
 ])
 
-/** P-6′ weaker, cause-free employee copy (owner's P-6′ option: weaker employee copy until RC (c)). */
+/** P-6′ ② cause-free employee copy (owner's P-6′ pick 「(ii) Reuse approval notices (Recommended)」, whose description reads "weaker employee-facing copy until RC (c) lands"). */
 export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
   'A cancellation cannot be started for this document right now — please contact an administrator'
 
