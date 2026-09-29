@@ -117,6 +117,8 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   const createdApprovalIds = new Set<string>()
   const createdRequestIds = new Set<string>()
   const createdLeaveTypeIds = new Set<string>()
+  // Phase D A3: fixture-only leave-balance lots (their events cascade with them).
+  const createdLeaveBalanceIds = new Set<string>()
   const seededUserIds = new Set<string>()
   const devTokenUserIds = new Set<string>()
   const createdRoleIds = new Set<string>()
@@ -401,6 +403,10 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       const approvalIds = [...createdApprovalIds]
       if (requestIds.length > 0) {
         await pool().query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [requestIds])
+      }
+      const leaveBalanceIds = [...createdLeaveBalanceIds]
+      if (leaveBalanceIds.length > 0) {
+        await pool().query('DELETE FROM attendance_leave_balances WHERE id = ANY($1::uuid[])', [leaveBalanceIds])
       }
       const leaveTypeIds = [...createdLeaveTypeIds]
       if (leaveTypeIds.length > 0) {
@@ -2874,6 +2880,178 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
         expect(read.json.data.round).toMatchObject({ outcome: 'pending', status: 'cancellation_pending_approval' })
         expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+      })
+
+      it('A3 — lock:86 + §15.3 ③④, end to end with NO stand-in and a real balance: a comp-time leave drawn from two lots, the earlier of which has since expired, is launched by its employee and approved on the attendance side — the summary carries cancelled_with_unrecoverable_expired with real non-zero minutes, reads back twice byte-identically, equals the approval-side projection, and the balance ledger ends exactly where the existing direct cancel leaves a twin leave', async () => {
+        const admin = `g4dh-a3-adm-${TS}`
+        await seedLoginUser(admin, { roles: ['admin'], admin: true })
+        const approver = `g4dh-a3-p-${TS}`
+        const approverToken = await seedPerson(approver, 'attendance_approver')
+
+        // `comp_time` is the leave code whose approval deducts a balance with no extra settings, and
+        // (org_id, code) is unique: an existing row is reused (and left in place), else one is created.
+        const existingType = await pool().query<{ id: string; requires_approval: boolean; is_active: boolean }>(
+          `SELECT id::text AS id, requires_approval, is_active FROM attendance_leave_types
+            WHERE org_id = 'default' AND code = 'comp_time'`,
+        )
+        let leaveTypeId = existingType.rows[0]?.id
+        if (leaveTypeId) {
+          expect(existingType.rows[0], 'the existing comp_time leave type must require approval').toMatchObject({
+            requires_approval: true,
+            is_active: true,
+          })
+        } else {
+          const created = await http('POST', '/api/attendance/leave-types', await loginToken(admin), {
+            code: 'comp_time',
+            name: `G4-D comp time ${TS}`,
+            paid: true,
+            requiresApproval: true,
+          })
+          expect(created.status, created.text).toBe(201)
+          leaveTypeId = created.json.data.id as string
+          createdLeaveTypeIds.add(leaveTypeId)
+        }
+
+        // Twins: the same two lots each (fixture-only balance rows): 60 minutes expiring first, 480 later.
+        const twins = [`g4dh-a3-round-${TS}`, `g4dh-a3-direct-${TS}`]
+        const tokens: string[] = []
+        const lotIds: string[][] = []
+        for (const employee of twins) {
+          tokens.push(await seedPerson(employee, 'attendance_employee'))
+          const ids: string[] = []
+          for (const [minutes, expiresIn] of [[60, '1 day'], [480, '300 days']] as const) {
+            const lot = await pool().query<{ id: string }>(
+              `INSERT INTO attendance_leave_balances
+                 (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key,
+                  granted_at, expires_at, status)
+               VALUES ('default', $1, 'comp_time', $2, $2, 'grant', $3,
+                       now() - interval '10 days', now() + $4::interval, 'active')
+               RETURNING id::text AS id`,
+              [employee, minutes, `g4dh-a3-${employee}-${minutes}`, expiresIn],
+            )
+            ids.push(lot.rows[0].id)
+            createdLeaveBalanceIds.add(lot.rows[0].id)
+          }
+          lotIds.push(ids)
+        }
+
+        // Each twin's leave: created and approved through the real plugin routes (the approval deducts).
+        const leaves: Array<{ requestId: string; documentId: string }> = []
+        for (const token of tokens) {
+          const create = await http('POST', '/api/attendance/requests', token, {
+            workDate: '2031-04-10',
+            requestType: 'leave',
+            leaveTypeId,
+            minutes: 120,
+          })
+          expect(create.status, create.text).toBe(201)
+          const requestId = create.json.data.request.id as string
+          createdRequestIds.add(requestId)
+          const approve = await http('POST', `/api/attendance/requests/${requestId}/approve`, approverToken, { comment: 'ok' })
+          expect(approve.status, approve.text).toBe(200)
+          const row = await pool().query<{ status: string; approval_instance_id: string }>(
+            'SELECT status, approval_instance_id FROM attendance_requests WHERE id = $1',
+            [requestId],
+          )
+          expect(row.rows[0].status).toBe('approved')
+          createdApprovalIds.add(row.rows[0].approval_instance_id)
+          leaves.push({ requestId, documentId: row.rows[0].approval_instance_id })
+        }
+
+        // Balance ledgers: the SELECT * rows, minus the columns that are per person / per row / per
+        // instant by construction; the lot and the request an event points at are kept as positions.
+        const LOT_VARYING = new Set(['id', 'user_id', 'source_key', 'granted_at', 'expires_at', 'created_at', 'updated_at'])
+        const EVENT_VARYING = new Set(['id', 'user_id', 'balance_id', 'source_id', 'occurred_at', 'created_at'])
+        const strip = (row: Record<string, unknown>, varying: Set<string>) =>
+          Object.fromEntries(Object.entries(row).filter(([key]) => !varying.has(key)))
+        const ledgerOf = async (twin: number) => {
+          const lots = await pool().query<Record<string, unknown>>(
+            'SELECT * FROM attendance_leave_balances WHERE user_id = $1 ORDER BY amount_minutes',
+            [twins[twin]],
+          )
+          const events = await pool().query<Record<string, unknown>>(
+            'SELECT * FROM attendance_leave_balance_events WHERE user_id = $1',
+            [twins[twin]],
+          )
+          return {
+            lots: lots.rows.map((row) => strip(row, LOT_VARYING)),
+            events: events.rows
+              .map((row) => ({
+                ...strip(row, EVENT_VARYING),
+                lot: lotIds[twin].indexOf(String(row.balance_id)),
+                ownRequest: row.source_id === leaves[twin].requestId,
+              }))
+              .sort((x, y) => x.lot - y.lot || String(x.event_type).localeCompare(String(y.event_type))),
+          }
+        }
+        for (const twin of [0, 1]) {
+          expect((await ledgerOf(twin)).events).toEqual([
+            expect.objectContaining({ lot: 0, event_type: 'deduct', delta_minutes: -60, ownRequest: true }),
+            expect.objectContaining({ lot: 1, event_type: 'deduct', delta_minutes: -60, ownRequest: true }),
+          ])
+        }
+        // The earlier lot has since expired (fixture-only time move, both twins).
+        for (const ids of lotIds) {
+          const aged = await pool().query(
+            `UPDATE attendance_leave_balances SET expires_at = now() - interval '1 minute' WHERE id = $1::uuid`,
+            [ids[0]],
+          )
+          expect(aged.rowCount).toBe(1)
+        }
+
+        // Twin 0: the cancel round, launched by the employee and approved on the attendance side.
+        const launch = await http('POST', entryPath(leaves[0].requestId), tokens[0], {})
+        expect(launch.status, launch.text).toBe(201)
+        const roundInstanceId = launch.json.data.round.engineInstanceId as string
+        createdApprovalIds.add(roundInstanceId)
+        expect(await activeUserSeats(roundInstanceId)).toEqual([approver])
+        const decided = await http('POST', actionsPath(leaves[0].requestId), approverToken, { action: 'approve' })
+        expect(decided.status, decided.text).toBe(200)
+        expect(decided.json).toEqual({
+          ok: true,
+          data: {
+            requestId: leaves[0].requestId,
+            roundId: launch.json.data.round.roundId,
+            outcome: 'applied',
+            status: 'leave_cancelled',
+          },
+        })
+        const firstRead = await http('GET', entryPath(leaves[0].requestId), tokens[0])
+        const secondRead = await http('GET', entryPath(leaves[0].requestId), tokens[0])
+        expect(firstRead.status, firstRead.text).toBe(200)
+        expect(secondRead.text).toBe(firstRead.text)
+        const outcome = firstRead.json.data.round.cancellationOutcome
+        expect(outcome).toEqual({
+          status: 'cancelled_with_unrecoverable_expired',
+          reversal: { reversed: 60, lots: 1, unrecoverableExpired: 60, alreadyReversed: false },
+        })
+        const approvalSide = await http('GET', `/api/approvals/${roundInstanceId}`, await fixtureAdminToken(approver))
+        expect(approvalSide.status, approvalSide.text).toBe(200)
+        expect(approvalSide.json.cancellationOutcome).toEqual(outcome)
+
+        // Twin 1: the existing direct cancel by its employee.
+        const direct = await http('POST', `/api/attendance/requests/${leaves[1].requestId}/cancel`, tokens[1], {})
+        expect(direct.status, direct.text).toBe(200)
+        expect(direct.json.data.reversal).toEqual(outcome.reversal)
+
+        // The ledgers end in the same place, column by column.
+        const [roundLedger, directLedger] = [await ledgerOf(0), await ledgerOf(1)]
+        expect(roundLedger).toEqual(directLedger)
+        expect(roundLedger.lots).toEqual([
+          expect.objectContaining({ amount_minutes: 60, remaining_minutes: 0 }),
+          expect.objectContaining({ amount_minutes: 480, remaining_minutes: 480, status: 'active' }),
+        ])
+        expect(roundLedger.events).toEqual([
+          expect.objectContaining({ lot: 0, event_type: 'deduct', delta_minutes: -60, ownRequest: true }),
+          expect.objectContaining({ lot: 1, event_type: 'deduct', delta_minutes: -60, ownRequest: true }),
+          expect.objectContaining({ lot: 1, event_type: 'reverse', delta_minutes: 60, ownRequest: true }),
+        ])
+        const statuses = await pool().query<{ status: string }>(
+          'SELECT status FROM attendance_requests WHERE id = ANY($1::uuid[]) ORDER BY status',
+          [[leaves[0].requestId, leaves[1].requestId]],
+        )
+        expect(statuses.rows).toEqual([{ status: 'cancelled' }, { status: 'cancelled' }])
+        expect((await roundsFor(leaves[0].documentId)).map((row) => row.outcome)).toEqual(['applied'])
       })
     })
   })
