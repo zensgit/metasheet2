@@ -167,6 +167,7 @@ AutomationExecutionsView
 cancelRoundEntryApproverList
 cancelRoundEntryAttendancePanel
 cancelRoundEntryCenterRoute
+cancelRoundEntryContract
 cancelRoundEntryCore
 cancelRoundEntryDetailView
 cancelRoundEntrySurfaces

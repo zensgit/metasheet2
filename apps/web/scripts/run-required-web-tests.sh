@@ -1389,7 +1389,8 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # token is a substring of any of them or vice versa (bidirectional scan in the design MD §7).
 # 阶段 B2 (same MD, §B2): `cancelRoundEntryApproverList` — the attendance-side list of cancellations
 # awaiting the viewer's approval (owner 2026-09-29 16:5x); `cancelRoundEntryTodoCenter` — the todo
-# center's cancel-round sub-type label (P-11 (b)). Same bidirectional scan, recorded in §B2.
+# center's cancel-round sub-type label (P-11 (b)); `cancelRoundEntryContract` — the client↔server
+# cancel-round contract read from the server sources. Same bidirectional scan, recorded in §B2.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1507,6 +1508,7 @@ exec npx vitest run \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
+  cancelRoundEntryContract \
   cancelRoundEntryCore \
   cancelRoundEntryDetailView \
   cancelRoundEntrySurfaces \
