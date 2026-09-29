@@ -429,11 +429,15 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
   it('E. slice 3b: the conversion and its undo are 免检 because they read the field row under a lock after the fence — and they do', () => {
     expect(FENCE_HOLDER_LEDGER.filter((e) => e.lockedFieldRead === true).map((e) => e.key)).toEqual([CONVERT_EXECUTE_KEY, CONVERT_UNDO_KEY])
     expect(lockedFieldReadViolations(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
-    // anti-vacuity: both holders DO write meta_records.data in their own region, through no callee
+    // Each holder writes meta_records.data with exactly ONE statement of its own, through no callee. The count is
+    // pinned: an exempt verdict covers the writes that were read when it was given, not the next one (C2-F4 —
+    // closed for these two rows; every other exempt row of the ledger still accepts a new direct write).
     for (const key of [CONVERT_EXECUTE_KEY, CONVERT_UNDO_KEY]) {
       const holders = REAL.holders.filter((h) => h.key === key)
       expect(holders, key).toHaveLength(1)
-      expect(directRecordDataWritesAfterFence(holders[0]).length, key).toBeGreaterThanOrEqual(1)
+      expect(directRecordDataWritesAfterFence(holders[0]), key).toHaveLength(1)
+      expect(holders[0].writesVia, key).toEqual([])
+      expect(holders[0].entryWritesVia, key).toEqual([])
     }
   })
 
@@ -849,6 +853,16 @@ describe('slice 3b — guard E (免检 by a locked field read after the fence) o
     expect(violations).toHaveLength(1)
     expect(violations[0]).toContain(`${CONVERT_UNDO_KEY} (line `)
     expect(violations[0]).toContain('no locked meta_fields read')
+  })
+
+  it('REAL tree: a SECOND direct data write in the conversion, after the locked field read, reds the pinned count', () => {
+    const anchor = '  await recordConfigRevision(query, {\n    id: convertRevisionId,'
+    const c = patched(anchor, `  await query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{}, sheetId])\n${anchor}`)
+    const holder = c.holders.find((h) => h.key === CONVERT_EXECUTE_KEY)!
+    // guard E alone would not notice: the locked field read still precedes the FIRST write
+    expect(checkLockedFieldReadBeforeFirstDataWrite(holder)).toEqual({ ok: true })
+    expect(directRecordDataWritesAfterFence(holder)).toHaveLength(2)
+    expect(directRecordDataWritesAfterFence(REAL.holders.find((h) => h.key === CONVERT_EXECUTE_KEY)!)).toHaveLength(1)
   })
 
   it('REAL tree: a data write reached through a NEW callee of the conversion reds the writesVia check', () => {
