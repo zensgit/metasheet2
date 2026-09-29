@@ -20,7 +20,7 @@ export async function verifyManualArchiveBrowser(backendOrigin, syntheticEdit, k
   const web = join(repo, 'apps/web')
   const requireWeb = createRequire(join(web, 'package.json'))
   const requireRoot = createRequire(join(repo, 'package.json'))
-  const { createServer } = await import(pathToFileURL(requireWeb.resolve('vite')).href)
+  const { createServer } = requireWeb('vite')
   const { default: vue } = await import(pathToFileURL(requireWeb.resolve('@vitejs/plugin-vue')).href)
   const { chromium } = requireRoot('@playwright/test')
   const cache = await mkdtemp(join(tmpdir(), 'tm-manual-browser-cache-'))
@@ -91,6 +91,8 @@ resumeJob:wire('resumeRecoveryArchiveJob'),cancelJob:wire('cancelRecoveryArchive
       })
       page.on('response', response => {
         const path = new URL(response.url()).pathname
+        if (application && process.env.TASKS_ENABLED !== 'true' && response.request().method() === 'GET'
+          && path === '/api/tasks/pending-count' && response.status() === 404) return
         if (path.startsWith('/api/') && !response.ok()) apiFailures.push(`API_STATUS_${response.status()}:${path}`)
       })
       page.on('request', request => {

@@ -1965,6 +1965,7 @@ try {
       console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
       const express = require('express') as typeof import('express')
       const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+      const { createMultitableAiRoutes } = require('../src/routes/multitable-ai.ts') as typeof import('../src/routes/multitable-ai')
       const attachmentApp = express()
       attachmentApp.use(express.json())
       const { authRouter } = require('../src/routes/auth.ts') as typeof import('../src/routes/auth')
@@ -2016,6 +2017,7 @@ try {
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
       }))
+      attachmentApp.use('/api/multitable', createMultitableAiRoutes())
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
       let verifyFullApplication: (() => Promise<void>) | undefined
       try {
