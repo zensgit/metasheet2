@@ -722,7 +722,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | P-5 待办镜像用例是计时抖动:插入与领取落在同一毫秒时,worker 领到 0 行 | P2 | worker 经自身的 `now` 注入点拿一个**固定**、快 60 s 的时钟;不手写账本行 | 修复前:库 A 16 次全文件运行 4 红、库 B 14 次 2 红,红全在领取计数行 `:1798`(`expected +0 to be 1`)。修复后:库 A 25/25、库 B 13/13 全绿(下表) |
 | `runBatch()` 从全库领取;`claimed == 1` 与抛错假件的终态写都假设库里没有别的到期行 | NIT | 跑批前断言:本轮实例之外不存在 `pending` / `completing` / `sending` 行,带明确失败信息。这三个状态是领取谓词的在途状态,是「到期」的超集。另断言本轮自己那一行的 `last_attempt_at` 恰等于该 worker 的固定时钟,即这次领取落在这一行 | 守卫探针(下文);`claimed == 1` 在守卫成立时才断言 |
 | 两处收窄(分发动作 `roles: []`;创建只收 `{ userId, userName }`)拆掉后套件仍 42/42 | NIT | 新单测 `approval-cancel-round-entry-port-actor-narrowing.test.ts`。服务入口被 mock,入口 actor 带 roles、ip、userAgent。approve / reject / revoke 三个分发动作的 actor 逐键等于 `{ userId, userName, roles: [], ip, userAgent }`;创建参数键集恰为 `userId`、`userName`,无显示名时恰为 `userId` | LEAK-dispatch 3 红;LEAK-create 2 红 |
-| 插件 `getActorRoleClaims` 的 `req.user.roles` 数组臂无读数 | NIT | 新单测 `approval-cancel-round-plugin-actor-role-claims.test.ts`:从 `index.cjs` 取该函数的字节(断言恰一处定义)并**运行**,逐个请求形状与核心 `resolveApprovalActorRoles` 及字面量两边比较。形状包括:数组臂单独、两臂去重、role 去空白、数组项不去空白、非字符串 / 空白数组项、非数组 `roles`、无用户。不新增插件导出 | P-array(去掉数组臂)4 红 |
+| 插件 `getActorRoleClaims` 的 `req.user.roles` 数组臂无读数 | NIT | 新单测 `approval-cancel-round-plugin-actor-role-claims.test.ts`:从 `index.cjs` 取该函数的字节(断言恰一处定义)并**运行**,逐个请求形状与核心 `resolveApprovalActorRoles` 及字面量两边比较。形状包括:数组臂单独、两臂去重、role 去空白、数组项不去空白、非字符串 / 空白数组项、非数组 `roles`、无用户。不新增插件导出 | P-array(去掉数组臂)4 红。该单测只钉住函数本身的行为;插件三处调用点确实调用它,由 §9.10 的 R-launch / R-decide / R-withdraw 钉住 |
 | 待办中心仍挂 `approvals:read`,非管理员考勤审批人 403 | NIT | 阶段 C 不改代码,记录同 §9.9 第 4 项。去处是 owner 16:5x ② 的考勤侧列表(新范围,§9.9 第 8 项),或另行的授予决定(不在授权内) | — |
 
 **抖动机理(计时问题)**:consumer 插入的行 `next_attempt_at` 取数据库 `now()` 默认值,精度到微秒。worker 领取时用 `this.now().toISOString()` 作 `$1`,精度截断到毫秒,判据是 `next_attempt_at <= $1`。插入与领取落在同一毫秒时,例如 `.682Z` 对 `.682115`,该行不到期,领到 0 行。固定时钟快 60 s,既覆盖毫秒截断,也覆盖进程与数据库之间的小时钟差。用固定时钟而不是走动时钟,是为了能用 `last_attempt_at` 精确认出这一次领取。
@@ -733,7 +733,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 3. 该行原样:`pending`、`attempt_count` 0、`last_attempt_at` 与 `claim_worker_id` 为空,即 worker 没有跑到。
 4. 删除该行后表内 0 行。
 
-**CI 里的前提**:`vitest.integration.config.ts` 设 `fileParallelism: false`、`maxConcurrency: 1`,同一 step 的文件串行执行,守卫取快照期间没有别的文件在写。今天集成测试里只有本文件写 `dingtalk_todo_mirrors`;它的其它用例只留终态行,`afterAll` 删除本文件写入的行。
+**CI 里的前提**:`vitest.integration.config.ts` 设 `fileParallelism: false`、`maxConcurrency: 1`,同一 step 的文件串行执行,守卫取快照期间没有别的文件在写。该账本表在生产代码里只有镜像服务一处 INSERT,由 `DINGTALK_TODO_MIRROR_ENABLED` 门控。grep 所见:集成测试里除本文件外,没有文件打开这个开关、调用 `applyTodoMirrorTaskCreated` 或构造镜像 worker;`.github/workflows/` 也没有设置该开关。多维表集成测试里出现的 `dingtalk-todo-mirror` 是自动化 outbox 的消费者键,不是这张账本表。本文件的其它用例只留终态行,`afterAll` 删除本文件写入的行。
 
 **读数**:
 - 库 A = `ms2_g4cancelc_fix2_20260929`;库 B = `ms2_g4cancelc_fix2b_20260929`,另行新建。
