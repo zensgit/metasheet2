@@ -675,7 +675,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     expect(summary.text.includes('g4a-free-text-detail-must-not-appear')).toBe(false)
   })
 
-  it('P-4 canWithdraw agrees with the ENGINE revoke gate in both directions (requester true ⇒ engine revoke succeeds; admin false ⇒ same code); the approval-side action route still refuses the employee (witness)', async () => {
+  it('P-4 canWithdraw agrees with the ENGINE revoke gate in both directions (requester true ⇒ engine revoke succeeds; admin false ⇒ same code, before AND after the round ends); the approval-side action route still refuses the employee (witness)', async () => {
     const employee = `g4a-wd-${TS}`
     const admin = `g4a-wd-admin-${TS}`
     await seedLoginUser(employee, { roles: ['attendance_employee'] })
@@ -715,6 +715,23 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       canWithdraw: false,
       withdrawBlockedReason: 'INVALID_STATUS_TRANSITION',
     })
+
+    // Same agreement once the round has ENDED, for a viewer who is not the requester: the engine
+    // checks the requester before the terminal status, so it answers the admin APPROVAL_REVOKE_FORBIDDEN
+    // (not INVALID_STATUS_TRANSITION) — and the summary must name the same code.
+    const adminAfter = await http('GET', entryPath(requestId), adminToken)
+    expect(adminAfter.status, adminAfter.text).toBe(200)
+    expect(adminAfter.json.data.round).toMatchObject({
+      outcome: 'withdrawn',
+      canWithdraw: false,
+      withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN',
+    })
+    await expect(
+      service().dispatchAction(roundInstanceId, { action: 'revoke' } as ApprovalActionRequest, { userId: admin, roles: ['admin'] }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'APPROVAL_REVOKE_FORBIDDEN' })
+    await expect(
+      service().dispatchAction(roundInstanceId, { action: 'revoke' } as ApprovalActionRequest, { userId: employee, roles: [] }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'INVALID_STATUS_TRANSITION' })
   })
 
   it('P-4 / I7: an outsider, and a request with no approval instance, get the byte-identical 404 of a never-existing id (GET and POST)', async () => {
@@ -1405,6 +1422,22 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         expect(response.status).toBe(401)
       }
       expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+    })
+
+    it('the launch records the requester\'s display name on the round\'s created audit row (not the bare id)', async () => {
+      const employee = `g4a-a2-name-${TS}`
+      const displayName = `G4A 显示名 ${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      await pool().query('UPDATE users SET name = $2 WHERE id = $1', [employee, displayName])
+      const token = await loginToken(employee)
+      const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+      const launch = await http('POST', entryPath(requestId), token, {})
+      expect(launch.status, launch.text).toBe(201)
+      const created = await pool().query<{ actor_id: string; actor_name: string }>(
+        `SELECT actor_id, actor_name FROM approval_records WHERE instance_id = $1 AND action = 'created'`,
+        [launch.json.data.round.engineInstanceId],
+      )
+      expect(created.rows).toEqual([{ actor_id: employee, actor_name: displayName }])
     })
   })
 })

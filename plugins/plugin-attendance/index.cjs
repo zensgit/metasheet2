@@ -37200,7 +37200,11 @@ module.exports = {
               })
               return
             }
-            const result = await cancelRoundEntryPort.launch(request.documentInstanceId, { userId: viewerId }, { reason })
+            const result = await cancelRoundEntryPort.launch(
+              request.documentInstanceId,
+              { userId: viewerId, userName: getUserLabel(req, viewerId) },
+              { reason }
+            )
             if (!result || result.ok !== true) {
               respondCancelRoundPortRefusal(res, result, 'Failed to start cancellation')
               return

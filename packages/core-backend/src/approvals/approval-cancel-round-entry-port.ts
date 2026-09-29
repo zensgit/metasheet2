@@ -247,19 +247,24 @@ function parseJsonish(value: unknown): unknown {
 /**
  * Mirror of the ENGINE-level revoke gate (`ApprovalProductService.dispatchAction`, the
  * `request.action === 'revoke'` branch), in the SAME order and over the SAME inputs: the published
- * definition's `runtime_graph.policy` (`allowRevoke`, `revokeBeforeNodeKeys`), the engine instance's
- * `requester_snapshot.id`, `status` and `current_node_key`, and the handled-record count at that
- * node. A `true` here means the engine would accept this viewer's revoke right now; a `false` names
- * the code the engine would answer. The employee-reachable HTTP path to this gate is the
- * attendance-side withdraw route (A2); the approval-side action route keeps its own permission guard
- * in front of the same engine. The suite pins both engine directions in-process and over HTTP.
+ * definition's `runtime_graph.policy.allowRevoke`, then the engine instance's `requester_snapshot.id`,
+ * then the terminal check (the round's own `outcome` and the engine instance's `status`), then
+ * `current_node_key`, `revokeBeforeNodeKeys` and the handled-record count at that node. A `true` here
+ * means the engine would accept this viewer's revoke right now; a `false` names the code the engine
+ * would answer — for every viewer, the requester and anyone else alike (the terminal check sits AFTER
+ * the requester check, exactly as in the engine, so a non-requester on a finished round reads
+ * `APPROVAL_REVOKE_FORBIDDEN`, the code the engine answers them). The only earlier exit is a round
+ * row with no engine instance at all, which the engine could not be asked about. The
+ * employee-reachable HTTP path to this gate is the attendance-side withdraw route (A2); the
+ * approval-side action route keeps its own permission guard in front of the same engine. The suite
+ * pins both engine directions in-process and over HTTP.
  */
 async function resolveCanWithdraw(
   query: Queryable,
   row: RoundRow,
   viewerId: string,
 ): Promise<{ canWithdraw: boolean; reason: CancelRoundWithdrawBlockedReasonV1 | null }> {
-  if (row.outcome !== 'pending' || !row.engine_instance_id) {
+  if (!row.engine_instance_id) {
     return { canWithdraw: false, reason: 'INVALID_STATUS_TRANSITION' }
   }
   if (row.allow_revoke !== true) {
@@ -268,7 +273,11 @@ async function resolveCanWithdraw(
   if (row.engine_requester_id !== viewerId) {
     return { canWithdraw: false, reason: 'APPROVAL_REVOKE_FORBIDDEN' }
   }
-  if (typeof row.engine_status !== 'string' || TERMINAL_ENGINE_STATUSES.has(row.engine_status)) {
+  if (
+    row.outcome !== 'pending'
+    || typeof row.engine_status !== 'string'
+    || TERMINAL_ENGINE_STATUSES.has(row.engine_status)
+  ) {
     return { canWithdraw: false, reason: 'INVALID_STATUS_TRANSITION' }
   }
   const currentNodeKey = row.engine_current_node_key
