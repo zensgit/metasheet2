@@ -1801,12 +1801,12 @@ test('tasks smoke id is registered: workflow choice list + remote action_smoke c
   assert.match(smoke, /tasks\)\n\s+smoke_script="staging-tasks-smoke\.mjs"\n\s+stamp_prefix="tasks-smoke"/, 'action_smoke must map smoke=tasks to staging-tasks-smoke.mjs with stamp_prefix tasks-smoke')
   assert.match(
     smoke,
-    /tasks_live="\$\(soak_backend_env TASKS_ENABLED\)"\n\s+\[\[ "\$tasks_live" == "true" \]\] \\\n\s+\|\| fail "smoke=tasks requires TASKS_ENABLED=true/,
+    /if \[\[ "\$SMOKE_ID" == "tasks" \]\]; then\n(?:\s+#[^\n]*\n)*\s+local tasks_live\n\s+tasks_live="\$\(soak_backend_env TASKS_ENABLED\)"\n\s+\[\[ "\$tasks_live" == "true" \]\] \\\n\s+\|\| fail "smoke=tasks requires TASKS_ENABLED=true/,
     'action_smoke must fail closed unless the running backend actually has TASKS_ENABLED=true',
   )
   assert.match(
     smoke,
-    /SUBJECT_TOKEN=\$\(mint_token "\$\{stamp\}" 'user' 'tasks:read,tasks:write' 'default'\)/,
+    /if \[\[ "\$SMOKE_ID" == "tasks" \]\]; then\n(?:\s+#[^\n]*\n)*\s+run_env\+=\("SUBJECT_TOKEN=\$\(mint_token "\$\{stamp\}" 'user' 'tasks:read,tasks:write' 'default'\)"\)\n\s+fi/,
     'action_smoke must mint a tenant-scoped SUBJECT_TOKEN for the tasks smoke, org default (the same deterministic org every other window smoke uses)',
   )
 })
@@ -1957,7 +1957,7 @@ test('action=soak-flags guard also refuses to silently drop a live TASKS_ENABLED
   const remote = readFileSync(REMOTE_SH, 'utf8')
   assert.match(
     remote,
-    /grep -qE 'ATTENDANCE_SCHEDULER_ENABLED\|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED\|TASKS_ENABLED' "\$OVERRIDE_FILE"/,
+    /if \[\[ -f "\$OVERRIDE_FILE" \]\] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED\|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED\|TASKS_ENABLED' "\$OVERRIDE_FILE"; then\n\s+fail "existing runner override carries/,
     'soak-flags must refuse to rewrite an override that already carries TASKS_ENABLED, same as it already refuses for the rd-window flags',
   )
 })
@@ -4428,4 +4428,91 @@ test('raw-control-byte guard: no soak-touched file carries raw control bytes (gi
     const off = hasControlByte(readFileSync(file))
     assert.equal(off, -1, `${file} carries a raw control byte at offset ${off}`)
   }
+})
+
+// --- tasks_enabled: executable checks (runner review round 1) ---------------------------------
+
+function extractAssertWindowEnvFlags() {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  // End at the next top-level function: the embedded node -e body contains column-0 `}` lines,
+  // so a "first column-0 brace" extractor would truncate this function.
+  const start = remote.indexOf('assert_window_env_flags() {')
+  const end = remote.indexOf('snapshot_staging_ps() {', start)
+  assert.ok(start !== -1 && end > start, 'expected assert_window_env_flags() bounds')
+  return remote.slice(start, end)
+}
+
+function runAssertWindowEnvFlags({ requested, live }) {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-envflags-'))
+  const script = `set -euo pipefail
+OUTPUT_DIR='${dir}'
+SET_WINDOW_ENV=none
+staging_exec() {
+  if [[ "$STUB_LIVE" == "<unset>" ]]; then
+    env -u TASKS_ENABLED -u ATTENDANCE_REPORT_DIGEST_ENABLED -u ATTENDANCE_SCHEDULER_ENABLED -u ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED "$@"
+  else
+    env -u ATTENDANCE_REPORT_DIGEST_ENABLED -u ATTENDANCE_SCHEDULER_ENABLED -u ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED TASKS_ENABLED="$STUB_LIVE" "$@"
+  fi
+}
+${extractAssertWindowEnvFlags()}
+assert_window_env_flags "$STUB_REQUESTED"
+`
+  const result = spawnSync('bash', ['-o', 'pipefail', '-c', script], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, STUB_LIVE: live, STUB_REQUESTED: requested },
+  })
+  const flags = existsSync(join(dir, 'env-flags.txt')) ? readFileSync(join(dir, 'env-flags.txt'), 'utf8') : ''
+  rmSync(dir, { recursive: true, force: true })
+  return { ...result, flags }
+}
+
+test('EXECUTABLE (assert_window_env_flags): tasks requested but not live FAILS closed; requested=false only WARNs', () => {
+  const cases = [
+    { requested: 'true', live: '<unset>', rc: 1, out: /FAIL: tasks_enabled=true requested but TASKS_ENABLED=undefined/ },
+    { requested: 'true', live: 'false', rc: 1, out: /FAIL: tasks_enabled=true requested but TASKS_ENABLED=false/ },
+    { requested: 'true', live: 'true', rc: 0, flags: /tasks=true\(requested=true\)/ },
+    { requested: 'false', live: '<unset>', rc: 0, flags: /tasks=<unset>\(requested=false\)/ },
+    { requested: 'false', live: 'true', rc: 0, out: /WARN: tasks_enabled=false/, flags: /tasks=true\(requested=false\)/ },
+  ]
+  for (const c of cases) {
+    const r = runAssertWindowEnvFlags(c)
+    const label = `requested=${c.requested} live=${c.live}`
+    assert.equal(r.status, c.rc, `${label}: rc ${r.status}; stderr: ${r.stderr}`)
+    if (c.out) assert.match(r.stderr + r.stdout, c.out, label)
+    if (c.flags) assert.match(r.flags, c.flags, label)
+  }
+})
+
+test('workflow validation: tasks_enabled rejects non-deploy true and any value other than true|false (exit 2); false passes', () => {
+  const notDeploy = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'true' })
+  assert.equal(notDeploy.status, 2, notDeploy.stderr)
+  assert.match(notDeploy.stderr, /tasks_enabled=true is only allowed for action=deploy/)
+  const badValue = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'TRUE' })
+  assert.equal(badValue.status, 2, badValue.stderr)
+  assert.match(badValue.stderr, /tasks_enabled must be true or false, got: 'TRUE'/)
+  const ok = runWorkflowValidation({ ACTION: 'status', TASKS_ENABLED_INPUT: 'false' })
+  assert.equal(ok.status, 0, ok.stderr)
+})
+
+test('workflow: both the validation step and the remote-action step map TASKS_ENABLED_INPUT from inputs.tasks_enabled', () => {
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  for (const step of ['Validate inputs and embedded scripts', 'Run remote action']) {
+    const at = workflow.indexOf(`- name: ${step}`)
+    assert.notEqual(at, -1, `expected workflow step: ${step}`)
+    const runAt = workflow.indexOf('run: |', at)
+    assert.match(workflow.slice(at, runAt), /\n\s+TASKS_ENABLED_INPUT: \$\{\{ inputs\.tasks_enabled \}\}\n/, `${step} must map TASKS_ENABLED_INPUT`)
+  }
+})
+
+test('EXECUTABLE (remote script): TASKS_WINDOW_ENABLED is re-validated fail-closed before any action runs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-tasks-validate-'))
+  const base = { PATH: process.env.PATH, OUTPUT_DIR: dir, RUN_STAMP: 'gh1a1' }
+  const bad = spawnSync('bash', ['-o', 'pipefail', REMOTE_SH], { encoding: 'utf8', env: { ...base, ACTION: 'status', TASKS_WINDOW_ENABLED: 'yes' } })
+  assert.equal(bad.status, 1, bad.stderr)
+  assert.match(bad.stderr, /TASKS_WINDOW_ENABLED must be true or false, got: 'yes'/)
+  const notDeploy = spawnSync('bash', ['-o', 'pipefail', REMOTE_SH], { encoding: 'utf8', env: { ...base, ACTION: 'status', TASKS_WINDOW_ENABLED: 'true' } })
+  assert.equal(notDeploy.status, 1, notDeploy.stderr)
+  assert.match(notDeploy.stderr, /TASKS_WINDOW_ENABLED=true is only allowed for action=deploy/)
+  assert.doesNotMatch(bad.stdout + notDeploy.stdout, /\[window-runner\] (?!.*error)/, 'nothing may run before the validation fails')
+  rmSync(dir, { recursive: true, force: true })
 })

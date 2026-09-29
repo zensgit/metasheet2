@@ -111,7 +111,7 @@ on:
         type: boolean
         default: false
       tasks_enabled:
-        description: 'deploy only: sets TASKS_ENABLED=true on the staging backend via the runner override (mounts the P0-A /api/tasks routes). Default false; redeploying with false removes it. Review-gated: only merge after review; default stays false until then.'
+        description: 'deploy only: sets TASKS_ENABLED=true on the staging backend via the runner override (mounts the P0-A /api/tasks routes). Default false; redeploying with false removes it. Rollback: redeploy the SAME deploy_sha with false (+force_recreate); an older image fails deploy migrate once newer migrations are applied.'
         required: false
         type: choice
         options: ['false', 'true']

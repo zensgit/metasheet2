@@ -9,6 +9,11 @@
 #                    SAME persistent runner override SET_WINDOW_ENV uses (one `environment:`
 #                    block, never a duplicate YAML key); redeploying with it false removes the
 #                    key again. Deploy-only — see the TASKS_WINDOW_ENABLED validation below.
+#                    Rollback rule: once a deploy has applied the new SHA's migrations, an older
+#                    image can no longer pass deploy's inline migrate (kysely refuses a DB that has
+#                    migrations the image does not know). So a tasks rollback redeploys the SAME
+#                    SHA with TASKS_WINDOW_ENABLED=false (and FORCE_RECREATE=true); roll back the
+#                    image only when no migrations were applied in the window.
 #   smoke          — run one of the five window smokes, PLUS the `tasks` id (owner-authorized
 #                    2026-09-28), in-container (bundle doc:
 #                    docs/development/attendance-staging-window-bundle-20260702.md). `tasks` is
@@ -762,12 +767,13 @@ assert_window_env_flags() {
   # assert_window_env_flags [tasks_mode=false]
   #
   # The digest gate must stay unset/false for the whole window (bundle §3.4); the two
-  # rd-window flags must be live when requested; TASKS_ENABLED must match tasks_mode when the
-  # caller KNOWS the requested mode (action=deploy passes TASKS_WINDOW_ENABLED), and merely
-  # WARNs (never fails) when the caller has no such input of its own (residue-sweep/status
-  # always pass "false" here — same "not requested but on" WARN treatment already given to the
-  # rd-window flags in that branch, since an env set outside this runner's own override is an
-  # observation, not this action's violation to fail on). Verified in the RUNNING container env.
+  # rd-window flags must be live when requested. TASKS_ENABLED is asymmetric, like the rd-window
+  # flags: tasks_mode=true FAILS closed unless TASKS_ENABLED=true is live; tasks_mode=false only
+  # WARNs when it is still live (an env set outside this runner's own override, e.g. in the host
+  # env file, is an observation, not this action's violation). That includes action=deploy with
+  # TASKS_WINDOW_ENABLED=false, so a tasks rollback must check env-flags.txt for
+  # `tasks=<unset>(requested=false)` rather than rely on the exit code. residue-sweep and status
+  # have no tasks input of their own and always pass "false". Verified in the RUNNING container env.
   local tasks_mode="${1:-false}"
   staging_exec node -e '
 const mode = process.argv[1]
@@ -1447,6 +1453,9 @@ action_residue_sweep() {
 # soak org slugs cannot leak into logs or artifacts.
 classify_runner_override() {
   local out="${OUTPUT_DIR}/override-shape.txt"
+  # TASKS_ENABLED is probed by presence like the other candidates, so the host env file must not
+  # set TASKS_ENABLED at all (any value, even "false", reads as live and status reports a mismatch);
+  # this runner's override is the only intended writer.
   local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME} TASKS_ENABLED"
   local rd_set="ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ATTENDANCE_SCHEDULER_ENABLED"
   local soak_set

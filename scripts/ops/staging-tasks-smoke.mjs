@@ -70,7 +70,9 @@ export function jwtSubject(jwt) {
     const seg = String(jwt).split('.')[1]
     if (!seg) return null
     const payload = JSON.parse(Buffer.from(seg, 'base64url').toString('utf8'))
-    return payload.id ?? payload.sub ?? payload.userId ?? null
+    // Same claim order as the backend's token verification (userId, then id, then sub), so the
+    // subject this smoke checks is the subject the backend will authenticate.
+    return payload.userId || payload.id || payload.sub || null
   } catch {
     return null
   }
@@ -86,6 +88,12 @@ export function assertNotAdminRoleId(roleId) {
     throw new Error(`refusing to use a role id ending "_admin" for a non-admin smoke subject: ${roleId}`)
   }
   return roleId
+}
+
+// The throwaway role id for a stamp. Exported so the companion test exercises the exact wiring
+// the smoke uses (not a literal the test builds itself).
+export function roleIdForStamp(stamp) {
+  return assertNotAdminRoleId(`${stamp}-role`)
 }
 
 // Env-only contract (no CLI args), mirroring the OT-bank v1-8 / mp6 / hmr5 helpers: BASE_URL/
@@ -129,7 +137,7 @@ const { baseUrl: BASE_URL, databaseUrl: DATABASE_URL, orgId: ORG_ID, deploySha: 
 // The subject IS the stamp itself (owner-named literally: "create a namespaced throwaway
 // non-admin user tasks-smoke-<RUN_STAMP>") — one subject, not a family, so no extra suffix.
 const USER_ID = STAMP
-const ROLE_ID = assertNotAdminRoleId(`${STAMP}-role`)
+const ROLE_ID = roleIdForStamp(STAMP)
 
 let subjectToken = process.env.SUBJECT_TOKEN || ''
 let cleanupAllowed = false
@@ -244,6 +252,11 @@ async function seedRoleAndUser() {
   if (!isStampedId(USER_ID, 'tasks-smoke-')) {
     throw new Error(`refusing to run: subject "${USER_ID}" is not stamped tasks-smoke-. This smoke deletes its synthetic user during cleanup.`)
   }
+  // Arm cleanup BEFORE the first INSERT, not after the last one: a failure partway through the
+  // seed must still be cleaned up. Safe because preflightNoExistingResidue() has just proved zero
+  // rows exist for this USER_ID/ROLE_ID, and every cleanup DELETE is keyed on those two ids, so
+  // cleanup can only remove rows this run wrote.
+  cleanupAllowed = true
   await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [ROLE_ID, ROLE_ID])
   await pool.query(
     `INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read'), ($1, 'tasks:write')
@@ -265,7 +278,6 @@ async function seedRoleAndUser() {
      ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
     [USER_ID, ORG_ID],
   )
-  cleanupAllowed = true
   ok(true, 'seeded synthetic non-admin subject: users + user_orgs + roles + role_permissions(tasks:read,tasks:write) + user_roles', { stamp: STAMP, role: ROLE_ID })
 }
 
