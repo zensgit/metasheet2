@@ -86,6 +86,12 @@ export type FenceHolder = {
    * callees' bodies — contains a `meta_records.data` write statement.
    */
   writesVia: string[]
+  /**
+   * C2-F1: callees through which the BODY of the entry / seam this holder calls writes `meta_records.data`
+   * (`entry>callee`, precise resolution, two levels below the entry). Empty for the SQL kinds and for an entry
+   * without a caller, whose own body already is its region.
+   */
+  entryWritesVia: string[]
 }
 
 export type Census = {
@@ -793,6 +799,25 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     }
     return [...via].sort()
   }
+  /**
+   * C2-F1 (slice 3b): the writes made INSIDE the body of the entry / seam a holder calls, through a callee. A
+   * holder's region starts where the entry call ENDS, so nothing the entry itself does was ever followed — and an
+   * entry stays an entry as long as its own literals write no `meta_records` row. Here the entry's own calls are
+   * resolved precisely and followed the same two levels as a region's callees (the callee's body, and its callees'
+   * bodies). Named `entry>callee` so a reviewer sees on which side of the call the write sits. Every call of the
+   * body counts, before or after the fence statement inside it: a write just before the fence is unfenced, which
+   * is no better.
+   */
+  const entryWritesViaOf = (target: Decl): string[] => {
+    const via = new Set<string>()
+    visitAll(target.fn, (n) => {
+      if (!ts.isCallExpression(n)) return
+      const r = resolveCall(n, target.parsed)
+      if (!r.precise) return
+      for (const d of r.decls) if (d !== target && declWritesData(d, 2)) via.add(`${target.qualified}>${d.qualified}`)
+    })
+    return [...via].sort()
+  }
 
   // ── holders ──
   const holders: FenceHolder[] = []
@@ -830,6 +855,7 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
       kind,
       regions,
       writesVia: writesViaOf(regions),
+      entryWritesVia: entryWritesViaOf(target),
     })
   }
   if (sqlAcquirers.size > 0 || triggerTables.size > 0) {
@@ -848,12 +874,12 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
         const fm = fnRe?.exec(text)
         if (fm) {
           const callee = `sql:${fm[1].toLowerCase()}`
-          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-function-call', regions, writesVia: writesViaOf(regions) })
+          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-function-call', regions, writesVia: writesViaOf(regions), entryWritesVia: [] })
         }
         const tm = trigRe?.exec(text)
         if (tm) {
           const callee = `sql-dml:${tm[1].toLowerCase()}`
-          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-trigger-dml', regions, writesVia: writesViaOf(regions) })
+          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-trigger-dml', regions, writesVia: writesViaOf(regions), entryWritesVia: [] })
         }
       }
     }
@@ -875,6 +901,7 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
       kind: 'entry-without-caller',
       regions,
       writesVia: writesViaOf(regions),
+      entryWritesVia: [],
     })
   }
   holders.sort((a, b) => a.key.localeCompare(b.key) || a.line - b.line)
