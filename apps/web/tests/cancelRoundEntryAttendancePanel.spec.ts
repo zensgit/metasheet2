@@ -219,6 +219,14 @@ describe('launch dialog and withdraw', () => {
     const other = await mountPanel(LEAVE, 'someone_else')
     expect($(other, 'data-cancel-round-withdraw')).toBeNull()
   })
+
+  it('the server says the viewer is not the requester (APPROVAL_REVOKE_FORBIDDEN): no withdraw even on the viewer\'s own row', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN' }) }))]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(root, 'data-cancel-round-withdraw')).toBeNull()
+    expect($(root, 'data-cancel-round-withdraw-reason')).toBeNull()
+  })
 })
 
 describe('round outcome presentation (P-2 / P-3 / P-7)', () => {

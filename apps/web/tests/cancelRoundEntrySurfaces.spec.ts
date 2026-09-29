@@ -28,7 +28,7 @@ import ApprovalCenterTable from '../src/views/approval/ApprovalCenterTable.vue'
 import ApprovalMobileList from '../src/views/approval/ApprovalMobileList.vue'
 import ApprovalCenterDetailPane from '../src/views/approval/ApprovalCenterDetailPane.vue'
 import MetaRecordApprovalPanel from '../src/multitable/components/MetaRecordApprovalPanel.vue'
-import { resetCancelRoundCloseReasonCache } from '../src/approvals/useCancelRoundCloseReasons'
+import { resetCancelRoundCloseReasonCache, useCancelRoundCloseReasons } from '../src/approvals/useCancelRoundCloseReasons'
 import { useLocale } from '../src/composables/useLocale'
 
 // ---- el-table registry stub (same pattern as approvalCenterTable.spec.ts) -------------------------
@@ -268,5 +268,29 @@ describe('MetaRecordApprovalPanel (P-2 record surface)', () => {
     expect(tags).toHaveLength(2)
     expect(tags[0].dataset).toMatchObject({ domain: 'approvalInstance', status: 'rejected' })
     expect(tags[1].dataset).toMatchObject({ domain: 'cancelRound', status: 'cancellation_pending_approval' })
+  })
+})
+
+describe('useCancelRoundCloseReasons (list criterion read)', () => {
+  it('a failed read is retried on the next ensure(); a resolved or in-flight read is not repeated', async () => {
+    resetCancelRoundCloseReasonCache()
+    getApprovalMock.mockReset()
+    const target = { id: 'cr_retry', status: 'rejected', workflowKey: 'approval.cancel-round' }
+    const { ensure, stateFor } = useCancelRoundCloseReasons()
+    getApprovalMock.mockRejectedValueOnce(new Error('API error: 503'))
+    ensure([target])
+    ensure([target]) // in flight: no second read
+    await flushUi()
+    expect(getApprovalMock).toHaveBeenCalledTimes(1)
+    expect(stateFor(target)).toEqual({ kind: 'unavailable' })
+    getApprovalMock.mockResolvedValueOnce({ id: 'cr_retry', cancelRoundCloseReason: 'round_expired' })
+    ensure([target])
+    await flushUi()
+    expect(getApprovalMock).toHaveBeenCalledTimes(2)
+    expect(stateFor(target)).toEqual({ kind: 'resolved', closeReason: 'round_expired' })
+    ensure([target])
+    await flushUi()
+    expect(getApprovalMock).toHaveBeenCalledTimes(2)
+    resetCancelRoundCloseReasonCache()
   })
 })

@@ -250,6 +250,16 @@ describe('attendance-side client', () => {
   })
 })
 
+describe('attendance-side client: envelope', () => {
+  it('a 200 whose envelope says ok:false is an error carrying the server code — never a summary or a success', async () => {
+    apiFetchMock.mockImplementation(async () => jsonResponse(200, { ok: false, error: { code: 'SOME_REFUSAL', message: 'refused' } }))
+    await expect(fetchCancelRoundSummary('r1')).rejects.toMatchObject({ status: 200, code: 'SOME_REFUSAL', message: 'refused' })
+    await expect(decideCancelRound('r1', 'approve')).rejects.toMatchObject({ code: 'SOME_REFUSAL' })
+    await expect(withdrawCancelRound('r1')).rejects.toBeInstanceOf(ApprovalApiError)
+    await expect(launchCancelRound('r1')).rejects.toBeInstanceOf(ApprovalApiError)
+  })
+})
+
 describe('approver path: leave id resolution (fail closed)', () => {
   it('cancel-round businessKey → original instance → attendance-request:<id>', async () => {
     apiGetMock.mockResolvedValueOnce({ id: 'apv_orig', businessKey: 'attendance-request:req-42' })

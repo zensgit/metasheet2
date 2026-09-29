@@ -382,6 +382,14 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(q(container!, 'approval-reject-button')).not.toBeNull()
   })
 
+  it('canDecideCurrentNode === false hides the cancel-round decision buttons even for an attendance:approve holder', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    mockActiveApproval.value = cancelRoundInstance({ canDecideCurrentNode: false })
+    await mountView()
+    expect(q(container!, 'approval-approve-button')).toBeNull()
+    expect(q(container!, 'approval-reject-button')).toBeNull()
+  })
+
   it('approvals:act alone does not show the decision buttons on a cancel round (the route checks attendance:approve)', async () => {
     mockCanAct.value = true
     await mountView()
