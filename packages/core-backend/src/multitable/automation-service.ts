@@ -60,6 +60,12 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromRows,
+  type FieldSchemaSnapshot,
+  type FieldSchemaSnapshotEntry,
+} from './field-schema-fence-recheck'
+import {
   AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -4174,7 +4180,8 @@ export class AutomationService {
     }
 
     // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
-    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4191,6 +4198,7 @@ export class AutomationService {
       automationDepth: this.backwriteAutomationDepth(bridge),
       lockedMessage: 'source record is locked',
       onMissing: 'skip',
+      schemaSnapshot,
     })
     // Final review F3: `false` here only ever means "the record is gone" (SELECT saw no row, or the UPDATE
     // affected 0 rows) — say so instead of the silent null that "no writeback configured" also returns.
@@ -4244,7 +4252,8 @@ export class AutomationService {
     if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
-    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4260,6 +4269,7 @@ export class AutomationService {
       lockedMessage: 'target record is locked',
       onMissing: 'throw',
       missingMessage: `cross-base resultWriteback target record not found: ${targetRecordId} ∉ ${targetSheetId}`,
+      schemaSnapshot,
     })
     if (!wrote) return null // unreachable with onMissing:'throw'; keeps the boolean contract total
     return { kind: 'cross-base', target: { targetBaseId, targetSheetId, targetRecordId } }
@@ -4362,6 +4372,11 @@ export class AutomationService {
       lockedMessage: string
       onMissing: 'skip' | 'throw'
       missingMessage?: string
+      /**
+       * Field retype slice 3a (ADR §3.11 row 7): the field rows `assertResultWritebackFields` validated the
+       * patch against — read through `this.queryFn` OUTSIDE the transaction below, i.e. before the fence.
+       */
+      schemaSnapshot?: FieldSchemaSnapshot | null
     },
   ): Promise<boolean> {
     // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
@@ -4374,6 +4389,10 @@ export class AutomationService {
       _automationDepth: opts.automationDepth,
     })
     const wrote = await this.withTransaction(sheetId, async (query) => {
+      // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
+      // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
+      // unless the convert flag is 'true'.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, opts.schemaSnapshot ?? null, Object.keys(patch))
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -4454,6 +4473,8 @@ export class AutomationService {
     sheetId: string,
     writeback: Record<string, unknown>,
     outcome: string,
+    /** Field retype slice 3a: filled with what this check validated against, for the post-fence re-check. */
+    schemaSnapshotOut?: Map<string, FieldSchemaSnapshotEntry>,
   ): Promise<void> {
     const mapped = RESULT_WRITEBACK_FIELDS
       .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
@@ -4481,6 +4502,8 @@ export class AutomationService {
       const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
       if (typeError) throw new Error(typeError)
     }
+    // Field retype slice 3a: what the check above validated against — re-compared after the fence.
+    if (schemaSnapshotOut) for (const [id, entry] of fieldSchemaSnapshotFromRows(res.rows)) schemaSnapshotOut.set(id, entry)
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
