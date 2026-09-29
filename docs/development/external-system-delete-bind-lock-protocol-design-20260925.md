@@ -198,7 +198,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 - `lib/http-routes.cjs`、`index.cjs`、`package.json`、`.github/`：未动。
 - 测试假件：13 个既有套件的内存 db 补 `selectOneForKeyShare` / `selectOneForUpdate` / `transaction`（凡不是本刀主题的假件一律「任何 id 都活」，并注明存在性语义由协议套件负责）；**插件目录之外还有一个消费者**——`scripts/ops/scenario-b-replay-contract.test.mjs`（把回放脚本接到真 `http-routes` + 真 `read-source-config-store` 上，由 `scenario-b-replay-verify.yml` 按 `plugins/plugin-integration-core/lib/**` 触发），第一版漏补、把该车道打红（5/5）；补法**不是**「任何 id 都活」：它的 `selectOneForKeyShare` 按 tenant_id + id 去登记替身里解析（系统登记在替身、不在内存 db 的表中），查不到返回 null，并新增两条用例钉住「未登记 / 已删除 / 别租户的同 id → 400 `READ_SOURCE_CONFIG_INVALID` + `READ_SOURCE_SYSTEM_NOT_FOUND` tuple，不落行不落审计不回显 id」；其 F3 反例用例因此改为先经真 `externalSystemsUpsert` 登记再保存（与脚本 REGISTER_SYSTEM → SAVE_CONFIG 同序）；`db.test.cjs` 的方法面清单与 `gip-server-bound-source-executor.test.cjs` 的导出面清单按新增项更新；`external-systems-delete-dependent-references.test.cjs` 的 B-02/B-12 改为断言**事务内**那一次计数（探针使每张表计数两次），并把内存变异器改为 CRLF 归一（本机 `core.autocrlf=true` 检出下 M-5 的多行锚点本就假红）。
 
-## 5. 残余：073 sealed-export 绑定写入方未参与（owner 决定）
+## 5. 残余：073 sealed-export 绑定写入方未参与（owner 决定：方案①，由 #6099 在数据库层关闭）
 
 写入方是冻结的 S6-A 模块 `sealed-export-lifecycle-provisioning.cjs`（`s6a-package-provenance-pins.json:45` 的 s6 pin，自 #4694 以来从未重算），以 provisioning 角色运行（`stock-preparation-runtime-database.cjs:127` 断言 `current_user` 就是它），而 073/074/075 三份迁移对 `integration_external_systems` **零授权**（`grep integration_external_systems` 于三份迁移无命中；073 `:432-446` 对 PUBLIC REVOKE 的是 sealed-export 自己的表，`:609-635` 给 provisioning 角色的也只有那些表）。PG 要求锁子句至少一列 UPDATE 权限，所以哪怕改了模块，KEY SHARE 也会以 42501 被拒。
 
@@ -207,7 +207,11 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 1. **FK 走生成列**（#5784 `live_id` 形状）：073 加 `live_external_system_id GENERATED ALWAYS AS (CASE WHEN status='ACTIVE' THEN external_system_id END) STORED` + `REFERENCES integration_external_systems(id) ON DELETE RESTRICT NOT VALID`。RI 检查以表属主权限执行，provisioning 角色无需新授权；冻结模块一字不改；存量悬空由 NOT VALID 容忍。RETIRED 行不入 FK，与守卫「只数 ACTIVE」一致。
 2. **授权 + 改冻结模块**：新迁移给 provisioning 角色 `SELECT` + 单列 `UPDATE`（075 的最小授权形状）于 `integration_external_systems`，模块在 `:491` 之前取 KEY SHARE，s6 pin 重算——等于改动已批准的 S6-A 包。
 
-在此之前，073 的两个交错都敞开（写入方不取锁，删除方的 FOR UPDATE 无从等待）。**机器钉住**：`R-073` 用例（内存与真 PG 各一）断言悬空**确实发生**；修掉它的人必须连同这条登记一起退掉。已考虑并否决的半措施：删除方对 073 表 `LOCK TABLE … IN SHARE MODE` 只封「写入在前」一半、需要 API 角色在 073 表上的 UPDATE/DELETE 权限（073 对 PUBLIC 已 REVOKE），且 `db.cjs` 无此方法。
+owner 选了方案 1，由 #6099 落地（迁移 `packages/core-backend/src/db/migrations/zzzz20260926140000_sealed_export_binding_live_external_system_fk.ts`，约束名 `fk_sealed_export_stock_prep_binding_live_external_system`；设计说明 `docs/development/sealed-export-binding-live-external-system-fk-20260926.md`）。**#6099 合入并执行迁移后，R-073 在数据库层关闭**：冻结写入方仍不取应用层锁（模块与 s6 pin 不改），但绑定 INSERT 的 RI 检查对系统行取 KEY SHARE，与本协议删除方的 FOR UPDATE 串行——写入在前时删除等锁、计数看见绑定、回 409（同租户）；删除在前时写入等锁、被 23503 拒绝、报 `SEALED_EXPORT_INTERNAL_ERROR`、零悬空（#6099 真 PG 套件 `sealed-export-binding-live-external-system-fk.db.test.ts` B-12 / B-13，走本协议的 `deleteExternalSystem`）。外键是 NOT VALID：新写入与删除从迁移那一刻起全查全锁，**存量**悬空行要等 owner 跑普查包 `scripts/ops/sealed-export-binding-live-fk-validate-20260926/` 的 `02 APPLY=1` 与 `03`（VALIDATE）后才算清零——「合入并 VALIDATE」之后这条残余才完全退役。仍登记的一项：租户错配的 ACTIVE 绑定（绑定租户 ≠ 系统租户）对本协议的按租户计数不可见，删除由外键以原始 23503 拒绝（系统保留、不悬空），路由的 `sendError` 把它报成未分类、values-free 的 500；把这个 23503 映射到 409 是后续项（#6099 设计说明 §4，真 PG B-10 断言现状）。
+
+`R-073` 用例（内存与真 PG 各一）保留原断言、改了名：两者都不经过 #6099 的迁移（真 PG 套件只按 SQL 迁移清单建 schema，不跑 TS 迁移；内存 db 不建模外键），所以它们断言的是**应用层**事实——冻结写入方不取应用层锁、在没有外键的 schema 上悬空——而不是部署后的结局；部署后的结局由 #6099 的 B-13 断言。让本套件的真 PG `R-073` 也套上该迁移的 `up()` 并翻转断言，是另一项后续（需要在本套件里接入 TS 迁移）。
+
+合入 #6099 之前，073 的两个交错都敞开（写入方不取锁，删除方的 FOR UPDATE 无从等待）。已考虑并否决的半措施：删除方对 073 表 `LOCK TABLE … IN SHARE MODE` 只封「写入在前」一半、需要 API 角色在 073 表上的 UPDATE/DELETE 权限（073 对 PUBLIC 已 REVOKE），且 `db.cjs` 无此方法。
 
 ## 6. CI 接线
 
@@ -241,7 +245,7 @@ values-free：`L-01`/`P-079-A` 断言拒绝 details 的 JSON 不含系统 id；0
 | P-062-A / P-062-B | ✗ / ✗ | ✓ `READ_SOURCE_SYSTEM_NOT_FOUND`、无版本无审计 / ✓ `readSourceConfigCount=1` |
 | P-PIPE-A / P-PIPE-B | ✗ / ✗ | ✓ `PipelineValidationError`（非 23503）/ ✓ `used by pipelines` 逐字 |
 | P-MIX 两写入方相容、删除等两者、无 40P01 | ✗ | ✓ |
-| R-073 残余悬空 | ✓（悬空） | ✓（悬空，登记） |
+| R-073（无 #6099 迁移的 schema 上的前提：写入方不取锁、悬空） | ✓（悬空） | ✓（悬空；#6099 合入后在数据库层关闭——有迁移时的同一交错见 #6099 真 PG B-13：写入等锁、被拒、零悬空；第 5 节） |
 | P-ABSENT 只跑过 057 的 schema 上删除放行；依赖 COUNT 全在 BEGIN 之前（第二轮新增） | ✗（旧代码删除也放行，但根本不开事务：语句记录里没有 `BEGIN`，形状断言红） | ✓ |
 | P-062-REUSE-A 同内容 + retired 版本 + 系统已删 → 409 content_retired、0 锁；新内容 → 400 tuple（第二轮新增） | ✗（复用一半旧代码同样 409；红在「新内容 → 400」：旧代码不看系统、直接铸出指向已删系统的版本） | ✓ |
 | P-062-REUSE-B 存量活行同内容 → reused + reuse_version 审计、0 锁；新内容 → 400 tuple（第二轮新增） | ✗（同上，红在「新内容 → 400」） | ✓ |

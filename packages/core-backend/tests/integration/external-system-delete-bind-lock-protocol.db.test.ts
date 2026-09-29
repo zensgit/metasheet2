@@ -24,9 +24,12 @@
 //   P-MIX    a bind and a pipeline write hold KEY SHARE on the same system concurrently (KEY SHARE is
 //            compatible with KEY SHARE: neither waits), the delete waits for both, then refuses with
 //            BOTH counted — and no 40P01 deadlock anywhere
-//   R-073    the REGISTERED RESIDUAL: sealed-export provisioning (frozen S6-A module, provisioning
-//            role with no privilege on integration_external_systems) takes no lock and DANGLES —
-//            asserted so fixing it must retire this arm with the design doc's residual entry
+//   R-073    the PREMISE on a schema WITHOUT migration zzzz20260926140000 (this suite applies SQL
+//            migrations only): sealed-export provisioning (frozen S6-A module, provisioning role
+//            with no privilege on integration_external_systems) takes no lock and DANGLES. That
+//            migration closes it at the database layer (generated column + NOT VALID FK); the same
+//            interleaving WITH it is B-13 of sealed-export-binding-live-external-system-fk.db.test.ts
+//            (writer waits, is refused, zero dangling) — design doc §5
 //   P-ABSENT a schema that ran ONLY 057 (no 079 / 062 / 073): the delete still goes through, because
 //            the absence is learned by the autocommit probe BEFORE the transaction. A mutant that
 //            counts the missing tables inside the FOR UPDATE transaction (external-systems.cjs
@@ -645,7 +648,7 @@ describeIfDatabase('external-system delete × bind lock protocol (real Postgres,
     expect(await count(EXTERNAL_SYSTEMS, "id = 'sys_1'")).toBe(1)
   })
 
-  it('R-073 (registered residual): sealed-export provisioning takes no lock on the system row and the delete-first interleaving dangles', async () => {
+  it('R-073 (premise, schema without migration zzzz20260926140000): sealed-export provisioning takes no lock on the system row and the delete-first interleaving dangles', async () => {
     const material = plugin.createEd25519SignerMaterial()
     const provisioning = plugin.createSealedExportLifecycleProvisioning({ db: writer.db, clock: () => NOW })
     const { deleted, written, writerWaited } = await deleteFirst(
