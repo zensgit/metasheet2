@@ -20,8 +20,11 @@
  *   - §15.4 P-4. The summary is keyed by the ORIGINAL document; visibility is
  *     `canReadApprovalInstance` applied to the original document instance (lock:153 I7 — no second
  *     「已到达」 predicate). `canWithdraw` is resolved here, server-side, by reading the SAME inputs the
- *     engine's revoke branch reads, so the FE never derives a second predicate. The policy snapshots
- *     never leave this module.
+ *     engine's revoke gate reads, so the FE never derives a second predicate. It answers the ENGINE-level
+ *     gate only: phase A ships no employee-reachable HTTP withdraw path (the approval-side action route
+ *     sits behind a permission the employee lane does not hold), so a `true` here is not yet an
+ *     actionable button — see the phase A design MD residuals. The policy snapshots never leave this
+ *     module.
  *   - §15.2 P-2. `status` is a machine token whose SUBJECT is part of the token (`cancellation_*` vs
  *     `leave_cancelled`), one per word-table row V1–V6; a system closure is distinguishable from an
  *     approver's reject on this surface via `closedBySystem` (derived from the terminal audit row's
@@ -30,9 +33,14 @@
  *   - §15.6 P-6. No seat holder is ever named: the summary carries no assignee data at all.
  *   - §15.7 P-7. `blockCode` is the bare `<code>` after `business_blocked:`; the adapter's free-text
  *     detail stays in the column.
- *   - §15.8 P-8. `launch` surfaces the creation path's registered codes VERBATIM (status + code +
- *     message) and nothing else — `details` is dropped, so no per-seat qualification detail reaches
- *     the employee surface (P-6′ ②).
+ *   - §15.8 P-8. `launch` surfaces the creation path's registered CODES verbatim (status + code) with
+ *     the path's message, and nothing else — `details` is dropped. For the two SEAT-class codes
+ *     (`CANCEL_ROUND_SEAT_INELIGIBLE`, `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`) the message is replaced by
+ *     one neutral, reason-free sentence: the creation path's messages for those codes are written for
+ *     an administrator and name the cause (an approver's eligibility, an attribution failure), which
+ *     §15.6.1 ② (P-6′) keeps off the employee surface, and the owner's P-6′ choice keeps employee copy
+ *     at the weaker, cause-free strength until root cause (c) lands. The CODE is unchanged, so the FE
+ *     (phase B) still renders per code.
  *
  * Least-privilege posture (same as `approvalAssigneeResolver`): `src/index.ts` injects this port into
  * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port plugin-attendance
@@ -65,8 +73,8 @@ export type CancelRoundSummaryStatusV1 =
 
 /**
  * Why `canWithdraw` is false — the ENGINE's own revoke-gate codes, reused verbatim so the summary and
- * the action endpoint cannot disagree about the reason (P-4 理由 2: N≥2 会签 after the first approve
- * is `APPROVAL_REVOKE_WINDOW_CLOSED`; N=1 / any terminal is `INVALID_STATUS_TRANSITION`).
+ * the engine's revoke gate cannot disagree about the reason (P-4 理由 2: N≥2 会签 after the first
+ * approve is `APPROVAL_REVOKE_WINDOW_CLOSED`; N=1 / any terminal is `INVALID_STATUS_TRANSITION`).
  */
 export type CancelRoundWithdrawBlockedReasonV1 =
   | 'APPROVAL_REVOKE_FORBIDDEN'
@@ -117,7 +125,8 @@ export interface ApprovalCancelRoundEntryPort {
    * P-1 launch — delegates to the dedicated creation path (lock §14.1). Every creation-time
    * precondition (approved document, original requester only, suite gate, one pending round, seat
    * eligibility) is enforced THERE and surfaces as its registered P-8 code; this port adds none of
-   * its own and never routes through the public `createApproval`.
+   * its own and never routes through the public `createApproval`. Seat-class refusals carry
+   * `CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE` instead of the creation path's admin-facing message.
    */
   launch(
     documentInstanceId: string,
@@ -187,12 +196,15 @@ function parseJsonish(value: unknown): unknown {
 }
 
 /**
- * Mirror of the engine's revoke gates (`dispatchAction`, the `request.action === 'revoke'` branch),
- * in the SAME order and over the SAME inputs: the published definition's `runtime_graph.policy`
- * (`allowRevoke`, `revokeBeforeNodeKeys`), the engine instance's `requester_snapshot.id`, `status`
- * and `current_node_key`, and the handled-record count at that node. A `true` here means the action
- * endpoint would accept this viewer's revoke right now; a `false` names the code it would answer.
- * The integration suite pins both directions against the real action endpoint.
+ * Mirror of the ENGINE-level revoke gate (`ApprovalProductService.dispatchAction`, the
+ * `request.action === 'revoke'` branch), in the SAME order and over the SAME inputs: the published
+ * definition's `runtime_graph.policy` (`allowRevoke`, `revokeBeforeNodeKeys`), the engine instance's
+ * `requester_snapshot.id`, `status` and `current_node_key`, and the handled-record count at that
+ * node. A `true` here means the engine would accept this viewer's revoke right now; a `false` names
+ * the code the engine would answer. It says nothing about an HTTP route: the approval-side action
+ * route adds its own permission guard in front of the engine, which the employee lane does not pass
+ * today (the integration suite pins that 403 as a witness), so an employee-reachable withdraw path
+ * is a phase B precondition. The suite pins both engine directions in-process.
  */
 async function resolveCanWithdraw(
   query: Queryable,
@@ -257,6 +269,12 @@ async function resolveClosedBySystem(query: Queryable, engineInstanceId: string 
 /**
  * P-4 — the latest cancel round of `documentInstanceId`, or `round: null`. 「Latest」 = the pending
  * round when one exists (at most one, I3), otherwise the most recently started one.
+ *
+ * Consistency: the round row, the durable projection, `closedBySystem` and `canWithdraw` are four
+ * separate statements, not one snapshot, so a transition landing between them can yield a torn view
+ * (e.g. `outcome: 'pending'` beside a just-written terminal audit row). Accepted deliberately: the
+ * summary is advisory — every decision it could inform is re-checked under the row lock by the path
+ * that acts on it (creation path for a launch, engine for a withdraw) — and the next read converges.
  */
 export async function readCancelRoundSummaryForDocumentV1(
   query: Queryable,
@@ -323,6 +341,16 @@ export async function readCancelRoundSummaryForDocumentV1(
   }
 }
 
+/** The two SEAT-class creation-time codes (P-8 ①; P-6′ ② governs their employee-facing copy). */
+const CANCEL_ROUND_SEAT_CLASS_CODES: ReadonlySet<string> = new Set([
+  'CANCEL_ROUND_SEAT_INELIGIBLE',
+  'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+])
+
+/** P-6′ weaker, cause-free employee copy (owner's P-6′ option: weaker employee copy until RC (c)). */
+export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
+  'A cancellation cannot be started for this document right now — please contact an administrator'
+
 export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPort {
   const db = (): Queryable => {
     if (!pool) throw new Error('Database not available')
@@ -338,7 +366,10 @@ export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPor
         await service.createCancelRoundInstance(documentInstanceId, actor, { reason: options.reason ?? null })
       } catch (error) {
         if (error instanceof ServiceError) {
-          return { ok: false, status: error.statusCode, code: error.code, message: error.message }
+          const message = CANCEL_ROUND_SEAT_CLASS_CODES.has(error.code)
+            ? CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE
+            : error.message
+          return { ok: false, status: error.statusCode, code: error.code, message }
         }
         throw error
       }
