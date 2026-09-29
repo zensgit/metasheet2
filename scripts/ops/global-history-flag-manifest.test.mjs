@@ -357,9 +357,9 @@ test('R4 isMisconfiguredTruthy is false for empty/absent values (nothing to warn
   assert.equal(isMisconfiguredTruthy(retentionSpec, 'false'), false)
 })
 
-// ── D2a: archive contract-only flag ────────────────────────────────────────────────────────────────
+// ── Recovery archive runtime gate ───────────────────────────────────────────────────────────────────
 
-test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
+test('recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
   const archive = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
   assert.deepEqual(
     {
@@ -387,8 +387,8 @@ test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and ha
   for (const value of [undefined, 'false', 'TRUE', ' true ', 'true ', ' true']) {
     assert.equal(isActivated(archive, value), false, `archive flag must remain OFF for ${String(value)}`)
   }
-  assert.match(archive.purpose, /no production caller/i)
-  assert.match(archive.purpose, /later D2 caller/i)
+  assert.match(archive.purpose, /dedicated local launcher/i)
+  assert.match(archive.purpose, /ordinary server startup without an injected archive composition refuses ON/i)
   assert.match(archive.purpose, /no retention conflict/i)
 })
 

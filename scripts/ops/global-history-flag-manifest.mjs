@@ -286,7 +286,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      "Time Machine D2a contract flag only: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. This slice has no production caller and does not make archive behavior available. A later D2 caller remains unreachable unless this flag and MULTITABLE_ENABLE_WRITER_FENCE are both exact ON. It intentionally has no retention conflict: D2 is the archive-before-prune handoff, not current retention behavior.",
+      "Time Machine archive runtime gate: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. The dedicated local launcher requires this flag and MULTITABLE_ENABLE_WRITER_FENCE both exact ON, admitted local configuration and FD3 custody unlock before listening. Ordinary server startup without an injected archive composition refuses ON; manual capture also requires explicit policy. This flag has no retention conflict and does not enable prune or retention.",
     source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
   },
   {
