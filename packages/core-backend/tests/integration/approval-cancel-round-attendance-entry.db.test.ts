@@ -59,6 +59,11 @@ import { CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE } from '../../src/approvals/app
  *     `closedBySystem`; `blockCode` without the adapter's free-text detail.
  *   - P-9: the seed template through the PUBLIC create path — legs A (admin HTTP), B (employee HTTP),
  *     C (normal actor, in-process service) — never yields a cancel round.
+ *
+ * A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」), the last describe block:
+ *   - the launch sits behind `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`, default OFF. This file turns it
+ *     ON in `beforeAll` (and restores the previous value in `afterAll`) because every phase A case
+ *     launches; the OFF case removes it and measures zero writes.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -85,6 +90,8 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   const previousRbacBypass = process.env.RBAC_BYPASS
+  const ENTRY_FLAG = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const previousEntryFlag = process.env[ENTRY_FLAG]
   const password = `G4a-entry-${TS}-Pw!`
   let passwordHash = ''
 
@@ -330,6 +337,9 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
     process.env.RBAC_BYPASS = 'false'
+    // A2: the launch is default-OFF; every phase A case launches, so the suite runs with it ON and the
+    // A2 OFF case removes it explicitly.
+    process.env[ENTRY_FLAG] = 'true'
     await ensureApprovalSchemaReady()
     passwordHash = await bcrypt.hash(password, 4)
     const repoRoot = path.resolve(__dirname, '../../../..')
@@ -405,6 +415,8 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       await server?.stop()
       if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
       else process.env.RBAC_BYPASS = previousRbacBypass
+      if (previousEntryFlag === undefined) delete process.env[ENTRY_FLAG]
+      else process.env[ENTRY_FLAG] = previousEntryFlag
     }
   })
 
@@ -1033,6 +1045,55 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       ).rejects.toMatchObject({ statusCode: 404, code: 'APPROVAL_TEMPLATE_NOT_FOUND' })
       expect(await seedInstancesBy(employee)).toBe(0)
       expect(await countRounds()).toBe(roundsBefore)
+    })
+  })
+
+  describe('A2 (owner 2026-09-29 「Attendance-side + OFF flag (Recommended)」): default-OFF launch flag', () => {
+    const NOT_FOUND_BODY = '{"ok":false,"error":{"code":"NOT_FOUND","message":"Request not found"}}'
+
+    /** Whole-table row counts: the OFF launch must add nothing to any table the creation path writes. */
+    const WRITE_SET = ['approval_instances', 'approval_rounds', 'approval_assignments', 'approval_records'] as const
+    async function countWriteSet(): Promise<Record<(typeof WRITE_SET)[number], number>> {
+      const counts = {} as Record<(typeof WRITE_SET)[number], number>
+      for (const table of WRITE_SET) {
+        const result = await pool().query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM ${table}`)
+        counts[table] = Number(result.rows[0].count)
+      }
+      return counts
+    }
+
+    it('flag OFF (unset, and an explicit "false"): the launch answers the byte-identical 404 of a never-existing id and writes NOTHING; the summary read is unaffected; flag ON is the positive control on the same leave', async () => {
+      const employee = `g4a-a2-off-${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      const token = await loginToken(employee)
+      const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+      const before = await countWriteSet()
+      try {
+        for (const value of [undefined, 'false'] as const) {
+          if (value === undefined) delete process.env[ENTRY_FLAG]
+          else process.env[ENTRY_FLAG] = value
+          const off = await http('POST', entryPath(requestId), token, { reason: 'flag off' })
+          const absent = await http('POST', entryPath(randomUUID()), token, {})
+          expect(off.status, off.text).toBe(404)
+          expect(off.text).toBe(NOT_FOUND_BODY)
+          expect(off.text).toBe(absent.text)
+          // The read is not gated.
+          const read = await http('GET', entryPath(requestId), token)
+          expect(read.status, read.text).toBe(200)
+          expect(read.json.data.round).toBeNull()
+        }
+        // Zero writes: no round, no engine instance, no seat, no audit row — anywhere, not just here.
+        expect(await roundsFor(documentId)).toHaveLength(0)
+        expect(await countWriteSet()).toEqual(before)
+      } finally {
+        process.env[ENTRY_FLAG] = 'true'
+      }
+      const on = await http('POST', entryPath(requestId), token, {})
+      expect(on.status, on.text).toBe(201)
+      expect(await roundsFor(documentId)).toHaveLength(1)
+      const after = await countWriteSet()
+      expect(after.approval_instances).toBe(before.approval_instances + 1)
+      expect(after.approval_rounds).toBe(before.approval_rounds + 1)
     })
   })
 })

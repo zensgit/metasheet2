@@ -16537,6 +16537,14 @@ function isAttendanceReportFieldCatalogSeedEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
 }
 
+// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the
+// launch endpoint `POST /api/attendance/requests/:id/cancel-round` stays OFF until phase D acceptance
+// passes. Default OFF; gates ONLY the launch — every other cancel-round route is unaffected. Read at
+// call time, never at module load, so both branches are exercisable in a single process.
+function isAttendanceCancelRoundEntryEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -37002,7 +37010,9 @@ module.exports = {
 
     // ── Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记」 2026-09-28),
     //    phase A: the attendance-side cancel-round entry (P-1 Q1′ = (i): launch behind
-    //    `attendance:write`, read progress behind `attendance:read`).
+    //    `attendance:write`, read progress behind `attendance:read`); A2 (owner 2026-09-29,
+    //    「Attendance-side + OFF flag (Recommended)」): a default-OFF flag
+    //    (`ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`) on the launch only.
     //
     // The two routes reach core ONLY through `context.services.approvalCancelRoundEntry`, which core
     // injects into this plugin alone. No port ⇒ the routes are not registered at all (fail-closed:
@@ -37106,6 +37116,13 @@ module.exports = {
           const requestId = normalizeUuidString(req.params.id)
           if (!requestId) {
             respondInvalidUuid(res)
+            return
+          }
+          // A2 default-OFF launch flag, checked before any read or write. OFF answers with the entry's
+          // own not-found body — the same bytes as a never-existing id — rather than a new
+          // feature-disabled code (P-8: no code before it is registered; see the design MD §A2).
+          if (!isAttendanceCancelRoundEntryEnabled()) {
+            respondCancelRoundRequestNotFound(res)
             return
           }
           const parsed = cancelRoundLaunchBodySchema.safeParse(req.body ?? {})
