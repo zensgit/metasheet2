@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,P-6′(ii) 管理员通知按 owner 2026-09-29 16:5x ① 暂缓(§9.6);阶段 C 门审 r1 已做(1 P2 / 2 P3 / 2 NIT),修复轮 1 见 §9.10;门审 r2(修复轮 1 的复审)已做(1 P2 / 4 NIT),修复轮 2 见 §9.11;门审 r3(修复轮 2 的复审)已做(APPROVE,0 P1 / 0 P2 / 0 P3 / 1 NIT,NIT 已按其建议改 §9.11);**C2**(owner 16:5x ② 的考勤侧「待我审批的撤销」列表,§10)已实现并本地真库验证,C2 的独立门审未做;P-6′(ii) 按 16:5x ① 记为对 lock:75 的已知缺口(§10.6);未推送、未开 PR;合并见 goal §0 owner 17:1x 选项原文「Yes, merge under those conditions (Recommended)」及其条件,C2 不涉合并) |
+| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,P-6′(ii) 管理员通知按 owner 2026-09-29 16:5x ① 暂缓(§9.6);阶段 C 门审 r1 已做(1 P2 / 2 P3 / 2 NIT),修复轮 1 见 §9.10;门审 r2(修复轮 1 的复审)已做(1 P2 / 4 NIT),修复轮 2 见 §9.11;门审 r3(修复轮 2 的复审)已做(APPROVE,0 P1 / 0 P2 / 0 P3 / 1 NIT,NIT 已按其建议改 §9.11);**C2**(owner 16:5x ② 的考勤侧「待我审批的撤销」列表,§10)已实现并本地真库验证,C2 的独立门审未做;P-6′(ii) 按 16:5x ① 记为对 lock:75 的已知缺口(§10.6);未推送、未开 PR;合并见 goal §0 owner 17:1x 选项原文「Yes, merge under those conditions (Recommended)」及其条件,C2 不涉合并);**阶段 D 收口**(计数推送的权限上下文 T6、办理 / 撤回的期望轮次 D2)见 §12 |
 | 分支 | `feat/approval-cancel-entry-phase-a-read-launch` |
 | 基线 | `main @ f47054d88e`(第 2 轮 rebase;原基线 `68a703038e`。撤销轮 C-1 #5851 `44770107f`、C-2 #5856 `2594ca6e2` 已在其中) |
 | 权威锁 | 撤销锁 v5.9(RATIFIED 2026-09-18)及其抬头「**RATIFY 追记 —— 产品入口增补 v2(P-1…P-11)**」(2026-09-28) |
@@ -1011,3 +1011,64 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 - **本节不含**:
   - 验收方案中「只作探针、不入库」的行(已知缺陷见证、席位失格时的零新增通知计数)。它们只在一次性库上以未跟踪探针跑过。
   - 这 9 条用例的独立门审(未做)。
+
+## 12. 阶段 D 收口:计数推送的权限上下文(T6)与期望轮次(D2)
+
+两处改动都出自阶段 D 验收读数;取舍由主会话在无人值守规则下定(不扩大授权、可回退),不是 owner 裁定。开关、授予、DDL 均不涉及。
+
+### 12.1 T6:办理后推送的待办计数与 `GET /api/todo/count` 同口径
+
+- **读数**:在考勤侧卡片办理一条撤销轮后,推送的 `todo:counts-updated` 比同一时刻 `GET /api/todo/count` 少 1。差额是查看者一条只经权限队列臂(`source_queue`)可见的待办项。
+- **原因**:本入口复用审批侧各动作共用的 `publishApprovalCountsForUsers`。执行者一项只带角色,其他被推送者什么都不带;该函数的两个发布器按空权限集计数(`services/todo-realtime.ts` 文件注释在 main 上已写明这一既有限制)。
+- **改法(只在本入口调用发布器时带上权限上下文,不改其它调用方)**:
+  - 插件 `getActorPermissionClaims(req)` 按 core `resolveApprovalActorPermissions` 的读法取调用者的权限声明(`permissions` ∪ `perms`,trim、去空、去重)。发起 / 办理 / 撤回三条路由把它和角色声明一起交给端口。它只用于计数推送,不是授权输入。
+  - 端口 `publishCancelRoundCounts`:
+    - 执行者一项带角色 + 权限。
+    - 其他被推送者(席位持有人、请求人)带 `listUserPermissions(userId)` 解析出的权限。令牌声明不受信时(生产设置),认证层也是用这个解析函数构造 `req.user.permissions`。
+    - 解析失败时按空权限计数,推送仍是尽力而为。
+  - `publishApprovalCountsForUsers`:每个用户项增加可选的 `permissions`,转给两个发布器。审批侧各调用点都不传它,所以两个发布器收到的参数与改前完全相同(不带 `permissions` 键)。
+- **用例**:`approval-cancel-round-attendance-entry.db.test.ts`,P-11 块。两条用例共用一个夹具:一条无关待办,唯一在席臂是 `source_queue` / `attendance:approve`。审批人照 `seedScopedAttendanceUser` 的额外准备处理(见私有记录),并持 `approvals:read`(夹具)。
+  - 「T6 (actor)」:审批人在考勤侧 approve、reject 后,推给自己的计数 == 同刻自己的 GET。
+  - 「T6 (affected user)」:请求人发起与撤回后,推给席位持有人的计数 == 同刻其 GET。
+  - 单测:插件权限声明副本对 core 解析器逐形状钉住;发布器对带 / 不带 `permissions` 的两种调用逐一钉住。
+- **mutation**(各在新克隆库上跑 ENTRY 的 T6 两条,cp 还原,`cmp`,工作树 clean):
+
+| mutation | 红 |
+|---|---|
+| 端口执行者一项不带权限 | 恰「T6 (actor)」 |
+| 被推送者的权限解析恒为空 | 恰「T6 (affected user)」 |
+| 插件办理路由不传权限声明 | 恰「T6 (actor)」 |
+| 发布器不把权限转给待办发布器 | 两条都红 |
+
+- **残留**:
+  - 其他被推送者仍不带角色声明,与审批侧对被推送者的做法一致。
+  - 开发期令牌声明受信模式下(`RBAC_TOKEN_TRUST`,生产禁用),被推送者一侧的权限来自数据库、不来自令牌,可能与其 GET 不同。
+
+### 12.2 D2:办理 / 撤回可携带期望轮次
+
+- **读数**:委托人 A 在撤销轮上有席位,但不是原单参与者。
+  - 前端考勤侧卡片在办理前会先读摘要来确认轮次。摘要读受原单可读谓词(I7)门控,A 读到 404,所以卡片失败关闭,不发写。
+  - A 只能直接调用 actions 路由。
+- **改法**:
+  - `POST …/cancel-round/actions` 与 `…/withdraw` 接受可选的 `expectedRoundId`。
+  - 端口在选出该请假的最新轮次后先做比较,不符即返回 409 并且不 dispatch、不推送。409 用引擎既有的 `INVALID_STATUS_TRANSITION` 码,message 用引擎对终态实例的原句 `Approval is already in a terminal status`。**零新码。**
+  - 这个码为什么贴切:按 I3,一单至多一个 pending 轮,「最新」选取会把它排在最前;所以不是最新的那一轮必然已经终结(或者根本不是本单的轮次)。
+  - 竞态:动作仍 dispatch 到被比对那一轮自己的引擎实例上,比对之后才终结的轮次由引擎自己拒绝。
+  - I7 不放宽:actions 路由本来就不挂 I7(席位即权威);摘要路由不变。
+- **用例**(C2 块):
+  - 「D2 — expectedRoundId (phase D)」,委托夹具与 C2 委托用例相同:
+    - 请求人撤回后再发起,列表只剩第二轮。
+    - A 用第一轮 id 办理,或用随机 id 驳回:均 409,体逐字节。
+    - 请求人用第一轮 id 撤回:409。
+    - 以上三次合计:四表行数不变、零推送、兑现替身零调用、席位不变。
+    - A 读摘要仍 404;A 用第二轮 id 办理:200,恰 4 键 `applied`。
+  - 「D2 — … withdraw」:请求人带上 pending 轮的 id 撤回,得 200 最小体。
+- **mutation**:
+
+| mutation | 红 |
+|---|---|
+| 端口比对恒不命中 | 恰 D2 主用例 |
+| 插件办理路由不传 `expectedRoundId` | 恰 D2 主用例 |
+| 插件撤回路由不传 `expectedRoundId` | 恰 D2 主用例(撤回腿) |
+
+- **前端**:考勤侧卡片改走 `decideListedCancelRound`(不预读摘要,带 `expectedRoundId`;该 409 用既有客户端文案「已不在审批中……未执行任何操作」)。审批侧路径不变。见前端记录 §11.12。
