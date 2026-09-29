@@ -25,7 +25,7 @@ import type { ApprovalTemplateStatus } from '../types/approval'
 
 export type StatusTone = 'success' | 'warning' | 'danger' | 'info' | 'primary' | 'neutral'
 
-export type StatusDomain = 'approvalInstance' | 'approvalTemplate' | 'delegation' | 'automationRun'
+export type StatusDomain = 'approvalInstance' | 'approvalTemplate' | 'delegation' | 'automationRun' | 'cancelRound'
 
 export interface StatusDisplayEntry {
   tone: StatusTone
@@ -53,6 +53,33 @@ const APPROVAL_INSTANCE_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
   rejected: { tone: 'danger', zh: '已驳回', en: 'Rejected' },
   revoked: { tone: 'info', zh: '已撤回', en: 'Revoked' },
   cancelled: { tone: 'info', zh: '已取消', en: 'Cancelled' },
+}
+
+// ---------------------------------------------------------------------------
+// cancelRound — 请假撤销(撤销轮)的状态词表 V1–V8(撤销锁 v5.9 抬头「RATIFY 追记 —— 产品入口增补 v2」
+// P-2;词表见 docs/development/approval-cancel-entry-phase-b-fe-design-20260929.md §3). A SEPARATE
+// domain on purpose: `approvalInstance` above stays byte-for-byte as it was (changing it would repaint
+// every approval list), and a cancel-round instance is switched onto this table by the one selector
+// `approvalStatusTagProps` (approvals/cancelRound.ts) keyed on `workflowKey === 'approval.cancel-round'`.
+//  - Every label names its subject (撤销申请 / 请假): the approval instance's own `revoked` /
+//    `cancelled` words say neither, and on the same screen as the leave they read as the same thing.
+//  - V3 (an approver's rejection) and V5 / V6 (system closure) share the engine status `rejected`;
+//    they differ ONLY by the close-reason criterion (lock:131), resolved upstream — this table never
+//    guesses. `status_resolving` / `status_unavailable` are for a surface that has not read that
+//    criterion yet; they are not V-words and never say 驳回.
+//  - V7 / V8 are NOT terminal (the round stays pending, the action may be retried): warning tone,
+//    never the danger tone of a failure.
+const CANCEL_ROUND_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
+  cancellation_pending_approval: { tone: 'warning', zh: '撤销申请审批中', en: 'Cancellation pending approval' },
+  leave_cancelled: { tone: 'success', zh: '请假已取消', en: 'Leave cancelled' },
+  cancellation_rejected: { tone: 'danger', zh: '撤销申请被驳回', en: 'Cancellation rejected' },
+  cancellation_withdrawn: { tone: 'info', zh: '撤销申请已撤回', en: 'Cancellation withdrawn' },
+  cancellation_window_closed: { tone: 'neutral', zh: '撤销窗口已过,申请自动关闭', en: 'Cancellation window closed' },
+  cancellation_blocked: { tone: 'neutral', zh: '该请假已无法撤销(业务原因)', en: 'Cancellation blocked' },
+  action_incomplete_retry: { tone: 'warning', zh: '本次操作未完成,请稍后重试', en: 'Action failed, still pending' },
+  system_busy_retry: { tone: 'warning', zh: '系统繁忙,请稍后重试', en: 'System busy' },
+  status_resolving: { tone: 'neutral', zh: '撤销结果读取中', en: 'Loading cancellation result' },
+  status_unavailable: { tone: 'neutral', zh: '撤销结果暂时无法读取', en: 'Cancellation result unavailable' },
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +148,7 @@ const DOMAIN_TABLES: Record<StatusDomain, Record<string, StatusDisplayEntry>> = 
   approvalTemplate: APPROVAL_TEMPLATE_STATUS_DOMAIN,
   delegation: DELEGATION_STATUS_DOMAIN,
   automationRun: AUTOMATION_RUN_STATUS_DOMAIN,
+  cancelRound: CANCEL_ROUND_STATUS_DOMAIN,
 }
 
 /**
