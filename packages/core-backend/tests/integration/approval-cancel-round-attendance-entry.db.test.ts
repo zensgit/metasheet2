@@ -2490,6 +2490,240 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
     })
+
+    describe('phase D (H layer): acceptance rows the cases above do not reach', () => {
+      const ASSIGNMENT_REQUIRED_BODY =
+        '{"ok":false,"error":{"code":"APPROVAL_ASSIGNMENT_REQUIRED","message":"Approval assignment not found for actor"}}'
+      const REQUESTER_ONLY_BODY =
+        '{"ok":false,"error":{"code":"CANCEL_ROUND_REQUESTER_ONLY","message":"Only the original requester may start a cancel round for this document"}}'
+      const ALREADY_PENDING_BODY =
+        '{"ok":false,"error":{"code":"CANCEL_ROUND_ALREADY_PENDING","message":"This document already has a cancel round in progress"}}'
+
+      /** A one-node template seating `assigneeIds` with `approvalMode` (fixture-only author token). */
+      async function publishSeatTemplate(label: string, assigneeIds: string[], approvalMode: 'single' | 'all'): Promise<string> {
+        const authorToken = await fixtureAdminToken(authorId)
+        const create = await http('POST', '/api/approval-templates', authorToken, {
+          key: `g4dh-${label}-${TS}-${Math.floor(Math.random() * 1e6)}`,
+          name: `G4-D acceptance fixture (${label})`,
+          description: 'approval-cancel-round-attendance-entry.db.test.ts — phase D',
+          formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+          approvalGraph: {
+            nodes: [
+              { key: 'start', type: 'start', config: {} },
+              { key: 'approval_a', type: 'approval', config: { assigneeType: 'user', assigneeIds, approvalMode } },
+              { key: 'end', type: 'end', config: {} },
+            ],
+            edges: [
+              { key: 'e-s-a', source: 'start', target: 'approval_a' },
+              { key: 'e-a-end', source: 'approval_a', target: 'end' },
+            ],
+          },
+        })
+        expect(create.status, create.text).toBe(201)
+        const id = create.json.id as string
+        createdTemplateIds.add(id)
+        const publish = await http('POST', `/api/approval-templates/${id}/publish`, authorToken, {
+          policy: { allowRevoke: true },
+        })
+        expect(publish.status, publish.text).toBe(200)
+        return id
+      }
+
+      /** A login-able person holding one built-in attendance role; returns a REAL login token. */
+      async function seedPerson(userId: string, role: 'attendance_employee' | 'attendance_approver'): Promise<string> {
+        await seedLoginUser(userId, { roles: [role] })
+        return loginToken(userId)
+      }
+
+      /**
+       * As `seedPerson`, plus a fixture-only admin-claims token used ONLY to approve an original
+       * document on `/api/approvals/:id/actions` (never sent to the routes under test).
+       */
+      async function seedApprovingPerson(
+        userId: string,
+        role: 'attendance_employee' | 'attendance_approver',
+      ): Promise<{ token: string; fixtureToken: string }> {
+        const token = await seedPerson(userId, role)
+        return { token, fixtureToken: await fixtureAdminToken(userId) }
+      }
+
+      /** An `approval_delegations` config row (non-product-path fixture write; deleted in afterAll). */
+      async function addDelegation(id: string, delegator: string, delegatee: string): Promise<void> {
+        createdDelegationIds.add(id)
+        await pool().query(
+          `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+           VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+          [id, delegator, delegatee],
+        )
+      }
+
+      async function activeUserSeats(instanceId: string): Promise<string[]> {
+        const rows = await pool().query<{ assignee_id: string }>(
+          `SELECT assignee_id FROM approval_assignments
+            WHERE instance_id = $1 AND is_active = TRUE AND assignment_type = 'user'
+            ORDER BY assignee_id`,
+          [instanceId],
+        )
+        return rows.rows.map((row) => row.assignee_id)
+      }
+
+      async function originalSeatRows(documentId: string): Promise<Array<{ assignee_id: string; delegated_from: string | null }>> {
+        const rows = await pool().query<{ assignee_id: string; delegated_from: string | null }>(
+          `SELECT assignee_id, metadata->>'delegatedFrom' AS delegated_from
+             FROM approval_assignments WHERE instance_id = $1 ORDER BY assignee_id`,
+          [documentId],
+        )
+        return rows.rows
+      }
+
+      it('L4a — lock:157 「委托人不可」, first reading: a person holding the REQUESTER\'s delegation (active, its window covering now) is not the requester — GET and POST are the byte-identical 404 of a never-existing id, and no round is opened', async () => {
+        const requester = `g4dh-l4a-e-${TS}`
+        const delegatee = `g4dh-l4a-d-${TS}`
+        const requesterToken = await seedPerson(requester, 'attendance_employee')
+        const delegateeToken = await seedPerson(delegatee, 'attendance_employee')
+        await addDelegation(`g4dh-l4a-${TS}`, requester, delegatee)
+        const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: requester })
+
+        const absentId = randomUUID()
+        for (const method of ['GET', 'POST'] as const) {
+          const body = method === 'POST' ? {} : undefined
+          const absent = await http(method, entryPath(absentId), delegateeToken, body)
+          const actual = await http(method, entryPath(requestId), delegateeToken, body)
+          expect(absent.status).toBe(404)
+          expect(actual.status, `${method} ${actual.text}`).toBe(404)
+          expect(actual.text).toBe(absent.text)
+          expect(actual.text).toBe(NOT_FOUND_BODY)
+        }
+        expect(await roundsFor(documentId)).toEqual([])
+        // Positive control: the requester herself reads the same leave (no round yet).
+        const own = await http('GET', entryPath(requestId), requesterToken)
+        expect(own.status, own.text).toBe(200)
+        expect(own.json.data.round).toBeNull()
+      })
+
+      it('L4b — lock:157 「委托人不可」, second reading: the approver\'s delegatee, who approved the original in that seat, may READ the document (I7 participant arm) but may not launch — 403 CANCEL_ROUND_REQUESTER_ONLY, and no round is opened', async () => {
+        const seatOwner = `g4dh-l4b-a-${TS}`
+        const delegatee = `g4dh-l4b-d-${TS}`
+        await seedPerson(seatOwner, 'attendance_approver')
+        const actingDelegatee = await seedApprovingPerson(delegatee, 'attendance_employee')
+        await addDelegation(`g4dh-l4b-${TS}`, seatOwner, delegatee)
+        const tpl = await publishSeatTemplate('l4b', [seatOwner], 'single')
+        const requester = `g4dh-l4b-e-${TS}`
+        await seedPerson(requester, 'attendance_employee')
+        const { documentId, requestId } = await seedApprovedLeave({
+          documentRequesterId: requester,
+          templateId: tpl,
+          approverTokens: [actingDelegatee.fixtureToken],
+        })
+        // The original's seat was the delegatee's, substituted from the seat owner at create time.
+        expect(await originalSeatRows(documentId)).toEqual([{ assignee_id: delegatee, delegated_from: seatOwner }])
+
+        const read = await http('GET', entryPath(requestId), actingDelegatee.token)
+        expect(read.status, read.text).toBe(200)
+        expect(read.json.data.round).toBeNull()
+        const launch = await http('POST', entryPath(requestId), actingDelegatee.token, {})
+        expect(launch.status, launch.text).toBe(403)
+        expect(launch.text).toBe(REQUESTER_ONLY_BODY)
+        expect(await roundsFor(documentId)).toEqual([])
+      })
+
+      it('I5 — lock:142 I3 under concurrency: two launches of the same leave sent together yield exactly one round — one 201 and one 409 CANCEL_ROUND_ALREADY_PENDING — and the losing launch leaves nothing behind', async () => {
+        const requester = `g4dh-i5-e-${TS}`
+        const token = await seedPerson(requester, 'attendance_employee')
+        const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: requester })
+        const before = await countWriteSet()
+
+        const [first, second] = await Promise.all([
+          http('POST', entryPath(requestId), token, {}),
+          http('POST', entryPath(requestId), token, {}),
+        ])
+        expect([first.status, second.status].sort(), `${first.text} | ${second.text}`).toEqual([201, 409])
+        const winner = first.status === 201 ? first : second
+        const loser = first.status === 201 ? second : first
+        expect(loser.text).toBe(ALREADY_PENDING_BODY)
+
+        const rounds = await roundsFor(documentId)
+        expect(rounds.map((row) => row.outcome)).toEqual(['pending'])
+        expect(winner.json.data.round.roundId).toBe(rounds[0].id)
+        const after = await countWriteSet()
+        expect(after.approval_instances - before.approval_instances).toBe(1)
+        expect(after.approval_rounds - before.approval_rounds).toBe(1)
+      })
+
+      for (const variant of ['live', 'ended'] as const) {
+        it(`D1 — lock:74 §2-G3 third sentence + owner 14:3x ① 「Minimal action response」, delegation ${variant === 'live' ? 'still active at launch' : 'ended before launch'}: the round seats the ORIGINAL approver A, not the delegatee D who approved the original; A approves with exactly four keys yet reads the summary as a 404; D reads the summary (I7 participant arm) but is refused on the actions route with the engine's own code`, async () => {
+          const seatOwner = `g4dh-d1${variant}-a-${TS}`
+          const delegatee = `g4dh-d1${variant}-d-${TS}`
+          const a = await seedApprovingPerson(seatOwner, 'attendance_approver')
+          const d = await seedApprovingPerson(delegatee, 'attendance_approver')
+          const delegationId = `g4dh-d1-${variant}-${TS}`
+          await addDelegation(delegationId, seatOwner, delegatee)
+          const tpl = await publishSeatTemplate(`d1${variant}`, [seatOwner], 'single')
+          const requester = `g4dh-d1${variant}-e-${TS}`
+          const requesterToken = await seedPerson(requester, 'attendance_employee')
+          const { documentId, requestId } = await seedApprovedLeave({
+            documentRequesterId: requester,
+            templateId: tpl,
+            approverTokens: [d.fixtureToken],
+          })
+          expect(await originalSeatRows(documentId)).toEqual([{ assignee_id: delegatee, delegated_from: seatOwner }])
+          if (variant === 'ended') {
+            const ended = await pool().query(
+              `UPDATE approval_delegations SET end_at = NOW() - INTERVAL '1 minute' WHERE id = $1`,
+              [delegationId],
+            )
+            expect(ended.rowCount).toBe(1)
+          }
+
+          const launch = await http('POST', entryPath(requestId), requesterToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          const roundInstanceId = launch.json.data.round.engineInstanceId as string
+          const roundId = launch.json.data.round.roundId as string
+          createdApprovalIds.add(roundInstanceId)
+          expect(await activeUserSeats(roundInstanceId)).toEqual([seatOwner])
+
+          // A took no part in the ORIGINAL, so I7 on it answers the never-existing-id 404.
+          const absent = await http('GET', entryPath(randomUUID()), a.token)
+          const aSummary = await http('GET', entryPath(requestId), a.token)
+          expect(aSummary.status).toBe(404)
+          expect(aSummary.text).toBe(absent.text)
+          // D took part in the original: the summary is readable…
+          const dSummary = await http('GET', entryPath(requestId), d.token)
+          expect(dSummary.status, dSummary.text).toBe(200)
+          expect(dSummary.json.data.round).toMatchObject({ roundId, outcome: 'pending' })
+          // …but D holds no seat on the round: the route passes the engine's refusal through, and the
+          // engine in-process refuses D with the same code.
+          const dAct = await http('POST', actionsPath(requestId), d.token, { action: 'approve' })
+          expect(dAct.status).toBe(403)
+          expect(dAct.text).toBe(ASSIGNMENT_REQUIRED_BODY)
+          let inProcess: { code?: unknown; statusCode?: unknown } | null = null
+          try {
+            await service().dispatchAction(roundInstanceId, { action: 'approve' } as ApprovalActionRequest, {
+              userId: delegatee,
+              roles: [],
+            })
+          } catch (error) {
+            inProcess = error as { code?: unknown; statusCode?: unknown }
+          }
+          expect(inProcess).toMatchObject({ code: 'APPROVAL_ASSIGNMENT_REQUIRED', statusCode: 403 })
+          expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
+
+          const stub = bindCancellationPort(async () => cancelledResponse)
+          try {
+            const aAct = await http('POST', actionsPath(requestId), a.token, { action: 'approve' })
+            expect(aAct.status, aAct.text).toBe(200)
+            expect(aAct.json).toEqual({
+              ok: true,
+              data: { requestId, roundId, outcome: 'applied', status: 'leave_cancelled' },
+            })
+            expect(stub.calls).toHaveLength(1)
+          } finally {
+            stub.stop()
+          }
+          expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['applied'])
+        })
+      }
+    })
   })
 })
 
