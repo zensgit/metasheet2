@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  FIELD_SCHEMA_CHANGED_CODE,
   META_API_ERROR_LABEL_KEYS,
   aiRetryCountdown,
   aiShortcutErrorMessage,
+  apiCodeOwnedErrorMessage,
   apiDefaultErrorMessage,
   apiFieldValidationFallback,
   metaApiErrorLabel,
@@ -40,6 +42,8 @@ describe('meta-api-error-labels', () => {
       'error.serverRestarting',
       // 客户反馈 #4b: automation condition value does not fit the field type.
       'error.automationConditionValueInvalid',
+      // 字段类型转换第 3 刀: 409 FIELD_SCHEMA_CHANGED.
+      'error.fieldSchemaChanged',
     ])
 
     for (const key of META_API_ERROR_LABEL_KEYS) {
@@ -100,6 +104,33 @@ describe('meta-api-error-labels', () => {
     expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, false))
       .toBe('A condition value does not match its field type (dates use YYYY-MM-DD, date-times YYYY-MM-DD HH:mm, numbers digits only).')
     expect(apiDefaultErrorMessage('AUTOMATION_CONDITION_VALUE_INVALID', 400, true)).not.toMatch(/fld[_-]/)
+  })
+
+  // Field retype slice 3b — the write was refused because its column changed type while it waited.
+  it('FIELD_SCHEMA_CHANGED: one plain sentence per locale, owned by the client, values-free', () => {
+    const zh = '这一列刚刚被改成了别的类型，你这次的修改没有保存。请刷新页面后重新修改。'
+    const en = 'This column was just changed to another type, so your edit was not saved. Refresh the page and edit again.'
+    expect(FIELD_SCHEMA_CHANGED_CODE).toBe('FIELD_SCHEMA_CHANGED')
+    // the copy the client uses INSTEAD of the server's message
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED', true)).toBe(zh)
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED', false)).toBe(en)
+    expect(apiCodeOwnedErrorMessage('FIELD_SCHEMA_CHANGED')).toBe(en)
+    // and the same copy when the payload arrived without a message
+    expect(apiDefaultErrorMessage('FIELD_SCHEMA_CHANGED', 409, true)).toBe(zh)
+    expect(apiDefaultErrorMessage('FIELD_SCHEMA_CHANGED', 409, false)).toBe(en)
+    // the AI run surface reads its copy by code
+    expect(aiShortcutErrorMessage('FIELD_SCHEMA_CHANGED', true)).toBe(zh)
+    // plain: no code, no lock vocabulary, no field id — and it says the edit was NOT saved
+    for (const copy of [zh, en]) expect(copy).not.toMatch(/FIELD_SCHEMA|fld[_-]|409|fence|栅栏|锁/)
+    expect(zh).toContain('没有保存')
+    expect(en).toContain('not saved')
+  })
+
+  it('FIELD_SCHEMA_CHANGED is the ONLY code whose copy the client owns: every other code leaves the server message alone', () => {
+    for (const code of ['VERSION_CONFLICT', 'RECOVERY_IN_PROGRESS', 'LINK_WRITER_FENCE_PLAN_CHANGED', 'VALIDATION_ERROR', 'FORBIDDEN', 'FIELD_RETYPE_NOT_LOSSLESS', 'field_schema_changed', 'SOMETHING_NEW', '']) {
+      expect([code, apiCodeOwnedErrorMessage(code, true)]).toEqual([code, null])
+    }
+    expect(apiCodeOwnedErrorMessage(undefined, true)).toBeNull()
   })
 
   it('keeps unknown API status fallback technical and locale-neutral', () => {

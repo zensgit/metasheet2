@@ -12910,7 +12910,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -12996,7 +12996,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -13233,7 +13233,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
