@@ -30,7 +30,9 @@ import type { ApprovalTemplateVisibilityActor } from '../../src/services/Approva
  * mismatch and rollback SKIPS it rather than force-clearing a group_id that is no longer even
  * `b.group_id`), the §13 changesRequired #7 409-not-idempotent-200 rule (with `details.rolledBackAt`),
  * the 404 not-found shape (including cross-org batchId lookup, which is indistinguishable from
- * not-found by design), and route wiring (admin/reader/unauthenticated).
+ * not-found by design), and route wiring (admin/reader/unauthenticated), and the
+ * standalone cross-org execution of the exported rollback unlink statement (owner ruling Q3b: the
+ * redundant literal org predicate makes it touch 0 rows for another org's batch).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const EXPECT_DB = process.env.EXPECT_DB === '1'

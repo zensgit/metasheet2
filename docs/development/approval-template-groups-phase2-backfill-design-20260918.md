@@ -308,9 +308,11 @@ UPDATE approval_template_group_links
 UPDATE approval_template_group_links l
    SET group_id = NULL, unlinked_at = now()
   FROM approval_template_group_backfill_batch_links b
- WHERE b.batch_id = $1 AND b.org_id = l.org_id AND b.template_id = l.template_id
+ WHERE b.batch_id = $1 AND b.org_id = $2 AND b.org_id = l.org_id AND b.template_id = l.template_id
    AND l.group_id = b.group_id AND l.linked_at = b.linked_at
 ```
+
+> 2026-09-28 补:按 owner 对 DDL 声明 §6 Q3b 的裁定(见 `ApprovalTemplateGroupService.ts` 导出常量 `ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL`),WHERE 增一条冗余的字面 org 谓词 `AND b.org_id = $2` 作纵深防御;服务调用路径上它不可观测(先按 `(id, org_id)` 取批次行锁),由 rollback 真库套件直接执行该语句钉住。
 
 ### 4.3 分组回滚:仅归档"批次新建 且 回滚后零剩余成员"的组
 
@@ -755,7 +757,7 @@ s6a `pluginTestsWorkflow` 钉重算(`.github/workflows/plugin-tests.yml` 两处�
 **算法落地要点(逐条对应 §13.1 changesRequired,§4 pseudocode → 代码)**:
 - §13 changesRequired #1(事务骨架):L0 → 批次头 `FOR UPDATE`(不存在→404;`rolled_back_at IS NOT NULL`→409)→ 只读取本批次触达的全部 group id(`UNION` 两张子表)→ §13.2 统一锁序的"一条 `ORDER BY id FOR UPDATE`"预锁全部既有组 → §4.2 的 L2 写 → §4.3 的归档判定(复用上一步的预锁快照,不第二次 `FOR UPDATE`)→ 批次头 `rolled_back_at = now()` → COMMIT。
 - §4.1(不调用 `unlinkApprovalTemplateFromGroup` / `archiveApprovalTemplateGroupWithClient`,因为两者都是无条件的,会撤销批次外状态)与"仍要求全仓只有一份语句文本"之间的张力,本步的落地做法:把 `archiveApprovalTemplateGroupWithClient` 内联的两条语句(unlink-all-members / archive-group-row)提成两个**命名导出的 SQL 文本常量**(`ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` / `ATG_ARCHIVE_GROUP_ROW_SQL`),而不是一个共享函数——原因是两个调用点需要在**不同的锁前提**下执行同一段文本:`archiveApprovalTemplateGroupWithClient` 自己的调用点在紧邻语句里持有 `FOR UPDATE`;rollback 的调用点复用的是骨架预锁步骤已经拿到的行锁,不能再发第二次 `FOR UPDATE`(见下一条)。`archiveApprovalTemplateGroupWithClient` 本身也改为调用这两个常量(不是复制文本两份),因此这一步顺带是一次无行为变化的重构。
-- §13 changesRequired #2(§4.2 落地,令牌全程不经 JS):`UPDATE approval_template_group_links l SET group_id = NULL, unlinked_at = now() FROM approval_template_group_backfill_batch_links b WHERE b.batch_id = $1 AND b.org_id = l.org_id AND b.template_id = l.template_id AND l.group_id = b.group_id AND l.linked_at = b.linked_at` —— 一条集合式服务端 join,`group_id` 与 `linked_at` 两列都在 SQL 内部比较,从未经过 JS。
+- §13 changesRequired #2(§4.2 落地,令牌全程不经 JS):`UPDATE approval_template_group_links l SET group_id = NULL, unlinked_at = now() FROM approval_template_group_backfill_batch_links b WHERE b.batch_id = $1 AND b.org_id = $2 AND b.org_id = l.org_id AND b.template_id = l.template_id AND l.group_id = b.group_id AND l.linked_at = b.linked_at` —— 一条集合式服务端 join,`group_id` 与 `linked_at` 两列都在 SQL 内部比较,从未经过 JS。
 - §4.3 落地:对每个 `created_new = true` 的 `(group_id)`,从骨架预锁步骤的快照里读 `archived_at`(不存在或非 NULL 则跳过,不报错)→ `SELECT count(*) … WHERE unlinked_at IS NULL` 算 `remaining` → `remaining = 0` 才执行 `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` + `ATG_ARCHIVE_GROUP_ROW_SQL`(顺序上 §4.2 已经先跑完,所以 `remaining` 不会把本批次自己刚解除的成员算进去)。
 - §13 changesRequired #7(已裁,ownerLevel=false):已回滚批次再次调用 → 409 `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK`,`ServiceError` 的 `details.rolledBackAt` 带上第一次回滚的时间戳(经 `sendServiceError` 落进响应体 `error.details.rolledBackAt`)——不是幂等 200。
 - 404 `APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND`:批次头查询的 `WHERE` 本身带 `org_id = $2`,不存在与"存在但属于别的 org"两种情况走同一条路径(同文件其余每个 org 域查询的惯例)。
