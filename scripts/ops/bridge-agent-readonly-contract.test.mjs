@@ -1,17 +1,264 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, readdir } from 'node:fs/promises';
 import { test } from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const scriptPath = new URL('./bridge-agent-readonly.ps1', import.meta.url);
+// What this file proves, and what it does not
+// -------------------------------------------
+//
+// Layer 1, the change detector. The whole text of every Bridge Agent script
+// that opens a database connection or builds SQL is pinned below by a sha256
+// digest. Any change to such a script -- new SQL text, a comment edit, a
+// whitespace change -- turns this file red until the pin is updated. That
+// proves one thing: a pinned script cannot change without a visible re-pin
+// in the same diff. Updating a pin is a review duty, not a formality: whoever
+// updates it must first read the diff of the script for anything that can
+// write or execute beyond the existing reads.
+//
+// Layer 1 also refuses, in the pinned scripts, the forms that load a second
+// code file (dot-sourcing, Import-Module, using module, Invoke-Expression,
+// Add-Type with anything other than an assembly name), because the digest
+// covers only the bytes of the pinned file itself.
+//
+// Layer 2, the older word and line checks further down, is a readable check
+// for common write forms in bridge-agent-readonly.ps1. It is kept because it
+// still flags the obvious cases after a careless re-pin. It is not a proof
+// that the script cannot write: a list of forbidden forms cannot be
+// completed, and each of three verification rounds slipped a plain write
+// past it.
+//
+// Neither layer proves that the Bridge Agent cannot write. The provable
+// guarantee against external writes is the read-only database account the
+// agent connects with.
+
+// Test-only override, used by mutation harnesses to point these tests at a
+// changed COPY of a pinned script instead of editing the tracked file. It
+// takes effect only when this flag equals the exact literal 'true' AND the
+// per-script path variable is set. Two tests keep it honest: one proves that
+// the path variables are ignored without the exact flag, and one fails
+// whenever a redirect is in effect, so a run that uses the override is never
+// all green and certifies nothing.
+const TEST_ONLY_OVERRIDE_FLAG = 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_OVERRIDE';
+
+// Every Bridge Agent script in scripts/ops that opens a database connection
+// or builds SQL. `sha256` is the digest of the file after CRLF is normalized
+// to LF (see lfNormalized below).
+const PINNED_SCRIPTS = Object.freeze({
+  readonly: Object.freeze({
+    // Opens a SqlClient connection; runs the /health probe and the /query SELECT.
+    file: 'bridge-agent-readonly.ps1',
+    sha256: '7e656b54af23fd16981356828d8eb15c0be03f9c40f5110892ee801ab2713a91',
+    overrideVar: 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_READONLY_PS1',
+  }),
+  driverSmoke: Object.freeze({
+    // Opens a SqlClient, Odbc or OleDb connection and runs SELECT @@VERSION.
+    file: 'bridge-agent-driver-smoke.ps1',
+    sha256: 'aab2ef409ddedf3a9b53f4d38cfa7ec87446af5247be4d738406983b6b5178f1',
+    overrideVar: 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_DRIVER_SMOKE_PS1',
+  }),
+});
+
+// Bridge Agent scripts in scripts/ops that are deliberately not pinned.
+const UNPINNED_SCRIPTS = Object.freeze({
+  'bridge-agent-readonly-scheduled-task.ps1':
+    'opens no database connection and builds no SQL; it registers a Windows startup task that runs ' +
+    'bridge-agent-readonly.ps1 with -File',
+});
+
 const configPath = new URL('./fixtures/bridge-agent-readonly/config.example.json', import.meta.url);
 
+function trackedScriptUrl(key) {
+  return new URL(`./${PINNED_SCRIPTS[key].file}`, import.meta.url);
+}
+
+function resolveScriptUrl(key, env) {
+  const overridePath = env[PINNED_SCRIPTS[key].overrideVar];
+  if (env[TEST_ONLY_OVERRIDE_FLAG] === 'true' && typeof overridePath === 'string' && overridePath !== '') {
+    return pathToFileURL(overridePath);
+  }
+  return trackedScriptUrl(key);
+}
+
+function scriptUnderTest(key) {
+  return resolveScriptUrl(key, process.env);
+}
+
+// The digest is taken over the file's bytes with every CR that directly
+// precedes an LF removed, and nothing else changed. A Windows checkout with
+// core.autocrlf=true has CRLF while the committed blob and the CI checkout
+// have LF; both give the same digest. A lone CR is kept.
+//
+// A UTF-8 byte-order mark is kept as well, so adding or removing one changes
+// the digest. That is deliberate: Windows PowerShell 5.1 reads a script
+// without a BOM in the system ANSI code page and a script with one as UTF-8,
+// and bridge-agent-readonly.ps1 has non-ASCII string literals, so a BOM change
+// changes what the script does and must be reviewed like any other edit.
+function lfNormalized(bytes) {
+  return Buffer.from(bytes.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+}
+
+function lfNormalizedSha256(bytes) {
+  return createHash('sha256').update(lfNormalized(bytes)).digest('hex');
+}
+
 async function readScript() {
-  return readFile(scriptPath, 'utf8');
+  return readFile(scriptUnderTest('readonly'), 'utf8');
 }
 
 async function readConfig() {
   return JSON.parse(await readFile(configPath, 'utf8'));
 }
+
+// ---------------------------------------------------------------------------
+// Layer 1: whole-file digest pins, and no second code file
+// ---------------------------------------------------------------------------
+
+for (const [key, spec] of Object.entries(PINNED_SCRIPTS)) {
+  test(`digest pin: ${spec.file} is the reviewed version, byte for byte`, async () => {
+    const actual = lfNormalizedSha256(await readFile(scriptUnderTest(key)));
+    assert.equal(
+      actual,
+      spec.sha256,
+      [
+        `The Bridge Agent script ${spec.file} changed.`,
+        `Its sha256 (CRLF normalized to LF) is ${actual}; the pin in ` +
+          `scripts/ops/bridge-agent-readonly-contract.test.mjs is ${spec.sha256}.`,
+        'Before you update the pin, read the diff of the script for anything that can write or execute ' +
+          'beyond the existing reads: new SQL text, a new command or connection object, another SQL client ' +
+          'or program, a second file loaded, a new process or network call.',
+        'Only then update the pin, in the same PR as the script change, so that the reviewer sees both together.',
+        'This pin only makes the change visible. The guarantee against writes is the read-only database account.',
+      ].join('\n'),
+    );
+  });
+}
+
+test('digest normalization drops only a CR that directly precedes an LF, and keeps a byte-order mark', () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  assert.deepEqual(
+    lfNormalized(Buffer.concat([bom, Buffer.from('a\r\nb\rc\n\r\n', 'latin1')])),
+    Buffer.concat([bom, Buffer.from('a\nb\rc\n\n', 'latin1')]),
+  );
+  assert.equal(
+    lfNormalizedSha256(Buffer.from('x\r\ny\r\n', 'latin1')),
+    lfNormalizedSha256(Buffer.from('x\ny\n', 'latin1')),
+    'a CRLF checkout and an LF checkout of the same file must give the same digest',
+  );
+  assert.notEqual(
+    lfNormalizedSha256(Buffer.concat([bom, Buffer.from('x\n', 'latin1')])),
+    lfNormalizedSha256(Buffer.from('x\n', 'latin1')),
+    'adding a byte-order mark must change the digest',
+  );
+});
+
+test('test-only override: the script path variables are ignored unless the exact test-only flag is set', () => {
+  const elsewhere = fileURLToPath(new URL('./not-a-bridge-agent-script.ps1', import.meta.url));
+  for (const [key, spec] of Object.entries(PINNED_SCRIPTS)) {
+    const tracked = trackedScriptUrl(key).href;
+    assert.equal(resolveScriptUrl(key, {}).href, tracked);
+    assert.equal(
+      resolveScriptUrl(key, { [spec.overrideVar]: elsewhere }).href,
+      tracked,
+      `${spec.overrideVar} without ${TEST_ONLY_OVERRIDE_FLAG} must be ignored`,
+    );
+    for (const flag of ['', '1', 'yes', 'TRUE', 'True', ' true', 'true ']) {
+      assert.equal(
+        resolveScriptUrl(key, { [TEST_ONLY_OVERRIDE_FLAG]: flag, [spec.overrideVar]: elsewhere }).href,
+        tracked,
+        `${TEST_ONLY_OVERRIDE_FLAG}=${JSON.stringify(flag)} is not the exact literal 'true' and must be ignored`,
+      );
+    }
+    assert.equal(
+      resolveScriptUrl(key, { [TEST_ONLY_OVERRIDE_FLAG]: 'true' }).href,
+      tracked,
+      'the flag without a path must not redirect',
+    );
+    const otherSpecs = Object.entries(PINNED_SCRIPTS).filter(([otherKey]) => otherKey !== key);
+    assert.ok(otherSpecs.length > 0);
+    for (const [, otherSpec] of otherSpecs) {
+      assert.equal(
+        resolveScriptUrl(key, { [TEST_ONLY_OVERRIDE_FLAG]: 'true', [otherSpec.overrideVar]: elsewhere }).href,
+        tracked,
+        `${otherSpec.overrideVar} must not redirect ${spec.file}`,
+      );
+    }
+    // Positive control, so that the checks above cannot pass vacuously.
+    assert.equal(
+      resolveScriptUrl(key, { [TEST_ONLY_OVERRIDE_FLAG]: 'true', [spec.overrideVar]: elsewhere }).href,
+      pathToFileURL(elsewhere).href,
+    );
+  }
+});
+
+test('no test-only override is in effect (a run that redirects a pinned script never passes)', () => {
+  for (const [key, spec] of Object.entries(PINNED_SCRIPTS)) {
+    assert.equal(
+      scriptUnderTest(key).href,
+      trackedScriptUrl(key).href,
+      `${spec.file} is redirected to another file by the test-only override; ` +
+        'this run checks a copy, not the tracked script, and certifies nothing',
+    );
+  }
+});
+
+// Forms that make a pinned script load and run a second code file, which the
+// digest above cannot see. Each count is 0 today. The dot-sourcing pattern
+// was checked against the Windows PowerShell 5.1 parser: at the start of a
+// command, `. x`, `.$x`, `.'x'`, `."x"`, `.(x)` and `.{ }` all dot-source,
+// while `.\x.ps1` (run a script in its own scope) and `$x.Name` do not.
+// Add-Type is allowed only in the form `Add-Type -AssemblyName Some.Name`,
+// which loads a framework assembly by name; a path, a literal path, source
+// text or any other argument is refused.
+const SECOND_FILE_LOADERS = Object.freeze([
+  ['dot-sourcing', /(?:^|[;{(|&=])[ \t]*\.(?:[ \t]+\S|[$'"({])/m],
+  ['Import-Module (or its alias ipmo)', /\b(?:Import-Module|ipmo)\b/i],
+  ['#requires -Modules', /#requires\b[^\r\n]*[ \t]-Modules?\b/i],
+  ['using module / using assembly', /\busing[ \t]+(?:module|assembly)\b/i],
+  ['Invoke-Expression (or its alias iex)', /\b(?:Invoke-Expression|iex)\b/i],
+]);
+const ASSEMBLY_NAME_ONLY_ADD_TYPE = /^Add-Type[ \t]+-AssemblyName[ \t]+[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/i;
+
+for (const [key, spec] of Object.entries(PINNED_SCRIPTS)) {
+  test(`${spec.file} loads no second code file`, async () => {
+    const script = await readFile(scriptUnderTest(key), 'utf8');
+
+    for (const [form, pattern] of SECOND_FILE_LOADERS) {
+      assert.doesNotMatch(
+        script,
+        pattern,
+        `${spec.file} must not use ${form}: the digest pin covers only this file, not a file it loads`,
+      );
+    }
+
+    const addTypeStatements = [...script.matchAll(/\bAdd-Type\b[^\r\n]*/gi)].map((match) => match[0].trim());
+    for (const statement of addTypeStatements) {
+      assert.match(
+        statement,
+        ASSEMBLY_NAME_ONLY_ADD_TYPE,
+        `${spec.file} may use Add-Type only to load a framework assembly by name ` +
+          `(Add-Type -AssemblyName System.Data), not a path or source text; found: ${statement}`,
+      );
+      assert.doesNotMatch(statement, /\.(?:dll|exe)$/i, `Add-Type must not name an assembly file: ${statement}`);
+    }
+  });
+}
+
+test('every bridge-agent*.ps1 in scripts/ops is either pinned or listed as not pinned with a reason', async () => {
+  const family = (await readdir(new URL('./', import.meta.url)))
+    .filter((name) => /^bridge-agent.*\.ps[dm]?1$/i.test(name))
+    .sort();
+  assert.deepEqual(
+    family,
+    [...Object.values(PINNED_SCRIPTS).map((spec) => spec.file), ...Object.keys(UNPINNED_SCRIPTS)].sort(),
+    'A Bridge Agent script was added, renamed or removed. If it opens a database connection or builds SQL, ' +
+      'pin it in PINNED_SCRIPTS; otherwise list it in UNPINNED_SCRIPTS with the reason.',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Layer 2: readable checks for common write forms in bridge-agent-readonly.ps1
+// ---------------------------------------------------------------------------
 
 test('readonly bridge exposes the BA-M1 HTTP contract only on localhost', async () => {
   const script = await readScript();
@@ -55,32 +302,30 @@ test('readonly bridge rejects unsafe query surfaces by code', async () => {
 // filter-rejection marker from UNSUPPORTED_FILTERS to INVALID_FILTERS and
 // left this file unupdated: the marker `assert.match` threw before the write
 // verb check below it ever ran.
+//
+// Catches: every word listed below, in any letter case, as a whole word,
+// anywhere in the file -- comments and string literals included, so also
+// inside here-strings; and any Execute* method name other than ExecuteReader.
+// Does not catch: a word split by concatenation or -f formatting, a method
+// reached by reflection or a computed name, a statement or client whose name
+// is not listed (for example ENABLE TRIGGER, SHUTDOWN, osql), a procedure
+// name that contains no listed word, or a lower-case Execute* name (the
+// Execute* scan is case-sensitive).
 test('readonly bridge script contains no SQL/ADO write or extra execute verbs', async () => {
   const script = await readScript();
 
-  // Matched as whole words, case-insensitively, across the *entire* script
-  // text -- including PowerShell comments (`#...`) and embedded SQL string
-  // literals. Comments are not exempt: a stale comment naming a write verb
-  // (for example, copy-pasted from a T-SQL snippet while drafting a query)
-  // is exactly the kind of drift this test exists to catch, and comments are
-  // trivially uncommented by later edits. If the script ever needs to name
-  // one of these words legitimately -- for example inside a human-facing
-  // refusal message that enumerates the forbidden verbs -- that occurrence
-  // must be carved out narrowly (e.g. asserted at its own literal/line)
-  // rather than by removing or loosening an entry below. No such occurrence
-  // exists in the script today.
+  // Comments are not exempt: a stale comment naming a write verb (for example,
+  // copy-pasted from a T-SQL snippet while drafting a query) is drift, and
+  // comments are trivially uncommented by later edits. If the script ever
+  // needs to name one of these words legitimately -- for example inside a
+  // human-facing refusal message that enumerates the forbidden verbs -- that
+  // occurrence must be carved out narrowly rather than by removing or
+  // loosening an entry below. No such occurrence exists in the script today.
   //
-  // Beyond the core DML/DDL verb set, this also forbids: bulk-copy write
-  // paths (SqlBulkCopy / WriteToServer -- an ADO.NET bulk insert that never
-  // spells INSERT); `SELECT ... INTO` (creates and populates a table without
-  // any of the other listed verbs); legacy text-write statements (WRITETEXT
-  // / UPDATETEXT); administrative writes reachable from a query connection
-  // (RESTORE / BACKUP / DENY / DISABLE, e.g. `DISABLE TRIGGER ...`); and
-  // `sp_rename` (a system stored procedure call, which a whole-word check on
-  // RENAME/EXEC alone would miss because `_` is a word character and glues
-  // `sp_` onto the procedure name, leaving no `\b` boundary before it).
-  // `StoredProcedure` is forbidden here too, as a belt to the CommandType
-  // pin below.
+  // Besides the DML/DDL verbs the list names: the ADO.NET bulk insert
+  // (SqlBulkCopy / WriteToServer), `SELECT ... INTO`, WRITETEXT / UPDATETEXT,
+  // RESTORE / BACKUP / DENY / DISABLE, `sp_rename` (a whole-word RENAME check
+  // would miss it, because `_` is a word character), and StoredProcedure.
   const forbiddenVerbs = [
     'INSERT',
     'UPDATE',
@@ -119,9 +364,8 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
   }
 
   // ExecuteReader is the only ADO.NET command-execution call the read path
-  // may use. Matching the generic `Execute<Word>` shape (rather than
-  // enumerating known ADO.NET method names) also catches variants such as
-  // ExecuteXmlReader or ExecuteDataSet that are not individually named above.
+  // uses. Matching the generic `Execute<Word>` shape also catches PascalCase
+  // variants such as ExecuteXmlReader that are not named above.
   const executeCalls = [...script.matchAll(/\bExecute[A-Za-z]+\b/g)].map((match) => match[0]);
   assert.ok(executeCalls.length > 0, 'expected at least one Execute* call in the script');
   assert.deepEqual(
@@ -131,17 +375,10 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
   );
 });
 
-// The two checks above catch write *verbs* appearing anywhere in the script,
-// but a stored-procedure call spelled as a bare object name (for example
-// `dbo.usp_InsertStockIssue`) contains none of those verbs as whole words --
-// `usp_Insert...` has no `\b` boundary before `Insert` because `_` is a word
-// character. That shape is instead ruled out structurally here: the whole
-// script may only ever set `CommandText` once, to the `$Sql` variable built
-// by New-ObjectQuerySql, and `CommandType` once, to `::Text`. Any stored
-// procedure call (whether via `CommandType.StoredProcedure` or via a bare
-// `usp_...`/`sp_...` literal assigned to CommandText) changes one of those
-// two assignments and is caught here, independent of what verb list is kept
-// in sync above.
+// Pins the text of the one `.CommandText =` line and the one `.CommandType =`
+// line. Catches a procedure name, another variable or another type written on
+// those two lines. Does not see what reaches `$Sql` before the CommandText
+// line, `.CommandText +=`, `set_CommandText(...)`, or a second command object.
 test('readonly bridge sets SQL command text and type through one pinned assignment', async () => {
   const script = await readScript();
 
@@ -165,20 +402,15 @@ test('readonly bridge sets SQL command text and type through one pinned assignme
   );
 });
 
-// Round-2 verifier finding: a whole-word verb ban (the test above) and a
-// count-of-assignments ban (the test above that) both only recognise a
-// *spelling* -- they never pin what SQL text actually reaches the database.
-// A bare stored-procedure name (e.g. `dbo.usp_InsertStockIssue`) contains no
-// forbidden verb as a whole word, and T-SQL admin statements (DBCC, SHUTDOWN,
-// KILL, sp_configure, sp_addrolemember, xp_cmdshell, ENABLE TRIGGER) are not
-// on -- and can never fully enumerate -- the forbidden-verb list. Closing
-// this structurally: the script has exactly one function that ever runs SQL
-// (Invoke-BridgeSqlQuery), it is only ever called from two literal call
-// sites, and the one SQL string it builds itself has exactly one literal
-// shape. Any mutation to the health-check literal, to the query-builder
-// text, or to how either reaches -Sql (a renamed variable, a different
-// request property, an inline batch) changes one of the pinned literals
-// below and fails this test, regardless of which word it now contains.
+// Pins the three lines that name `Invoke-BridgeSqlQuery` (exact case) and
+// the `$sql =` / `$sql +=` lines of the query builder (exact case). Catches a
+// change written on those exact lines: another health-check literal, another
+// argument at the /query call site, a third call spelled `Invoke-BridgeSqlQuery`,
+// or new text on the two builder lines. Does not see the lines in between:
+// the builder's return line, `$querySpec` before the call, `$source`,
+// `$columns` and `$whereClauses` that feed the builder line, or the `$Sql`
+// parameter inside Invoke-BridgeSqlQuery; nor a call or variable spelled in
+// another letter case.
 test('readonly bridge executes SQL only through two pinned call sites, each with a pinned SQL shape', async () => {
   const script = await readScript();
 
@@ -212,20 +444,12 @@ test('readonly bridge executes SQL only through two pinned call sites, each with
   );
 });
 
-// Round-2 verifier finding: the CommandText/CommandType pin above only
-// watches the one SqlCommand object created via $connection.CreateCommand().
-// A stored-procedure (or any other write) reaches the database just as well
-// through a *second* command object that never touches that pin: a direct
-// `New-Object ... SqlCommand(...)` / `[SqlCommand]::new(...)` /
-// `New-Object ... SqlCommand -Property @{ CommandText = ... }` constructor,
-// a SqlDataAdapter/SqlCommandBuilder pair (`.Fill()`, `.Update()`,
-// `.GetInsertCommand()`), or shelling out to `Invoke-Sqlcmd`/`sqlcmd.exe`.
-// None of those names is a "write verb" in the SQL sense, so the whole-word
-// verb test above cannot see them either. These are matched as plain
-// substrings, not whole words: `SqlCommandBuilder` and `SqlDataAdapter` are
-// their own identifiers with no `\b` boundary a `\bSqlCommand\b`-style check
-// could rely on, and `sqlcmd`/`Invoke-Sqlcmd`/`sqlcmd.exe` are not variants
-// of any word in the forbidden-verb list at all.
+// Refuses the substrings SqlCommand, SqlDataAdapter and sqlcmd in any letter
+// case (they are matched as substrings, so SqlCommandBuilder and
+// Invoke-Sqlcmd are covered too), and allows exactly one CreateCommand()
+// call. Catches a second SqlClient command or adapter and the sqlcmd tools.
+// Does not catch OleDb or Odbc command objects, osql, bcp, or any other
+// client that does not contain one of those three names.
 test('readonly bridge names no alternate SqlCommand/adapter/sqlcmd execution surface', async () => {
   const script = await readScript();
 
