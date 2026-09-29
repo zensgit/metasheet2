@@ -967,3 +967,47 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 7. **测试残留**:
    - 同 §8.8 第 7 项。C2 用例写入的 `approval_delegations` 行在 `afterAll` 显式删除,运行后库内 0 行;轮次、实例、请求、用户与角色随既有清理删除。
    - 动态探针对全部路由打请求,会在一次性库留下探针数据,随库 drop。
+
+## 11. 阶段 D(H 层:真库 + 真 HTTP)新增用例
+
+- **来由**:阶段 D 验收方案(2026-09-29)H 层标为「新增」的行,写进既有 `approval-cancel-round-attendance-entry.db.test.ts`,放在 A2 块末尾的 `phase D (H layer)` 块里。
+  - 不改 workflow、`vitest.config.ts`、ci-wiring 常量或 s6a pins。
+  - 验收读数(逐行)另见阶段 D 验收报告,不入库。
+- **用例**(9 条,标题以行 ID 开头):
+
+| 行 | 断言 |
+|---|---|
+| L4a | 持有**请求人**委托的受托人:GET / POST 与不存在 id 逐字节同形 404,零轮次;请求人本人读 200(正控) |
+| L4b | 以受托身份坐原单席位并批准原单的人:读 200(参与者臂)、发起 403 `CANCEL_ROUND_REQUESTER_ONLY`,零轮次 |
+| I5 | 同一请假两次发起同时到达:恰一个 201、一个 409 `CANCEL_ROUND_ALREADY_PENDING`(逐字节);pending 轮次 1 行,引擎实例与轮次各只 +1 |
+| D1 ×2 | 委托「发起时仍有效」「发起前已结束」两变体:轮次席位 = 原审批人 A;A 办理 200 恰 4 键,A 读摘要 404(与不存在同形);受托人 D 读摘要 200,办理 403 `APPROVAL_ASSIGNMENT_REQUIRED`,与进程内引擎同码 |
+| A8 | 同一轮:平台管理员真令牌走 `POST /api/approvals/:id/actions` 得 403,code 与 message 同考勤侧无席位持码人;两侧体都不含 `details`;轮次不变,审计只有 `created` |
+| A12 | 会签两席:首个 approve 后摘要 `canWithdraw=false`、`withdrawBlockedReason=APPROVAL_REVOKE_WINDOW_CLOSED`;请求人撤回 409 同码;第二个 approve ⇒ `applied`;发起时 `canWithdraw=true`(正控) |
+| N3 | 卡片账本自己的写函数写 `outcome_unknown`,再加一条 `outcome_unknown` 的待办镜像行:两条都列为 `pending`、`attempts` 1,键集固定,不含收件人或错误文本 |
+| A3 | 无替身端到端:两个孪生员工各持同样两批调休余额(60 分钟先到期、480 分钟后到期);120 分钟请假经插件路由创建并批准,再把先到期那批移到已过期 ⇒ 撤销轮 `cancelled_with_unrecoverable_expired`,`reversed` 60 / `lots` 1 / `unrecoverableExpired` 60;读两次逐字节同,与审批侧投影深等;孪生经既有直接取消得同一 reversal,两本余额账逐列相等 |
+
+- **非产品路径的夹具写**:
+  - `approval_delegations` 行,以及 D1「已结束」变体把 `end_at` 移到过去;
+  - N3 的一条待办镜像账本行;
+  - A3 的四批余额行与到期时间前移;
+  - A3 的 `comp_time` 请假类型:组织里没有时经管理员路由创建,已有则复用、不删。
+  - `afterAll` 新增删除余额行,其事件随之级联删除。
+- **mutation**:每条的做法是 cp 备份 → 改生产代码 → 核 numstat → 在新克隆库上跑整个文件 → cp 还原 → `cmp` 逐字节 → 工作树 clean。红集记全。
+
+| mutation | 目标行 | 红 |
+|---|---|---|
+| 读谓词加一条「请求人的受托人可读」臂 | L4a | 恰 L4a |
+| 去掉路由与服务两层「仅原请求人」 | L4b | 4:L4b + 既有 L2 / L3 见证 / 管理员正控 |
+| 去掉路由 I3 预检、事务内预检与唯一冲突译码 | I5 | 2:I5(败方 500)+ 既有重复发起 |
+| 席位还原改为坐受托人 | D1 | 3:D1 ×2 + C2 委托用例 |
+| 插件拒绝体的 code 改成固定值 | A8 | 12(共享透传) |
+| 审批侧对无席位码改名 | A8 | 恰 A8 |
+| 去掉 `resolveCanWithdraw` 的「本节点已有人办理」判据 | A12 | 恰 A12 |
+| 卡片映射去掉 `outcome_unknown` | N3 | 恰 N3 |
+| 待办映射去掉 `outcome_unknown` | N3 | 恰 N3 |
+| 分类不再区分 `unrecoverableExpired > 0` | A3 | 2:A3 + 既有三分类的第二个 token |
+| 反转不再识别已过期批次 | A3 | 恰 A3 |
+
+- **本节不含**:
+  - 验收方案中「只作探针、不入库」的行(已知缺陷见证、席位失格时的零新增通知计数)。它们只在一次性库上以未跟踪探针跑过。
+  - 这 9 条用例的独立门审(未做)。
