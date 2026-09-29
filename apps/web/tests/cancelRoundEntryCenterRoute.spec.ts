@@ -441,6 +441,41 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     expect(summaryLine()).toBe('成功 1 项，失败 1 项：')
     expect(resultKinds()).toEqual(['failed'])
   })
+
+  it('batch: a retry that clears every true failure keeps the manifest open while an accepted-but-unconfirmed row is carried', async () => {
+    actionResponses.push(() =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'round-of-cr_other', outcome: 'applied', status: 'leave_cancelled' } }))
+    dispatchActionSpy.mockImplementation(async (id: string) => {
+      if (id === 'apv_bad') throw new Error('冲突：状态已变更')
+      return {}
+    })
+    mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1'), pendingRow({ id: 'apv_bad', requestNo: 'AP-BAD' })]
+    await mountView()
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(summaryLine()).toBe('成功 0 项，已提交但未能确认 1 项，失败 1 项：')
+    expect(resultKinds().sort()).toEqual(['failed', 'unconfirmed'])
+
+    // the true failure now succeeds on retry; the accepted-but-unconfirmed row is not re-sent, and since
+    // it still has to be checked by hand the manifest stays open (no all-clear toast) with that row listed
+    dispatchActionSpy.mockReset().mockResolvedValue({})
+    const retry = container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement
+    expect(retry.disabled).toBe(false)
+    retry.click()
+    await flushUi()
+    expect(dispatchActionSpy.mock.calls.map((c) => c[0])).toEqual(['apv_bad'])
+    expect(attendanceCalls()).toHaveLength(1)
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')).not.toBeNull()
+    expect(summaryLine()).toBe('成功 1 项，已提交但未能确认 1 项，失败 0 项：')
+    expect(resultKinds()).toEqual(['unconfirmed'])
+    expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')?.textContent)
+      .toContain('操作已提交,但无法确认它作用于页面上的这条撤销申请')
+    // nothing left to retry
+    expect((container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement).disabled).toBe(true)
+  })
 })
 
 describe('ApprovalCenterView — cancel-round affordances follow the attendance route grant', () => {
