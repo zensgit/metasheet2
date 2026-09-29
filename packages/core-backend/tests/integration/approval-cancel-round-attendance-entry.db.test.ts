@@ -23,6 +23,7 @@ import { CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE } from '../../src/approvals/app
 import {
   insertDingTalkApprovalCardDelivery,
   markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySendOutcomeUnknown,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
 import { ApprovalGraphExecutor } from '../../src/services/ApprovalGraphExecutor'
@@ -2723,6 +2724,157 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['applied'])
         })
       }
+
+      it('A8 — owner 14:3x ③ 「Keep, same as approval side」: on the same pending round, a platform admin (real login token, no seat) is refused by POST /api/approvals/:id/actions with the SAME code and message the attendance-side actions route gives a seatless attendance:approve holder; neither body carries details, and the round is untouched', async () => {
+        const fixture = await launchedRound('g4dh-a8')
+        const admin = `g4dh-a8-adm-${TS}`
+        await seedLoginUser(admin, { roles: ['admin'], admin: true })
+        const adminToken = await loginToken(admin)
+        const holder = `g4dh-a8-holder-${TS}`
+        const holderToken = await seedPerson(holder, 'attendance_approver')
+        expect(await activeUserSeats(fixture.roundInstanceId)).not.toContain(admin)
+        expect(await activeUserSeats(fixture.roundInstanceId)).not.toContain(holder)
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        let approvalSide: Raw
+        let attendanceSide: Raw
+        try {
+          approvalSide = await http('POST', `/api/approvals/${fixture.roundInstanceId}/actions`, adminToken, { action: 'approve' })
+          attendanceSide = await http('POST', actionsPath(fixture.requestId), holderToken, { action: 'approve' })
+          expect(stub.calls).toHaveLength(0)
+        } finally {
+          stub.stop()
+        }
+        // The admin claim passed the approval side's permission guard (not its generic 403 body) and
+        // reached the engine's seat check.
+        expect(approvalSide.status, approvalSide.text).toBe(403)
+        expect(approvalSide.text).not.toBe(CORE_RBAC_FORBIDDEN_BODY)
+        expect(approvalSide.json.error.code).toBe('APPROVAL_ASSIGNMENT_REQUIRED')
+        expect(attendanceSide.status, attendanceSide.text).toBe(403)
+        expect(attendanceSide.json.error.code).toBe(approvalSide.json.error.code)
+        expect(attendanceSide.json.error.message).toBe(approvalSide.json.error.message)
+        expect(approvalSide.json.error).not.toHaveProperty('details')
+        expect(attendanceSide.json.error).not.toHaveProperty('details')
+        expect(attendanceSide.text).toBe(ASSIGNMENT_REQUIRED_BODY)
+
+        expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+        const records = await pool().query<{ action: string; actor_id: string }>(
+          'SELECT action, actor_id FROM approval_records WHERE instance_id = $1 ORDER BY occurred_at, id',
+          [fixture.roundInstanceId],
+        )
+        expect(records.rows).toEqual([{ action: 'created', actor_id: fixture.employee }])
+      })
+
+      it('A12 — lock:119 / lock:179 N≥2 (会签, approvalMode all): after the first of two seats approves, the summary says canWithdraw false with APPROVAL_REVOKE_WINDOW_CLOSED, the requester\'s withdraw is refused with that same code, and the second seat\'s approve applies the round', async () => {
+        const first = `g4dh-a12-p1-${TS}`
+        const second = `g4dh-a12-p2-${TS}`
+        const p1 = await seedApprovingPerson(first, 'attendance_approver')
+        const p2 = await seedApprovingPerson(second, 'attendance_approver')
+        const tpl = await publishSeatTemplate('a12', [first, second], 'all')
+        const requester = `g4dh-a12-e-${TS}`
+        const requesterToken = await seedPerson(requester, 'attendance_employee')
+        const { documentId, requestId } = await seedApprovedLeave({
+          documentRequesterId: requester,
+          templateId: tpl,
+          approverTokens: [p1.fixtureToken, p2.fixtureToken],
+        })
+        const launch = await http('POST', entryPath(requestId), requesterToken, {})
+        expect(launch.status, launch.text).toBe(201)
+        const roundInstanceId = launch.json.data.round.engineInstanceId as string
+        const roundId = launch.json.data.round.roundId as string
+        createdApprovalIds.add(roundInstanceId)
+        expect(await activeUserSeats(roundInstanceId)).toEqual([first, second].sort())
+        // Positive control: before either seat acts, the requester may withdraw.
+        expect(launch.json.data.round).toMatchObject({ canWithdraw: true, withdrawBlockedReason: null })
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const partial = await http('POST', actionsPath(requestId), p1.token, { action: 'approve' })
+          expect(partial.status, partial.text).toBe(200)
+          expect(partial.json).toEqual({
+            ok: true,
+            data: { requestId, roundId, outcome: 'pending', status: 'cancellation_pending_approval' },
+          })
+          const summary = await http('GET', entryPath(requestId), requesterToken)
+          expect(summary.status, summary.text).toBe(200)
+          expect(summary.json.data.round).toMatchObject({
+            roundId,
+            outcome: 'pending',
+            canWithdraw: false,
+            withdrawBlockedReason: 'APPROVAL_REVOKE_WINDOW_CLOSED',
+          })
+          const withdraw = await http('POST', withdrawPath(requestId), requesterToken, {})
+          expect(withdraw.status, withdraw.text).toBe(409)
+          expect(withdraw.json.error.code).toBe(summary.json.data.round.withdrawBlockedReason)
+          expect(withdraw.json).toEqual({
+            ok: false,
+            error: { code: 'APPROVAL_REVOKE_WINDOW_CLOSED', message: 'Approval can no longer be revoked' },
+          })
+          expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
+          expect(stub.calls).toHaveLength(0)
+
+          const closing = await http('POST', actionsPath(requestId), p2.token, { action: 'approve' })
+          expect(closing.status, closing.text).toBe(200)
+          expect(closing.json).toEqual({
+            ok: true,
+            data: { requestId, roundId, outcome: 'applied', status: 'leave_cancelled' },
+          })
+          expect(stub.calls).toHaveLength(1)
+        } finally {
+          stub.stop()
+        }
+        expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['applied'])
+      })
+
+      it('N3 — owner 16:5x ③ 「Show the list」: an approval-card send whose outcome is unknown, and a todo-mirror create left outcome_unknown, are each listed as pending (not failed) with their channel type and attempts — no error text or recipient — and the round is untouched', async () => {
+        const fixture = await launchedRound('g4dh-n3')
+        const q = (text: string, values?: unknown[]) => pool().query(text, values)
+        const engineRow = await pool().query<{ current_node_key: string; org_id: string | null }>(
+          'SELECT current_node_key, org_id FROM approval_instances WHERE id = $1',
+          [fixture.roundInstanceId],
+        )
+        const nodeKey = engineRow.rows[0].current_node_key
+        const orgId = engineRow.rows[0].org_id ?? 'default'
+        const SECRET_DT_USER = `dt-n3-recipient-${TS}`
+        const SECRET_ERROR = `send timed out: secret-${TS}`
+
+        // The card through its ledger's own writers: inserted pending, then marked outcome_unknown.
+        const card = await insertDingTalkApprovalCardDelivery(q, {
+          instanceId: fixture.roundInstanceId,
+          nodeKey,
+          recipientUserId: approverId,
+          recipientDingTalkUserId: SECRET_DT_USER,
+          deliveryKind: 'work_notice_action_card',
+        })
+        const marked = await markDingTalkApprovalCardDeliverySendOutcomeUnknown(q, card.id, SECRET_ERROR)
+        expect(marked?.send_status).toBe('outcome_unknown')
+        // A todo-mirror row as its worker leaves an ambiguous create: terminal outcome_unknown after one
+        // attempt, never resent (fixture-only ledger row, the same way the P-5 case above writes its rows).
+        await pool().query(
+          `INSERT INTO dingtalk_todo_mirrors
+             (org_id, instance_id, node_key, recipient_user_id, recipient_union_id, source_key, status,
+              attempt_count, last_attempt_at, send_issued_at, last_error, redelivery_safe, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'outcome_unknown', 1, now() + interval '1 second', now() + interval '1 second',
+                   $7, FALSE, now() + interval '1 second', now() + interval '1 second')`,
+          [orgId, fixture.roundInstanceId, nodeKey, approverId, SECRET_DT_USER, `g4dh-n3-todo-${TS}`, SECRET_ERROR],
+        )
+
+        const read = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+        expect(read.status, read.text).toBe(200)
+        const deliveries = read.json.data.round.deliveries as Array<Record<string, unknown>>
+        expect(deliveries.map((d) => ({ channelType: d.channelType, status: d.status, attempts: d.attempts }))).toEqual([
+          { channelType: 'dingtalk_approval_card', status: 'pending', attempts: 1 },
+          { channelType: 'dingtalk_todo', status: 'pending', attempts: 1 },
+        ])
+        for (const delivery of deliveries) {
+          expect(Object.keys(delivery).sort()).toEqual(['attempts', 'channelType', 'createdAt', 'lastAttemptAt', 'status', 'updatedAt'])
+        }
+        for (const secret of [SECRET_DT_USER, SECRET_ERROR, card.id, approverId, nodeKey]) {
+          expect(read.text.includes(secret), `summary leaks ${secret}`).toBe(false)
+        }
+        expect(read.json.data.round).toMatchObject({ outcome: 'pending', status: 'cancellation_pending_approval' })
+        expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+      })
     })
   })
 })
