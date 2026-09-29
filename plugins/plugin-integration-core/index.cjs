@@ -311,6 +311,9 @@ module.exports = {
       // The host injects it only for this plugin; ordinary Connection resolution
       // remains values-free and never receives this capability's projection.
       sealedSnapshotFacade,
+      // Where the resolver writes WHY a connection was refused: one values-free line per refusal
+      // (phase, connection error code, closed-list reason). The response does not change.
+      logger,
     })
     externalSystemRegistry = createExternalSystemRegistry({
       db,
