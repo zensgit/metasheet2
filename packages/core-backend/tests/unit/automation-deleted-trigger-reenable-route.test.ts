@@ -4,7 +4,7 @@
  *
  * Before: PATCH `{ enabled: false }` answered 200, then PATCH `{ enabled: true }` answered
  * 400 DELETED_TRIGGER_SELF_MUTATION, so the only way back was a database edit. The rule's shape did not change,
- * and a rule of this shape that is already on keeps firing (its self-targeting action changes nothing: a
+ * and a rule of this shape that is already on keeps firing (its self-targeting action changes no table record: a
  * delete_record step ends as skipped, an update_record / lock_record step as success, #6078), so an enable-only
  * PATCH no longer runs the deleted-trigger shape check. Everything that creates the shape or changes a rule INTO it
  * stays refused — including `enabled: true` sent TOGETHER with a shape field.

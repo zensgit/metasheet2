@@ -10,7 +10,7 @@
  *     through updateRule — otherwise the rule could never be turned off);
  *   - #6155: an ENABLE-only update `{ enabled: true }` of it SUCCEEDS too (switching off and on again brings
  *     back the state it had; the shape does not change; an enabled rule of this shape already runs and its
- *     self-targeting action changes nothing — #6078: a delete_record step ends as skipped, an update_record /
+ *     self-targeting action changes no table record — #6078: a delete_record step ends as skipped, an update_record /
  *     lock_record step as success). This reverses #6078's "re-enabling is checked like a save";
  *   - a rename / conditions-only edit succeeds (no shape change);
  *   - deleteRule succeeds (it validates nothing).
@@ -304,7 +304,7 @@ describe('updateRule — refuses shape changes INTO the combination, lets the op
     expect(h.updateSets()).toHaveLength(1)
   })
 
-  it('#6155: RE-ENABLING an existing such rule is admitted (an on/off switch restores the state it had and changes no shape; the enabled rule already runs and its self-targeting action changes nothing)', async () => {
+  it('#6155: RE-ENABLING an existing such rule is admitted (an on/off switch restores the state it had and changes no shape; the enabled rule already runs and its self-targeting action changes no table record)', async () => {
     h.setStored(storedRow({ enabled: false }))
     h.pushExecute([storedRow({ enabled: true })])
 

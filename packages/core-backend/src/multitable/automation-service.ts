@@ -2078,8 +2078,8 @@ export class AutomationService {
     // #6155 (Ratified-by-default-2026-09-29, reverses one sentence of #6078): an enable-only PATCH
     // (`{ enabled: true }` with none of the five shape fields) is NOT checked either. Switching a rule off and
     // on again must bring back the state it had; the shape does not change; a rule of this shape that is on
-    // already runs and the self-targeting action changes nothing (#6078: a delete_record step ends as skipped, an
-    // update_record / lock_record step as success with no row touched). `enabled: true` sent TOGETHER with a
+    // already runs and the self-targeting action changes no table record (#6078: a delete_record step ends as
+    // skipped, an update_record / lock_record step as success). `enabled: true` sent TOGETHER with a
     // shape field is still checked — the shape field alone opens this gate. Existing rules stay loadable and
     // switchable; they cannot be saved forward with this shape.
     if (
