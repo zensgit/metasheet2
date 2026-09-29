@@ -31,6 +31,14 @@
  *     `ApprovalProductService.dispatchAction`, on the round's own engine instance. Seat ownership,
  *     the §2-G3 seat rules, the §9-9 allowed-action set and the revoke gate are all enforced THERE,
  *     unchanged; this module adds no predicate of its own and never writes a round or an instance.
+ *   - C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」 — option text in the phase A
+ *     design MD §10): `listSeatedPendingRounds` answers the attendance-side 「cancellations waiting for
+ *     me」 list (`GET /api/attendance/cancel-rounds/pending`, behind `attendance:approve` in the
+ *     plugin). The seat verdict is the decision door's OWN predicate — `decisionDoorIsSeatGated` +
+ *     `resolveCanDecideCurrentNode` (`services/approval-seat-authorization.ts`, the same pair
+ *     `resolveLegacyDecisionSeat` and the todo center's `actionable` call) — over the round's active
+ *     assignments, with the SAME role claims `decide` dispatches with
+ *     (`CANCEL_ROUND_DISPATCH_ROLE_CLAIMS`). No seat rule is restated here.
  *   - §15.2 P-2. `status` is a machine token whose SUBJECT is part of the token (`cancellation_*` vs
  *     `leave_cancelled`), one per word-table row V1–V6; a system closure is distinguishable from an
  *     approver's reject on this surface via `closedBySystem` (derived from the terminal audit row's
@@ -49,8 +57,8 @@
  *     (phase B) still renders per code.
  *
  * Least-privilege posture (same as `approvalAssigneeResolver`): `src/index.ts` injects this port into
- * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port (all five methods)
- * plugin-attendance registers none of the four routes (fail-closed: no entry rather than a half-wired
+ * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port (all six methods)
+ * plugin-attendance registers none of the five routes (fail-closed: no entry rather than a half-wired
  * one).
  */
 
@@ -59,6 +67,12 @@ import { ApprovalProductService } from '../services/ApprovalProductService'
 import { ServiceError } from '../services/ApprovalBridgeService'
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import { isSystemSentinelActor } from '../services/ApprovalAssigneeResolver'
+import {
+  decisionDoorIsSeatGated,
+  resolveCanDecideCurrentNode,
+  type DecidableInstanceRow,
+  type SeatedAssignment,
+} from '../services/approval-seat-authorization'
 import {
   CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX,
   readCancelRoundDurableProjectionV1,
@@ -444,6 +458,13 @@ export interface ApprovalCancelRoundEntryPort {
     actor: CancelRoundEntryActorV1,
     request?: { comment?: string | null },
   ): Promise<CancelRoundActionResultV1>
+  /**
+   * C2 — the pending cancel rounds `viewerId` could decide RIGHT NOW through `decide`: the door's own
+   * seat predicate over each round's active assignments, with the role claims `decide` dispatches
+   * with. Keyed by round; the plugin applies the entry's document gate (org, leave, approval instance)
+   * and pagination. See `listSeatedPendingCancelRoundsV1`.
+   */
+  listSeatedPendingRounds(viewerId: string): Promise<CancelRoundSeatedPendingRoundV1[]>
 }
 
 type RoundRow = {
@@ -717,6 +738,14 @@ export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
 const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
 
 /**
+ * The role claims a cancel-round action is DISPATCHED with — none (see the `roles: []` paragraph
+ * above). ONE constant, read by both the dispatch below and the C2 list
+ * (`listSeatedPendingCancelRoundsV1`), so the list's seat verdict is computed on exactly the role set
+ * the door will see when the listed viewer acts: if this ever changes, both change together.
+ */
+export const CANCEL_ROUND_DISPATCH_ROLE_CLAIMS: readonly string[] = Object.freeze([])
+
+/**
  * Exported with its `Queryable` injected so the verb allow-list above can be pinned on its own by a
  * unit test (a verb outside it must throw BEFORE any query); the port below is its only production
  * caller.
@@ -749,7 +778,7 @@ export async function dispatchOnLatestCancelRound(
       {
         userId: actor.userId,
         userName: actor.userName || actor.userId,
-        roles: [],
+        roles: [...CANCEL_ROUND_DISPATCH_ROLE_CLAIMS],
         ip: actor.ip ?? null,
         userAgent: actor.userAgent ?? null,
       },
@@ -780,6 +809,132 @@ async function readActedRoundOutcome(query: Queryable, roundId: string): Promise
     throw new Error(`cancel-round entry: unrecognised round outcome ${JSON.stringify(outcome)} on round ${roundId}`)
   }
   return { roundId, outcome, status: statusTokenFor(outcome) }
+}
+
+/** C2 — one round the viewer could decide now, keyed back to its ORIGINAL document. */
+export interface CancelRoundSeatedPendingRoundV1 {
+  readonly roundId: string
+  readonly engineInstanceId: string
+  /** The ORIGINAL document (`approval_rounds.document_id`) — what the plugin keys its request row on. */
+  readonly documentInstanceId: string
+  /** `approval_rounds.started_at`, ISO. */
+  readonly launchedAt: string
+}
+
+type SeatedPendingCandidateRow = {
+  round_id: string
+  document_id: string
+  started_at: Date | string
+  engine_instance_id: string
+  status: string
+  source_system: string | null
+  published_definition_id: string | null
+  current_node_key: string | null
+  metadata: Record<string, unknown> | null
+}
+
+type SeatedPendingAssignmentRow = SeatedAssignment & { instance_id: string }
+
+/**
+ * C2 (owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」) — the pending cancel rounds the
+ * viewer could approve / reject RIGHT NOW through `decide`, newest launch first.
+ *
+ * THE SEAT VERDICT IS THE DOOR'S OWN. `decide` dispatches, AS the caller and with
+ * `CANCEL_ROUND_DISPATCH_ROLE_CLAIMS`, into `ApprovalProductService.dispatchAction`, whose 403
+ * `APPROVAL_ASSIGNMENT_REQUIRED` gate is built from `assignmentMatchesActor` over the active
+ * assignments at the decidable node keys. `resolveCanDecideCurrentNode` is that gate restated as a
+ * verdict (the same function the todo center's `actionable`, the detail DTO's `canDecideCurrentNode`
+ * and `resolveLegacyDecisionSeat` call; pinned against the door by
+ * `approval-can-decide-current-node.db.test.ts`); `decisionDoorIsSeatGated` excludes a row the door
+ * would not seat-gate at all (no published definition / not platform — `dispatchAction` refuses
+ * those outright, so `resolveCanDecideCurrentNode`'s status-quo `true` for them must not list them).
+ * Both are CALLED here, never restated. The inputs are the ones the door reads: the engine instance
+ * row (status, source system, published definition, current node, parallel metadata) and its ACTIVE
+ * assignments (`is_active = TRUE`, the door's own filter), with the dispatch role claims.
+ *
+ * WHICH ROUNDS. `approval_rounds.kind = 'cancel' AND outcome = 'pending'` — at most one per document
+ * (I3, `uq_approval_rounds_pending_document`), and the pending round is what `decide`'s 「latest」
+ * pick selects first, so every listed round is the round `decide` would act on for its document.
+ *
+ * CANDIDATE NARROWING, NOT A PREDICATE. The first read keeps only rounds whose engine instance has
+ * SOME assignment row (active or not, any type) whose `assignee_id` is the viewer or one of the
+ * dispatch role claims. `assignmentMatchesActor` can only ever match a row whose `assignee_id` is
+ * one of those values (user arm: the actor id; role arm: a role claim), so no round the predicate
+ * would admit is dropped; the narrowing only keeps the read proportional to the viewer's own seats
+ * instead of every pending round. The verdict is the predicate's alone — removing the narrowing
+ * leaves every listed item unchanged (design MD §10 records that mutation).
+ */
+export async function listSeatedPendingCancelRoundsV1(
+  query: Queryable,
+  viewerId: string,
+): Promise<CancelRoundSeatedPendingRoundV1[]> {
+  const viewer = typeof viewerId === 'string' ? viewerId.trim() : ''
+  if (!viewer) return []
+  const candidates = await query.query(
+    `SELECT r.id AS round_id,
+            r.document_id,
+            r.started_at,
+            e.id AS engine_instance_id,
+            e.status,
+            e.source_system,
+            e.published_definition_id,
+            e.current_node_key,
+            e.metadata
+       FROM approval_rounds r
+       JOIN approval_instances e ON e.id = r.engine_instance_id
+      WHERE r.kind = 'cancel'
+        AND r.outcome = 'pending'
+        AND EXISTS (
+              SELECT 1
+                FROM approval_assignments a
+               WHERE a.instance_id = r.engine_instance_id
+                 AND a.assignee_id = ANY($1::text[])
+            )
+      ORDER BY r.started_at DESC, r.id DESC`,
+    [[viewer, ...CANCEL_ROUND_DISPATCH_ROLE_CLAIMS]],
+  )
+  const rows = candidates.rows as unknown as SeatedPendingCandidateRow[]
+  if (rows.length === 0) return []
+  const assignmentResult = await query.query(
+    `SELECT instance_id, node_key, is_active, assignment_type, assignee_id
+       FROM approval_assignments
+      WHERE instance_id = ANY($1::text[])
+        AND is_active = TRUE`,
+    [[...new Set(rows.map((row) => row.engine_instance_id))]],
+  )
+  const assignmentsByInstance = new Map<string, SeatedAssignment[]>()
+  for (const assignment of assignmentResult.rows as unknown as SeatedPendingAssignmentRow[]) {
+    const list = assignmentsByInstance.get(assignment.instance_id) ?? []
+    list.push(assignment)
+    assignmentsByInstance.set(assignment.instance_id, list)
+  }
+  const seated: CancelRoundSeatedPendingRoundV1[] = []
+  for (const row of rows) {
+    const instance: DecidableInstanceRow = {
+      id: row.engine_instance_id,
+      status: row.status,
+      source_system: row.source_system,
+      published_definition_id: row.published_definition_id,
+      current_node_key: row.current_node_key,
+      metadata: row.metadata,
+    }
+    const canDecide =
+      decisionDoorIsSeatGated(instance)
+      && resolveCanDecideCurrentNode({
+        instance,
+        assignments: assignmentsByInstance.get(row.engine_instance_id) ?? [],
+        viewerUserId: viewer,
+        viewerRoles: CANCEL_ROUND_DISPATCH_ROLE_CLAIMS,
+      })
+    if (!canDecide) continue
+    seated.push({
+      roundId: row.round_id,
+      engineInstanceId: row.engine_instance_id,
+      documentInstanceId: row.document_id,
+      launchedAt: toIso(row.started_at) ?? '',
+    })
+  }
+  return seated
 }
 
 export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDepsV1 = {}): ApprovalCancelRoundEntryPort {
@@ -821,5 +976,6 @@ export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDeps
       dispatchOnLatestCancelRound(db(), documentInstanceId, actor, request.action, request.comment, deps.publishCounts),
     withdraw: (documentInstanceId, actor, request = {}) =>
       dispatchOnLatestCancelRound(db(), documentInstanceId, actor, 'revoke', request.comment, deps.publishCounts),
+    listSeatedPendingRounds: (viewerId) => listSeatedPendingCancelRoundsV1(db(), viewerId),
   }
 }

@@ -1313,7 +1313,10 @@ export interface PluginServices {
    * the ONE plugin-reachable path to the dedicated cancel-round creation path (never the public
    * `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance` applied to the
    * ORIGINAL document instance; `decide` / `withdraw` hand approve / reject / revoke on the round's
-   * own instance to `ApprovalProductService.dispatchAction`, unchanged. Implementation:
+   * own instance to `ApprovalProductService.dispatchAction`, unchanged; `listSeatedPendingRounds`
+   * (C2, owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」, behind plugin-attendance's
+   * `GET /api/attendance/cancel-rounds/pending`) answers the pending rounds the viewer could decide
+   * now, by the decision door's own seat predicate. Implementation:
    * `approvals/approval-cancel-round-entry-port.ts`.
    */
   approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort

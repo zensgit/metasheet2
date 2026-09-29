@@ -65,9 +65,10 @@ describe('product entry phase A + A2 — approvalCancelRoundEntry port is scoped
     launch?: unknown
     decide?: unknown
     withdraw?: unknown
+    listSeatedPendingRounds?: unknown
   }
 
-  it('plugin-attendance receives the port with all five methods (positive control)', () => {
+  it('plugin-attendance receives the port with all six methods (positive control)', () => {
     const services = contextFor('plugin-attendance').services as { approvalCancelRoundEntry?: EntryPort }
     expect(services.approvalCancelRoundEntry).toBeDefined()
     expect(typeof services.approvalCancelRoundEntry?.canReadDocument).toBe('function')
@@ -76,6 +77,8 @@ describe('product entry phase A + A2 — approvalCancelRoundEntry port is scoped
     // A2: the approver's approve / reject and the requester's withdraw.
     expect(typeof services.approvalCancelRoundEntry?.decide).toBe('function')
     expect(typeof services.approvalCancelRoundEntry?.withdraw).toBe('function')
+    // C2: the approver's 「cancellations waiting for me」 list.
+    expect(typeof services.approvalCancelRoundEntry?.listSeatedPendingRounds).toBe('function')
   })
 
   it('a non-attendance plugin does NOT receive the port', () => {
