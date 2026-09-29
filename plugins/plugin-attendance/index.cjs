@@ -37017,8 +37017,11 @@ module.exports = {
     // leave suite). It scopes to `request_type === 'leave'` — together with P-1 (a) below this is the
     // same `approvedLeave` predicate the W4 cancel adapter applies (`status === 'approved' &&
     // request_type === 'leave'`), so a round is never opened on a document the W4 redemption would
-    // refuse. The refusal SHAPE (the not-found body, no new code) is a provisional implementation
-    // choice pending an owner/gate pick — see the phase A design MD.
+    // refuse AT LAUNCH TIME. It cannot cover a change to the request after launch (for example the
+    // existing direct-cancel route cancelling the leave while the round is pending); that case is
+    // recorded as owner merge/deploy input in the phase A design MD. The refusal SHAPE (the
+    // not-found body, no new code) is a provisional implementation choice pending an owner/gate
+    // pick — see the same MD.
     //
     // LAUNCH preconditions are P-1 (a)/(b)/(c) on the attendance request row, answered with the P-8
     // registered codes, and then the dedicated creation path re-checks them on the approval instance
