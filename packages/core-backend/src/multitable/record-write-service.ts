@@ -26,7 +26,7 @@ import {
   type RecordPostCommitHook,
   type YjsInvalidator,
 } from './post-commit-hooks'
-import { BATCH1_FIELD_TYPES, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
+import { BATCH1_FIELD_TYPES, classifySelectCellValue, coerceBatch1Value, isPersonSingleRecord, normalizeMultiSelectValue, validateLongTextValue, validatePersonValue } from './field-codecs'
 import { createPersonMemberResolver, personRestrictGroupIds } from './person-field-restriction'
 import {
   HierarchyCycleError,
@@ -576,11 +576,11 @@ export class RecordWriteService {
         }
 
         if (field.type === 'select') {
-          if (typeof change.value !== 'string') {
+          const verdict = classifySelectCellValue(change.value, field.options ?? [])
+          if (verdict === 'not_string') {
             throw new RecordValidationError(`Select value must be string: ${change.fieldId}`)
           }
-          const allowed = new Set(field.options ?? [])
-          if (change.value !== '' && !allowed.has(change.value)) {
+          if (verdict === 'not_in_options') {
             throw new RecordValidationError(`Invalid select option for ${change.fieldId}: ${change.value}`)
           }
         }

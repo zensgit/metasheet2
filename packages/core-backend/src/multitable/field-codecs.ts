@@ -1033,6 +1033,21 @@ export function validateDateTimeValue(
   return new Date(parsed.ms).toISOString()
 }
 
+/**
+ * The select cell write rule, in one place: a non-string is refused, `''` (the empty cell) is allowed, any other
+ * string must be one of the field's option values. Used by the bulk and single-record write paths
+ * (RecordWriteService.validateChanges, RecordService.patchRecord) and by the automation writers' option validation
+ * (ADR multitable-field-retype-first-batch §3.12); each caller keeps its own error text.
+ */
+export function classifySelectCellValue(
+  value: unknown,
+  options: readonly string[],
+): 'ok' | 'not_string' | 'not_in_options' {
+  if (typeof value !== 'string') return 'not_string'
+  if (value === '') return 'ok'
+  return new Set(options).has(value) ? 'ok' : 'not_in_options'
+}
+
 export function normalizeMultiSelectValue(
   value: unknown,
   fieldId: string,

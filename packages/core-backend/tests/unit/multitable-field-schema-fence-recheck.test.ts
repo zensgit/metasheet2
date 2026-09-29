@@ -169,7 +169,7 @@ describe('assertFieldSchemaUnchangedAfterFence — the helper', () => {
     for (const [c, f] of [['TRUE', 'true'], ['true', undefined], ['true', 'false'], [undefined, 'true']] as const) {
       gate(c, f)
       const db = makeDb({ snapshot: STRING, recheck: SELECT_B })
-      await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD])).resolves.toBeUndefined()
+      await expect(assertFieldSchemaUnchangedAfterFence(db.txn, SHEET, snapshot, [FIELD])).resolves.toBeNull()
       expect(db.stmts).toEqual([])
     }
   })
@@ -614,4 +614,118 @@ describe('R-F2 — the comparison is like with like, whatever builder made the s
       expect(db.recordWrites()).toHaveLength(1)
     }
   })
+})
+
+// ── ADR §3.12 (fix round, R-22): option validation for automation update_record / create_record, gated ──
+
+import { classifySelectCellValue } from '../../src/multitable/field-codecs'
+import {
+  AUTOMATION_WRITE_VALUE_INVALID_CODE,
+  AutomationWriteValueInvalidError,
+  validateAutomationOptionValues,
+} from '../../src/multitable/field-schema-fence-recheck'
+
+const SELECT_AB: Shape = { type: 'select', options: ['A', 'B'] }
+const MULTI_AB: Shape = { type: 'multiSelect', options: ['A', 'B'] }
+const updateWith = (value: unknown) => ({ type: 'update_record', config: { fields: { [FIELD]: value } } })
+const createWith = (value: unknown) => ({ type: 'create_record', config: { sheetId: SHEET, data: { [FIELD]: value } } })
+const writtenCell = (db: Db): unknown => {
+  const stmt = db.recordWrites()[0]
+  if (!stmt) return undefined
+  const json = /^UPDATE/i.test(stmt.sql) ? stmt.params[0] : stmt.params[2]
+  return (JSON.parse(String(json)) as Record<string, unknown>)[FIELD]
+}
+const stepOf = (exec: unknown) => (exec as { steps: Array<{ status: string; error?: string }> }).steps[0]
+
+describe('§3.12 — the shared select rule', () => {
+  it('classifySelectCellValue: non-string refused, "" allowed, otherwise an option', () => {
+    expect(classifySelectCellValue('A', ['A', 'B'])).toBe('ok')
+    expect(classifySelectCellValue('', ['A'])).toBe('ok')
+    expect(classifySelectCellValue('Z', ['A'])).toBe('not_in_options')
+    expect(classifySelectCellValue('A ', ['A'])).toBe('not_in_options') // no trim on select (the write paths do not trim)
+    for (const v of [null, undefined, 5, true, ['A'], { value: 'A' }]) expect(classifySelectCellValue(v, ['A']), JSON.stringify(v)).toBe('not_string')
+  })
+
+  it('RecordWriteService.validateChanges applies the same rule (parity with the classifier)', async () => {
+    bothOn()
+    for (const [value, verdict] of [['A', 'ok'], ['', 'ok'], ['Z', 'not_in_options'], [5, 'not_string']] as const) {
+      expect(classifySelectCellValue(value, ['A', 'B'])).toBe(verdict)
+      const outcome = await settle(runPatchRecords(makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB }), serializedGuardMap(SELECT_AB), value))
+      expect(outcome.ok, `${JSON.stringify(value)} → ${verdict}`).toBe(verdict === 'ok')
+    }
+  })
+
+  it('validateAutomationOptionValues: null (gate off) validates nothing', () => {
+    expect(validateAutomationOptionValues(null, { [FIELD]: 'Z' })).toEqual({})
+  })
+})
+
+describe('§3.12 — automation update_record / create_record, gate ON', () => {
+  for (const [kind, action] of [['update_record', updateWith], ['create_record', createWith]] as const) {
+    it(`${kind}: select value in the options ("A") and the empty cell ("") ⇒ success, written as given`, async () => {
+      bothOn()
+      for (const value of ['A', '']) {
+        const db = makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB })
+        expect(stepOf(await runAutomation(db, action(value)))?.status).toBe('success')
+        expect(writtenCell(db)).toBe(value)
+      }
+    })
+
+    it(`${kind}: select value outside the options ⇒ step failed, values-free (field id + reason), zero writes`, async () => {
+      bothOn()
+      const db = makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB })
+      const step = stepOf(await runAutomation(db, action('Zeta-not-an-option')))
+      expect(step?.status).toBe('failed')
+      expect(step?.error).toBe(new AutomationWriteValueInvalidError(FIELD, 'select_value_not_in_options').message)
+      expect(step?.error).not.toContain('Zeta')
+      expect(db.recordWrites()).toEqual([])
+    })
+
+    it(`${kind}: a non-string select value ⇒ step failed (select_value_not_string), zero writes`, async () => {
+      bothOn()
+      const db = makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB })
+      const step = stepOf(await runAutomation(db, action(5)))
+      expect(step?.error).toBe(new AutomationWriteValueInvalidError(FIELD, 'select_value_not_string').message)
+      expect(db.recordWrites()).toEqual([])
+    })
+
+    it(`${kind}: multiSelect is trimmed and de-duplicated like the record write paths; an item outside the options fails, values-free`, async () => {
+      bothOn()
+      const ok = makeDb({ snapshot: MULTI_AB, recheck: MULTI_AB })
+      expect(stepOf(await runAutomation(ok, action([' A ', 'A', 'B', ''])))?.status).toBe('success')
+      expect(writtenCell(ok)).toEqual(['A', 'B'])
+      const bad = makeDb({ snapshot: MULTI_AB, recheck: MULTI_AB })
+      const step = stepOf(await runAutomation(bad, action(['A', 'Zeta-not-an-option'])))
+      expect(step?.error).toBe(new AutomationWriteValueInvalidError(FIELD, 'multiselect_value_invalid').message)
+      expect(step?.error).not.toContain('Zeta')
+      expect(bad.recordWrites()).toEqual([])
+    })
+
+    it(`${kind}: the validation reads nothing extra — one pre-fence snapshot read and one post-fence re-read`, async () => {
+      bothOn()
+      const db = makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB })
+      await runAutomation(db, action('A'))
+      expect(db.snapshotReads().map((s) => s.via)).toEqual(['pool'])
+      expect(db.rechecks().map((s) => s.via)).toEqual(['txn'])
+    })
+  }
+
+  it('the error code is stable', () => {
+    expect(new AutomationWriteValueInvalidError(FIELD, 'select_value_not_in_options').code).toBe(AUTOMATION_WRITE_VALUE_INVALID_CODE)
+  })
+})
+
+describe('§3.12 — gate OFF (either flag): automation writes exactly as today, including values outside the options', () => {
+  for (const [c, f] of [[undefined, 'true'], ['true', undefined], ['TRUE', 'true']] as const) {
+    for (const [kind, action] of [['update_record', updateWith], ['create_record', createWith]] as const) {
+      it(`${kind}, convert=${JSON.stringify(c)} fence=${JSON.stringify(f)}: an out-of-options value lands unvalidated`, async () => {
+        gate(c, f)
+        const db = makeDb({ snapshot: SELECT_AB, recheck: SELECT_AB })
+        expect(stepOf(await runAutomation(db, action('Zeta-not-an-option')))?.status).toBe('success')
+        expect(writtenCell(db)).toBe('Zeta-not-an-option')
+        expect(db.rechecks()).toEqual([])
+        expect(db.snapshotReads()).toEqual([])
+      })
+    }
+  }
 })

@@ -70,7 +70,11 @@ import type { ConditionBranchResumeCursor } from './automation-resume-cursor'
 import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './field-codecs'
 import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
-import { assertFieldSchemaUnchangedAfterFence, loadFieldSchemaSnapshot } from './field-schema-fence-recheck'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  loadFieldSchemaSnapshot,
+  validateAutomationOptionValues,
+} from './field-schema-fence-recheck'
 import {
   assertRecordLinkDeleteFencePlanCurrent,
   prepareRecordLinkDeleteFencePlan,
@@ -3256,7 +3260,12 @@ export class AutomationExecutor {
         }
         // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read of the patched fields; a type / option
         // change since `schemaSnapshot` throws (rolls back the claim too) ⇒ the step fails, zero writes.
-        await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
+        // ADR §3.12, gated (Decision Register R-22): select / multiSelect values are validated against the same
+        // read with the record write paths' rules; a value outside the options fails the step (values-free), zero
+        // writes. multiSelect values are written normalised, as the record write paths write them. Gate off ⇒
+        // `currentFields` is null ⇒ `{}` ⇒ the patch is untouched (today's behaviour).
+        Object.assign(patch, validateAutomationOptionValues(currentFields, patch))
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -3795,7 +3804,10 @@ export class AutomationExecutor {
           return 'duplicate' as const
         }
         // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read before the INSERT.
-        await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
+        // ADR §3.12, gated (R-22): same validation as update_record, on the same read. `data` is normalised in place,
+        // as sanitizeRichLongTextInWritePayload above already does; gate off ⇒ `{}` ⇒ untouched.
+        Object.assign(data, validateAutomationOptionValues(currentFields, data))
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.

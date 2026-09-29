@@ -15,6 +15,7 @@ import {
   extractSelectOptions,
   isPersonSingleRecord,
   normalizeMultiSelectValue,
+  classifySelectCellValue,
   normalizeJson,
   normalizeJsonArray,
   validateLongTextValue,
@@ -1541,12 +1542,12 @@ export class RecordService {
         continue
       }
       if (field.type === 'select') {
-        if (typeof value !== 'string') {
+        const verdict = classifySelectCellValue(value, field.options ?? [])
+        if (verdict === 'not_string') {
           fieldErrors[fieldId] = 'Select value must be a string'
           continue
         }
-        const allowed = new Set(field.options ?? [])
-        if (value !== '' && !allowed.has(value)) {
+        if (verdict === 'not_in_options') {
           fieldErrors[fieldId] = 'Invalid select option'
           continue
         }

@@ -2,7 +2,7 @@
  * Field retype first batch, slice 3a — fenced writers re-check the field schema AFTER the canonical fence.
  *
  * Design lock: docs/development/multitable-field-retype-first-batch-adr-20260926.md §3.11 (the invariant, the
- * fence-holder census rows 1–35 and the structural guard) and §3.12 (why the automation writers are in scope).
+ * fence-holder census rows 1–35 and the structural guard) and §3.12 (option validation for the automation writers).
  *
  * THE RACE. A fenced writer validates a write against a field snapshot it loaded BEFORE the canonical sheet
  * fence (`RecordWriteService.patchRecords` loads `fieldById` outside its transaction; REST / OAPI single-record
@@ -13,7 +13,7 @@
  * select column. The fence serialises the two transactions; it does not make the writer look again.
  *
  * THE FIX. After the fence-acquisition branch and before the writer's first row lock / `meta_records` write,
- * re-read the touched fields `FOR SHARE` and compare `type` + option set with the snapshot the writer validated
+ * re-read the touched fields `FOR SHARE` and compare type + option set with the snapshot the writer validated
  * against. Any difference (or a field that no longer exists) ⇒ `FieldSchemaChangedError` (409
  * `FIELD_SCHEMA_CHANGED`, values-free): the client reloads the schema and retries. `FOR SHARE` also holds the
  * field rows until the writer commits, so the conversion's own `FOR UPDATE` on the field row waits for the
@@ -40,7 +40,13 @@
  * and re-throw everything else (ADR §3.11 row 13, r6 N2).
  */
 import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
-import { mapFieldType, serializeFieldRow, type MultitableField } from './field-codecs'
+import {
+  classifySelectCellValue,
+  mapFieldType,
+  normalizeMultiSelectValue,
+  serializeFieldRow,
+  type MultitableField,
+} from './field-codecs'
 import { isFieldRetypeConvertEnabled } from './field-retype-convert'
 
 /** Minimal query shape shared by the writers' QueryFn / FenceQuery / AutomationQueryFn aliases. */
@@ -200,22 +206,25 @@ function sameFieldSchema(before: Comparable, now: Comparable): boolean {
  * - `touchedFieldIds`: the fields this write sets. Ids the snapshot does not carry are skipped — the writer
  *   validated nothing about them, so nothing about them can be stale.
  * - A touched field that no longer exists counts as changed.
+ *
+ * Returns the re-read fields (serialised, keyed by id) so a caller can validate values against them in the same
+ * read (ADR §3.12, automation); `null` when nothing ran (gate off or no snapshot).
  */
 export async function assertFieldSchemaUnchangedAfterFence(
   query: FieldSchemaRecheckQuery,
   sheetId: string,
   fieldById: FieldSchemaSnapshot | null | undefined,
   touchedFieldIds: Iterable<string>,
-): Promise<void> {
-  if (!isFieldSchemaFenceRecheckEnabled()) return
-  if (!fieldById) return
+): Promise<Map<string, MultitableField> | null> {
+  if (!isFieldSchemaFenceRecheckEnabled()) return null
+  if (!fieldById) return null
   const ids = touchedIds(fieldById, touchedFieldIds)
-  if (ids.length === 0) return
-  const res = await query(FIELD_SCHEMA_FENCE_RECHECK_SQL, [sheetId, ids])
   const current = new Map<string, MultitableField>()
+  if (ids.length === 0) return current
+  const res = await query(FIELD_SCHEMA_FENCE_RECHECK_SQL, [sheetId, ids])
   for (const raw of res.rows) {
     if (!isPlainObject(raw) || typeof raw.id !== 'string') continue
-    current.set(raw.id, serialize(raw.type, raw.property))
+    current.set(raw.id, serializeFieldRow({ id: raw.id, name: '', type: raw.type, property: raw.property, order: 0 }))
   }
   for (const id of ids) {
     const before = fieldById.get(id)
@@ -224,6 +233,57 @@ export async function assertFieldSchemaUnchangedAfterFence(
       throw new FieldSchemaChangedError()
     }
   }
+  return current
+}
+
+// ── ADR §3.12: option validation for the automation writers (same field read, same gate) ─────────────────
+
+export const AUTOMATION_WRITE_VALUE_INVALID_CODE = 'AUTOMATION_WRITE_VALUE_INVALID'
+export type AutomationWriteValueInvalidReason =
+  | 'select_value_not_string'
+  | 'select_value_not_in_options'
+  | 'multiselect_value_invalid'
+
+/** The automation step's refusal. Carries the field id and a reason — never the value or an option text. */
+export class AutomationWriteValueInvalidError extends Error {
+  readonly code = AUTOMATION_WRITE_VALUE_INVALID_CODE
+  constructor(readonly fieldId: string, readonly reason: AutomationWriteValueInvalidReason) {
+    super(`Automation write refused: ${reason} (field ${fieldId})`)
+    this.name = 'AutomationWriteValueInvalidError'
+  }
+}
+
+/**
+ * ADR §3.12, gated form (Decision Register R-22): validate an automation write's select / multiSelect values
+ * against the fields the post-fence re-read returned, with the record write paths' own rules
+ * (`classifySelectCellValue` — non-string refused, `''` allowed, otherwise an option; `normalizeMultiSelectValue`
+ * — trim, drop empties, de-duplicate, every item an option). Returns the normalised multiSelect values to write.
+ * `current === null` (gate off) ⇒ no validation, `{}`: automation behaves exactly as before.
+ */
+export function validateAutomationOptionValues(
+  current: ReadonlyMap<string, MultitableField> | null,
+  values: Readonly<Record<string, unknown>>,
+): Record<string, string[]> {
+  const normalized: Record<string, string[]> = {}
+  if (!current) return normalized
+  for (const [fieldId, value] of Object.entries(values)) {
+    const field = current.get(fieldId)
+    if (!field) continue
+    const options = (field.options ?? []).map((option) => option.value)
+    if (field.type === 'select') {
+      const verdict = classifySelectCellValue(value, options)
+      if (verdict === 'not_string') throw new AutomationWriteValueInvalidError(fieldId, 'select_value_not_string')
+      if (verdict === 'not_in_options') throw new AutomationWriteValueInvalidError(fieldId, 'select_value_not_in_options')
+    } else if (field.type === 'multiSelect') {
+      try {
+        normalized[fieldId] = normalizeMultiSelectValue(value, fieldId, options)
+      } catch {
+        // normalizeMultiSelectValue's message can carry an option text; the refusal must not.
+        throw new AutomationWriteValueInvalidError(fieldId, 'multiselect_value_invalid')
+      }
+    }
+  }
+  return normalized
 }
 
 // ── Row 13: the derived-merge variant ─────────────────────────────────────────────────────────────────
@@ -249,7 +309,7 @@ export class DerivedMergeTargetRetypedError extends SheetWriterBlockedError {
 /**
  * After the fence and before the merge UPDATE: every key of `updates` must still be a formula / lookup /
  * rollup field of `sheetId`. Otherwise (retyped or deleted) ⇒ `DerivedMergeTargetRetypedError`, zero writes.
- * Flag off ⇒ no query.
+ * Gate off ⇒ no query.
  */
 export async function assertDerivedMergeTargetsStillDerived(
   query: FieldSchemaRecheckQuery,
