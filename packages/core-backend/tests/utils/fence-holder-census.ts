@@ -957,6 +957,76 @@ export function directRecordDataWritesAfterFence(holder: FenceHolder): string[] 
   return out
 }
 
+/** A `meta_fields` read that takes a row lock on the field row (any strength): a concurrent schema change waits
+ * for this transaction, and this transaction reads the committed row. */
+export const FIELD_ROW_LOCKED_READ_RE =
+  /\bSELECT\b[\s\S]*?\bFROM\s+(?:"?public"?\.)?"?meta_fields"?(?![\w])[\s\S]*?\bFOR\s+(?:NO\s+KEY\s+)?(?:UPDATE|(?:KEY\s+)?SHARE)\b/i
+
+/** `node` is the statement text of a call that is a TOP-LEVEL statement of `fn` — not inside a branch, a loop, a
+ * `try`, or a nested callback — so no path from the fence to a later statement of `fn` can skip it. */
+function topLevelCallOf(fn: FnNode, node: ts.Node): ts.CallExpression | null {
+  const call = node.parent
+  if (!call || !ts.isCallExpression(call) || call.arguments[0] !== node) return null
+  let n: ts.Node = call
+  while (n.parent && (ts.isAwaitExpression(n.parent) || ts.isParenthesizedExpression(n.parent) || ts.isAsExpression(n.parent)
+    || ts.isVariableDeclaration(n.parent) || ts.isVariableDeclarationList(n.parent))) n = n.parent
+  const statement = n.parent
+  if (!statement || !(ts.isVariableStatement(statement) || ts.isExpressionStatement(statement))) return null
+  return statement.parent === fn.body ? call : null
+}
+
+/**
+ * The mechanical half of the 免检 verdict "the field row is read under a lock AFTER the fence" (the field retype
+ * conversion's own two transactions). In every region of the holder that writes a value into `meta_records.data`,
+ * a locked read of the field row must
+ *   - sit after the fence and before the first `meta_records.data` write,
+ *   - be issued on the fenced query (the statement's callee is the region's query binding),
+ *   - be a top-level statement of the region's function (see `topLevelCallOf`).
+ * What this cannot see: whether the values written are derived from rows read under the fence. The ledger reason
+ * states that and the behaviour suites pin it (PLAN_DRIFT / UNDO_PRECONDITION_FAILED).
+ */
+export function checkLockedFieldReadBeforeFirstDataWrite(holder: FenceHolder): HelperCheck {
+  if (holder.regions.length === 0) return { ok: false, reason: 'no region to inspect' }
+  let anyWrite = false
+  for (const region of holder.regions) {
+    const fn = region.fn as FnNode
+    const literals = literalsIn(fn).map(({ node, text }) => ({ node, sql: collapse(text), at: node.getStart(region.source) }))
+    let firstWriteAt = -1
+    for (const { sql, at } of literals) {
+      if (at < region.after || !RECORDS_DATA_WRITE_RE.test(sql)) continue
+      if (firstWriteAt === -1 || at < firstWriteAt) firstWriteAt = at
+    }
+    if (firstWriteAt === -1) continue
+    anyWrite = true
+    let accepted = false
+    const rejected = new Set<string>()
+    for (const { node, sql, at } of literals) {
+      if (!FIELD_ROW_LOCKED_READ_RE.test(sql)) continue
+      if (at < region.after) { rejected.add('before the fence'); continue }
+      if (at > firstWriteAt) { rejected.add('after the first meta_records.data write'); continue }
+      const call = topLevelCallOf(fn, node)
+      if (!call) { rejected.add('not a top-level statement of the fenced function'); continue }
+      const callee = call.expression.getText(region.source)
+      if (region.queryBinding !== '' && callee !== region.queryBinding) {
+        rejected.add(`issued on ${callee} instead of the fenced query ${region.queryBinding}`)
+        continue
+      }
+      accepted = true
+    }
+    if (!accepted) {
+      return {
+        ok: false,
+        reason: rejected.size > 0
+          ? `the locked meta_fields read is ${[...rejected].sort().join('; ')}`
+          : 'no locked meta_fields read (SELECT … FROM meta_fields … FOR UPDATE / FOR SHARE) after the fence',
+      }
+    }
+  }
+  return anyWrite
+    ? { ok: true }
+    : { ok: false, reason: 'the holder writes no meta_records.data value in its own region, so this verdict does not describe it' }
+}
+
 // ── the real tree ──────────────────────────────────────────────────────────────────────────────────
 
 /** Every non-test `.ts` file under `srcDir` (tests, `__tests__`, and declaration files excluded). */
