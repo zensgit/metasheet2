@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import express, { type RequestHandler } from 'express'
+import type { Request, RequestHandler, Response } from 'express'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
-import request from 'supertest'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { ensureCanonicalUserOrgsTable } from '../../src/db/migrations/_ensure-user-orgs'
 import { up as installRegistry } from '../../src/db/migrations/zzzz20260413130000_create_platform_app_instances'
@@ -16,7 +15,6 @@ import {
 import { changeElearningAppInstallation, readElearningAppInstallation } from '../../src/services/elearning-app-installation'
 import type { ElearningAdminAccessDb, ElearningAdminAccessQueryable } from '../../src/services/elearning-admin-access'
 import { dropScratchDatabase } from '../helpers/scratch-database'
-import { usePinnedServer } from '../utils/pinned-server'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) throw new Error('installation gate requires DATABASE_URL; refusing skip-shaped green')
@@ -142,9 +140,31 @@ test('membership revocation waits for admitted installation transaction (not mer
   await expect(changeElearningAppInstallation(database(), input)).rejects.toMatchObject({ code: 'forbidden' })
 })
 
-const pinned = usePinnedServer()
+/**
+ * Drives a production middleware in process, with no listening socket (real-DB suites stay free of
+ * HTTP transports): resolves with the answer it sent, or with `next: true` when it passed the
+ * request on. `json` is the only response method the installation surface uses.
+ */
+function drive(handler: RequestHandler, input: { method: 'GET' | 'POST' | 'PUT'; url: string; body?: unknown }) {
+  return new Promise<{ status: number; body: unknown; next: boolean }>((resolve, reject) => {
+    const answer = { status: 200, body: undefined as unknown, next: false }
+    const req = { method: input.method, url: input.url, originalUrl: input.url, headers: { authorization: 'admin' }, body: input.body }
+    const res = {
+      status(code: number) { answer.status = code; return res },
+      json(payload: unknown) { answer.body = payload; resolve(answer); return res },
+      setHeader() { return res },
+    }
+    try {
+      handler(req as unknown as Request, res as unknown as Response, (error?: unknown) => {
+        if (error) { reject(error); return }
+        answer.next = true
+        resolve(answer)
+      })
+    } catch (error) { reject(error) }
+  })
+}
 
-/** The production installation surface over the real table; only authentication is injected. */
+/** The production installation router and business gate over the real table; only authentication is injected. */
 function installationSurface(env: NodeJS.ProcessEnv, orgId: string) {
   const auth: RequestHandler = (req, res, next) => {
     if (!req.headers.authorization) { res.status(401).json({ error: 'unauthenticated' }); return }
@@ -152,11 +172,10 @@ function installationSurface(env: NodeJS.ProcessEnv, orgId: string) {
     req.authenticatedTenantId = orgId
     next()
   }
-  const app = express()
-  app.use(createElearningAppInstallationRouter({ getDb: () => database(), authenticate: auth, featureGate: requireElearningEnabled({ env }) }))
-  const business: RequestHandler = (_req, res) => { res.json({ ok: true }) }
-  app.use('/api/elearning', auth, requireElearningAppInstallation({ getDb: () => database(), env }), business)
-  return app
+  const router = createElearningAppInstallationRouter({ getDb: () => database(), authenticate: auth, featureGate: requireElearningEnabled({ env }) })
+  const gate = requireElearningAppInstallation({ getDb: () => database(), env })
+  const business: RequestHandler = (req, res, next) => auth(req, res, () => gate(req, res, next))
+  return { router, business }
 }
 
 async function snapshotRow(orgId: string) {
@@ -174,28 +193,24 @@ test('switch off: an existing ACTIVE installation is neither rewritten nor reach
   expect(before).toHaveLength(1)
   expect(before[0]).toMatchObject({ status: 'active', config_json: { notificationsEnabled: true } })
 
-  pinned.setApp(installationSurface({}, input.orgId))
-  const refused = { error: 'feature_disabled' }
+  const off = installationSurface({}, input.orgId)
+  const refused = { status: 404, body: { error: 'feature_disabled' }, next: false }
   // Soft, so that the row comparison below is evaluated even when an answer is wrong.
-  const post = await request(pinned.url()).post(PATH).set('Authorization', 'admin').send({})
-  expect.soft([post.status, post.body]).toEqual([404, refused])
+  expect.soft(await drive(off.router, { method: 'POST', url: PATH, body: {} })).toEqual(refused)
   for (const body of [
     { enabled: false, notificationsEnabled: false },
     { enabled: true, notificationsEnabled: false },
   ]) {
-    const put = await request(pinned.url()).put(PATH).set('Authorization', 'admin').send(body)
-    expect.soft([put.status, put.body]).toEqual([404, refused])
+    expect.soft(await drive(off.router, { method: 'PUT', url: PATH, body })).toEqual(refused)
   }
-  const get = await request(pinned.url()).get(PATH).set('Authorization', 'admin')
-  expect.soft([get.status, get.body]).toEqual([404, refused])
-  const business = await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')
-  expect.soft([business.status, business.body]).toEqual([404, refused])
+  expect.soft(await drive(off.router, { method: 'GET', url: PATH })).toEqual(refused)
+  expect.soft(await drive(off.business, { method: 'GET', url: '/api/elearning/me/courses' })).toEqual(refused)
   expect(await snapshotRow(input.orgId)).toEqual(before)
 
-  pinned.setApp(installationSurface({ ELEARNING_ENABLED: 'true' }, input.orgId))
-  expect((await request(pinned.url()).get(PATH).set('Authorization', 'admin')).body)
-    .toEqual({ status: 'active', notificationsEnabled: true, canManage: true })
-  expect((await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')).body)
-    .toEqual({ ok: true })
+  const on = installationSurface({ ELEARNING_ENABLED: 'true' }, input.orgId)
+  expect(await drive(on.router, { method: 'GET', url: PATH }))
+    .toEqual({ status: 200, body: { status: 'active', notificationsEnabled: true, canManage: true }, next: false })
+  expect(await drive(on.business, { method: 'GET', url: '/api/elearning/me/courses' }))
+    .toEqual({ status: 200, body: undefined, next: true })
   expect(await snapshotRow(input.orgId)).toEqual(before)
 })
