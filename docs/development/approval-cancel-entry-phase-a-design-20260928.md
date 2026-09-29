@@ -391,6 +391,7 @@
 | 开关 OFF | 未设置与 `"false"` 两种:发起 404 且与不存在 id 逐字节同形;同一请假 GET 仍 200(`round: null`);四表全表行数不变;随后 ON 同单发起 201(正控),`approval_instances` / `approval_rounds` 各 +1 | 绿 |
 | 无 `attendance:approve` | 席位持有者(仅员工角色)办理 ⇒ 插件 403 逐字节 `{"ok":false,"error":{"code":"FORBIDDEN","message":"Insufficient permissions"}}`,轮次仍 pending;授予 `attendance_approver` 后同人同轮 approve 200 | 绿 |
 | 有席位 approve | 轮次指派全为 `user` 类型且唯一有效席位 = 夹具审批人;approve 200 ⇒ `applied` / `leave_cancelled`,`cancellationOutcome` = C-2 形状 `{status:'cancelled', reversal:{reversed:480, lots:1, unrecoverableExpired:0, alreadyReversed:false}}`,与员工摘要、审批侧 `GET /api/approvals/<轮实例>` 深等;`approval_records` 的 approve 行 actor = 调用者、意见原样 | 绿 |
+| **端到端(无替身)** | 员工经真实插件路由建请假(不带薪假类型)→ `attendance_approver` 经插件路由批准 → 员工经本入口发起(唯一有效席位 = 该审批人)→ 该审批人经考勤侧办理路由 approve ⇒ 真实 W4 边界兑现:`applied` / `leave_cancelled`,`cancellationOutcome` = `{status:'cancelled', reversal:{reversed:0, lots:0, unrecoverableExpired:0, alreadyReversed:false}}`(无余额批次,返还为 0;带余额的形状由上一行替身用例钉住),与审批侧投影深等;考勤请求行变为 `cancelled` | 绿 |
 | 有席位 reject | 无意见 ⇒ 400 `REJECT_COMMENT_REQUIRED`(服务层规则透传),轮次不变;带意见 ⇒ `rejected` / `cancellation_rejected`、`closedBySystem=false`;兑现边界未被调用;原单实例与请求行仍 `approved` | 绿 |
 | 无席位的审批人 | 持 `attendance_approver`、非席位、非请求人:approve / reject ⇒ 403 `APPROVAL_ASSIGNMENT_REQUIRED`(只含 code + message),轮次 pending、审计只有 `created`;无轮次的请假与不存在 id ⇒ 404 同形 | 绿 |
 | 非允许动作 | transfer / add_sign / reduce_sign / revoke / comment / handle / return ⇒ 400 `VALIDATION_ERROR`;轮次与审计不变 | 绿 |
@@ -404,9 +405,9 @@
 
 | 运行 | 读数 |
 |---|---|
-| 本套件(`EXPECT_DB=1`,两条 URL) | **34/34**(阶段 A 22 + A2 12) |
-| CI 形(`env -i`,仅 `DATABASE_URL`) | 33 通过 / 1 跳过(EXPECT_DB 哨兵) |
-| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 71 通过 / 3 跳过(74) |
+| 本套件(`EXPECT_DB=1`,两条 URL) | **35/35**(阶段 A 22 + A2 13) |
+| CI 形(`env -i`,仅 `DATABASE_URL`) | 34 通过 / 1 跳过(EXPECT_DB 哨兵) |
+| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 72 通过 / 3 跳过(75) |
 | 撤销轮真库尾部(CI 同序)上半:lock-order-census / creation / redemption | 126 通过 / 3 跳过(129) |
 | 下半:seat-guards / attendance-fk-migration / outlet-guards / node-timeout-effect | 22 通过 / 4 跳过(26) |
 | 单测 `tests/unit/approval*`(88 文件) | 1706/1706 |
@@ -447,4 +448,4 @@
 4. **§6 第 0b 项**(兑现侧 500)未修,归 C-1 线;开关 OFF 期间经本入口不可达。
 5. **`roles: []` 的前提**(撤销轮只有人席位)由测试断言钉住;若将来改变,见 §8.4。
 6. **NOT RUN**:前端(阶段 B);投递与待办(阶段 C);阶段 D 验收;CI(未推送);A2 的独立门审;CI 所用 PostgreSQL 版本(本地 15.17);`attendance-plugin.test.ts` 全量;`scripts/ops/*.test.mjs`;`tests/unit` 中 approval / attendance 前缀之外的文件;钉钉卡片回调对撤销轮的办理(UNVERIFIED,未改)。
-7. **测试残留**:与 §6 第 8 项同类(只追加的修订历史行、登录类审计行),随一次性库 drop。
+7. **测试残留**:与 §6 第 8 项同类(只追加的修订历史行、登录类审计行);端到端用例经真实 W4 取消,每次运行另留 1 行只追加的考勤结果操作行与 1 行修订历史行(二者都有拒绝删除的守卫)。套件删除自己建的请假类型、请求、实例、轮次、用户与角色;以上只追加行随一次性库 drop(CI 的服务库同样是一次性的)。

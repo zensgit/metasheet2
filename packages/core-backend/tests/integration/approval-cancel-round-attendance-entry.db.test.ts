@@ -103,6 +103,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   const createdTemplateIds = new Set<string>()
   const createdApprovalIds = new Set<string>()
   const createdRequestIds = new Set<string>()
+  const createdLeaveTypeIds = new Set<string>()
   const seededUserIds = new Set<string>()
   const devTokenUserIds = new Set<string>()
   const createdRoleIds = new Set<string>()
@@ -380,6 +381,10 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       const approvalIds = [...createdApprovalIds]
       if (requestIds.length > 0) {
         await pool().query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [requestIds])
+      }
+      const leaveTypeIds = [...createdLeaveTypeIds]
+      if (leaveTypeIds.length > 0) {
+        await pool().query('DELETE FROM attendance_leave_types WHERE id = ANY($1::uuid[])', [leaveTypeIds])
       }
       if (approvalIds.length > 0) {
         await pool().query(
@@ -1422,6 +1427,76 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         expect(response.status).toBe(401)
       }
       expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+    })
+
+    it('end to end with NO stand-in: a leave created and approved through the real plugin routes, launched by its employee, approved on the attendance side by the seated attendance_approver — the real W4 boundary cancels the leave', async () => {
+      const employee = `g4a-a2-e2e-${TS}`
+      const approver = `g4a-a2-e2e-apr-${TS}`
+      const attendanceAdmin = `g4a-a2-e2e-adm-${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      await seedLoginUser(approver, { roles: ['attendance_approver'] })
+      await seedLoginUser(attendanceAdmin, { roles: ['admin'], admin: true })
+      const employeeToken = await loginToken(employee)
+      const approverToken = await loginToken(approver)
+
+      const leaveType = await http('POST', '/api/attendance/leave-types', await loginToken(attendanceAdmin), {
+        code: `g4a2e${TS}`.slice(0, 20),
+        name: `G4A2 E2E ${TS}`,
+        paid: false,
+        requiresApproval: true,
+      })
+      expect(leaveType.status, leaveType.text).toBe(201)
+      const leaveTypeId = leaveType.json?.data?.id as string
+      expect(typeof leaveTypeId).toBe('string')
+      createdLeaveTypeIds.add(leaveTypeId)
+
+      const create = await http('POST', '/api/attendance/requests', employeeToken, {
+        workDate: '2031-03-12',
+        requestType: 'leave',
+        leaveTypeId,
+        minutes: 120,
+      })
+      expect(create.status, create.text).toBe(201)
+      const requestId = create.json?.data?.request?.id as string
+      createdRequestIds.add(requestId)
+      const approve = await http('POST', `/api/attendance/requests/${requestId}/approve`, approverToken, { comment: 'ok' })
+      expect(approve.status, approve.text).toBe(200)
+      const original = await pool().query<{ status: string; request_type: string; approval_instance_id: string }>(
+        'SELECT status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1',
+        [requestId],
+      )
+      expect(original.rows[0]).toMatchObject({ status: 'approved', request_type: 'leave' })
+      const documentId = original.rows[0].approval_instance_id
+      createdApprovalIds.add(documentId)
+
+      const launch = await http('POST', entryPath(requestId), employeeToken, {})
+      expect(launch.status, launch.text).toBe(201)
+      const roundInstanceId = launch.json.data.round.engineInstanceId as string
+      createdApprovalIds.add(roundInstanceId)
+      const seats = await pool().query<{ assignee_id: string }>(
+        'SELECT assignee_id FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE',
+        [roundInstanceId],
+      )
+      expect(seats.rows.map((row) => row.assignee_id)).toEqual([approver])
+
+      const decided = await http('POST', actionsPath(requestId), approverToken, { action: 'approve' })
+      expect(decided.status, decided.text).toBe(200)
+      expect(decided.json.data.round).toMatchObject({ outcome: 'applied', status: 'leave_cancelled', closedBySystem: false })
+      // An unpaid leave type holds no balance lots, so the real boundary reports the C-2 shape with a
+      // zero reversal; the balance-bearing shape is pinned by the stand-in approve case above.
+      const outcome = decided.json.data.round.cancellationOutcome
+      expect(outcome).toEqual({
+        status: 'cancelled',
+        reversal: { reversed: 0, lots: 0, unrecoverableExpired: 0, alreadyReversed: false },
+      })
+      // Cross-read of the same projection on the approval side (fixture token of the seated approver).
+      const approvalSide = await http('GET', `/api/approvals/${roundInstanceId}`, await fixtureAdminToken(approver))
+      expect(approvalSide.status, approvalSide.text).toBe(200)
+      expect(approvalSide.json.cancellationOutcome).toEqual(outcome)
+
+      const after = await pool().query<{ status: string }>('SELECT status FROM attendance_requests WHERE id = $1', [requestId])
+      expect(after.rows[0]?.status).toBe('cancelled')
+      expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['applied'])
     })
 
     it('the launch records the requester\'s display name on the round\'s created audit row (not the bare id)', async () => {
