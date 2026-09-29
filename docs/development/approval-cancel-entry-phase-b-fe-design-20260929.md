@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿:实现与本地验证已完成;**独立门审未做**;未推送、未开 PR;**合并未被授权**(见 §1) |
+| 状态 | 草稿:实现与本地验证已完成(7 个提交,见 §8);**独立门审未做**;未推送、未开 PR;**合并未被授权**(见 §1) |
 | 分支 | `feat/approval-cancel-entry-phase-b-fe` |
 | 基线 | 后端分支 `feat/approval-cancel-entry-phase-a-read-launch` 的 `2e44d6053`(阶段 A + A2;其基线 `main @ f47054d88e`) |
 | 改动面 | 只 `apps/web/**` 与本文件;**后端零改动**,**DDL 零** |
@@ -20,8 +20,10 @@
 3. **④ 审批人办理** —— 撤销轮实例在审批详情、审批中心(行内 / 行驳回 / 批量)上的通过 / 驳回改走 `POST /api/attendance/requests/:id/cancel-round/actions`。
 4. **① 考勤自助面入口 + ② 轮次摘要呈现 + ③ 申请人撤回** —— `AttendanceView`「最近申请」的**请假行**(不是换班列表)挂 `AttendanceCancelRoundPanel`。
 5. **⑦ required web lane 登记** + 本文件。
+6. **P-6 席位呈现边界(审批侧)** —— 撤销轮实例在审批详情时间线「当前处理人」行与审批中心详情窗格「待处理人」行不渲染具体人名,只渲染 V1 词(§4.4)。
+7. 本文件修订(owner 2026-09-29 16:5x 三项选项入 §1、§9)。
 
-**本阶段不做的**:后端任何改动(摘要 `entryEnabled`、办理成功体最小形、P-5 投递状态、P-11 待办由后端 lane 在后端分支上做);P-11 待办中心呈现(阶段 C);P-5 投递状态呈现(阶段 C);P-6′ 管理员通知(后端);阶段 D 真浏览器验收。
+**本阶段不做的**:后端任何改动(摘要 `entryEnabled`、办理成功体最小形、P-5 投递状态、P-11 待办由后端 lane 在后端分支上做);P-11 待办中心呈现(阶段 C);P-5 投递状态呈现(阶段 C);P-6′ 管理员通知(owner 16:5x 选择暂缓,见 §1);考勤侧「待我审批的撤销」列表(owner 16:5x 新增,后端路由不在本基线,见 §9);阶段 D 真浏览器验收。
 
 ---
 
@@ -33,14 +35,16 @@
 |---|---|---|
 | 目标 | 「你所说的这4项能否定为目标来开发执行么？根据代码难度自动选择模型，另外完成后给出设计及验证MD」 | 本分支 + 本文件 |
 | Q1′ 挂载侧 | 「(i) Attendance-side (Recommended)」 | 前端只调考勤侧四条路由 |
-| P-1 / P-2 / P-4 / P-6 | 「P-1 (Q1) entry + predicates」「P-2 (Q2) status wording」「P-4 (Q4) round-summary read」「P-6 (Q6) seat display lift」 | §2、§3、§4 |
+| P-1 / P-2 / P-4 / P-6 | 「P-1 (Q1) entry + predicates」「P-2 (Q2) status wording」「P-4 (Q4) round-summary read」「P-6 (Q6) seat display lift」 | §2、§3、§4;P-6 → §4.3(自助面零人名)+ §4.4(审批侧两处) |
 | P-7 / P-8 / P-9 / P-10 | 「P-7 (Q8) unknown codes」「P-8 (Q9) error-code registry」「P-9 (Q10) seed visibility」「P-10 (Q11) code prerequisite」 | §5 |
 | P-3 | 「(iii) Round-summary endpoint (Recommended)」;④ 量纲「Reuse leave-balance formatter (Recommended)」 | 结果行经 `formatLeaveBalanceMinutes` |
-| P-6′ | 「(ii) Reuse approval notices (Recommended)」(选项说明含 “weaker employee-facing copy until RC (c) lands”) | 席位类两码用弱版文案 |
+| P-6′ | 「(ii) Reuse approval notices (Recommended)」(选项说明含 “weaker employee-facing copy until RC (c) lands”);其后 2026-09-29 16:5x ①「Defer: weak copy only (Recommended)」 | 席位类两码用弱版文案(16:5x 选择下员工面文案与 code 不变,本分支无需改动);管理员通知暂缓,不在本分支 |
 | 审批人路径 | 2026-09-29 11:0x 「Attendance-side + OFF flag (Recommended)」 | ④ 走考勤侧 `…/actions`;③ 走考勤侧 `…/withdraw` |
 | 开关对前端可见 | 2026-09-29 14:3x 「Summary exposes entryEnabled (Recommended)」 | `entryEnabled` 缺失按 false |
 | 办理成功体 | 2026-09-29 14:3x 「Minimal action response (Recommended)」 | 前端不读写路由成功体,成功后重读 |
 | 无席位码 | 2026-09-29 14:3x 「Keep, same as approval side (Recommended)」 | 无席位 403 沿用服务端既有句 |
+| 审批人入口 | 2026-09-29 16:5x ②「Attendance-side list (Recommended)」 | **本分支未做**:需要的后端列表路由不在基线 `2e44d6053` 上,前端面板不按猜测的合同先写;后端路由落地后另起切片(§9 第 11 项) |
+| P-5 投递条数 | 2026-09-29 16:5x ③「Show the list (Recommended)」 | 阶段 C(后端 + 呈现),不在本分支 |
 | **合并** | 撤销入口 PR 的合并**未被点名**(goal §0:「这些新 PR 的合并未被点名 ⇒ 完成后单独请示」) | 不推送、不开 PR、不合并 |
 
 ---
@@ -63,6 +67,8 @@
 ---
 
 ## 3. P-2 词表(`cancelRound` 域)
+
+词表来源:ratify 的 P-2 文本「词表(V1–V8)见提案 §3.2」—— 该表在 **v1** 提案 `approval-cancel-round-phase3-fe-entry-design-proposal-20260920.md` §3.2;v2 提案(任务书所指)的 §3.2 是另一节,只回指 v1 §3.2。下表 V1–V8 的中英文与 v1 §3.2 的「建议中文 / 建议英文」两列逐字相同。
 
 `approvalInstance` 域一字未改。`cancelRound` 域每个词带主语:
 
@@ -125,7 +131,7 @@
 | 非请假,或请假状态不是 approved / cancelled | 不读、不渲染 |
 | 摘要 404 | 不渲染 |
 | 摘要其它失败 | 「撤销状态暂时无法读取」+ 重试(与「无轮次」不同形) |
-| `entryEnabled` 为 false / 缺失 | **不渲染发起入口**;已有轮次的进度仍显示(读与撤回不受开关管) |
+| `entryEnabled` 为 false / 缺失 | **不渲染发起入口**(不是禁用);已有轮次的进度与撤回仍显示 —— 「开关只管发起入口,不管进度与撤回」是**实现选择**(依据:开关挂在发起端点上;owner 14:3x 选项说的是「整块隐藏撤销入口」),**不是 owner 条款**,待门审 / owner 核 |
 | entryEnabled ∧ approved ∧ 本人 ∧ 无在途轮 | 「申请撤销」可用 → 对话框(确认 + 可选说明 ≤2000)→ POST → 重读 |
 | 同上但**有在途轮**(I3 不满足) | 按钮**禁用**,原因「这条请假已有一个撤销申请在审批中」(`aria-describedby`)+ 页内链接到进度区(审批详情页对员工 403,故不外链) |
 | 在途轮 ∧ 本人 | 「撤回撤销申请」:可用性取服务端 `canWithdraw`;窗口已关显示原因;非请求人(`APPROVAL_REVOKE_FORBIDDEN`)不显示 |
@@ -142,6 +148,21 @@
 | `cancelled_with_unrecoverable_expired` | 本次已返还 {返还};另有 {过期} 因额度已过期未能返还 |
 | `cancelled_reversal_unreported`,或无结果 | 返还结果暂未能读取,请联系管理员核对余额(**不渲染 0**) |
 | `alreadyReversed` | 附:此前已返还过,本次未重复返还 |
+
+### 4.4 P-6 席位呈现边界(审批侧)
+
+ratify 的 P-6(§15.6)在其解除条件满足前禁止撤销进度界面渲染「将由谁审批 / 当前审批人」的具体人名(只显示「审批中」),也禁止委托来源标;P-1 把审批详情页定为撤销轮的只读进度面。本分支上的解除条件未满足(RC (c) 未落地,故员工面仍用弱版文案)。普查(`apps/web/src/views/approval/**`、`approvals/**`、`MetaRecordApprovalPanel.vue`)与处理:
+
+| 渲染点 | 内容 | 撤销轮上的处理 |
+|---|---|---|
+| `ApprovalDetailView.vue` 时间线「当前处理人：{名} · 已等待 {时长}」(`currentHandlerEntries`) | 当前审批人人名,每席一行 | 收成**一行**「撤销申请审批中 · 已等待 {时长}」(V1 词,带主语;不显示人名,也不显示席位数) |
+| `ApprovalCenterDetailPane.vue`「待处理人：{名、名}」(`pendingApproverLabels`) | 当前审批人人名 | 换成 V1 词「撤销申请审批中」 |
+| `ApprovalDetailView.vue` 时间线后续节点摘要(`nodeAssigneeSourceSummary`) | 只有来源类别或人数(「指定成员（N 人）」等),**从不含人名** | 不改 |
+| 委托来源标 | `grep -nE "委托\|delegat\|Delegat"` 对 `ApprovalDetailView.vue`、`ApprovalCenterDetailPane.vue` 零命中 | 无需改 |
+| `MetaRecordApprovalPanel.vue` 待处理人 | 多维表记录提交(撤销轮不会成为记录提交) | 不改 |
+| 自助面 `AttendanceCancelRoundPanel` | 本来就不渲染任何审批人 / 席位人名 | 不改 |
+
+普通实例的两行逐字不变(测试钉住)。时间线 / 记录表里**已发生动作**的执行人名、`cancelledAssigneesLabel`(「其他审批人已失效」)不在 P-6 字面范围(不是「将由谁 / 当前」),未改,列 §9 第 12 项待门审。
 
 ---
 
@@ -189,12 +210,12 @@
 | spec | 用例 | 读数 |
 |---|---|---|
 | `cancelRoundEntryCore.spec.ts` | 词表主语 / V7-V8 色调 / V3-V5-V6 可辨;V 词解析;域选择器;17 码文案、席位类弱版、未登记码用服务端原句;P-7 未知 code;客户端路径与请求体、`entryEnabled` 缺失 ⇒ false;请假 id 两跳与失败即抛;V7 映射 | 16/16 |
-| `cancelRoundEntrySurfaces.spec.ts` | 桌面表:普通行不变 / 撤销轮换域 / rejected 行读详情前「读取中」后 V5 / 详情无原因 ⇒ V3 / 读失败 ⇒「暂时无法读取」;移动列表同;详情窗格三态;多维表记录面板经同一选择器 | 8/8 |
-| `cancelRoundEntryDetailView.spec.ts` | 页头 V6 / V3 / 普通实例;时间线与记录表:哨兵 ⇒「系统」、V5 词、不出现「驳回」与原始哨兵;④:仅 `attendance:approve` 的审批人见通过 / 驳回、次要动作隐藏、通过走考勤路由且不调 `executeAction`、成功后重读详情;仅 `approvals:act` 不显示撤销轮办理按钮;409 可重试 ⇒ V7 文案;请假 id 解析失败 ⇒ 对话框报错且零考勤调用零通用调用;普通实例仍走 `executeAction` | 9/9 |
+| `cancelRoundEntrySurfaces.spec.ts` | 桌面表:普通行不变 / 撤销轮换域 / rejected 行读详情前「读取中」后 V5 / 详情无原因 ⇒ V3 / 读失败 ⇒「暂时无法读取」;移动列表同;详情窗格三态;多维表记录面板经同一选择器;**P-6**:窗格上撤销轮只有 V1 词、无人名、无「待处理人」,普通实例仍列人名 | 10/10 |
+| `cancelRoundEntryDetailView.spec.ts` | 页头 V6 / V3 / 普通实例;时间线与记录表:哨兵 ⇒「系统」、V5 词、不出现「驳回」与原始哨兵;④:仅 `attendance:approve` 的审批人见通过 / 驳回、次要动作隐藏、通过走考勤路由且不调 `executeAction`、成功后重读详情;仅 `approvals:act` 不显示撤销轮办理按钮;409 可重试 ⇒ V7 文案;请假 id 解析失败 ⇒ 对话框报错且零考勤调用零通用调用;普通实例仍走 `executeAction`;**P-6**:两席撤销轮只一行 V1 词、无人名,普通实例两行「当前处理人：{名}」 | 11/11 |
 | `cancelRoundEntryCenterRoute.spec.ts` | 行内通过 / 行驳回(带意见)/ 批量(撤销轮行 → 考勤路由,普通行 → `dispatchAction`);无席位 403 原句;不可解析的请假不回落 | 4/4 |
 | `cancelRoundEntryAttendancePanel.spec.ts` | entryEnabled 缺失 ⇒ 不渲染、false+有轮 ⇒ 仅进度;仅本人已批准请假有入口、非请假 / pending 不读;**I3 不满足 ⇒ 禁用 + 原因 + 页内链接**;读失败与 404 不同形;发起对话框 → POST → 重读 → V1;席位类弱版、503 ⇒ V8 warning;撤回 → V4、入口重新可用;撤回窗口关闭原因、非本人无撤回;**V2 三值**(1天 / 1天 1小时 + 过期 1小时 + 已返还附注 / unreported 不出现 0);V5 与 V3 可辨;V6 未知 code 折叠;AttendanceView 挂载位置(请假行、最近申请内、换班列表前、唯一一处) | 12/12 |
 
-合计 **49/49**(按 lane token 过滤一次跑五个文件)。
+合计 **53/53**(按 lane token 过滤一次跑五个文件;提交 5 时为 49/49,提交 6 加 4 条 P-6 用例)。
 
 ### 7.2 mutation(每条:恰一处替换 → 跑 → cp 还原 → `cmp` 逐字节;脚本 `g4cb-mut.py`)
 
@@ -224,12 +245,16 @@
 | C4-unreported | unreported 渲染成「已返还 0天」 | 1 red |
 | C4-wiring | AttendanceView 去掉请假行限定 | 1 red |
 | L1 | lane 删掉一个新 token 而不重生 manifest | manifest 守卫 7 red |
+| C6-dvseat | 详情页 `currentHandlerEntries` 去掉撤销轮分支 | 1 red |
+| C6-dvtpl | 详情页模板不按 `seatNamesWithheld` 分支(回到「当前处理人：」前缀) | 1 red |
+| C6-paneseat | 窗格 `cancelRoundPendingWord` 恒空(回到人名行) | 1 red |
 
 ### 7.3 回归与守卫
 
 | 项 | 读数 |
 |---|---|
-| `vue-tsc -b`(每个提交后,先删本地 `.tmp` 再跑) | 与基线 `2e44d6053` **逐字节相同**(EXIT 2,仅已知 TS2769 vite 插件类型) |
+| `vue-tsc -b`(先删本地 `.tmp` 再跑,与基线 `2e44d6053` 的输出 `cmp`) | 留有日志的读数:提交 1、2、3 后各一次,提交 5 时的 HEAD 一次(提交 5 不改 `.ts` / `.vue`,故覆盖提交 4 的源码),提交 6 后一次 —— 全部**逐字节相同**(EXIT 2,仅已知 TS2769 vite 插件类型)。提交 4 本身没有单独的日志 |
+| 提交 6 触及面(引用 `ApprovalDetailView` / `ApprovalCenterDetailPane` / `ApprovalCenterView` 的 37 个 spec 文件) | 844 通过 / 5 失败;5 个即上一行在基线上复现的同 5 条(`approval-ui-workspace` 2、`approvalMobileDetailActions` 3) |
 | 触及面既有 spec(引用五个渲染面 / 中心 / 详情 / statusDomains / StatusTag 的 44 个文件) | 970 通过 / 5 失败;5 个失败在基线上逐条复现(`approval-ui-workspace` 2、`approvalMobileDetailActions` 3,均不在 required lane) |
 | 引用 `AttendanceView` 的 28 个 spec(含 `attendance-selfservice-dashboard`、十六进制色棘轮) | 644 通过 / 9 失败;9 个在基线上同样失败(`attendance-import-batch-timezone-status` 5、`attendance-record-timeline` 4,均不在 required lane) |
 | `required-web-lane-token-manifest-guard` + `required-web-lane-registration-shape`(core-backend 单测) | 63/63 |
@@ -261,6 +286,8 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 3. `feat(web): cancel-round approver decisions through the attendance route`
 4. `feat(web): leave cancellation entry on the attendance self-service list`
 5. `test(web): register the cancel-round entry specs in the required web lane` + 本文件
+6. `feat(web): cancel-round progress names no current approver on the approval side`(P-6,§4.4)
+7. `docs(approval): phase-B record — owner 16:5x selections, P-6 surfaces, verification readings`(本文件修订)
 
 每个提交(树 / diff / 提交信息)已按私有短语表自扫,0 命中。
 
@@ -270,11 +297,14 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 
 1. **列表 DTO 不带 `cancelRoundCloseReason`**:列表面对「撤销轮 ∧ rejected」行逐行读一次详情(终态,结果缓存)。在列表 DTO 上白名单投影该字段即可去掉这次读取 —— 属后端改动,归后端 lane / owner。
 2. **审批侧撤回**:撤销轮在审批详情上的「撤回」仍走通用路由(`approvals:act`);员工的撤回入口在考勤自助面(③)。未在 ④ 的点名范围内,未改。
-3. **P-6 在审批侧**:审批详情 / 中心窗格对所有实例(含撤销轮)显示待处理人。这两个面今天只有持 `approvals:read` 者可达;自助面不显示任何人名。是否对撤销轮隐藏,待 owner。
+3. **P-6 在审批侧**:已按 ratify 的 P-6 在两处落实(§4.4,提交 6):撤销轮上「当前处理人」「待处理人」不再渲染人名。自助面本来零人名。
 4. **请假 id 两跳的边界**:第二跳读原实例受原实例的读准入约束。若某席位持有者不是原实例的参与者,第二跳 404 ⇒ 对话框报「无法定位…请到考勤页面办理或联系管理员」,不回落。撤销轮 DTO 若直接带考勤请求 id 可去掉此跳 —— 后端改动,待 owner。
 5. **开发模式 mock**:`approvals/api.ts` 在 DEV 下默认 mock,`getApproval` 返回夹具,审批侧撤销轮办理在 mock 模式下会报「无法定位」。只影响本地 mock。
 6. **后端两条已定变更不在本分支基线上**:`entryEnabled` 与最小成功体由后端 lane 实现;本分支对二者的处理(缺失按 false;不读成功体)已由测试钉住。两分支合并后的真 HTTP 联调 **NOT RUN**。
-7. **P-11**(待办中心子类型标 / href 指向原请假)、**P-5**(投递状态)、**P-6′ 管理员通知**:不在本阶段。
+7. **P-11**(待办中心子类型标 / href 指向原请假)、**P-5**(投递状态;owner 16:5x「Show the list」)不在本阶段;**P-6′ 管理员通知**由 owner 16:5x「Defer: weak copy only」暂缓(员工面弱版文案与 code 不变)。
 8. **真浏览器 / 阶段 D 验收**:NOT RUN。CI:未推送,NOT RUN。独立门审:未做。
 9. **本地全量 lane 的偶发超时**:分块跑时两个挂载 `ApprovalDetailView` 的既有 spec 的首个用例偶发 5 s 超时,复跑即绿;单独计时 HEAD 与基线无差异(§7.4)。CI 上若出现同形红,按已知环境类(worker 负载)处理前应先对照基线。
 10. **不写安全机理**:本文件与提交信息不含任何未修缺陷的机理;相关事项见私有记录。
+11. **考勤侧「待我审批的撤销」列表**(owner 2026-09-29 16:5x「Attendance-side list (Recommended)」):本 lane 起跑之后才选定;所需后端列表路由不在基线 `2e44d6053` 上,前端面板未按猜测的合同先写。后端路由落地后,前端面板另起切片(挂 `attendance:approve`,只列查看者自己的在席席位,办理仍走 `…/cancel-round/actions`)。
+12. **P-6 字面范围之外的两处**:撤销轮时间线 / 记录表中已发生动作的执行人名,与 `cancelledAssigneesLabel`(「其他审批人已失效:{名}」),均非「将由谁审批 / 当前审批人」,本分支未改;是否一并收,列给门审。
+13. **本 lane 的续跑**:本分支前五个提交由同一 lane 的上一次运行写成(同一工作树、同一分支);本次运行复核了其读数(vue-tsc 逐字节、五个 spec、manifest `--check`、逐提交私有短语扫描),并补提交 6、7。
