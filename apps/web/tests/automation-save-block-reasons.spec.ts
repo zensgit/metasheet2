@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import {
   computeSaveBlockReasons,
+  hasCompleteCrossBaseTarget,
+  isDeletedTriggerSelfMutation,
+  rawBranchActionTypes,
+  storedRuleHasDeletedTriggerSelfMutation,
   type SaveBlockActionSnapshot,
   type SaveBlockReasonsInput,
 } from '../src/multitable/automationSaveBlockReasons'
@@ -596,5 +600,60 @@ describe('computeSaveBlockReasons — condition_branch condition rows (#4b)', ()
   it('omitted or true means complete — callers without branch rows keep saving', () => {
     expect(computeSaveBlockReasons(baseInput())).toEqual([])
     expect(computeSaveBlockReasons({ ...baseInput(), branchConditionsComplete: true })).toEqual([])
+  })
+})
+
+// #6155: the ONE client-side detector for "record.deleted + an action that mutates the trigger record", shared by the
+// rule editor (its save-block flag) and the automation panel (its non-blocking notice on a listed rule).
+describe('isDeletedTriggerSelfMutation / storedRuleHasDeletedTriggerSelfMutation (#6155 shared detector)', () => {
+  const COMPLETE = { targetBaseId: 'base_b', targetSheetId: 'sheet_b', targetRecordId: 'rec_b' }
+  const shape = (type: string, extra: Partial<{ completeCrossBaseTarget: boolean; nestedActionTypes: string[] }> = {}) => ({
+    type,
+    completeCrossBaseTarget: false,
+    nestedActionTypes: [] as string[],
+    ...extra,
+  })
+
+  it('flags update/delete/lock without a complete cross-base target under record.deleted only', () => {
+    for (const type of ['update_record', 'delete_record', 'lock_record']) {
+      expect(isDeletedTriggerSelfMutation('record.deleted', shape(type))).toBe(true)
+      expect(isDeletedTriggerSelfMutation('record.deleted', shape(type, { completeCrossBaseTarget: true }))).toBe(false)
+      expect(isDeletedTriggerSelfMutation('record.created', shape(type))).toBe(false)
+    }
+    expect(isDeletedTriggerSelfMutation('record.deleted', shape('send_webhook'))).toBe(false)
+  })
+
+  it('a branch action counts by the types of its sub-actions', () => {
+    expect(isDeletedTriggerSelfMutation('record.deleted', shape('condition_branch', { nestedActionTypes: ['send_email', 'lock_record'] }))).toBe(true)
+    expect(isDeletedTriggerSelfMutation('record.deleted', shape('parallel_branch', { nestedActionTypes: ['send_email'] }))).toBe(false)
+  })
+
+  it('reads the cross-base triple and the branch sub-action types from a RAW config', () => {
+    expect(hasCompleteCrossBaseTarget(COMPLETE)).toBe(true)
+    expect(hasCompleteCrossBaseTarget({ ...COMPLETE, targetRecordId: '  ' })).toBe(false)
+    expect(hasCompleteCrossBaseTarget({ targetBaseId: 'base_b' })).toBe(false)
+    expect(hasCompleteCrossBaseTarget(null)).toBe(false)
+    expect(rawBranchActionTypes({
+      branches: [{ key: 'a', actions: [{ type: 'update_record' }, { type: 'send_email' }] }],
+      defaultBranch: { key: 'd', actions: [{ type: 'lock_record' }] },
+    })).toEqual(['update_record', 'send_email', 'lock_record'])
+    expect(rawBranchActionTypes(undefined)).toEqual([])
+  })
+
+  it('a STORED rule: actions[] when present, else the legacy pair; the v0 alias update_field counts as update_record', () => {
+    const rule = (overrides: Record<string, unknown>) => ({
+      triggerType: 'record.deleted',
+      actionType: 'send_webhook',
+      actionConfig: {},
+      actions: undefined,
+      ...overrides,
+    }) as never
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ actionType: 'delete_record' }))).toBe(true)
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ actionType: 'update_field', actionConfig: { fieldId: 'f', value: 1 } }))).toBe(true)
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ actions: [{ type: 'send_email', config: {} }, { type: 'lock_record', config: {} }] }))).toBe(true)
+    // actions[] wins over the legacy pair, exactly as the editor loads the rule.
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ actionType: 'delete_record', actions: [{ type: 'send_email', config: {} }] }))).toBe(false)
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ actionType: 'delete_record', actionConfig: COMPLETE }))).toBe(false)
+    expect(storedRuleHasDeletedTriggerSelfMutation(rule({ triggerType: 'record.created', actionType: 'delete_record' }))).toBe(false)
   })
 })

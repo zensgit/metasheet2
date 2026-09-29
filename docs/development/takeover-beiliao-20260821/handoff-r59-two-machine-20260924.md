@@ -45,7 +45,7 @@
 
 脚本模板在运维机 `%LOCALAPPDATA%\Temp\claude-auto24\rNN\`（不入库：含主机地址）。以 r59 为模板复制成 `r60`：
 
-1. **准备**：`sed 's/r59/r60/g'` 生成 `r60-build-and-ship.sh` 与 `upgrade-222-r60.ps1`；`multitable-onprem-package-upgrade-inplace.ps1` **从 `scripts/ops/` 重新复制并加 BOM**（PS 5.1 需要 BOM）。旧拷贝没有 pm2-runtime 探测，不能再用。wrapper 里**不要**再加 `PM2_HOME`（见第 2 节「下次上机改法」）。
+1. **准备**：`sed 's/r59/r60/g'` 生成 `r60-build-and-ship.sh` 与 wrapper `upgrade-<演示机>-r60.ps1`（文件名按运维机本地模板）；`multitable-onprem-package-upgrade-inplace.ps1` **从打包提交重新取**：`git show <打包提交>:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`，不要从 `git pull` 到 main 之后的工作区复制（main 可能比打包提交新；包里不带这个脚本，只能对打包提交核对；做法与原因见 `r61-release-checklist-draft-20260928.md` C8）。顺序固定为：替换本地副本 → 重跑本地门禁 → 上机（自 #6131 起该脚本是纯 ASCII，PS 5.1 下不需要 BOM；要加就只加一次，见第 2 节订正）。旧拷贝没有 pm2-runtime 探测，不能再用。wrapper 里**不要**再加 `PM2_HOME`（见第 2 节「下次上机改法」）。
 2. **标记**：只加本批 diff 里真实存在的标识符或文件哈希；新迁移按名字数 `kysely_migration`。带反斜杠的内容用文件写、别用 heredoc（会折叠成控制字符），写完按字节扫控制字符。
 3. **只读预检**：审计分区（当月+下月）、最近迁移、磁盘、`pm2 list`（手工执行时先设 `$env:PM2_HOME='<用户目录>\.pm2-runtime'`），另查一次 `Get-ScheduledTask -TaskName 'MetaSheet-PM2' | Select-Object TaskPath, TaskName, State`，确认计划任务恰好一个，并记下它的 `TaskPath`。升级脚本靠它探测托管方式、在 restart not found 后回退拉起。若 `pm2 list` 输出里出现 `Spawning PM2 daemon`，说明 pm2-runtime 此刻没在跑，这条命令刚在本会话里拉起了一个空 daemon：先停下来查后端为什么没在跑，别在这个状态下升级。
 4. **打包上机**：`bash r60-build-and-ship.sh all`（CI 打包 → 校验 sha256 / gitSha / base path `/assets/` → scp → 远端 sha 复核 → wrapper：pg_dump 备份 → 就地升级含 migrate → health → 标记 → 前端 smoke → 定时试拉 → pm2）。
@@ -59,7 +59,7 @@
 | | 开发机（新） | 运维机（能连演示机） |
 |---|---|---|
 | 职责 | 写代码、PR、反驳、终审、合并 | 上机、上机验证、演示机日志 |
-| 同步 | 推 PR → main | 上机前 `git pull` 到 main |
+| 同步 | 推 PR → main | 上机前 `git pull` 到 main（上机用的升级脚本仍取打包提交上的版本，见第 3 节第 1 步） |
 
 1. 一支 PR 只在一台机器上改；换机先推、再拉。
 2. 在 issue/PR 上注明归属（「开发机进行中」「待上机 R60」）。
@@ -72,11 +72,11 @@
 > 2026-09-28 更新（第十次无人值守窗口收尾，详见 `docs/development/autonomous-run-20260925-28-outcome.md`）。
 
 - 已处理：#5954 → #6065 已合；#5955 证实无代码路径可达、不修（issue 有证据评论）；form-share 按形状守卫 → #6069 转 draft（三选项待定）；升级脚本 PM2_HOME / pm2-runtime 探测 → #6071 已合（上机用法与预检见 #6079）。
-- 在飞、待条件：#6076（外部系统删除×并发写锁协议，终审可合，待 gh workflow 权限接真 PG 车道后合）；#6098（连接拒绝原因诊断日志，draft，含时序旁路需重做）。
+- 在飞、待条件：#6098（连接拒绝原因诊断日志，draft，含时序旁路需重做）。#6076（外部系统删除×并发写锁协议）已于 2026-09-28 合入（`e535702e6`），在 R60 包 `583dfdf1a` 内。
 - 待 owner：#5933 授权（R60 普查后；合并即演示机 migrate 执行）；#6099 DDL 方案 A 审；#6121 handoffAdvance 无租户放行策略；SHEET-LIVENESS-GAP-1（lockRestoreJobBlock）；#5864 字段类型转换五项；PR #5609 考勤守卫选路。
 
 **待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部（清单与预检统一追加在 #6079）。另需手工：演示机现网 nginx.conf 同步 #6097 的 index.html no-cache 段；#6109 导出租户墙上线前跑预检看 `checks.carryTargetBinding.ownershipState`。
 
 - R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。
 
-> 2026-09-28 追加（同一 24h 窗口内并行的客户反馈线收尾，详见 `docs/development/autonomous-run-20260926-cf-outcome.md`）。该线合入 main 的 20 支与本节上方所述内容互不重叠（本节是开发机/运维接管线）。待上机增量与其上机后回归要点已（或将于窗口收尾前）追加到 #6079；复制数据表 S1（#6112 后端 / #6116 前端）不在 R60 之列——真库并发撤销用例在真实 PostgreSQL 上失败，诊断未完成，合入前不要在演示机演示该功能。
+> 2026-09-28 追加（同一 24h 窗口内并行的客户反馈线收尾，详见 `docs/development/autonomous-run-20260926-cf-outcome.md`）。该线合入 main 的 20 支与本节上方所述内容互不重叠（本节是开发机/运维接管线）。待上机增量与其上机后回归要点已（或将于窗口收尾前）追加到 #6079；复制数据表 S1（#6112 后端 / #6116 前端）不在 R60 之列，归 R61。两支已合入 main（`0185b00a5` / `8a6746428`）。当时失败的真库并发撤销用例 G14，#6112 正文查明是测试夹具问题，已拆成 G14a / G14b；main `68578b56f` 的 Plugin System Tests 中，test (20.x) 的「Run multitable real-DB integration」步骤通过。R61 上机前演示机上没有这个功能；上机与验收见 `r61-release-checklist-draft-20260928.md` 与 `copy-sheet-r61-acceptance-checklist.md`。

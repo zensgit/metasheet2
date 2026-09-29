@@ -1869,6 +1869,10 @@ import {
 } from '../utils/parallelBranchAuthoring'
 import {
   computeSaveBlockReasons,
+  hasCompleteCrossBaseTarget,
+  isDeletedTriggerSelfMutation,
+  rawBranchActionTypes,
+  TRIGGER_RECORD_MUTATING_ACTION_TYPES,
   type SaveBlockActionSnapshot,
   type SaveBlockReason,
   type StartApprovalOutcomeValueBlock,
@@ -3771,9 +3775,9 @@ const crossBaseTargets = computed<Record<string, CrossBaseTarget>>(() => {
 // DELETED_TRIGGER_SELF_MUTATION); this editor mirrors it three ways: the option is disabled while the trigger
 // is record.deleted, the action card shows the same sentence as a hint, and save is blocked with an anchored
 // reason. A LOADED rule of that shape stays loadable (its type is still rendered/selected) — it just cannot be
-// saved forward until the action or the trigger changes; disabling it goes through the manager toggle, which
-// the backend lets through.
-const TRIGGER_RECORD_MUTATING_ACTION_TYPES: ReadonlySet<string> = new Set(['update_record', 'delete_record', 'lock_record'])
+// saved forward until the action or the trigger changes; switching it off and back on goes through the manager
+// toggle, which the backend lets through (#6155). The decision itself lives in automationSaveBlockReasons.ts
+// (isDeletedTriggerSelfMutation), shared with the manager's notice so the two cannot drift.
 
 function isDeletedTriggerBlockedActionType(type: string): boolean {
   return draft.value.triggerType === 'record.deleted' && TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type)
@@ -3781,41 +3785,24 @@ function isDeletedTriggerBlockedActionType(type: string): boolean {
 
 /**
  * Does this draft action (or a branch sub-action inside it) mutate the trigger record under a
- * `record.deleted` trigger? Mirrors the backend rule: a COMPLETE explicit cross-base triple retargets the
- * write (allowed); anything else resolves to the trigger record. Branch sub-actions are editor-authored and
- * carry no cross-base target, so their type alone decides.
+ * `record.deleted` trigger? The draft's adapter onto the shared rule: the cross-base triple is read from the
+ * config AS LOADED (this editor never authors it — see crossBaseTargetOf), and branch sub-actions are
+ * editor-authored and carry no cross-base target, so their type alone decides.
  */
 function deletedTriggerSelfMutationOf(action: DraftAction): boolean {
-  if (draft.value.triggerType !== 'record.deleted') return false
-  if (TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(action.type)) {
-    const target = crossBaseTargetOf(action)
-    return !(target && target.kind === 'mutate' && !crossBaseTargetIncomplete(target))
-  }
-  const nestedTypes: string[] = [
-    ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
-    ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
-    ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
-    // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
-    // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
-    ...rawBranchActionTypes(action.config.branchOriginal),
-    ...rawBranchActionTypes(action.config.parallelBranchOriginal),
-  ]
-  return nestedTypes.some((type) => TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type))
-}
-
-/** The `type` of every sub-action inside a RAW (as-loaded) condition_branch / parallel_branch config. */
-function rawBranchActionTypes(raw: unknown): string[] {
-  if (!isPlainRecord(raw)) return []
-  const out: string[] = []
-  const collect = (branch: unknown): void => {
-    if (!isPlainRecord(branch) || !Array.isArray(branch.actions)) return
-    for (const sub of branch.actions) {
-      if (isPlainRecord(sub) && typeof sub.type === 'string') out.push(sub.type)
-    }
-  }
-  if (Array.isArray(raw.branches)) raw.branches.forEach(collect)
-  collect(raw.defaultBranch)
-  return out
+  return isDeletedTriggerSelfMutation(draft.value.triggerType, {
+    type: action.type,
+    completeCrossBaseTarget: hasCompleteCrossBaseTarget(action.originalConfig),
+    nestedActionTypes: [
+      ...(action.config.branches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+      ...(action.config.defaultBranch?.actions ?? []).map((sub) => sub.type),
+      ...(action.config.parallelBranches ?? []).flatMap((branch) => branch.actions.map((sub) => sub.type)),
+      // A loaded branch the v1 UI cannot round-trip is kept READ-ONLY with its raw config preserved verbatim
+      // (branchOriginal / parallelBranchOriginal); its sub-actions still run, so they still count here.
+      ...rawBranchActionTypes(action.config.branchOriginal),
+      ...rawBranchActionTypes(action.config.parallelBranchOriginal),
+    ],
+  })
 }
 
 const saveBlockActionSnapshots = computed<SaveBlockActionSnapshot[]>(() => {

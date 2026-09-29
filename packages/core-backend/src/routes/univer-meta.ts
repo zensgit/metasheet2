@@ -7445,6 +7445,14 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ *
+ * The three axes only look for RESTRICTIONS; none of them asks whether the actor may read the sheet at all. That is
+ * the precondition below: `capabilities.canRead`, the sheet's resolved read plane. It is NOT implied by every
+ * capability a caller may have gated on before reaching here — `canManageFields` holds on `multitable:manage-schema`
+ * alone (manage-schema-permission.ts) while `canRead` needs read/write/admin (access.ts `deriveCapabilities`), so
+ * without it a schema manager who cannot read the sheet passed as "full read" on any unrestricted sheet (the lossy
+ * config-restore retype-revert preview/execute, which gate on `canManageFields`). Checked FIRST and with no DB
+ * access, so a refused actor causes no row-level/field/taint read either. Config-derived like the three axes.
  */
 export async function hasFullTableReadAccess(
   req: Request | undefined,
@@ -7454,6 +7462,7 @@ export async function hasFullTableReadAccess(
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!capabilities.canRead) return false // no read plane on this sheet → no full read (see above)
   if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
   const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
   const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
@@ -9250,7 +9259,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
       // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
       // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
-      // in-transaction re-check) ∧ hasFullTableReadAccess (source, three axes, no counts). The target gate runs
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source: read on the sheet plus the three axes, no counts;
+      // the read is this handler's own `capabilities.canRead`, and /context does not apply the projection fences —
+      // see the #5936 note above — while the copy route's gate reads it as the fences leave it). The target gate runs
       // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
       // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
       // entry, never 500s the load, and logs values-free.
