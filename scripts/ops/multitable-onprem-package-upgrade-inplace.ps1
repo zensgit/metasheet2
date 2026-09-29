@@ -1920,7 +1920,7 @@ function Start-BackendAfterUnappliedUpgrade {
     Write-Host '  This script deletes it on exit. If the site still answers 503 afterwards, delete it by hand.'
   }
   if (-not [string]::IsNullOrWhiteSpace($BackupRoot)) {
-    Write-Host "Backups: any upgrade-backup-* folder this run left under $BackupRoot is not needed and may be incomplete; never restore from it."
+    Write-Host "Backups: nothing needs to be restored. An upgrade-backup-* folder this run left under $BackupRoot may be incomplete; do not restore from it."
   }
   Write-Host 'Fix the cause of the error, then run the upgrade again.'
   Write-Host '=========================================================================='
