@@ -8,8 +8,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // -------------------------------------------
 //
 // Layer 1, the change detector. The whole text of every Bridge Agent script
-// that opens a database connection or builds SQL is pinned below by a sha256
-// digest. Any change to such a script -- new SQL text, a comment edit, a
+// that opens a database connection, builds SQL, or decides which script runs
+// as SYSTEM at startup is pinned below by a sha256 digest. Any change to such
+// a script -- new SQL text, another launched file, a comment edit, a
 // whitespace change -- turns this file red until the pin is updated. That
 // proves one thing: a pinned script cannot change without a visible re-pin
 // in the same diff. Updating a pin is a review duty, not a formality: whoever
@@ -41,9 +42,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // all green and certifies nothing.
 const TEST_ONLY_OVERRIDE_FLAG = 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_OVERRIDE';
 
-// Every Bridge Agent script in scripts/ops that opens a database connection
-// or builds SQL. `sha256` is the digest of the file after CRLF is normalized
-// to LF (see lfNormalized below).
+// Every Bridge Agent script in scripts/ops that opens a database connection,
+// builds SQL, or decides which script runs as SYSTEM at startup. `sha256` is
+// the digest of the file after CRLF is normalized to LF (see lfNormalized
+// below).
 const PINNED_SCRIPTS = Object.freeze({
   readonly: Object.freeze({
     // Opens a SqlClient connection; runs the /health probe and the /query SELECT.
@@ -57,13 +59,25 @@ const PINNED_SCRIPTS = Object.freeze({
     sha256: 'aab2ef409ddedf3a9b53f4d38cfa7ec87446af5247be4d738406983b6b5178f1',
     overrideVar: 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_DRIVER_SMOKE_PS1',
   }),
+  scheduledTask: Object.freeze({
+    // Opens no database connection and builds no SQL, but registers the
+    // Windows startup task that runs a script as SYSTEM. Without this pin, a
+    // copy that launches another file while keeping the old file name in a
+    // comment passed every other test here and in the task contract.
+    file: 'bridge-agent-readonly-scheduled-task.ps1',
+    sha256: '14c4c379f07ead60706b247518c2d58a16265de50cd68df77777a4d24af36fdc',
+    overrideVar: 'BRIDGE_AGENT_CONTRACT_TEST_ONLY_SCHEDULED_TASK_PS1',
+  }),
 });
 
-// Bridge Agent scripts in scripts/ops that are deliberately not pinned.
-const UNPINNED_SCRIPTS = Object.freeze({
-  'bridge-agent-readonly-scheduled-task.ps1':
-    'opens no database connection and builds no SQL; it registers a Windows startup task that runs ' +
-    'bridge-agent-readonly.ps1 with -File',
+// Bridge Agent scripts in scripts/ops that are deliberately not pinned, each
+// with the reason. Empty today: every bridge-agent*.ps1 is pinned above.
+const UNPINNED_SCRIPTS = Object.freeze({});
+
+// Scripts that must stay pinned whatever else changes, with the reason. The
+// family test below fails if one of them is moved to UNPINNED_SCRIPTS.
+const MUST_STAY_PINNED = Object.freeze({
+  'bridge-agent-readonly-scheduled-task.ps1': 'decides which script runs as SYSTEM at startup',
 });
 
 const configPath = new URL('./fixtures/bridge-agent-readonly/config.example.json', import.meta.url);
@@ -174,6 +188,11 @@ test('test-only override: the script path variables are ignored unless the exact
       tracked,
       'the flag without a path must not redirect',
     );
+    assert.equal(
+      resolveScriptUrl(key, { [TEST_ONLY_OVERRIDE_FLAG]: 'true', [spec.overrideVar]: '' }).href,
+      tracked,
+      'the flag with an empty path must not redirect',
+    );
     const otherSpecs = Object.entries(PINNED_SCRIPTS).filter(([otherKey]) => otherKey !== key);
     assert.ok(otherSpecs.length > 0);
     for (const [, otherSpec] of otherSpecs) {
@@ -204,14 +223,22 @@ test('no test-only override is in effect (a run that redirects a pinned script n
 
 // Forms that make a pinned script load and run a second code file, which the
 // digest above cannot see. Each count is 0 today. The dot-sourcing pattern
-// was checked against the Windows PowerShell 5.1 parser: at the start of a
-// command, `. x`, `.$x`, `.'x'`, `."x"`, `.(x)` and `.{ }` all dot-source,
-// while `.\x.ps1` (run a script in its own scope) and `$x.Name` do not.
+// was checked against the Windows PowerShell 5.1 parser: `. x`, `.$x`,
+// `.'x'`, `."x"`, `.(x)` and `.{ }` all dot-source, while `.\x.ps1` (run a
+// script in its own scope) and `$x.Name` do not. The pattern looks for them
+// at the start of a line, after one of ; { ( | & =, after the keywords
+// return, exit and throw (any letter case; not when the word ends a longer
+// name, a variable or a member, as in Rethrow, $throw or $x.return), and
+// after a param(...) block whose parentheses nest at most one level deep. It
+// does not look anywhere else; the digest pin is what catches a form it
+// misses.
 // Add-Type is allowed only in the form `Add-Type -AssemblyName Some.Name`,
 // which loads a framework assembly by name; a path, a literal path, source
 // text or any other argument is refused.
+const DOT_SOURCING =
+  /(?:^|[;{(|&=]|(?<![\w$.-])(?:return|exit|throw)|param[ \t]*\((?:[^()]|\([^()]*\))*\))[ \t]*\.(?:[ \t]+\S|[$'"({])/im;
 const SECOND_FILE_LOADERS = Object.freeze([
-  ['dot-sourcing', /(?:^|[;{(|&=])[ \t]*\.(?:[ \t]+\S|[$'"({])/m],
+  ['dot-sourcing', DOT_SOURCING],
   ['Import-Module (or its alias ipmo)', /\b(?:Import-Module|ipmo)\b/i],
   ['#requires -Modules', /#requires\b[^\r\n]*[ \t]-Modules?\b/i],
   ['using module / using assembly', /\busing[ \t]+(?:module|assembly)\b/i],
@@ -244,16 +271,44 @@ for (const [key, spec] of Object.entries(PINNED_SCRIPTS)) {
   });
 }
 
+// Checked parse-only against the Windows PowerShell 5.1 parser: each positive
+// snippet below is a dot-source, and each negative one is valid code that is
+// not. The first four positives are the forms the earlier pattern missed;
+// each goes red if its alternative is removed from DOT_SOURCING. `Return`
+// holds the letter-case flag and the nested param(...) holds the one level of
+// nesting. The last four negatives each go red if one character is removed
+// from the keyword lookbehind.
+test('the dot-sourcing pattern catches a dot-source after return, exit, throw and param()', () => {
+  for (const snippet of [
+    'return . $x',
+    'exit . $x',
+    'throw . $x',
+    'param() . $x',
+    'Return . $x',
+    'param([string]$p = (Get-Location)) . $x',
+  ]) {
+    assert.match(snippet, DOT_SOURCING, `the dot-sourcing pattern must match ${JSON.stringify(snippet)}`);
+  }
+  for (const snippet of ['return .\\x.ps1', 'Rethrow .($x)', '$throw.($name)', '$x.return.($y)', 'Do-Throw .($x)']) {
+    assert.doesNotMatch(snippet, DOT_SOURCING, `the dot-sourcing pattern must not match ${JSON.stringify(snippet)}`);
+  }
+});
+
 test('every bridge-agent*.ps1 in scripts/ops is either pinned or listed as not pinned with a reason', async () => {
   const family = (await readdir(new URL('./', import.meta.url)))
     .filter((name) => /^bridge-agent.*\.ps[dm]?1$/i.test(name))
     .sort();
+  const pinnedFiles = Object.values(PINNED_SCRIPTS).map((spec) => spec.file);
   assert.deepEqual(
     family,
-    [...Object.values(PINNED_SCRIPTS).map((spec) => spec.file), ...Object.keys(UNPINNED_SCRIPTS)].sort(),
-    'A Bridge Agent script was added, renamed or removed. If it opens a database connection or builds SQL, ' +
-      'pin it in PINNED_SCRIPTS; otherwise list it in UNPINNED_SCRIPTS with the reason.',
+    [...pinnedFiles, ...Object.keys(UNPINNED_SCRIPTS)].sort(),
+    'A Bridge Agent script was added, renamed or removed. If it opens a database connection, builds SQL ' +
+      'or decides what runs as SYSTEM, pin it in PINNED_SCRIPTS; otherwise list it in UNPINNED_SCRIPTS ' +
+      'with the reason.',
   );
+  for (const [file, reason] of Object.entries(MUST_STAY_PINNED)) {
+    assert.ok(pinnedFiles.includes(file), `${file} must be pinned in PINNED_SCRIPTS: it ${reason}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -379,7 +434,7 @@ test('readonly bridge script contains no SQL/ADO write or extra execute verbs', 
 // line. Catches a procedure name, another variable or another type written on
 // those two lines. Does not see what reaches `$Sql` before the CommandText
 // line, `.CommandText +=`, `set_CommandText(...)`, or a second command object.
-test('readonly bridge sets SQL command text and type through one pinned assignment', async () => {
+test('readonly bridge: the one .CommandText = line and the one .CommandType = line match their pinned text', async () => {
   const script = await readScript();
 
   const commandTextAssignments = [...script.matchAll(/\.CommandText\s*=[^\r\n]*/g)].map((match) =>
@@ -411,7 +466,7 @@ test('readonly bridge sets SQL command text and type through one pinned assignme
 // `$columns` and `$whereClauses` that feed the builder line, or the `$Sql`
 // parameter inside Invoke-BridgeSqlQuery; nor a call or variable spelled in
 // another letter case.
-test('readonly bridge executes SQL only through two pinned call sites, each with a pinned SQL shape', async () => {
+test('readonly bridge: the lines naming Invoke-BridgeSqlQuery and the $sql = / $sql += lines match their pinned text', async () => {
   const script = await readScript();
 
   const invokeBridgeSqlQueryLines = script
