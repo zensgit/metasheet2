@@ -1926,6 +1926,72 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-request-focused="true"]')).toBeNull()
   })
 
+  // 撤销锁增补 P-11 (a): a cancel round's todo item links to the ORIGINAL leave with the same deep link
+  // the approval center uses (`?section=attendance-overview-requests&requestId=<id>`). The page must
+  // locate that leave (loaded, first, focused), open the collapsed request tools, and mount the
+  // cancel-round block on the focused row so the round's progress shows there.
+  it('a cancel-round todo deep link lands on the focused approved leave with its cancel-round progress', async () => {
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            request: {
+              id: 'request-leave-focused',
+              work_date: '2026-04-20',
+              request_type: 'leave',
+              requested_in_at: '2026-04-20T09:00:00+08:00',
+              requested_out_at: '2026-04-20T18:00:00+08:00',
+              reason: 'Leave with a pending cancellation',
+              status: 'approved',
+              user_id: 'employee-7',
+              metadata: {},
+            },
+          },
+        })
+      }
+      if (url.endsWith('/api/attendance/requests/request-leave-focused/cancel-round')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            requestId: 'request-leave-focused',
+            documentInstanceId: 'apv-original',
+            entryEnabled: false,
+            round: {
+              roundId: 'round-1', engineInstanceId: 'cr-1', outcome: 'pending', status: 'cancellation_pending_approval',
+              startedAt: '2026-04-15T01:00:00.000Z', endedAt: null, closeReason: null, blockCode: null,
+              closedBySystem: false, canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN',
+              cancellationOutcome: null, deliveries: [],
+            },
+          },
+        })
+      }
+      return baseImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+      initialRequestId: 'request-leave-focused',
+    })
+    app.mount(container!)
+    await flushUi(16)
+
+    const tools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')
+    expect(tools?.open).toBe(true)
+    const rows = container!.querySelectorAll<HTMLElement>('.attendance__request-list [data-attendance-request-id]')
+    expect(rows[0]?.dataset.attendanceRequestId).toBe('request-leave-focused')
+    expect(rows[0]?.dataset.attendanceRequestFocused).toBe('true')
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).endsWith('/api/attendance/requests/request-leave-focused/cancel-round'),
+    )).toBe(true)
+    const block = rows[0]!.querySelector<HTMLElement>('[data-attendance-cancel-round="request-leave-focused"]')
+    expect(block).toBeTruthy()
+    expect(block!.querySelector('[data-cancel-round-status]')?.textContent).toBe('Cancellation pending approval')
+  })
+
   it('keeps focused attendance rejection comment required before calling the API', async () => {
     const promptSpy = vi.spyOn(window, 'prompt').mockReturnValueOnce('').mockReturnValueOnce('Need evidence')
 

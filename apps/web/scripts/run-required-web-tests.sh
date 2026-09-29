@@ -1388,7 +1388,8 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # path, and the attendance self-service entry. Each token matches exactly its own file and no existing
 # token is a substring of any of them or vice versa (bidirectional scan in the design MD §7).
 # 阶段 B2 (same MD, §B2): `cancelRoundEntryApproverList` — the attendance-side list of cancellations
-# awaiting the viewer's approval (owner 2026-09-29 16:5x). Same bidirectional scan, recorded in §B2.
+# awaiting the viewer's approval (owner 2026-09-29 16:5x); `cancelRoundEntryTodoCenter` — the todo
+# center's cancel-round sub-type label (P-11 (b)). Same bidirectional scan, recorded in §B2.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1509,6 +1510,7 @@ exec npx vitest run \
   cancelRoundEntryCore \
   cancelRoundEntryDetailView \
   cancelRoundEntrySurfaces \
+  cancelRoundEntryTodoCenter \
   categoryCandidateInput \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
