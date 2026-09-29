@@ -1361,7 +1361,7 @@ function boundSystem(id, overrides = {}) {
   }
 }
 
-function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOverride, logger } = {}) {
+function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOverride, logger, sourceBindingStore } = {}) {
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
   const loaded = []
@@ -1422,6 +1422,10 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
       readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+      // A persisted source binding store (the customer deployment's shape): when present, the
+      // table-action registry resolves the bound `externalSystemId` per caller scope and REFUSES an
+      // unscoped lookup — see `aBindingStoreBackedDeploymentIsCheckedThroughTheCallersScope`.
+      ...(sourceBindingStore ? { stockPreparationSourceBindingStore: sourceBindingStore } : {}),
     },
     // A caller may inject a recording logger (see `createRecordingLogger` below, R-08) to observe
     // what `routeLogger` is wired with, or explicitly pass `logger: null` to mean NO logger at all
@@ -1512,6 +1516,58 @@ async function routeDefaultsToTheConfiguredSourceAndAcceptsAnOverride() {
   assert.equal(overridden.statusCode, 200)
   assert.equal(loaded[loaded.length - 1].id, 'other_system')
   assert.equal(overridden.body.data.externalSystemId, 'other_system')
+}
+
+/**
+ * #6079 (demo host, R60): the workbench's 源就绪预检 answered SOURCE_PREFLIGHT_NO_SOURCE while the
+ * dry-run on the same host was reading the bound source fine. The deployment keeps its source in the
+ * PERSISTED binding store, not in the static action config; the registry resolves that binding only
+ * for a SCOPED lookup and throws TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED for an unscoped one —
+ * and this route's lookup was the one unscoped `getTableAction({ actionId })` in the file, its catch
+ * turning the refusal into "no source". The route must resolve the action exactly the way dry-run,
+ * carry and readiness do: through `scopedInput(req, …)`, so the caller's tenant (and workspace hint)
+ * reach the binding store and the BOUND system — not the deploy-time default — is what gets measured.
+ *
+ * Mutation evidence: restoring the unscoped call makes `store.calls` stay empty, the route answer
+ * 409 SOURCE_PREFLIGHT_NO_SOURCE, and this case fail on `statusCode`.
+ */
+async function aBindingStoreBackedDeploymentIsCheckedThroughTheCallersScope() {
+  const BOUND = 'plm_bound_in_store'
+  const DEPLOY_DEFAULT = 'deploy_default_system'
+  const store = {
+    calls: [],
+    async get(scope) {
+      this.calls.push({ ...scope })
+      // The registry only consults the store with a tenant in hand; a scoped lookup for this
+      // tenant + action resolves the persisted binding, anything else resolves nothing.
+      if (scope.tenantId === TENANT_ID && scope.actionId === PLM_STOCK_PREPARATION_ACTION_ID) return { externalSystemId: BOUND }
+      return null
+    },
+    async set() { throw new Error('preflight must never write a binding') },
+  }
+  const { routes, loaded } = mountRoute({
+    catalog: customerShapedSource(),
+    action: tableActionConfig({ source: { externalSystemId: DEPLOY_DEFAULT } }),
+    systems: {
+      [BOUND]: boundSystem(BOUND),
+      [DEPLOY_DEFAULT]: boundSystem(DEPLOY_DEFAULT),
+    },
+    sourceBindingStore: store,
+  })
+
+  const res = await callRoute(routes, { user: INTEGRATION_READER, query: { workspaceId: 'default' } })
+  assert.equal(res.statusCode, 200, `binding-store-backed deployment must be measured, got ${JSON.stringify(res.body && res.body.error)}`)
+  assert.equal(res.body.ok, true)
+  // The lookup carried the caller's scope: tenant from the principal, workspace from the query hint.
+  assert.equal(store.calls.length, 1, 'the binding store is consulted exactly once')
+  assert.equal(store.calls[0].tenantId, TENANT_ID)
+  assert.equal(store.calls[0].workspaceId, 'default')
+  assert.equal(store.calls[0].actionId, PLM_STOCK_PREPARATION_ACTION_ID)
+  // The BOUND system is what got measured, never the deploy-time default.
+  assert.equal(loaded.length, 1)
+  assert.equal(loaded[0].id, BOUND)
+  assert.equal(res.body.data.externalSystemId, BOUND)
+  assert.notEqual(res.body.data.externalSystemId, DEPLOY_DEFAULT)
 }
 
 async function noSourceAtAllIsAClearRefusal() {
@@ -2295,6 +2351,7 @@ async function main() {
   await routeIsGatedOnTheIntegrationReadTier()
   console.log('  ✓ R-01 the route is registered at the module`s path and gated on the integration read tier')
   await routeDefaultsToTheConfiguredSourceAndAcceptsAnOverride()
+  await aBindingStoreBackedDeploymentIsCheckedThroughTheCallersScope()
   console.log('  ✓ R-02 the configured source is the default, and an explicit id overrides it')
   await noSourceAtAllIsAClearRefusal()
   await anUnreadableKindIsRefused()

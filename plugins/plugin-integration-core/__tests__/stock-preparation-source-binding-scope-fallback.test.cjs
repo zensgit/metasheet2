@@ -10,10 +10,12 @@
 // the project board all call `getTableAction`/`store.get()` with NO workspace hint at all — an
 // omitted `workspaceId` normalizes to `null` (`optionalString(undefined) -> null`), so their lookup
 // is always `workspace_id IS NULL` and a binding saved under `'default'` was invisible to them.
-// (`stockPreparationSourcePreflight` at `http-routes.cjs:6163` calls `getTableAction({ actionId })`
-// with no `tenantId` at all, so `applyPersistedSourceBinding` throws and the route's own `catch`
-// swallows it before this fallback is ever reached — that is a separate, pre-existing bug, and
-// preflight is NOT one of this fallback's beneficiaries.)
+// (`stockPreparationSourcePreflight` used to call `getTableAction({ actionId })` with no `tenantId`
+// at all, so `applyPersistedSourceBinding` threw and the route's own `catch` swallowed it before
+// this fallback was ever reached — fixed alongside #6079: the route now looks the action up through
+// `scopedInput(req, …)` like every other stock-prep route, pinned by
+// `aBindingStoreBackedDeploymentIsCheckedThroughTheCallersScope` in
+// `stock-preparation-source-preflight.test.cjs`, so preflight IS a beneficiary of this fallback now.)
 //
 // THE FIX, one seam, `get()` only: when the caller's hint is `null` AND the exact
 // `workspace_id IS NULL` row is absent, look for this `(tenant_id, action_id)`'s OTHER

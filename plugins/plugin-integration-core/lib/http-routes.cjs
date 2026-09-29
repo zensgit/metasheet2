@@ -7030,9 +7030,17 @@ function requireStockPreparationAudit() {
       // Server config, never a request input. An unconfigured deployment throws here — that is the
       // "not plugged in yet" state, and it must degrade to the default plan rather than 5xx the whole
       // check, exactly as the hub overview treats the same throw.
+      //
+      // SCOPED, like every other stock-prep route (dry-run, carry, apply, readiness all go through
+      // `scopedInput(req, …)`): the registry resolves the PERSISTED source binding for the caller's
+      // tenant/workspace, and a binding-store-backed deployment (the customer's, where the static
+      // action config carries no `source` at all) refuses an UNSCOPED lookup with
+      // TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED. Before this the lookup here was unscoped, the
+      // catch below turned that refusal into `action = null`, and the panel reported
+      // SOURCE_PREFLIGHT_NO_SOURCE on a host whose dry-run was reading the bound source fine (#6079).
       let action = null
       try {
-        action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        action = await tableActions.getTableAction(scopedInput(req, { actionId: PLM_STOCK_PREPARATION_ACTION_ID }))
       } catch {
         action = null
       }
