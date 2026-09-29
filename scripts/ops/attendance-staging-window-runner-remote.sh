@@ -3,9 +3,24 @@
 #
 # Remote (deploy-host) half of .github/workflows/attendance-staging-window-runner.yml.
 # Executes ONE action per invocation against the STAGING stack only:
-#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth
-#   smoke          — run one of the five window smokes in-container (bundle doc:
-#                    docs/development/attendance-staging-window-bundle-20260702.md)
+#   deploy         — pin staging backend+web to a full-SHA image tag, migrate, verify build+auth.
+#                    Owner-authorized 2026-09-28: TASKS_WINDOW_ENABLED (true|false, default
+#                    false) additionally sets TASKS_ENABLED=true on the staging backend via the
+#                    SAME persistent runner override SET_WINDOW_ENV uses (one `environment:`
+#                    block, never a duplicate YAML key); redeploying with it false removes the
+#                    key again. Deploy-only — see the TASKS_WINDOW_ENABLED validation below.
+#   smoke          — run one of the five window smokes, PLUS the `tasks` id (owner-authorized
+#                    2026-09-28), in-container (bundle doc:
+#                    docs/development/attendance-staging-window-bundle-20260702.md). `tasks` is
+#                    a non-admin P0-A /api/tasks smoke: requires TASKS_ENABLED=true on the
+#                    running backend (fails closed otherwise), provisions ONE throwaway
+#                    non-admin user (role_permissions + user_roles + user_orgs +
+#                    user_namespace_admissions) against org `default`, proves the 403-before-
+#                    admission / 200-after-admission gate plus the create/list/complete/reopen/
+#                    read HTTP surface, and always tears the fixture back down (guaranteed
+#                    cleanup in the smoke script's own try/catch/finally, same as ae4/rd45/mp6/
+#                    hmr5). Not part of the bundle §7 fixed-format `stamps` residue-sweep — it
+#                    proves and reports its own zero-residue instead (see action_smoke below).
 #   status         — read-only snapshot (containers, health, settings, pending migrations)
 #   migrate        — backup + clone-rehearsal + apply, per
 #                    docs/operations/staging-migration-alignment-runbook.md and
@@ -101,6 +116,7 @@ DEPLOY_SHA="${DEPLOY_SHA:-}"
 SMOKE_ID="${SMOKE_ID:-}"
 SET_WINDOW_ENV="${SET_WINDOW_ENV:-none}"
 FORCE_RECREATE="${FORCE_RECREATE:-false}"
+TASKS_WINDOW_ENABLED="${TASKS_WINDOW_ENABLED:-false}"
 STAMPS="${STAMPS:-}"
 SOAK_ORGS="${SOAK_ORGS:-}"
 SOAK_OPTS="${SOAK_OPTS:-}"
@@ -117,6 +133,18 @@ case "$FORCE_RECREATE" in
 esac
 if [[ "$ACTION" != "deploy" && "$FORCE_RECREATE" == "true" ]]; then
   fail "FORCE_RECREATE=true is only allowed for action=deploy"
+fi
+
+# Owner-authorized 2026-09-28. Same defense-in-depth shape as FORCE_RECREATE above: the
+# workflow's own choice-type input already constrains this to true/false and to action=deploy,
+# but this file also runs standalone (`bash -o pipefail -c '<script>'`, per the header comment),
+# so it re-validates its own env inputs rather than trusting the caller.
+case "$TASKS_WINDOW_ENABLED" in
+  true|false) ;;
+  *) fail "TASKS_WINDOW_ENABLED must be true or false, got: '${TASKS_WINDOW_ENABLED}'" ;;
+esac
+if [[ "$ACTION" != "deploy" && "$TASKS_WINDOW_ENABLED" == "true" ]]; then
+  fail "TASKS_WINDOW_ENABLED=true is only allowed for action=deploy (env flips happen together with the deploy, never mid-smoke — same rule as SET_WINDOW_ENV/FORCE_RECREATE)"
 fi
 
 BACKEND_CONTAINER="metasheet-staging-backend"
@@ -696,11 +724,26 @@ find_admin_user() {
 }
 
 mint_token() {
-  # mint_token <user_id> <roles_csv> <perms_csv>; token printed to stdout (never logged).
-  local user_id="$1" roles="$2" perms="$3"
+  # mint_token <user_id> <roles_csv> <perms_csv> [tenant_id]; token printed to stdout (never
+  # logged). tenant_id is OPTIONAL — every pre-existing 3-arg caller is unaffected. When given,
+  # it is passed through to the mint script's --tenant-id, which embeds a `tenantId` claim.
+  # That claim is the ONLY thing that later sets req.authenticatedTenantId (AuthService
+  # verifyToken -> resolveSessionTenantId, packages/core-backend/src/auth/jwt-middleware.ts) —
+  # the x-org-id header other smokes rely on never sets it. resolveSessionTenantId itself
+  # requires an ACTIVE user_orgs row for (user_id, tenant_id) to accept the claim, so a caller
+  # minting with a tenant_id must seed that user_orgs row before the token is ever verified
+  # (minting is pure signing — no DB read — so seeding may happen either before or after this
+  # call, as long as it happens before the token's first authenticated use).
+  local user_id="$1" roles="$2" perms="$3" tenant_id="${4:-}"
   [[ "$user_id" =~ ^[A-Za-z0-9._@-]+$ ]] || fail "refusing to mint token for unsafe user id: ${user_id}"
-  staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
-    --mint --user-id "$user_id" --roles "$roles" --perms "$perms"
+  if [[ -n "$tenant_id" ]]; then
+    [[ "$tenant_id" =~ ^[A-Za-z0-9._-]+$ ]] || fail "refusing to mint token for unsafe tenant id: ${tenant_id}"
+    staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
+      --mint --user-id "$user_id" --roles "$roles" --perms "$perms" --tenant-id "$tenant_id"
+  else
+    staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" \
+      --mint --user-id "$user_id" --roles "$roles" --perms "$perms"
+  fi
 }
 
 capture_settings() {
@@ -716,10 +759,19 @@ capture_settings() {
 }
 
 assert_window_env_flags() {
+  # assert_window_env_flags [tasks_mode=false]
+  #
   # The digest gate must stay unset/false for the whole window (bundle §3.4); the two
-  # rd-window flags must be live when requested. Verified in the RUNNING container env.
+  # rd-window flags must be live when requested; TASKS_ENABLED must match tasks_mode when the
+  # caller KNOWS the requested mode (action=deploy passes TASKS_WINDOW_ENABLED), and merely
+  # WARNs (never fails) when the caller has no such input of its own (residue-sweep/status
+  # always pass "false" here — same "not requested but on" WARN treatment already given to the
+  # rd-window flags in that branch, since an env set outside this runner's own override is an
+  # observation, not this action's violation to fail on). Verified in the RUNNING container env.
+  local tasks_mode="${1:-false}"
   staging_exec node -e '
 const mode = process.argv[1]
+const tasksMode = process.argv[2]
 const digest = process.env.ATTENDANCE_REPORT_DIGEST_ENABLED
 if (digest === "true") {
   console.error("FAIL: ATTENDANCE_REPORT_DIGEST_ENABLED=true in the staging backend — the window plan requires it UNSET for the whole window (bundle §3.4)")
@@ -735,8 +787,17 @@ if (mode === "rd-window") {
 } else if (sched === "true" || worker === "true") {
   console.warn(`WARN: set_window_env=none but scheduler=${sched} worker=${worker} are on (likely set in the host env file; this runner only manages its own override)`)
 }
-console.log(`env-flags ok: mode=${mode} scheduler=${sched||"<unset>"} worker=${worker||"<unset>"} digest=${digest||"<unset>"}`)
-' "$SET_WINDOW_ENV" | tee "${OUTPUT_DIR}/env-flags.txt"
+const tasksEnabled = process.env.TASKS_ENABLED
+if (tasksMode === "true") {
+  if (tasksEnabled !== "true") {
+    console.error(`FAIL: tasks_enabled=true requested but TASKS_ENABLED=${tasksEnabled} in the running container`)
+    process.exit(1)
+  }
+} else if (tasksEnabled === "true") {
+  console.warn(`WARN: tasks_enabled=false (or not requested by this action) but TASKS_ENABLED=true is on (likely set in the host env file; this runner only manages its own override)`)
+}
+console.log(`env-flags ok: mode=${mode} scheduler=${sched||"<unset>"} worker=${worker||"<unset>"} digest=${digest||"<unset>"} tasks=${tasksEnabled||"<unset>"}(requested=${tasksMode})`)
+' "$SET_WINDOW_ENV" "$tasks_mode" | tee "${OUTPUT_DIR}/env-flags.txt"
 }
 
 snapshot_staging_ps() {
@@ -841,8 +902,12 @@ action_deploy() {
 
   # Persistent override, written ATOMICALLY: candidate → validate → rename. The persistent path
   # (RUNNER_PERSIST_DIR under $HOME) survives the workflow's OUTPUT_DIR cleanup, so the container
-  # config_files label it stamps never dangles. set_window_env=none takes the branch that omits
-  # the flags, so redeploying with none rewrites the SAME file without them (clears the old flags).
+  # config_files label it stamps never dangles. set_window_env=none / tasks_window_enabled=false
+  # take the branch that omits their respective keys, so redeploying with both "off" rewrites the
+  # SAME file without them (clears the old flags). The environment stanza itself (0-3 keys) comes
+  # from backend_override_environment_lines (attendance-window-runner-pipeline.lib.sh) — ONE
+  # function, ONE `environment:` block, so the rd-window keys and TASKS_ENABLED can never collide
+  # into a duplicate YAML key.
   mkdir -p "$RUNNER_PERSIST_DIR"
   local override_tmp
   # mktemp requires the X placeholder run at the END of the template (a trailing suffix like
@@ -853,15 +918,12 @@ action_deploy() {
   {
     echo "# Written by attendance-staging-window-runner (run ${RUN_STAMP}). Pins the staging"
     echo "# backend/web images to one full-SHA tag; env flips happen ONLY here, together with"
-    echo "# the deploy (bundle §3.4). Redeploying with set_window_env=none removes the flags."
+    echo "# the deploy (bundle §3.4). Redeploying with set_window_env=none/tasks_enabled=false"
+    echo "# removes the corresponding flags."
     echo "services:"
     echo "  backend:"
     echo "    image: ${backend_image}"
-    if [[ "$SET_WINDOW_ENV" == "rd-window" ]]; then
-      echo "    environment:"
-      echo "      ATTENDANCE_SCHEDULER_ENABLED: \"true\""
-      echo "      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: \"true\""
-    fi
+    backend_override_environment_lines "$SET_WINDOW_ENV" "$TASKS_WINDOW_ENABLED"
     echo "  web:"
     echo "    image: ${web_image}"
   } > "$override_tmp"
@@ -883,7 +945,7 @@ action_deploy() {
   mv -f "$override_tmp" "$OVERRIDE_FILE"
   hash_value "$STAGING_COMPOSE_FILE" > "${OUTPUT_DIR}/staging-compose.sha256"
   log "staging compose installed atomically at persistent path: ${STAGING_COMPOSE_FILE}"
-  log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV})"
+  log "override written (persistent, atomic): ${OVERRIDE_FILE} (env mode: ${SET_WINDOW_ENV}, tasks_enabled: ${TASKS_WINDOW_ENABLED})"
 
   compose_staging pull backend web 2>&1 | tee "${OUTPUT_DIR}/compose-pull.log"
   # NEVER recreate postgres/redis: only backend+web, --no-deps.
@@ -910,7 +972,7 @@ action_deploy() {
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json"
   curl -fsS --max-time 10 "$STAGING_BACKEND_HEALTH_URL" > "${OUTPUT_DIR}/health-backend.json" || true
 
-  assert_window_env_flags
+  assert_window_env_flags "$TASKS_WINDOW_ENABLED"
 
   # Migration discipline (bundle §3.2): list BEFORE, classify read-only, migrate, list
   # AFTER (must end pending=0). The alignment report runs in-container from the deployed
@@ -941,6 +1003,7 @@ action_deploy() {
     echo "deploy_sha=${DEPLOY_SHA}"
     echo "set_window_env=${SET_WINDOW_ENV}"
     echo "force_recreate=${FORCE_RECREATE}"
+    echo "tasks_enabled=${TASKS_WINDOW_ENABLED}"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
     echo "result=ok"
@@ -987,11 +1050,28 @@ action_smoke() {
       stamp_prefix="hmr5-smoke"
       extra_tokens=("SCOPED_TOKEN:scoped:user:attendance:read,attendance:write")
       ;;
+    tasks)
+      smoke_script="staging-tasks-smoke.mjs"
+      stamp_prefix="tasks-smoke"
+      # No extra_tokens entry: the tasks subject needs a --tenant-id-bearing token (see
+      # mint_token's comment), which the generic extra_tokens spec format below does not carry.
+      # Minted separately, after seeding-relevant vars are known, further down.
+      ;;
     *)
       fail "unknown smoke id: ${SMOKE_ID}"
       ;;
   esac
   local stamp="${stamp_prefix}-${RUN_STAMP}"
+
+  if [[ "$SMOKE_ID" == "tasks" ]]; then
+    # Owner-authorized 2026-09-28, fail-closed: the tasks smoke drives real /api/tasks routes,
+    # which the backend does not even mount unless TASKS_ENABLED=true (routes/tasks.ts). Check
+    # BEFORE host_sync_prod_repo (no point syncing the whole repo for a smoke that cannot run).
+    local tasks_live
+    tasks_live="$(soak_backend_env TASKS_ENABLED)"
+    [[ "$tasks_live" == "true" ]] \
+      || fail "smoke=tasks requires TASKS_ENABLED=true on the running staging backend (observed: '${tasks_live:-<unset>}'); deploy with tasks_enabled=true first (action=deploy)"
+  fi
 
   host_sync_prod_repo
   local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
@@ -1043,6 +1123,13 @@ action_smoke() {
     [[ -n "$spec" ]] || continue
     run_env+=("$spec")
   done
+  if [[ "$SMOKE_ID" == "tasks" ]]; then
+    # Tenant-scoped subject token (see mint_token's comment): tenant_id='default' — the same
+    # deterministic org every other window smoke defaults ORG_ID to (ae4/rd45/otbank/mp6/hmr5),
+    # so this smoke needs no new org concept. The smoke script itself seeds the matching
+    # user_orgs row before this token is ever used to authenticate.
+    run_env+=("SUBJECT_TOKEN=$(mint_token "${stamp}" 'user' 'tasks:read,tasks:write' 'default')")
+  fi
 
   # DATABASE_URL intentionally NOT passed: the container's own env already carries the
   # staging DB URL, which is exactly the API↔DB coherence the helpers assert.
@@ -1063,7 +1150,7 @@ action_smoke() {
   # a failing `docker logs` must still fail this step (filtered_pipe contract, proven
   # by scripts/ops/attendance-window-runner-pipeline.test.mjs).
   filtered_pipe "${OUTPUT_DIR}/backend-log-slice.log" \
-    'attendance|digest|delivery|reminder|overtime|makeup' \
+    'attendance|digest|delivery|reminder|overtime|makeup|tasks' \
     -- docker logs --since 30m "$BACKEND_CONTAINER"
 
   snapshot_staging_ps
@@ -1304,8 +1391,11 @@ action_residue_sweep() {
   # the whole window), so it flips the sweep result to FAIL like any other nonzero count —
   # but it must not abort mid-sweep and skip the remaining §7 counts, so capture the outcome
   # instead of letting `set -e` propagate it.
+  # residue-sweep has no tasks_enabled input of its own (bundle §7 predates the tasks feature),
+  # so it always passes "false" here — a live TASKS_ENABLED is only WARNed, never counted as a
+  # violation by this action (same treatment as an unrequested rd-window flag above).
   local env_flags_ok=1
-  assert_window_env_flags || env_flags_ok=0
+  assert_window_env_flags "false" || env_flags_ok=0
   if [[ "$env_flags_ok" != "1" ]]; then
     nonzero+=("env_flags_violation=1")
   fi
@@ -1357,7 +1447,7 @@ action_residue_sweep() {
 # soak org slugs cannot leak into logs or artifacts.
 classify_runner_override() {
   local out="${OUTPUT_DIR}/override-shape.txt"
-  local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME}"
+  local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME} TASKS_ENABLED"
   local rd_set="ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ATTENDANCE_SCHEDULER_ENABLED"
   local soak_set
   soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
@@ -1420,6 +1510,24 @@ classify_runner_override() {
     ' "$OVERRIDE_FILE" || true)"
   fi
 
+  # TASKS_ENABLED is an ORTHOGONAL flag, not a fourth closed shape: it can accompany the none or
+  # rd-window shapes (both written only by action=deploy, the sole writer of TASKS_ENABLED), but
+  # never soak-w4w7 (action=soak-flags never writes TASKS_ENABLED — see its own guard against
+  # overwriting a file that already carries it). Stripped out here via a plain bash word loop
+  # (never a grep/pipe substitution — an empty result after removing the ONLY name, e.g. the
+  # none+tasks shape's `file_names == "TASKS_ENABLED"`, would exit 1 and abort this function
+  # under the caller's `set -euo pipefail`, the same P3-1 hazard the awk calls above dodge with
+  # `|| true`) so the EXISTING rd_set/soak_set/empty comparisons below stay byte-for-byte
+  # unchanged and keep classifying the base shape on the names TASKS_ENABLED-free.
+  local file_has_tasks=false file_names_sans_tasks="" name
+  for name in $file_names; do
+    if [[ "$name" == "TASKS_ENABLED" ]]; then
+      file_has_tasks=true
+    else
+      file_names_sans_tasks="${file_names_sans_tasks}${file_names_sans_tasks:+ }${name}"
+    fi
+  done
+
   local shape
   if [[ "$file_present" == false ]]; then shape="absent"
   elif [[ "$all_upper_keys" != "$file_names" || "$all_upper_count" -ne "$backend_key_count" ]]; then
@@ -1436,10 +1544,19 @@ classify_runner_override() {
     # comment line saying "no environment: block on purpose" and on an image tag containing
     # `environment:` — both classified a true none as unexpected.
     shape="unexpected"
-  elif [[ -z "$file_names" ]]; then shape="none"
-  elif [[ "$file_names" == "$rd_set" ]]; then shape="rd-window"
-  elif [[ "$file_names" == "$soak_set" ]]; then shape="soak-w4w7"
+  elif [[ -z "$file_names_sans_tasks" ]]; then shape="none"
+  elif [[ "$file_names_sans_tasks" == "$rd_set" ]]; then shape="rd-window"
+  elif [[ "$file_names_sans_tasks" == "$soak_set" ]]; then shape="soak-w4w7"
   else shape="unexpected"
+  fi
+  if [[ "$file_has_tasks" == true ]]; then
+    case "$shape" in
+      none) shape="none+tasks" ;;
+      rd-window) shape="rd-window+tasks" ;;
+      # soak-w4w7+tasks has no writer (see comment above) and every already-unexpected shape
+      # stays unexpected — tasks presence never upgrades a bad shape to a calm one.
+      *) shape="unexpected" ;;
+    esac
   fi
 
   # Live side: NAMES only, in ONE observation (P2-1 round 2, external review of 4141c27832).
@@ -1524,7 +1641,9 @@ action_status() {
   if docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     prepare_container_runner
     staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list.txt" || status_rc=1
-    assert_window_env_flags || status_rc=1
+    # action=status is read-only and has no tasks_enabled input either — same "false" (WARN not
+    # FAIL on an unexpectedly-live flag) treatment as residue-sweep above.
+    assert_window_env_flags "false" || status_rc=1
     local admin_id admin_token
     if admin_id="$(find_admin_user)"; then
       admin_token="$(mint_token "$admin_id" 'admin' 'attendance:read,attendance:admin')"
@@ -3048,10 +3167,11 @@ action_soak_flags() {
   marker_sha="$(sed -n 's/^staging_build_commit=//p' "$SOAK_BASELINE_MARKER")"
   [[ "$marker_sha" == "$DEPLOY_SHA" ]] \
     || fail "baseline marker was captured at build ${marker_sha:-<unreadable>}, but flags are being set on ${DEPLOY_SHA} — re-run action=soak-baseline against the deployed SHA (O4-2 must anchor on the same build)"
-  # Never silently drop (or silently carry) rd-window flags: env flips for those happen
-  # only together with a deploy (bundle §3.4), and this action rewrites the same file.
-  if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' "$OVERRIDE_FILE"; then
-    fail "existing runner override carries rd-window env flags; refusing to rewrite them from a soak action — redeploy with set_window_env=none first"
+  # Never silently drop (or silently carry) rd-window flags OR TASKS_ENABLED: env flips for
+  # those happen only together with a deploy (bundle §3.4; tasks_enabled owner-authorized
+  # 2026-09-28 the same way), and this action rewrites the same file.
+  if [[ -f "$OVERRIDE_FILE" ]] && grep -qE 'ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED|TASKS_ENABLED' "$OVERRIDE_FILE"; then
+    fail "existing runner override carries rd-window env flags (and/or TASKS_ENABLED); refusing to rewrite them from a soak action — redeploy with set_window_env=none and tasks_enabled=false first"
   fi
   # This action changes ENV only, never images: deploy_sha must equal BOTH running images.
   local backend_image web_image
