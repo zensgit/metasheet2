@@ -6552,6 +6552,20 @@ function getUserLabel(req, fallback) {
   return fallback
 }
 
+// The authenticated caller's role claims, read exactly as core's `resolveApprovalActorRoles` reads
+// them (the `req.user.role` singular claim, trimmed, unioned with the string entries of the
+// `req.user.roles` array claim, deduplicated). Used ONLY for the cancel-round entry's post-action
+// count push, so the caller's pushed todo / approval count is computed on the same viewer the
+// caller's own count read resolves; it is not an authorization input.
+function getActorRoleClaims(req) {
+  const user = req.user
+  const role = typeof user?.role === 'string' && user.role.trim().length > 0 ? [user.role.trim()] : []
+  const roles = Array.isArray(user?.roles)
+    ? user.roles.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return Array.from(new Set([...role, ...roles]))
+}
+
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for']
   const header = Array.isArray(forwarded) ? forwarded[0] : forwarded
@@ -37226,7 +37240,11 @@ module.exports = {
             }
             const result = await cancelRoundEntryPort.launch(
               request.documentInstanceId,
-              { userId: viewerId, userName: getUserLabel(req, viewerId) },
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+              },
               { reason }
             )
             if (!result || result.ok !== true) {
@@ -37295,6 +37313,7 @@ module.exports = {
               {
                 userId: viewerId,
                 userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },
@@ -37365,6 +37384,7 @@ module.exports = {
               {
                 userId: viewerId,
                 userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },

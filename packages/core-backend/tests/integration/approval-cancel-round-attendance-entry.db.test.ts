@@ -1815,6 +1815,111 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
 
+      it('P-11 count refresh carries the ACTOR\'s role claims, as the approval side does: a requester and an approver whose users.role is admin, each seeing an unrelated role-seated pending item, are pushed the same todo count their own GET /api/todo/count answers — after the launch, the attendance-side approve and the withdraw', async () => {
+        await grantAttendanceApproverRole(approverId)
+        const requester = `g4c-roles-req-${TS}`
+        await seedLoginUser(requester, { roles: ['attendance_employee'] })
+        // An unrelated pending item whose ONLY active seat is the role arm `admin` (the shape the
+        // attendance fallback queue seats). It is in a viewer's count only when that viewer's `admin`
+        // role claim reaches the count.
+        const otherRequester = `g4c-roles-other-${TS}`
+        await seedLoginUser(otherRequester, { roles: ['attendance_employee'] })
+        await grantApprovalWriteForIntegrationActor(otherRequester)
+        let other: { id: string }
+        try {
+          other = await service().createApproval(
+            { templateId, formData: { reason: 'g4c role-seated item' } },
+            { userId: otherRequester, roles: [] },
+          )
+        } finally {
+          await pool().query(
+            `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+            [otherRequester],
+          )
+        }
+        createdApprovalIds.add(other.id)
+        const otherNode = (
+          await pool().query<{ current_node_key: string }>('SELECT current_node_key FROM approval_instances WHERE id = $1', [other.id])
+        ).rows[0].current_node_key
+        await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [other.id])
+        await pool().query(
+          `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+           VALUES ($1, 'role', 'admin', $2, TRUE)`,
+          [other.id, otherNode],
+        )
+
+        const viewers = [approverId, requester]
+        const recorder = recordPushes()
+        try {
+          for (const userId of viewers) {
+            // The count read's role input is the token's `role` claim (the `users.role` column), so
+            // the column is set before logging in. The todo routes sit behind approvals:read.
+            await pool().query(`UPDATE users SET role = 'admin' WHERE id = $1`, [userId])
+            await pool().query(
+              `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+              [userId],
+            )
+            invalidateUserPerms(userId)
+          }
+          const approverToken = await loginToken(approverId)
+          const requesterToken = await loginToken(requester)
+          const countOf = async (token: string): Promise<number> => {
+            const response = await http('GET', '/api/todo/count', token)
+            expect(response.status, response.text).toBe(200)
+            return response.json.count as number
+          }
+          const lastPushedCount = (userId: string) => todoPushesFor(recorder.pushes, userId).at(-1)?.payload?.count
+          // Precondition, so the legs below cannot pass vacuously: both viewers' own reads include the
+          // role-seated item.
+          for (const token of [approverToken, requesterToken]) {
+            const items = await http('GET', '/api/todo/items', token)
+            expect(items.status, items.text).toBe(200)
+            expect(items.json.items.some((entry: { id: string }) => entry.id === other.id)).toBe(true)
+          }
+
+          // Leg 1 — launch: the requester acts.
+          const toApprove = await seedApprovedLeave({ documentRequesterId: requester })
+          recorder.pushes.length = 0
+          const launch = await http('POST', entryPath(toApprove.requestId), requesterToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          expect(todoPushesFor(recorder.pushes, requester)).toHaveLength(1)
+          expect(lastPushedCount(requester)).toBe(await countOf(requesterToken))
+
+          // Leg 2 — attendance-side approve: the approver acts on their own seat.
+          recorder.pushes.length = 0
+          const stub = bindCancellationPort(async () => cancelledResponse)
+          try {
+            const approved = await http('POST', actionsPath(toApprove.requestId), approverToken, { action: 'approve' })
+            expect(approved.status, approved.text).toBe(200)
+          } finally {
+            stub.stop()
+          }
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(lastPushedCount(approverId)).toBe(await countOf(approverToken))
+
+          // Leg 3 — withdraw: the requester acts on a second leave's round.
+          const toWithdraw = await seedApprovedLeave({ documentRequesterId: requester })
+          const relaunch = await http('POST', entryPath(toWithdraw.requestId), requesterToken, {})
+          expect(relaunch.status, relaunch.text).toBe(201)
+          recorder.pushes.length = 0
+          const withdrawn = await http('POST', withdrawPath(toWithdraw.requestId), requesterToken, {})
+          expect(withdrawn.status, withdrawn.text).toBe(200)
+          expect(todoPushesFor(recorder.pushes, requester)).toHaveLength(1)
+          expect(lastPushedCount(requester)).toBe(await countOf(requesterToken))
+        } finally {
+          recorder.stop()
+          await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [other.id])
+          for (const userId of viewers) {
+            await pool().query(`UPDATE users SET role = 'user' WHERE id = $1`, [userId])
+            await pool().query(
+              `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+              [userId],
+            )
+            invalidateUserPerms(userId)
+          }
+        }
+      })
+
       it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
         const fixture = await launchedRound('fence')
         const arms = await pool().query<{ assignment_type: string }>(

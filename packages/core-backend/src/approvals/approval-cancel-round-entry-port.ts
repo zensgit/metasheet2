@@ -101,19 +101,46 @@ async function listActiveUserSeatIds(query: Queryable, engineInstanceId: string)
 }
 
 /**
+ * The actor's role claims as the plugin handed them over — it reads them from the authenticated
+ * request the way the approval-side routes do (`resolveApprovalActorRoles`). Only non-string /
+ * blank entries are dropped and duplicates folded; nothing is rewritten, so the pushed count is
+ * computed on the same role set the actor's own `GET /api/todo/count` resolves.
+ */
+function normalizeActorRoleClaims(roles: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(roles)) return []
+  return [...new Set(roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0))]
+}
+
+/**
  * Best effort by contract: the action has already committed, so a failed push is logged
  * (values-free: the reason token only) and never turns a done action into an error.
+ *
+ * The ACTOR's entry carries the actor's role claims — the same input the approval-side action
+ * routes hand the shared publisher for their caller (`{ userId, roles: actor.roles }`), so the
+ * actor's pushed count is computed on the same viewer the actor's own `GET /api/todo/count` uses.
+ * It goes FIRST and the actor id is not repeated among the others: the publisher keeps the first
+ * entry per user id, and the actor is often one of the seats too (an approver acting on their own
+ * seat). Everyone else is pushed without role claims, exactly as the approval side pushes the other
+ * users an action touches.
  */
 async function publishCancelRoundCounts(
   publishCounts: CancelRoundCountPublisherV1 | undefined,
-  userIds: Array<string | null | undefined>,
+  actor: { readonly userId: string; readonly roles?: readonly string[] },
+  otherUserIds: Array<string | null | undefined>,
   reason: string,
 ): Promise<void> {
   if (!publishCounts) return
   try {
-    const users = [...new Set(userIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0))]
+    const actorId = typeof actor.userId === 'string' ? actor.userId.trim() : ''
+    const others = [
+      ...new Set(otherUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
+    ].filter((id) => id !== actorId)
+    const users: Array<{ userId: string; roles?: string[] }> = [
+      ...(actorId ? [{ userId: actorId, roles: normalizeActorRoleClaims(actor.roles) }] : []),
+      ...others.map((userId) => ({ userId })),
+    ]
     if (users.length === 0) return
-    await publishCounts(users.map((userId) => ({ userId })), reason)
+    await publishCounts(users, reason)
   } catch (error) {
     try {
       logger.warn(`cancel-round todo count publish failed (${reason})`, error instanceof Error ? error : undefined)
@@ -361,10 +388,17 @@ export type CancelRoundActionResultV1 =
   | { readonly ok: false; readonly noRound: true }
   | { readonly ok: false; readonly noRound?: false; readonly status: number; readonly code: string; readonly message: string }
 
-/** A2 — who acts. `userName` is the display name for the audit row (falls back to the id there). */
+/**
+ * A2 — who acts. `userName` is the display name for the audit row (falls back to the id there).
+ * `roles` are the actor's role claims from the authenticated request (the plugin reads them the way
+ * `resolveApprovalActorRoles` does). They are used for ONE thing: the actor's own todo / approval
+ * count push after the action (增补 P-11). They never reach the creation path or the dispatched
+ * action — see `dispatchOnLatestCancelRound` for why the action itself carries no role claims.
+ */
 export interface CancelRoundEntryActorV1 {
   readonly userId: string
   readonly userName?: string
+  readonly roles?: readonly string[]
   readonly ip?: string | null
   readonly userAgent?: string | null
 }
@@ -386,7 +420,7 @@ export interface ApprovalCancelRoundEntryPort {
    */
   launch(
     documentInstanceId: string,
-    actor: { userId: string; userName?: string },
+    actor: { userId: string; userName?: string; roles?: readonly string[] },
     options?: { reason?: string | null },
   ): Promise<CancelRoundLaunchResultV1>
   /**
@@ -667,15 +701,18 @@ export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
  * instance's active assignments), the revoke gate, the C-2 redemption and C-3 closure — runs there,
  * unchanged. Nothing here re-derives or pre-empts any of it.
  *
- * `roles: []`: the actor carries no role claims. A cancel round's seats are PERSON seats — the
- * creation path seats the original approvers by user id (lock §14.1), and §9-9 / §14.3 #12–#13
- * refuse every verb or job that could change a seat — so a role claim can never be what seats an
- * actor on it; passing none can only narrow, never widen (the integration suite asserts every
- * assignment on a launched round is a `user` assignment).
+ * `roles: []` on the DISPATCHED action: the action carries no role claims. A cancel round's seats
+ * are PERSON seats — the creation path seats the original approvers by user id (lock §14.1), and
+ * §9-9 / §14.3 #12–#13 refuse every verb or job that could change a seat — so a role claim can never
+ * be what seats an actor on it; passing none can only narrow, never widen (the integration suite
+ * asserts every assignment on a launched round is a `user` assignment). `actor.roles` is NOT handed
+ * to the action.
  *
  * The pending-count refresh (增补 P-11) runs after the action when the host bound a publisher: the
  * caller plus the round's person seats as they were BEFORE and AFTER the action, through the same
- * publisher the approval-side action routes use. Best effort — the action has already committed.
+ * publisher the approval-side action routes use. The caller's entry carries `actor.roles` (their
+ * count covers every pending item they see, not only this round's seat — role-seated ones included),
+ * as on the approval side. Best effort — the action has already committed.
  */
 const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
 
@@ -726,7 +763,7 @@ export async function dispatchOnLatestCancelRound(
   const round = await readActedRoundOutcome(query, row.round_id)
   if (publishCounts) {
     const seatsAfter = await listActiveUserSeatIds(query, row.engine_instance_id).catch(() => [] as string[])
-    await publishCancelRoundCounts(publishCounts, [actor.userId, ...seatsBefore, ...seatsAfter], `cancel-round:${action}`)
+    await publishCancelRoundCounts(publishCounts, actor, [...seatsBefore, ...seatsAfter], `cancel-round:${action}`)
   }
   return { ok: true, round }
 }
@@ -757,7 +794,13 @@ export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDeps
     launch: async (documentInstanceId, actor, options = {}) => {
       try {
         const service = new ApprovalProductService()
-        await service.createCancelRoundInstance(documentInstanceId, actor, { reason: options.reason ?? null })
+        // Only the identity and the display name reach the creation path; the role claims are for
+        // the count push below.
+        await service.createCancelRoundInstance(
+          documentInstanceId,
+          { userId: actor.userId, ...(actor.userName !== undefined ? { userName: actor.userName } : {}) },
+          { reason: options.reason ?? null },
+        )
       } catch (error) {
         if (error instanceof ServiceError) {
           const message = CANCEL_ROUND_SEAT_CLASS_CODES.has(error.code)
@@ -770,7 +813,7 @@ export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDeps
       const summary = await readCancelRoundSummaryForDocumentV1(db(), documentInstanceId, actor.userId)
       if (deps.publishCounts && summary.round?.engineInstanceId) {
         const seats = await listActiveUserSeatIds(db(), summary.round.engineInstanceId).catch(() => [] as string[])
-        await publishCancelRoundCounts(deps.publishCounts, [actor.userId, ...seats], 'cancel-round:launch')
+        await publishCancelRoundCounts(deps.publishCounts, actor, seats, 'cancel-round:launch')
       }
       return { ok: true, summary }
     },
