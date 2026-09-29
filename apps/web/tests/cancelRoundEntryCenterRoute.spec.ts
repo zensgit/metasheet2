@@ -43,6 +43,7 @@ vi.mock('vue-router', async () => {
 })
 
 const mockPendingApprovals = ref<any[]>([])
+const loadPendingSpy = vi.fn().mockResolvedValue(undefined)
 vi.mock('../src/approvals/store', () => ({
   useApprovalStore: () => ({
     get approvals() { return [] },
@@ -62,7 +63,7 @@ vi.mock('../src/approvals/store', () => ({
     get totalProcessed() { return 0 },
     get pendingCount() { return mockPendingApprovals.value.length },
     approvalById: () => undefined,
-    loadPending: vi.fn().mockResolvedValue(undefined),
+    loadPending: loadPendingSpy,
     loadMine: vi.fn().mockResolvedValue(undefined),
     loadCc: vi.fn().mockResolvedValue(undefined),
     loadCompleted: vi.fn().mockResolvedValue(undefined),
@@ -330,12 +331,36 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     await mountView()
     ;(container!.querySelector('[data-testid="approval-row-approve-cr_1"]') as HTMLButtonElement).click()
     await flushUi()
+    loadPendingSpy.mockClear()
     ;(document.querySelector('[data-el-popconfirm-confirm^="确认通过"]') as HTMLButtonElement).click()
     await flushUi()
     expect(attendanceCalls()).toHaveLength(0)
     expect(dispatchActionSpy).not.toHaveBeenCalled()
     expect(elSuccessSpy).not.toHaveBeenCalled()
     expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('未执行任何操作'))
+    // the stale row is not left on screen: the list is reloaded
+    expect(loadPendingSpy).toHaveBeenCalled()
+  })
+
+  it('row 驳回 on a row whose round is no longer pending: nothing sent, the dialog shows the error, the list reloads', async () => {
+    latestRound['req-2'] = pendingRound('cr_2', { outcome: 'withdrawn', status: 'cancellation_withdrawn' })
+    mockPendingApprovals.value = [cancelRow('cr_2', 'apv_orig_2')]
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-row-reject-cr_2"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = container!.querySelector('[data-testid="approval-row-reject-dialog"] input') as HTMLInputElement
+    input.value = '时间冲突'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    loadPendingSpy.mockClear()
+    ;(container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(0)
+    // the inline error (el-alert title — the stub does not render titles) is shown and the dialog stays open
+    expect(container!.querySelector('[data-testid="approval-row-reject-error"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-dialog"]')).not.toBeNull()
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+    expect(loadPendingSpy).toHaveBeenCalled()
   })
 
   it('batch: a decision attributed to another round lands in the manifest, and 重试失败项 is refused before sending', async () => {
