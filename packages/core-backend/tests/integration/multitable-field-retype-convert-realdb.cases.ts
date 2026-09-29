@@ -8,10 +8,13 @@
  * 不要再为这些用例单独登记文件，否则它们跑两遍。
  *
  * ── 十三条的去向 ───────────────────────────────────────────────────────────────────────────────────────
- *   ① ② ③ ④ ⑤ ⑥ ⑧ ⑨ ⑩ ⑬  —— 本文件，真跑。
- *   ⑦ ⑪ ⑫                —— `test.skip`，等 A 线（分支 feat/multitable-retype-fenced-writer-recheck：写入者栅栏后
- *                            复核助手 `assertFieldSchemaUnchangedAfterFence`、行 13 派生型复核、§3.12 自动化选项校验）。
- *                            本分支没有这些代码，这三条在这里写不出真断言——不伪造，A 线合入后补。
+ *   十三条全部在本文件真跑，没有 `test.skip`。
+ *   ⑦ ⑪ ⑫ 依赖第 3a 刀（#6145：写入者栅栏后复核助手 `assertFieldSchemaUnchangedAfterFence`、行 13 派生型复核、
+ *   §3.12 自动化选项校验），3a 合入 main 后在这里补上真断言：
+ *     ⑦ 九个写入者形状（§3.11 行 1–7）各自排在**真实的**执行事务与**真实的**撤销事务的栅栏后面——三会话构造，
+ *        由 pg_blocking_pids 证明「转换持栅栏、写入者停在栅栏上」，不成立即抛，不靠计时；
+ *     ⑪ 拒绝按**消息**与**错误码**断言，外加九个面零写入；`status: 'failed'` 单独不算证据；
+ *     ⑫ 派生合并停在转换的栅栏后面被拒一次、提交之后再来被拒一次。
  * 另有两条不在十三条之内、但与迁移直接相关：CHECK 放宽的取值面、审批投影 `system_kind` 窄回填的证据绑定。
  *
  * ── 夹具 ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -34,10 +37,26 @@ import { down as relaxTombstoneReasonDown, up as relaxTombstoneReason } from '..
 import { down as createConversionsTableDown, up as createConversionsTable } from '../../src/db/migrations/zzzz20260928150100_create_meta_field_retype_conversions'
 import { up as backfillApprovalProjectionKind } from '../../src/db/migrations/zzzz20260928150200_backfill_approval_projection_system_kind'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { EventBus } from '../../src/integration/events/event-bus'
 import { APPROVAL_PROJECTION_BASE_ID } from '../../src/multitable/approval-projection-constants'
+import { AutomationService } from '../../src/multitable/automation-service'
 import { WRITER_BLOCK_STATES } from '../../src/multitable/canonical-sheet-fence'
+import { applyFencedDerivedDataMerge } from '../../src/multitable/derived-write-fence'
 import { __resetFieldRetypeConversionsTableProbe } from '../../src/multitable/field-retype-convert-execute'
+import {
+  AUTOMATION_WRITE_VALUE_INVALID_CODE,
+  AutomationWriteValueInvalidError,
+  DerivedMergeTargetRetypedError,
+  FIELD_SCHEMA_CHANGED_CODE,
+  FieldSchemaChangedError,
+} from '../../src/multitable/field-schema-fence-recheck'
+import { loadFieldsForSheet } from '../../src/multitable/loaders'
 import { sweepFieldValueTombstoneRetention } from '../../src/multitable/meta-revision-retention'
+import { createRecord as pluginCreateRecord, patchRecord as pluginPatchRecord } from '../../src/multitable/records'
+import {
+  getMultitableRequestMetadataCache,
+  runWithMultitableRequestMetadataCache,
+} from '../../src/multitable/request-metadata-cache'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -46,6 +65,7 @@ const CONVERT_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT'
 const FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 const LEGACY_FLAG = 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'
 const TIER2_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
+const CACHE_FLAG = 'MULTITABLE_ENABLE_REQUEST_METADATA_CACHE'
 const CONVERT_CONFIRM = 'convert-field-type'
 const UNDO_CONFIRM = 'undo-field-type-convert'
 
@@ -167,8 +187,103 @@ export function defineFieldRetypeConvertRealDbCases(): void {
     )
   }
 
+  // ── ⑦ ⑪ ⑫: a writer racing the REAL conversion ─────────────────────────────────────────────────────────
+  //
+  // The race is constructed, never timed. Three sessions:
+  //   H  holds a row lock on ONE record of the sheet (`held`), nothing else.
+  //   C  is the real execute / undo, sent through the real route. Its transaction takes the canonical sheet fence
+  //      first, passes its gates, and then waits for H's row when it locks the sheet's live rows — so it sits there
+  //      HOLDING THE FENCE, with nothing written yet. Its backend is found through pg_blocking_pids(H).
+  //   W  is the production writer under test. It takes its field snapshot (the committed state: the field as it was
+  //      before C), validates its value against it, and parks on the fence. Proven through pg_blocking_pids(C) on a
+  //      session waiting in pg_advisory_xact_lock; THROWS if W never parks, so the race cannot degrade into the
+  //      sequential case.
+  // H rolls back. C finishes and commits. W gets the fence and runs its post-fence statements.
+  type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown }
+  const settle = (run: Promise<unknown>): Promise<Outcome> =>
+    run.then((value): Outcome => ({ ok: true, value }), (error): Outcome => ({ ok: false, error }))
+  const send = (call: request.Test): Promise<request.Response> =>
+    new Promise((resolve, reject) => { call.end((err, res) => (err ? reject(err) : resolve(res))) })
+
+  async function backendParkedBehind(holderPid: number, on: 'row' | 'fence', who: string): Promise<number> {
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const r = await q(
+        `SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'
+            AND $1 = ANY(pg_blocking_pids(pid))
+            AND (query ILIKE '%pg_advisory_xact_lock%') = $2
+          ORDER BY pid`,
+        [holderPid, on === 'fence'],
+      )
+      if (r.rows.length >= 1) return Number((r.rows[0] as { pid: unknown }).pid)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    throw new Error(`${who} never parked on the ${on} lock — the race did not occur`)
+  }
+
+  async function raceWithConversion(
+    heldRecordId: string,
+    conversion: () => request.Test,
+    writer: () => Promise<unknown>,
+  ): Promise<{ conversion: request.Response; writer: Outcome }> {
+    const holder = await poolManager.get().getInternalPool().connect()
+    let conversionRun: Promise<Outcome> | null = null
+    let writerRun: Promise<Outcome> | null = null
+    let released = false
+    try {
+      await holder.query('BEGIN')
+      const holderPid = Number((await holder.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid)
+      const held = await holder.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [heldRecordId])
+      expect(held.rows).toHaveLength(1)
+      conversionRun = settle(send(conversion()))
+      const conversionPid = await backendParkedBehind(holderPid, 'row', 'the conversion')
+      writerRun = settle(writer())
+      await backendParkedBehind(conversionPid, 'fence', 'the writer')
+      await holder.query('ROLLBACK')
+      released = true
+      const conversionOutcome = await conversionRun
+      const writerOutcome = await writerRun
+      if (!conversionOutcome.ok) throw conversionOutcome.error
+      return { conversion: conversionOutcome.value as request.Response, writer: writerOutcome }
+    } finally {
+      if (!released) await holder.query('ROLLBACK').catch(() => {})
+      holder.release()
+      // never leave a run in flight behind a failed assertion: the next test would inherit its locks
+      if (conversionRun) await conversionRun
+      if (writerRun) await writerRun
+    }
+  }
+
+  type AutomationInternals = {
+    executor: { deps: { transaction: (handler: (tx: { query: unknown }) => Promise<unknown>) => Promise<unknown> } }
+    writeApprovalResultBack(bridge: unknown, config: Record<string, unknown>, event: unknown): Promise<unknown>
+  }
+  /** The service as production builds it: its executor's transaction seam is the real pool transaction. */
+  const automationService = () => new AutomationService(new EventBus(), {} as never, q as never)
+  const automationRuleIds: string[] = []
+  let ruleCounter = 0
+  const automationRule = (sheetId: string, action: Record<string, unknown>) => {
+    ruleCounter += 1
+    const id = `rule_frc_${TS}_${ruleCounter}`
+    automationRuleIds.push(id)
+    return {
+      id, name: 'frc', sheetId, trigger: { type: 'record.created', config: {} }, actions: [action],
+      enabled: true, createdBy: ACTOR, createdAt: '2026-09-29T00:00:00Z',
+    }
+  }
+  type Execution = { status: string; steps: Array<{ actionType: string; status: string; error?: string }> }
+  const runRule = async (service: AutomationService, sheetId: string, recordId: string, action: Record<string, unknown>): Promise<Execution> =>
+    (await service.executeRule(automationRule(sheetId, action) as never, { recordId, sheetId, actorId: ACTOR, data: {} })) as unknown as Execution
+
+  const revisionsBySource = async (sheetId: string) =>
+    (await q('SELECT source, count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1 GROUP BY source ORDER BY source', [sheetId])).rows as Array<{ source: string; n: number }>
+  const recordRows = async (sheetId: string) =>
+    (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows as Array<{ id: string; version: number; data: Record<string, unknown> }>
+
   const SAVED_ENV: Record<string, string | undefined> = {}
-  const FLAGS = [CONVERT_FLAG, FENCE_FLAG, LEGACY_FLAG, TIER2_FLAG, 'MULTITABLE_SHEET_REVERT_MAX_RECORDS', 'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS', 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED']
+  const FLAGS = [CONVERT_FLAG, FENCE_FLAG, LEGACY_FLAG, TIER2_FLAG, CACHE_FLAG, 'MULTITABLE_SHEET_REVERT_MAX_RECORDS', 'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS', 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED']
 
   describeIfDatabase('field retype convert — execute + whole-column undo (real DB, fence ON)', () => {
     beforeAll(async () => {
@@ -206,7 +321,9 @@ export function defineFieldRetypeConvertRealDbCases(): void {
 
     afterAll(async () => {
       for (const id of createdProjectionInstances) await q('DELETE FROM approval_record_projection WHERE instance_id = $1', [id]).catch(() => {})
+      await q('DELETE FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [automationRuleIds]).catch(() => {})
       for (const sheetId of createdSheets) {
+        await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_field_retype_conversions WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -233,6 +350,8 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       delete process.env.MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS
       // The conversion's pre-image is unconditional: leave the capture flag OFF on purpose.
       delete process.env.MULTITABLE_TOMBSTONE_CAPTURE_ENABLED
+      // Only the two plugin SDK legs of ⑦ switch the request-scoped metadata cache on.
+      delete process.env[CACHE_FLAG]
       as(ACTOR)
     })
 
@@ -681,13 +800,166 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       expect(typeof control.body.data.previewToken).toBe('string')
     })
 
-    // ── ⑦ ── depends on track A ─────────────────────────────────────────────────────────────────────────
-    // TODO(track A — branch feat/multitable-retype-fenced-writer-recheck): un-skip when the fenced-writer re-check
-    // helper `assertFieldSchemaUnchangedAfterFence` is merged. Needs the seven 必接 fence holders of ADR §3.11 rows
-    // 1-7 (bulk patch / plugin patch / plugin create / REST + OAPI single patch / form EDIT + CREATE / automation
-    // update + create / approval resultWriteback) each parked behind the conversion's fence and answering 409
-    // FIELD_SCHEMA_CHANGED after it commits. This branch carries none of that wiring, so nothing here could be asserted.
-    test.skip('⑦ retype-convert-concurrent-writer: the seven 必接 fence holders re-check the field after the fence (track A)', () => {})
+    // ── ⑦ ──────────────────────────────────────────────────────────────────────────────────────────────
+    // ADR §3.11 rows 1–7: every 必接 fence holder, parked behind the REAL execute and behind the REAL undo, looks at
+    // the field again after the fence and refuses. Slice 3a proved the helper against a stand-in session that
+    // edited meta_fields by hand; here the other side is the product's own conversion transaction.
+    const ORIG = 'VAL-ORIG'
+    const OTHER = 'VAL-OTHER'
+    const HELD = 'VAL-HELD'
+    const OUTCOME = 'approved' // what an approval write-back writes for an approved instance
+    const STALE = 'VAL-STALE ' // fine for a text column; not an option of the converted column, and not an array
+
+    interface RaceColumn extends Column { viewId: string; target: string; held: string }
+
+    /** Four rows: the writer's target, two more option texts, and the row session H holds. */
+    async function seedRaceColumn(): Promise<RaceColumn> {
+      const column = await seedColumn([])
+      const texts: Array<[number, string]> = [[1, ORIG], [2, OTHER], [3, OUTCOME], [9, HELD]]
+      for (const [n, text] of texts) {
+        await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [column.rec(n), column.sheetId, JSON.stringify({ [column.fieldId]: text }), ACTOR])
+      }
+      const viewId = column.sheetId.replace('sheet_', 'view_')
+      await q(
+        `INSERT INTO meta_views (id, sheet_id, name, type, filter_info, sort_info, group_info, hidden_field_ids, config)
+         VALUES ($1,$2,$3,'grid','{}'::jsonb,'{}'::jsonb,'{}'::jsonb,'[]'::jsonb,'{}'::jsonb)`,
+        [viewId, column.sheetId, 'FRC view'],
+      )
+      return { ...column, viewId, target: column.rec(1), held: column.rec(9) }
+    }
+
+    type Refusal = 'http' | 'throws' | 'step'
+    interface RaceWriter {
+      name: string
+      refusal: Refusal
+      /** the request-scoped metadata cache: the only way a plugin SDK writer's snapshot predates the fence */
+      cache?: true
+      /** the conversion the UNDO leg undoes (an approval write-back can only target a single select) */
+      undoOf: 'multiSelect' | 'select'
+      run: (c: RaceColumn, value: unknown) => () => Promise<unknown>
+    }
+
+    const inWarmCache = (c: RaceColumn, write: (query: never) => Promise<unknown>) => () =>
+      runWithMultitableRequestMetadataCache(async () => {
+        await loadFieldsForSheet(q as never, c.sheetId, getMultitableRequestMetadataCache()!.fields)
+        return poolManager.get().transaction(async ({ query }) => write(query as never))
+      })
+
+    const WRITERS: RaceWriter[] = [
+      {
+        name: 'row 1 bulk patch (POST /patch)', refusal: 'http', undoOf: 'multiSelect',
+        run: (c, value) => () => send(request(app).post('/api/multitable/patch').send({ sheetId: c.sheetId, changes: [{ recordId: c.target, fieldId: c.fieldId, value }] })),
+      },
+      {
+        name: 'row 2 plugin SDK patchRecord', refusal: 'throws', cache: true, undoOf: 'multiSelect',
+        run: (c, value) => inWarmCache(c, (query) => pluginPatchRecord({ query, sheetId: c.sheetId, recordId: c.target, changes: { [c.fieldId]: value } })),
+      },
+      {
+        name: 'row 3 plugin SDK createRecord', refusal: 'throws', cache: true, undoOf: 'multiSelect',
+        run: (c, value) => inWarmCache(c, (query) => pluginCreateRecord({ query, sheetId: c.sheetId, data: { [c.fieldId]: value } })),
+      },
+      {
+        name: 'row 4 single-record patch (PATCH /records/:recordId)', refusal: 'http', undoOf: 'multiSelect',
+        run: (c, value) => () => send(request(app).patch(`/api/multitable/records/${c.target}`).send({ sheetId: c.sheetId, data: { [c.fieldId]: value } })),
+      },
+      {
+        name: 'row 5 form submit EDIT', refusal: 'http', undoOf: 'multiSelect',
+        run: (c, value) => () => send(request(app).post(`/api/multitable/views/${c.viewId}/submit`).send({ recordId: c.target, data: { [c.fieldId]: value } })),
+      },
+      {
+        name: 'row 5 form submit CREATE', refusal: 'http', undoOf: 'multiSelect',
+        run: (c, value) => () => send(request(app).post(`/api/multitable/views/${c.viewId}/submit`).send({ data: { [c.fieldId]: value } })),
+      },
+      {
+        name: 'row 6 automation update_record', refusal: 'step', undoOf: 'multiSelect',
+        run: (c, value) => () => runRule(automationService(), c.sheetId, c.target, { type: 'update_record', config: { fields: { [c.fieldId]: value } } }),
+      },
+      {
+        name: 'row 6 automation create_record', refusal: 'step', undoOf: 'multiSelect',
+        run: (c, value) => () => runRule(automationService(), c.sheetId, c.target, { type: 'create_record', config: { sheetId: c.sheetId, data: { [c.fieldId]: value } } }),
+      },
+      {
+        // THE RACE SHAPE the design lock asks for: assertResultWritebackFields passes outside the transaction against
+        // the field as it still is, the conversion commits, the write-back enters withTransaction and is refused.
+        name: 'row 7 approval resultWriteback', refusal: 'throws', undoOf: 'select',
+        run: (c) => () => (automationService() as unknown as AutomationInternals).writeApprovalResultBack(
+          { id: `aab_${c.sheetId}`, sheetId: c.sheetId, recordId: c.target, triggerEvent: { actorId: ACTOR, recordId: c.target, _automationDepth: 0 } },
+          { templateId: 'tpl_frc', resultWriteback: { statusField: c.fieldId } },
+          {
+            version: 1, source: 'approval-product', eventType: 'approval.approved', eventId: `evt_${c.sheetId}`,
+            occurredAt: '2026-09-29T00:00:00.000Z',
+            approval: { instanceId: 'ai_frc', requestNo: 'R-1', templateId: 'tpl_frc', publishedDefinitionId: 'pd_frc' },
+            transition: { toStatus: OUTCOME }, actor: { id: ACTOR }, requester: { id: ACTOR },
+          },
+        ),
+      },
+    ]
+
+    const expectRefused = (w: RaceWriter, outcome: Outcome) => {
+      const told = new FieldSchemaChangedError()
+      if (w.refusal === 'http') {
+        expect(outcome.ok, String((outcome as { error?: unknown }).error ?? '')).toBe(true)
+        const res = (outcome as { value: request.Response }).value
+        expect([res.status, res.body?.error?.code, res.body?.error?.message]).toEqual([409, FIELD_SCHEMA_CHANGED_CODE, told.message])
+        expect(JSON.stringify(res.body)).not.toMatch(/VAL-/)
+      } else if (w.refusal === 'step') {
+        expect(outcome.ok, String((outcome as { error?: unknown }).error ?? '')).toBe(true)
+        const execution = (outcome as { value: Execution }).value
+        expect(execution.steps.map((s) => [s.status, s.error])).toEqual([['failed', told.message]])
+      } else {
+        expect(outcome.ok).toBe(false)
+        const error = (outcome as { error: unknown }).error
+        expect(error).toBeInstanceOf(FieldSchemaChangedError)
+        expect([(error as FieldSchemaChangedError).code, (error as FieldSchemaChangedError).statusCode]).toEqual([FIELD_SCHEMA_CHANGED_CODE, 409])
+      }
+    }
+
+    for (const w of WRITERS) {
+      test(`⑦ retype-convert-concurrent-writer — ${w.name}, parked behind the EXECUTE: refused once it commits, no cell of the wrong shape`, async () => {
+        const c = await seedRaceColumn()
+        if (w.cache) process.env[CACHE_FLAG] = 'true'
+        const token = await previewToken(c.fieldId, 'multiSelect')
+
+        const raced = await raceWithConversion(c.held, () => execute(c.fieldId, { previewToken: token, confirm: CONVERT_CONFIRM }), w.run(c, STALE))
+
+        expect([raced.conversion.status, raced.conversion.body?.data?.cells]).toEqual([200, { rewritten: 4, unchanged: 0 }])
+        expectRefused(w, raced.writer)
+        // the column holds exactly what the conversion wrote — four arrays of one text — and nothing of the writer's
+        expect((await fieldRow(c.fieldId)).type).toBe('multiSelect')
+        expect(await recordRows(c.sheetId)).toEqual([
+          { id: c.rec(1), version: 2, data: { [c.fieldId]: [ORIG] } },
+          { id: c.rec(2), version: 2, data: { [c.fieldId]: [OTHER] } },
+          { id: c.rec(3), version: 2, data: { [c.fieldId]: [OUTCOME] } },
+          { id: c.rec(9), version: 2, data: { [c.fieldId]: [HELD] } },
+        ])
+        expect(await revisionsBySource(c.sheetId)).toEqual([{ source: 'retype-convert', n: 4 }])
+      })
+
+      test(`⑦ retype-convert-concurrent-writer — ${w.name}, parked behind the UNDO: refused once it commits, the column is text again`, async () => {
+        const c = await seedRaceColumn()
+        if (w.cache) process.env[CACHE_FLAG] = 'true'
+        const id = await convert(c, w.undoOf)
+        // a value the writer's own snapshot accepts: an option of the converted column, in the converted shape
+        const value = w.undoOf === 'multiSelect' ? [OTHER] : OTHER
+
+        const raced = await raceWithConversion(c.held, () => undo(c.fieldId, { convertRevisionId: id, confirm: UNDO_CONFIRM }), w.run(c, value))
+
+        expect(raced.conversion.status).toBe(200)
+        expectRefused(w, raced.writer)
+        expect(await fieldRow(c.fieldId)).toEqual({ type: 'string', property: {} })
+        // multiSelect: every row was rewritten twice (convert, undo); select: the text already was the option, no row moved
+        const version = w.undoOf === 'multiSelect' ? 3 : 1
+        expect(await recordRows(c.sheetId)).toEqual([
+          { id: c.rec(1), version, data: { [c.fieldId]: ORIG } },
+          { id: c.rec(2), version, data: { [c.fieldId]: OTHER } },
+          { id: c.rec(3), version, data: { [c.fieldId]: OUTCOME } },
+          { id: c.rec(9), version, data: { [c.fieldId]: HELD } },
+        ])
+        expect(await revisionsBySource(c.sheetId)).toEqual(
+          w.undoOf === 'multiSelect' ? [{ source: 'retype-convert', n: 4 }, { source: 'retype-convert-undo', n: 4 }] : [],
+        )
+      })
+    }
 
     // ── ⑧ ──────────────────────────────────────────────────────────────────────────────────────────────
     test('⑧ retype-convert-foreign-id: another sheet\'s convertRevisionId ⇒ 404, another field\'s or another actor\'s token ⇒ 401, zero writes', async () => {
@@ -838,14 +1110,130 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       expect((await fieldRow(F)).type).toBe('string')
     })
 
-    // ── ⑪ ⑫ ── depend on track A ────────────────────────────────────────────────────────────────────────
-    // TODO(track A — branch feat/multitable-retype-fenced-writer-recheck, ADR §3.12): un-skip when the automation
-    // `update_record` / `create_record` option validation is merged. On this branch those two writers still bypass
-    // every record-write validator, so "a non-option string is refused" would assert behaviour that does not exist.
-    test.skip('⑪ retype-convert-unvalidated-writers-refused: automation update_record / create_record refuse a non-option value (track A, §3.12)', () => {})
-    // TODO(track A — branch feat/multitable-retype-fenced-writer-recheck, ADR §3.11 row 13): un-skip when the
-    // non-scoped derived merge re-reads the key types after the fence. Needs a second session parked on the fence.
-    test.skip('⑫ retype-convert-derived-merge-refused: a queued non-scoped derived merge refuses a field that is no longer derived (track A, row 13)', () => {})
+    // ── ⑪ ──────────────────────────────────────────────────────────────────────────────────────────────
+    // ADR §3.12 (gated form, Decision Register R-22). The two automation writers validate nothing by type on their
+    // own; after a conversion they must not put a value outside the options into the converted column.
+    // `status: 'failed'` alone would prove nothing — a step with no transaction seam fails too — so the refusal is
+    // pinned by its MESSAGE (what the execution log keeps) and by the thrown error's CODE (observed where it crosses
+    // the transaction seam), together with zero writes on all nine surfaces.
+    test('⑪ retype-convert-unvalidated-writers-refused: automation update_record / create_record refuse a value outside the options (message, code, zero writes); a value inside the options lands', async () => {
+      const refusal = (fieldId: string, reason: string) => `Automation write refused: ${reason} (field ${fieldId})`
+      /** production's own pool transaction, wrapped — not replaced — so a rejection can be looked at on its way out */
+      const observed = (service: AutomationService): unknown[] => {
+        const thrown: unknown[] = []
+        const deps = (service as unknown as AutomationInternals).executor.deps
+        const realTransaction = deps.transaction
+        deps.transaction = (handler) => realTransaction(handler).catch((error: unknown) => { thrown.push(error); throw error })
+        return thrown
+      }
+
+      for (const targetType of ['select', 'multiSelect'] as const) {
+        const column = await seedColumn([])
+        const F = column.fieldId
+        for (const [n, text] of [[1, 'VAL-ALPHA'], [2, 'VAL-BETA']] as const) {
+          await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [column.rec(n), column.sheetId, JSON.stringify({ [F]: text }), ACTOR])
+        }
+        await convert(column, targetType)
+        const shaped = (text: string) => (targetType === 'select' ? text : [text])
+        const service = automationService()
+        const thrown = observed(service)
+        const update = (value: unknown) => ({ type: 'update_record', config: { fields: { [F]: value } } })
+        const create = (value: unknown) => ({ type: 'create_record', config: { sheetId: column.sheetId, data: { [F]: value } } })
+
+        const outside: Array<[string, Record<string, unknown>, string]> = targetType === 'select'
+          ? [
+              ['update_record', update('VAL-OUTSIDE'), 'select_value_not_in_options'],
+              ['create_record', create('VAL-OUTSIDE'), 'select_value_not_in_options'],
+              ['update_record', update(7), 'select_value_not_string'],
+            ]
+          : [
+              ['update_record', update(['VAL-OUTSIDE']), 'multiselect_value_invalid'],
+              ['create_record', create(['VAL-ALPHA', 'VAL-OUTSIDE']), 'multiselect_value_invalid'],
+            ]
+        const before = await snapshot(column)
+        for (const [actionType, action, reason] of outside) {
+          thrown.length = 0
+          const execution = await runRule(service, column.sheetId, column.rec(1), action)
+          expect([targetType, execution.status, ...execution.steps.map((s) => [s.actionType, s.status, s.error])])
+            .toEqual([targetType, 'failed', [actionType, 'failed', refusal(F, reason)]])
+          expect(thrown).toHaveLength(1)
+          expect(thrown[0]).toBeInstanceOf(AutomationWriteValueInvalidError)
+          expect(thrown[0]).toMatchObject({ code: AUTOMATION_WRITE_VALUE_INVALID_CODE, fieldId: F, reason })
+          expect(JSON.stringify(execution.steps)).not.toMatch(/VAL-/)
+          // unchanged meta_records.data, no revision, no record added — and nothing else either
+          expect(await snapshot(column)).toEqual(before)
+        }
+
+        // a value inside the options lands, through the same two writers
+        thrown.length = 0
+        const versionBefore = (await cellState(column.rec(1), F)).version
+        const updated = await runRule(service, column.sheetId, column.rec(1), update(shaped('VAL-BETA')))
+        expect(updated.steps.map((s) => [s.actionType, s.status, s.error])).toEqual([['update_record', 'success', undefined]])
+        expect(await cellState(column.rec(1), F)).toMatchObject({ has_key: true, value: shaped('VAL-BETA'), version: versionBefore + 1 })
+        const created = await runRule(service, column.sheetId, column.rec(1), create(shaped('VAL-ALPHA')))
+        expect(created.steps.map((s) => [s.actionType, s.status, s.error])).toEqual([['create_record', 'success', undefined]])
+        const rows = await recordRows(column.sheetId)
+        expect(rows).toHaveLength(3)
+        expect(rows.filter((row) => ![column.rec(1), column.rec(2)].includes(row.id)).map((row) => row.data[F])).toEqual([shaped('VAL-ALPHA')])
+        expect(thrown).toEqual([])
+        expect((await revisionsBySource(column.sheetId)).find((row) => row.source === 'automation')).toEqual({ source: 'automation', n: 2 })
+
+        // THE GATE, stated as behaviour: with the conversion flag off the validation does not run, and the same rule
+        // writes the outside value as it did before this feature existed. Every backend process must therefore
+        // carry the same flag values (runbook).
+        delete process.env[CONVERT_FLAG]
+        const legacy = await runRule(service, column.sheetId, column.rec(2), update('VAL-OUTSIDE'))
+        expect(legacy.steps.map((s) => [s.actionType, s.status, s.error])).toEqual([['update_record', 'success', undefined]])
+        expect((await cellState(column.rec(2), F)).value).toBe('VAL-OUTSIDE')
+        process.env[CONVERT_FLAG] = 'true'
+      }
+    })
+
+    // ── ⑫ ──────────────────────────────────────────────────────────────────────────────────────────────
+    // ADR §3.11 row 13. A non-scoped derived merge computes its values OUTSIDE the fence, from a column that was a
+    // formula when it looked. The column is then patched formula → text and converted text → select. The merge must
+    // not write its computed text into what is now a select column — neither when it was queued behind the
+    // conversion's fence, nor when it arrives after the commit.
+    test('⑫ retype-convert-derived-merge-refused: a derived merge computed while the column was a formula is refused after formula → text → select — parked behind the conversion, and after it; zero writes, no revision', async () => {
+      const column = await seedColumn([])
+      const F = column.fieldId
+      const G = column.otherFieldId
+      await q(`UPDATE meta_fields SET type = 'formula', property = $2::jsonb WHERE id = $1`, [F, JSON.stringify({ expression: '=1+1' })])
+      // no F key on any row: nothing was materialised before the column stopped being a formula
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [column.rec(1), column.sheetId, JSON.stringify({ [G]: 'VAL-KEEP' }), ACTOR])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [column.rec(9), column.sheetId, JSON.stringify({ [G]: 'VAL-HELD' }), ACTOR])
+      // what the merge computed while F was a formula
+      const updates = { [F]: 'VAL-COMPUTED' }
+      const merge = () => applyFencedDerivedDataMerge(q as never, column.sheetId, column.rec(1), updates)
+
+      // formula → text, through the product
+      const patched = await request(app).patch(`/api/multitable/fields/${F}`).send({ type: 'string', property: {} })
+      expect([patched.status, patched.body?.error?.code]).toEqual([200, undefined])
+      expect((await fieldRow(F)).type).toBe('string')
+
+      // text → select, with the merge parked behind the conversion's fence
+      const token = await previewToken(F, 'select')
+      const raced = await raceWithConversion(column.rec(9), () => execute(F, { previewToken: token, confirm: CONVERT_CONFIRM }), merge)
+      expect(raced.conversion.status).toBe(200)
+      expect(raced.writer.ok).toBe(false)
+      const refused = (raced.writer as { error: unknown }).error
+      expect(refused).toBeInstanceOf(DerivedMergeTargetRetypedError)
+      expect(refused).toMatchObject({ reason: 'derived_target_retyped' })
+      expect(String((refused as Error).message)).not.toMatch(/VAL-/)
+
+      // the column holds what the conversion wrote (the canonical empty value), not the merge's text
+      expect((await fieldRow(F)).type).toBe('select')
+      expect(await recordRows(column.sheetId)).toEqual([
+        { id: column.rec(1), version: 2, data: { [G]: 'VAL-KEEP', [F]: '' } },
+        { id: column.rec(9), version: 2, data: { [G]: 'VAL-HELD', [F]: '' } },
+      ])
+      expect(await revisionsBySource(column.sheetId)).toEqual([{ source: 'retype-convert', n: 2 }])
+
+      // the same merge arriving after the commit: same refusal, nothing moves
+      const settled = await snapshot(column)
+      await expect(merge()).rejects.toBeInstanceOf(DerivedMergeTargetRetypedError)
+      expect(await snapshot(column)).toEqual(settled)
+    })
 
     // ── ⑬ ──────────────────────────────────────────────────────────────────────────────────────────────
     test('⑬ retype-convert-refuses-approval-projection-sheet: system_kind NULL but approval_record_projection rows ⇒ 422 on all three endpoints, zero writes', async () => {
