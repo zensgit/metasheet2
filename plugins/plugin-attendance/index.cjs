@@ -37010,7 +37010,15 @@ module.exports = {
     //
     // VISIBILITY is lock I7 — `canReadApprovalInstance` on the request's ORIGINAL approval instance
     // (P-4: the predicate sits on the original document, never a second one). A viewer who fails it,
-    // an unknown id, and a request with no approval instance all get the SAME 404 body.
+    // an unknown id, a request with no approval instance, and a request that is not a LEAVE all get
+    // the SAME 404 body.
+    //
+    // LEAVE ONLY: the entry is the leave-cancellation entry (§15.1 「原请假单」; phase 1 ships only the
+    // leave suite). It scopes to `request_type === 'leave'` — together with P-1 (a) below this is the
+    // same `approvedLeave` predicate the W4 cancel adapter applies (`status === 'approved' &&
+    // request_type === 'leave'`), so a round is never opened on a document the W4 redemption would
+    // refuse. The refusal SHAPE (the not-found body, no new code) is a provisional implementation
+    // choice pending an owner/gate pick — see the phase A design MD.
     //
     // LAUNCH preconditions are P-1 (a)/(b)/(c) on the attendance request row, answered with the P-8
     // registered codes, and then the dedicated creation path re-checks them on the approval instance
@@ -37029,11 +37037,12 @@ module.exports = {
 
       const loadCancelRoundRequestForViewer = async (requestId, orgId, viewerId) => {
         const rows = await db.query(
-          'SELECT id, user_id, status, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
+          'SELECT id, user_id, status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
           [requestId, orgId]
         )
         const row = rows[0]
         if (!row || !row.approval_instance_id) return null
+        if (row.request_type !== 'leave') return null
         const documentInstanceId = String(row.approval_instance_id)
         const readable = await cancelRoundEntryPort.canReadDocument(viewerId, documentInstanceId)
         if (!readable) return null
