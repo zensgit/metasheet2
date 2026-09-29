@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, reactive, type App as VueApp } from 'vue'
 
 const apiFetchMock = vi.fn()
 vi.mock('../src/utils/api', async (importOriginal) => {
@@ -122,6 +122,21 @@ describe('visibility and read states', () => {
     const root = await mountPanel({ canDecide: false })
     expect($(root, 'data-cancel-round-pending')).toBeNull()
     expect(apiFetchMock).not.toHaveBeenCalled()
+  })
+
+  it('a card already on screen leaves when the grant does (the grant, not only the first read, gates rendering)', async () => {
+    const props = reactive({ canDecide: true })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({ render: () => h(AttendanceCancelRoundApproverPanel, { ...props } as never) })
+    app.mount(container)
+    apps.push(app)
+    await flushUi()
+    expect($(container, 'data-cancel-round-pending-item')!.dataset.cancelRoundPendingItem).toBe('req-1')
+    props.canDecide = false
+    await flushUi()
+    expect($(container, 'data-cancel-round-pending')).toBeNull()
+    expect(calls()).toEqual([['GET', PENDING_PATH, null]])
   })
 
   it('reads the agreed route and lists the viewer\'s pending cancellations: requester, leave, V1 word, no approver names', async () => {
