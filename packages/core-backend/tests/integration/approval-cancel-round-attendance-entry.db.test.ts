@@ -19,6 +19,7 @@ import type {
   AttendanceRequestOperationExternalTransactionResultV1,
 } from '../../src/attendance/w4c3b-request-operation-boundary'
 import { CANCEL_ROUND_TEMPLATE_ID } from '../../src/db/seeds/approval-cancel-round-published-definition'
+import { CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE } from '../../src/approvals/approval-cancel-round-entry-port'
 
 /**
  * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
@@ -383,6 +384,11 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       }
       const userIds = [...new Set([...seededUserIds, ...devTokenUserIds])]
       if (userIds.length > 0) {
+        // The LEAVE ONLY case approves a real missed_check_in through the plugin, which writes the
+        // punch-side rows below. Their append-only revision history row is left in place by design
+        // (direct mutation is refused by its guard).
+        await pool().query('DELETE FROM attendance_events WHERE user_id = ANY($1::text[])', [userIds])
+        await pool().query('DELETE FROM attendance_records WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds])
         await pool().query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds])
@@ -652,7 +658,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     expect(summary.text.includes('g4a-free-text-detail-must-not-appear')).toBe(false)
   })
 
-  it('P-4 canWithdraw agrees with the engine revoke branch in both directions (requester true ⇒ revoke succeeds; admin false ⇒ same code)', async () => {
+  it('P-4 canWithdraw agrees with the ENGINE revoke gate in both directions (requester true ⇒ engine revoke succeeds; admin false ⇒ same code); the employee has no HTTP withdraw path in phase A (witness)', async () => {
     const employee = `g4a-wd-${TS}`
     const admin = `g4a-wd-admin-${TS}`
     await seedLoginUser(employee, { roles: ['attendance_employee'] })
@@ -672,6 +678,17 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     ).rejects.toMatchObject({ statusCode: 403, code: 'APPROVAL_REVOKE_FORBIDDEN' })
 
     expect(launch.json.data.round.canWithdraw).toBe(true)
+
+    // WITNESS (phase A gap, disclosed in the design MD residuals): `canWithdraw` is the ENGINE-level
+    // gate. The employee's only HTTP withdraw path today is the approval-side action route, and the
+    // same employee token is refused there before the engine is reached — exact core body, round
+    // untouched. An employee-reachable withdraw endpoint is a phase B precondition.
+    const httpRevoke = await http('POST', `/api/approvals/${roundInstanceId}/actions`, employeeToken, { action: 'revoke' })
+    expect(httpRevoke.status).toBe(403)
+    expect(httpRevoke.text).toBe(CORE_RBAC_FORBIDDEN_BODY)
+    const stillPending = await http('GET', entryPath(requestId), employeeToken)
+    expect(stillPending.json.data.round).toMatchObject({ outcome: 'pending', canWithdraw: true, withdrawBlockedReason: null })
+
     await service().dispatchAction(roundInstanceId, { action: 'revoke' } as ApprovalActionRequest, { userId: employee, roles: [] })
     const withdrawn = await http('GET', entryPath(requestId), employeeToken)
     expect(withdrawn.json.data.round).toMatchObject({
@@ -734,11 +751,13 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     expect(await roundsFor(documentId)).toHaveLength(0)
   })
 
-  it('P-1 (b) route-level witness: the proxy submitter of someone else\'s leave (snapshot requester ≠ leave owner) cannot launch', async () => {
-    // The ONE fixture where the route's own requester check is load-bearing: the creation path
-    // compares against `requester_snapshot.id` (= the proxy here) and would accept; the route
-    // compares against the leave's `user_id` (= the owner) and must refuse. lock:157 「委托人不可;
-    // 代理发起另案」.
+  it('P-1 (b) route-level witness: a document whose snapshot requester ≠ the leave owner cannot be launched by the snapshot requester', async () => {
+    // DEFENCE IN DEPTH, constructed shape: the plugin's own request writers set
+    // `requester_snapshot.id` = the request's `user_id` today, so the plugin does not produce this
+    // shape; the fixture builds it directly to witness the route's own check. It is the one fixture
+    // where that check is load-bearing: the creation path compares against `requester_snapshot.id`
+    // (= the snapshot requester here) and would accept; the route compares against the leave's
+    // `user_id` (= the owner) and must refuse. lock:157 「委托人不可;代理发起另案」.
     const proxy = `g4a-proxy-${TS}`
     const owner = `g4a-proxied-${TS}`
     await seedLoginUser(proxy, { roles: ['attendance_employee'] })
@@ -775,7 +794,79 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     expect(await roundsFor(documentId)).toHaveLength(0)
   })
 
-  it('P-8: creation-path refusals pass through as (status, code, message) only — SUITE_FORBIDDEN, and SEAT_INELIGIBLE without its per-seat details', async () => {
+  it('LEAVE ONLY: an approved NON-leave request created and approved through the real plugin routes is outside the entry — GET and POST are the byte-identical 404 of a never-existing id, and no round is opened', async () => {
+    // Same predicate as the W4 cancel adapter's `approvedLeave` (status approved AND request_type
+    // leave): a round on a non-leave document could never be redeemed by W4. The refusal shape (the
+    // not-found body, no new code) is provisional pending an owner/gate pick (design MD).
+    const employee = `g4a-nl-${TS}`
+    const attendanceAdmin = `g4a-nl-admin-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    await seedLoginUser(attendanceAdmin, { roles: ['admin'], admin: true })
+    const token = await loginToken(employee)
+    const create = await http('POST', '/api/attendance/requests', token, {
+      workDate: new Date().toISOString().slice(0, 10),
+      requestType: 'missed_check_in',
+      requestedInAt: new Date().toISOString(),
+    })
+    expect(create.status, create.text).toBe(201)
+    const requestId = create.json?.data?.request?.id as string
+    expect(typeof requestId).toBe('string')
+    createdRequestIds.add(requestId)
+    const created = await pool().query<{ approval_instance_id: string | null }>(
+      'SELECT approval_instance_id FROM attendance_requests WHERE id = $1',
+      [requestId],
+    )
+    const documentId = created.rows[0]?.approval_instance_id
+    expect(typeof documentId).toBe('string')
+    createdApprovalIds.add(documentId as string)
+
+    const approve = await http('POST', `/api/attendance/requests/${requestId}/approve`, await loginToken(attendanceAdmin), { comment: 'ok' })
+    expect(approve.status, approve.text).toBe(200)
+    const row = await pool().query<{ status: string; request_type: string; engine_status: string }>(
+      `SELECT r.status, r.request_type, i.status AS engine_status
+         FROM attendance_requests r JOIN approval_instances i ON i.id = r.approval_instance_id
+        WHERE r.id = $1`,
+      [requestId],
+    )
+    // Precondition, so the 404 below cannot pass vacuously: approved on both sides, not a leave.
+    expect(row.rows[0]).toEqual({ status: 'approved', request_type: 'missed_check_in', engine_status: 'approved' })
+
+    const neverExisting = randomUUID()
+    for (const method of ['GET', 'POST'] as const) {
+      const body = method === 'POST' ? {} : undefined
+      const absent = await http(method, entryPath(neverExisting), token, body)
+      const nonLeave = await http(method, entryPath(requestId), token, body)
+      expect(absent.status).toBe(404)
+      expect(nonLeave.status, nonLeave.text).toBe(404)
+      expect(nonLeave.text).toBe(absent.text)
+    }
+    expect(await roundsFor(documentId as string)).toHaveLength(0)
+  })
+
+  it('ORG SCOPE: the requester\'s own approved leave whose request row sits in ANOTHER org is the byte-identical 404 of a never-existing id (GET and POST), and no round is opened', async () => {
+    const employee = `g4a-org-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const moved = await pool().query(
+      `UPDATE attendance_requests SET org_id = $2 WHERE id = $1`,
+      [requestId, `g4a-other-org-${TS}`],
+    )
+    expect(moved.rowCount).toBe(1)
+
+    const neverExisting = randomUUID()
+    for (const method of ['GET', 'POST'] as const) {
+      const body = method === 'POST' ? {} : undefined
+      const absent = await http(method, entryPath(neverExisting), token, body)
+      const otherOrg = await http(method, entryPath(requestId), token, body)
+      expect(absent.status).toBe(404)
+      expect(otherOrg.status, otherOrg.text).toBe(404)
+      expect(otherOrg.text).toBe(absent.text)
+    }
+    expect(await roundsFor(documentId)).toHaveLength(0)
+  })
+
+  it('P-8 / P-6′: creation-path refusals pass through as {code, message} only — SUITE_FORBIDDEN with its own message; the seat class (SEAT_INELIGIBLE, NO_ELIGIBLE_APPROVER) with the neutral message and no details', async () => {
     const employee = `g4a-p8-${TS}`
     await seedLoginUser(employee, { roles: ['attendance_employee'] })
     const token = await loginToken(employee)
@@ -789,21 +880,43 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     expect(suite.status, suite.text).toBe(409)
     expect(suite.json.error.code).toBe('CANCEL_ROUND_SUITE_FORBIDDEN')
     expect(Object.keys(suite.json.error).sort()).toEqual(['code', 'message'])
+    // Non-seat codes keep the creation path's own message.
+    expect(typeof suite.json.error.message).toBe('string')
+    expect(suite.json.error.message).not.toBe(CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE)
 
     const seat = await seedApprovedLeave({ documentRequesterId: employee })
     await pool().query('UPDATE users SET is_active = FALSE WHERE id = $1', [approverId])
     try {
       const ineligible = await http('POST', entryPath(seat.requestId), token, {})
       expect(ineligible.status, ineligible.text).toBe(409)
-      expect(ineligible.json.error.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
-      expect(Object.keys(ineligible.json.error).sort()).toEqual(['code', 'message'])
+      expect(ineligible.json).toEqual({
+        ok: false,
+        error: { code: 'CANCEL_ROUND_SEAT_INELIGIBLE', message: CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE },
+      })
       expect(ineligible.text.includes('details')).toBe(false)
       expect(ineligible.text.includes(approverId)).toBe(false)
     } finally {
       await pool().query('UPDATE users SET is_active = TRUE WHERE id = $1', [approverId])
     }
+
+    // NO_ELIGIBLE_APPROVER: the document's only approval is re-labelled as automation's, so the
+    // creation path finds no human seat to re-convene.
+    const automated = await seedApprovedLeave({ documentRequesterId: employee })
+    const relabelled = await pool().query(
+      `UPDATE approval_records SET actor_id = 'system:auto-approval' WHERE instance_id = $1 AND action = 'approve'`,
+      [automated.documentId],
+    )
+    expect(relabelled.rowCount).toBe(1)
+    const noSeat = await http('POST', entryPath(automated.requestId), token, {})
+    expect(noSeat.status, noSeat.text).toBe(409)
+    expect(noSeat.json).toEqual({
+      ok: false,
+      error: { code: 'CANCEL_ROUND_NO_ELIGIBLE_APPROVER', message: CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE },
+    })
+
     expect(await roundsFor(forbidden.documentId)).toHaveLength(0)
     expect(await roundsFor(seat.documentId)).toHaveLength(0)
+    expect(await roundsFor(automated.documentId)).toHaveLength(0)
   })
 
   it('P-10 positive control: an ADMIN real token is green on the same three steps for their own leave, and reads (I7 admin arm) but cannot launch someone else\'s', async () => {
