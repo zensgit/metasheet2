@@ -493,12 +493,81 @@ export async function decideCancelRound(
   return typeof data?.roundId === 'string' && data.roundId.length > 0 ? data.roundId : null
 }
 
+// ---------------------------------------------------------------------------
+// Attendance-side 「待我审批的撤销」 list (owner 2026-09-29 16:5x 「Attendance-side list
+// (Recommended)」: guarded by `attendance:approve`, filtered to the viewer's own live seats, same seat
+// source as the decision route). Contract agreed with the backend lane:
+//   GET /api/attendance/cancel-rounds/pending
+//   ⇒ { ok: true, data: { items: [{ requestId, roundId, engineInstanceId, requesterUserId,
+//        requesterName, requestType, startAt, endAt, launchedAt }], total } }   (requesterName may be null)
+// A response that does not have this shape is a failed read — never an empty list.
+
+export interface PendingCancelRoundItem {
+  requestId: string
+  roundId: string
+  engineInstanceId: string
+  requesterUserId: string | null
+  requesterName: string | null
+  requestType: string | null
+  startAt: string | null
+  endAt: string | null
+  launchedAt: string | null
+}
+
+export interface PendingCancelRoundList {
+  items: PendingCancelRoundItem[]
+  total: number
+}
+
+export const CANCEL_ROUND_PENDING_LIST_PATH = '/api/attendance/cancel-rounds/pending'
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** Strict: any item without the three ids it is acted on by makes the whole read a failure. */
+export function normalizePendingCancelRoundList(payload: unknown): PendingCancelRoundList {
+  const envelope = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null
+  const data = envelope?.data && typeof envelope.data === 'object' ? (envelope.data as Record<string, unknown>) : null
+  if (!data || !Array.isArray(data.items)) throw new Error('Malformed pending cancellation list')
+  const items = data.items.map((raw): PendingCancelRoundItem => {
+    const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+    const requestId = nonEmptyString(r.requestId)
+    const roundId = nonEmptyString(r.roundId)
+    const engineInstanceId = nonEmptyString(r.engineInstanceId)
+    if (!requestId || !roundId || !engineInstanceId) throw new Error('Malformed pending cancellation item')
+    return {
+      requestId,
+      roundId,
+      engineInstanceId,
+      requesterUserId: toStringOrNull(r.requesterUserId),
+      requesterName: nonEmptyString(r.requesterName),
+      requestType: toStringOrNull(r.requestType),
+      startAt: toStringOrNull(r.startAt),
+      endAt: toStringOrNull(r.endAt),
+      launchedAt: toStringOrNull(r.launchedAt),
+    }
+  })
+  const total = typeof data.total === 'number' && Number.isFinite(data.total) && data.total >= items.length
+    ? data.total
+    : items.length
+  return { items, total }
+}
+
+/** `GET /api/attendance/cancel-rounds/pending` (attendance:approve). Throws on any non-2xx or malformed body. */
+export async function fetchPendingCancelRounds(): Promise<PendingCancelRoundList> {
+  const response = await apiFetch(CANCEL_ROUND_PENDING_LIST_PATH)
+  const payload = await readCancelRoundResponse(response)
+  return normalizePendingCancelRoundList(payload)
+}
+
 /**
- * Display predicate for the approver decision on a cancel round, shared by the detail view and the
- * approval center (inline, pane, batch). It mirrors the grant the attendance decision route actually
- * checks: `withPermission('attendance:approve')`, which the plugin's `withAnyPermission` satisfies for
- * an admin, a holder of `attendance:approve`, or a holder of `attendance:admin`. Display only — the
- * route (grant, seat, §9-9) decides.
+ * Display predicate for the approver decision on a cancel round, shared by the detail view, the
+ * approval center (inline, pane, batch) and the attendance-side pending list (whose route the owner's
+ * 16:5x option names as 「guarded by attendance:approve」). It mirrors the grant the attendance decision
+ * route actually checks: `withPermission('attendance:approve')`, which the plugin's `withAnyPermission`
+ * satisfies for an admin, a holder of `attendance:approve`, or a holder of `attendance:admin`. Display
+ * only — the route (grant, seat, §9-9) decides.
  */
 export function canDecideCancelRoundWith(
   access: { readonly isAdmin: boolean; readonly permissions: readonly string[] } | null | undefined,
@@ -599,11 +668,8 @@ export async function resolveCancelRoundLeaveRequestId(
  * `ApprovalApiError`) carries the mapped copy as its message, so existing dialog code that renders
  * `error.message` shows registered copy for registered codes and the server's own text otherwise.
  *
- * The route decides the leave's latest round, so the round on screen (`approval.id`) is first
- * confirmed — by the summary read — to be that round and still pending; a failed or mismatching
- * read sends nothing (fail closed; the same for a delegate who may not read the leave). After the
- * decision, the `roundId` the server names must be the confirmed round, or the caller is told to
- * re-check instead of being told it succeeded.
+ * The approval side knows the round by its own instance id only; the leave is resolved first (two
+ * reads, fail closed) and the decision then goes through `decideCancelRoundOnRequest`.
  */
 export async function decideCancelRoundFromApproval(
   approval: { id: string; businessKey: string | null },
@@ -612,6 +678,27 @@ export async function decideCancelRoundFromApproval(
   isZh = true,
 ): Promise<void> {
   const requestId = await resolveCancelRoundLeaveRequestId(approval, isZh)
+  await decideCancelRoundOnRequest(requestId, { engineInstanceId: approval.id }, action, comment, isZh)
+}
+
+/**
+ * The ONE decision path for a cancel round shown on screen, shared by the approval side and the
+ * attendance-side 「待我审批的撤销」 list (owner 2026-09-29 16:5x 「Attendance-side list
+ * (Recommended)」).
+ *
+ * The route decides the leave's latest round, so the round on screen (`expected.engineInstanceId`,
+ * and `expected.roundId` when the surface knows it) is first confirmed — by the summary read — to be
+ * that round and still pending; a failed or mismatching read sends nothing (fail closed; the same
+ * for a delegate who may not read the leave). After the decision, the `roundId` the server names must
+ * be the confirmed round, or the caller is told to re-check instead of being told it succeeded.
+ */
+export async function decideCancelRoundOnRequest(
+  requestId: string,
+  expected: { engineInstanceId: string; roundId?: string | null },
+  action: 'approve' | 'reject',
+  comment?: string | null,
+  isZh = true,
+): Promise<void> {
   let summary: CancelRoundSummary
   try {
     summary = await fetchCancelRoundSummary(requestId)
@@ -619,7 +706,12 @@ export async function decideCancelRoundFromApproval(
     throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED, isZh)
   }
   const confirmed = summary.round
-  if (!confirmed || confirmed.engineInstanceId !== approval.id || confirmed.outcome !== 'pending') {
+  if (
+    !confirmed
+    || confirmed.engineInstanceId !== expected.engineInstanceId
+    || confirmed.outcome !== 'pending'
+    || (typeof expected.roundId === 'string' && confirmed.roundId !== expected.roundId)
+  ) {
     throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT, isZh)
   }
   let actedRoundId: string | null

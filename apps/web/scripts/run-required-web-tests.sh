@@ -1387,6 +1387,8 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # list / preview StatusTag surfaces, the detail view (P-2 + approver path), the approval-center approver
 # path, and the attendance self-service entry. Each token matches exactly its own file and no existing
 # token is a substring of any of them or vice versa (bidirectional scan in the design MD §7).
+# 阶段 B2 (same MD, §B2): `cancelRoundEntryApproverList` — the attendance-side list of cancellations
+# awaiting the viewer's approval (owner 2026-09-29 16:5x). Same bidirectional scan, recorded in §B2.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1501,6 +1503,7 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
   cancelRoundEntryCore \
