@@ -119,6 +119,8 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
   const seededUserIds = new Set<string>()
   const devTokenUserIds = new Set<string>()
   const createdRoleIds = new Set<string>()
+  // C2: `approval_delegations` config rows (no FK to the instances they shaped; deleted explicitly).
+  const createdDelegationIds = new Set<string>()
 
   const pool = () => poolManager.get()
   const service = () => new ApprovalProductService()
@@ -275,13 +277,16 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     documentRequesterId: string
     leaveUserId?: string
     requestStatus?: string
+    /** C2: another fixture template, approved by `approverTokens` (each approves once, in order). */
+    templateId?: string
+    approverTokens?: string[]
   }): Promise<{ documentId: string; requestId: string }> {
     // Fixture-only: the create boundary's DB-read approvals:write, granted for this call and removed.
     await grantApprovalWriteForIntegrationActor(options.documentRequesterId)
     let dto: { id: string }
     try {
       dto = await service().createApproval(
-        { templateId, formData: { reason: 'g4a leave' } },
+        { templateId: options.templateId ?? templateId, formData: { reason: 'g4a leave' } },
         { userId: options.documentRequesterId, roles: [] },
       )
     } finally {
@@ -291,8 +296,10 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       )
     }
     createdApprovalIds.add(dto.id)
-    const approve = await http('POST', `/api/approvals/${dto.id}/actions`, approverFixtureToken, { action: 'approve' })
-    expect(approve.status, approve.text).toBe(200)
+    for (const approverToken of options.approverTokens ?? [approverFixtureToken]) {
+      const approve = await http('POST', `/api/approvals/${dto.id}/actions`, approverToken, { action: 'approve' })
+      expect(approve.status, approve.text).toBe(200)
+    }
     const status = await pool().query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [dto.id])
     expect(status.rows[0]?.status).toBe('approved')
 
@@ -416,6 +423,10 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
         await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      const delegationIds = [...createdDelegationIds]
+      if (delegationIds.length > 0) {
+        await pool().query('DELETE FROM approval_delegations WHERE id = ANY($1::text[])', [delegationIds])
       }
       const userIds = [...new Set([...seededUserIds, ...devTokenUserIds])]
       if (userIds.length > 0) {
@@ -2111,6 +2122,372 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         createdApprovalIds.add(round.id)
         expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
         expect(await requestNoSequence()).not.toBe(sequenceBefore)
+      })
+    })
+
+    describe('C2 (owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」): the approver\'s pending cancel-round list', () => {
+      const PENDING_LIST_PATH = '/api/attendance/cancel-rounds/pending'
+      // The contract agreed with the frontend lane: exactly these nine keys per item.
+      const ITEM_KEYS = [
+        'endAt',
+        'engineInstanceId',
+        'launchedAt',
+        'requestId',
+        'requestType',
+        'requesterName',
+        'requesterUserId',
+        'roundId',
+        'startAt',
+      ]
+      const EMPTY_LIST = { ok: true, data: { items: [], total: 0 } }
+      const ASSIGNMENT_REQUIRED = {
+        ok: false,
+        error: { code: 'APPROVAL_ASSIGNMENT_REQUIRED', message: 'Approval assignment not found for actor' },
+      }
+
+      /** A one-node template seating `assigneeIds` with `approvalMode` (fixture-only author token). */
+      async function publishTemplateFor(label: string, assigneeIds: string[], approvalMode: 'single' | 'all'): Promise<string> {
+        const authorToken = await fixtureAdminToken(authorId)
+        const create = await http('POST', '/api/approval-templates', authorToken, {
+          key: `g4c2-${label}-${TS}-${Math.floor(Math.random() * 1e6)}`,
+          name: `G4-C2 pending-list fixture (${label})`,
+          description: 'approval-cancel-round-attendance-entry.db.test.ts — C2',
+          formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+          approvalGraph: {
+            nodes: [
+              { key: 'start', type: 'start', config: {} },
+              { key: 'approval_a', type: 'approval', config: { assigneeType: 'user', assigneeIds, approvalMode } },
+              { key: 'end', type: 'end', config: {} },
+            ],
+            edges: [
+              { key: 'e-s-a', source: 'start', target: 'approval_a' },
+              { key: 'e-a-end', source: 'approval_a', target: 'end' },
+            ],
+          },
+        })
+        expect(create.status, create.text).toBe(201)
+        const id = create.json.id as string
+        createdTemplateIds.add(id)
+        const publish = await http('POST', `/api/approval-templates/${id}/publish`, authorToken, {
+          policy: { allowRevoke: true },
+        })
+        expect(publish.status, publish.text).toBe(200)
+        return id
+      }
+
+      /**
+       * A dedicated approver: a login-able directory user (so the list assertions below can be EXACT —
+       * nobody else's case seats them) holding `attendance_approver` unless told otherwise, plus a
+       * fixture-only admin-claims token used ONLY to approve original documents on
+       * `/api/approvals/:id/actions` (never sent to the routes under test).
+       */
+      async function seedApprover(userId: string, options: { attendanceApprover?: boolean } = {}): Promise<{ token: string; fixtureToken: string }> {
+        await seedLoginUser(userId, {
+          roles: options.attendanceApprover === false ? ['attendance_employee'] : ['attendance_approver'],
+        })
+        return { token: await loginToken(userId), fixtureToken: await fixtureAdminToken(userId) }
+      }
+
+      async function seedEmployee(userId: string): Promise<string> {
+        await seedLoginUser(userId, { roles: ['attendance_employee'] })
+        return loginToken(userId)
+      }
+
+      /** Launch through the entry (flag ON) and return the round the summary reports. */
+      async function launch(employeeToken: string, requestId: string): Promise<{ roundId: string; roundInstanceId: string }> {
+        const launched = await http('POST', entryPath(requestId), employeeToken, {})
+        expect(launched.status, launched.text).toBe(201)
+        const roundInstanceId = launched.json.data.round.engineInstanceId as string
+        createdApprovalIds.add(roundInstanceId)
+        return { roundId: launched.json.data.round.roundId as string, roundInstanceId }
+      }
+
+      async function listPending(token: string, query = ''): Promise<Raw> {
+        return http('GET', `${PENDING_LIST_PATH}${query}`, token)
+      }
+
+      function roundIdsOf(list: Raw): string[] {
+        return (list.json?.data?.items ?? []).map((item: { roundId: string }) => item.roundId)
+      }
+
+      async function launchedAtOf(roundId: string): Promise<string> {
+        const row = await pool().query<{ started_at: Date }>('SELECT started_at FROM approval_rounds WHERE id = $1', [roundId])
+        return row.rows[0].started_at.toISOString()
+      }
+
+      async function activeSeats(roundInstanceId: string): Promise<string[]> {
+        const rows = await pool().query<{ assignee_id: string }>(
+          `SELECT assignee_id FROM approval_assignments
+            WHERE instance_id = $1 AND is_active = TRUE AND assignment_type = 'user'
+            ORDER BY assignee_id`,
+          [roundInstanceId],
+        )
+        return rows.rows.map((row) => row.assignee_id)
+      }
+
+      it('the guard is attendance:approve: without it the plugin refuses with its exact 403 body — a SEAT HOLDER included; a holder of attendance:approve with no seat gets an empty list (200, not a refusal), and the actions route refuses that holder on the same round', async () => {
+        const holder = `g4c2-guard-seat-${TS}`
+        const seatHolder = await seedApprover(holder, { attendanceApprover: false })
+        const tpl = await publishTemplateFor('guard', [holder], 'single')
+        const employee = `g4c2-guard-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const { requestId } = await seedApprovedLeave({
+          documentRequesterId: employee,
+          templateId: tpl,
+          approverTokens: [seatHolder.fixtureToken],
+        })
+        const round = await launch(employeeToken, requestId)
+        expect(await activeSeats(round.roundInstanceId)).toEqual([holder])
+
+        const byEmployee = await listPending(employeeToken)
+        expect(byEmployee.status).toBe(403)
+        expect(byEmployee.text).toBe(PLUGIN_FORBIDDEN_BODY)
+        const bySeatHolderWithoutCode = await listPending(seatHolder.token)
+        expect(bySeatHolderWithoutCode.status).toBe(403)
+        expect(bySeatHolderWithoutCode.text).toBe(PLUGIN_FORBIDDEN_BODY)
+
+        const seatless = await seedApprover(`g4c2-guard-noseat-${TS}`)
+        const empty = await listPending(seatless.token)
+        expect(empty.status, empty.text).toBe(200)
+        expect(empty.json).toEqual(EMPTY_LIST)
+        const refused = await http('POST', `${entryPath(requestId)}/actions`, seatless.token, { action: 'approve' })
+        expect(refused.status).toBe(403)
+        expect(refused.json).toEqual(ASSIGNMENT_REQUIRED)
+
+        await pool().query(
+          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'attendance_approver') ON CONFLICT DO NOTHING`,
+          [holder],
+        )
+        const granted = await listPending(seatHolder.token)
+        expect(granted.status, granted.text).toBe(200)
+        expect(roundIdsOf(granted)).toEqual([round.roundId])
+        expect(granted.json.data.total).toBe(1)
+      })
+
+      it('a seated approver lists exactly their own pending rounds, newest launch first, with exactly the agreed fields; paging follows the plugin\'s parsePagination; every listed round is one the actions route accepts from them, and a handled round drops off', async () => {
+        const approver = `g4c2-seat-${TS}`
+        const seated = await seedApprover(approver)
+        const tpl = await publishTemplateFor('seat', [approver], 'single')
+        const employeeA = `g4c2-seat-empA-${TS}`
+        const employeeB = `g4c2-seat-empB-${TS}`
+        const tokenA = await seedEmployee(employeeA)
+        const tokenB = await seedEmployee(employeeB)
+        const leaveA = await seedApprovedLeave({ documentRequesterId: employeeA, templateId: tpl, approverTokens: [seated.fixtureToken] })
+        const leaveB = await seedApprovedLeave({ documentRequesterId: employeeB, templateId: tpl, approverTokens: [seated.fixtureToken] })
+        await pool().query(
+          `UPDATE attendance_requests
+              SET requested_in_at = '2026-10-08T01:00:00Z', requested_out_at = '2026-10-08T09:00:00Z'
+            WHERE id = $1`,
+          [leaveA.requestId],
+        )
+        const roundA = await launch(tokenA, leaveA.requestId)
+        const roundB = await launch(tokenB, leaveB.requestId)
+        // The requester-name null branch: a directory row whose name is absent.
+        await pool().query('UPDATE users SET name = NULL WHERE id = $1', [employeeB])
+
+        const list = await listPending(seated.token)
+        expect(list.status, list.text).toBe(200)
+        expect(Object.keys(list.json).sort()).toEqual(['data', 'ok'])
+        expect(Object.keys(list.json.data).sort()).toEqual(['items', 'total'])
+        expect(list.json.data.total).toBe(2)
+        for (const item of list.json.data.items) expect(Object.keys(item).sort()).toEqual(ITEM_KEYS)
+        expect(list.json.data.items).toEqual([
+          {
+            requestId: leaveB.requestId,
+            roundId: roundB.roundId,
+            engineInstanceId: roundB.roundInstanceId,
+            requesterUserId: employeeB,
+            requesterName: null,
+            requestType: 'leave',
+            startAt: null,
+            endAt: null,
+            launchedAt: await launchedAtOf(roundB.roundId),
+          },
+          {
+            requestId: leaveA.requestId,
+            roundId: roundA.roundId,
+            engineInstanceId: roundA.roundInstanceId,
+            requesterUserId: employeeA,
+            requesterName: employeeA,
+            requestType: 'leave',
+            startAt: '2026-10-08T01:00:00.000Z',
+            endAt: '2026-10-08T09:00:00.000Z',
+            launchedAt: await launchedAtOf(roundA.roundId),
+          },
+        ])
+
+        const firstPage = await listPending(seated.token, '?pageSize=1')
+        expect(firstPage.json.data.total).toBe(2)
+        expect(roundIdsOf(firstPage)).toEqual([roundB.roundId])
+        const secondPage = await listPending(seated.token, '?page=2&pageSize=1')
+        expect(secondPage.json.data.total).toBe(2)
+        expect(roundIdsOf(secondPage)).toEqual([roundA.roundId])
+
+        // Every listed round is one the actions route accepts from this viewer (count parity), and a
+        // handled round drops off the list.
+        const rejected = await http('POST', `${entryPath(leaveB.requestId)}/actions`, seated.token, {
+          action: 'reject',
+          comment: '不同意撤销',
+        })
+        expect(rejected.status, rejected.text).toBe(200)
+        expect(rejected.json).toEqual({
+          ok: true,
+          data: { requestId: leaveB.requestId, roundId: roundB.roundId, outcome: 'rejected', status: 'cancellation_rejected' },
+        })
+        expect(roundIdsOf(await listPending(seated.token))).toEqual([roundA.roundId])
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const approved = await http('POST', `${entryPath(leaveA.requestId)}/actions`, seated.token, { action: 'approve' })
+          expect(approved.status, approved.text).toBe(200)
+          expect(approved.json).toEqual({
+            ok: true,
+            data: { requestId: leaveA.requestId, roundId: roundA.roundId, outcome: 'applied', status: 'leave_cancelled' },
+          })
+        } finally {
+          stub.stop()
+        }
+        const after = await listPending(seated.token)
+        expect(after.status).toBe(200)
+        expect(after.json).toEqual(EMPTY_LIST)
+      })
+
+      it('会签 (two seats, approvalMode all): both seat holders list the round; the first approve deactivates only that seat while the round stays pending — it drops off THAT approver\'s list, and the actions route refuses them a second time; the other still lists it until they act', async () => {
+        const first = `g4c2-all-p1-${TS}`
+        const second = `g4c2-all-p2-${TS}`
+        const p1 = await seedApprover(first)
+        const p2 = await seedApprover(second)
+        const tpl = await publishTemplateFor('all', [first, second], 'all')
+        const employee = `g4c2-all-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const { documentId, requestId } = await seedApprovedLeave({
+          documentRequesterId: employee,
+          templateId: tpl,
+          approverTokens: [p1.fixtureToken, p2.fixtureToken],
+        })
+        const round = await launch(employeeToken, requestId)
+        expect(await activeSeats(round.roundInstanceId)).toEqual([first, second].sort())
+        expect(roundIdsOf(await listPending(p1.token))).toEqual([round.roundId])
+        expect(roundIdsOf(await listPending(p2.token))).toEqual([round.roundId])
+
+        const partial = await http('POST', `${entryPath(requestId)}/actions`, p1.token, { action: 'approve' })
+        expect(partial.status, partial.text).toBe(200)
+        expect(partial.json).toEqual({
+          ok: true,
+          data: { requestId, roundId: round.roundId, outcome: 'pending', status: 'cancellation_pending_approval' },
+        })
+        // The discriminating state: the round is still pending and P1 still has an assignment row on
+        // it — only inactive. The door refuses P1 now, so the list must not offer it to P1.
+        expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
+        const p1Rows = await pool().query<{ is_active: boolean }>(
+          'SELECT is_active FROM approval_assignments WHERE instance_id = $1 AND assignee_id = $2',
+          [round.roundInstanceId, first],
+        )
+        expect(p1Rows.rows).toEqual([{ is_active: false }])
+        expect(await activeSeats(round.roundInstanceId)).toEqual([second])
+        const p1After = await listPending(p1.token)
+        expect(p1After.status).toBe(200)
+        expect(p1After.json).toEqual(EMPTY_LIST)
+        const again = await http('POST', `${entryPath(requestId)}/actions`, p1.token, { action: 'approve' })
+        expect(again.status).toBe(403)
+        expect(again.json).toEqual(ASSIGNMENT_REQUIRED)
+        expect(roundIdsOf(await listPending(p2.token))).toEqual([round.roundId])
+
+        const closed = await http('POST', `${entryPath(requestId)}/actions`, p2.token, { action: 'reject', comment: '不同意撤销' })
+        expect(closed.status, closed.text).toBe(200)
+        expect(closed.json.data.outcome).toBe('rejected')
+        expect((await listPending(p2.token)).json).toEqual(EMPTY_LIST)
+      })
+
+      it('delegated seat restored to the original approver (lock §2-G3 third sentence, reading (a)): the delegator A lists the round and acts on it from the list; the delegatee D, who approved the original, is not listed and is refused by the actions route — the list and the route agree', async () => {
+        const delegatorA = `g4c2-dlg-a-${TS}`
+        const delegateeD = `g4c2-dlg-d-${TS}`
+        const a = await seedApprover(delegatorA)
+        const d = await seedApprover(delegateeD)
+        const delegationId = `g4c2-dlg-${TS}`
+        createdDelegationIds.add(delegationId)
+        await pool().query(
+          `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+           VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+          [delegationId, delegatorA, delegateeD],
+        )
+        const tpl = await publishTemplateFor('dlg', [delegatorA], 'single')
+        const employee = `g4c2-dlg-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const { documentId, requestId } = await seedApprovedLeave({
+          documentRequesterId: employee,
+          templateId: tpl,
+          approverTokens: [d.fixtureToken],
+        })
+        // The ORIGINAL's seat was the delegatee's (delegation applied at create time)…
+        const originalSeat = await pool().query<{ assignee_id: string; delegated_from: string | null }>(
+          `SELECT assignee_id, metadata->>'delegatedFrom' AS delegated_from FROM approval_assignments WHERE instance_id = $1`,
+          [documentId],
+        )
+        expect(originalSeat.rows).toEqual([{ assignee_id: delegateeD, delegated_from: delegatorA }])
+        // …and the round seats the delegator A.
+        const round = await launch(employeeToken, requestId)
+        expect(await activeSeats(round.roundInstanceId)).toEqual([delegatorA])
+
+        expect(roundIdsOf(await listPending(a.token))).toEqual([round.roundId])
+        const byDelegatee = await listPending(d.token)
+        expect(byDelegatee.status).toBe(200)
+        expect(byDelegatee.json).toEqual(EMPTY_LIST)
+        const dRefused = await http('POST', `${entryPath(requestId)}/actions`, d.token, { action: 'approve' })
+        expect(dRefused.status).toBe(403)
+        expect(dRefused.json).toEqual(ASSIGNMENT_REQUIRED)
+        // Recorded, not changed: the list applies no I7 (the seat is the authority, as on the actions
+        // route), while the round summary stays behind I7 on the ORIGINAL — A never took part in it.
+        const aSummary = await http('GET', entryPath(requestId), a.token)
+        expect(aSummary.status).toBe(404)
+        expect(aSummary.text).toBe(NOT_FOUND_BODY)
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const approved = await http('POST', `${entryPath(requestId)}/actions`, a.token, { action: 'approve' })
+          expect(approved.status, approved.text).toBe(200)
+          expect(approved.json).toEqual({
+            ok: true,
+            data: { requestId, roundId: round.roundId, outcome: 'applied', status: 'leave_cancelled' },
+          })
+        } finally {
+          stub.stop()
+        }
+        expect((await listPending(a.token)).json).toEqual(EMPTY_LIST)
+      })
+
+      it('the list follows the actions route\'s document gate and not the launch flag: a round whose request row moved to another org is not listed (the actions route answers it 404); with the flag OFF, rounds launched while it was ON are still listed', async () => {
+        const approver = `g4c2-gate-${TS}`
+        const seated = await seedApprover(approver)
+        const tpl = await publishTemplateFor('gate', [approver], 'single')
+        const employee = `g4c2-gate-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const kept = await seedApprovedLeave({ documentRequesterId: employee, templateId: tpl, approverTokens: [seated.fixtureToken] })
+        const moved = await seedApprovedLeave({ documentRequesterId: employee, templateId: tpl, approverTokens: [seated.fixtureToken] })
+        const keptRound = await launch(employeeToken, kept.requestId)
+        const movedRound = await launch(employeeToken, moved.requestId)
+        expect(roundIdsOf(await listPending(seated.token))).toEqual([movedRound.roundId, keptRound.roundId])
+
+        const relocated = await pool().query('UPDATE attendance_requests SET org_id = $2 WHERE id = $1', [
+          moved.requestId,
+          `g4c2-other-org-${TS}`,
+        ])
+        expect(relocated.rowCount).toBe(1)
+        const scoped = await listPending(seated.token)
+        expect(roundIdsOf(scoped)).toEqual([keptRound.roundId])
+        expect(scoped.json.data.total).toBe(1)
+        const outOfOrg = await http('POST', `${entryPath(moved.requestId)}/actions`, seated.token, { action: 'approve' })
+        expect(outOfOrg.status).toBe(404)
+        expect(outOfOrg.text).toBe(NOT_FOUND_BODY)
+
+        delete process.env[ENTRY_FLAG]
+        try {
+          const flagOff = await listPending(seated.token)
+          expect(flagOff.status, flagOff.text).toBe(200)
+          expect(roundIdsOf(flagOff)).toEqual([keptRound.roundId])
+        } finally {
+          process.env[ENTRY_FLAG] = 'true'
+        }
       })
     })
   })
