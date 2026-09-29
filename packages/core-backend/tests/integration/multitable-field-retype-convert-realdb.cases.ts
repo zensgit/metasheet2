@@ -26,12 +26,26 @@
  * fail-not-skip：哨兵在 DB 门控的 describe **外面**；真库步骤（METASHEET_REAL_DB_TEST_STEP=1）里没有 DATABASE_URL 就抛。
  */
 import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import { createServer, type Server as HttpServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 
-import express, { type Express } from 'express'
+import express, { type Express, type Request } from 'express'
 import jwt from 'jsonwebtoken'
+import * as decoding from 'lib0/decoding'
+import * as encoding from 'lib0/encoding'
+import { Server as SocketServer } from 'socket.io'
+import { io as socketClient, type Socket as ClientSocket } from 'socket.io-client'
 import request from 'supertest'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
+import * as syncProtocol from 'y-protocols/sync'
+import * as Y from 'yjs'
 
+import { createFieldSchemaRefusalHandler, createYjsInvalidator, type YjsInvalidate } from '../../src/collab/yjs-invalidation'
+import { YjsPersistenceAdapter } from '../../src/collab/yjs-persistence-adapter'
+import { YjsRecordBridge } from '../../src/collab/yjs-record-bridge'
+import { YjsSyncService } from '../../src/collab/yjs-sync-service'
+import { YjsWebSocketAdapter } from '../../src/collab/yjs-websocket-adapter'
 import { db } from '../../src/db/db'
 import { down as relaxTombstoneReasonDown, up as relaxTombstoneReason } from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
 import { down as createConversionsTableDown, up as createConversionsTable } from '../../src/db/migrations/zzzz20260928150100_create_meta_field_retype_conversions'
@@ -52,12 +66,23 @@ import {
 } from '../../src/multitable/field-schema-fence-recheck'
 import { loadFieldsForSheet } from '../../src/multitable/loaders'
 import { sweepFieldValueTombstoneRetention } from '../../src/multitable/meta-revision-retention'
+import { isFieldAlwaysReadOnly } from '../../src/multitable/permission-derivation'
+import { createYjsInvalidationPostCommitHook } from '../../src/multitable/post-commit-hooks'
+import { RecordWriteService, type RecordPatchInput } from '../../src/multitable/record-write-service'
 import { createRecord as pluginCreateRecord, patchRecord as pluginPatchRecord } from '../../src/multitable/records'
 import {
   getMultitableRequestMetadataCache,
   runWithMultitableRequestMetadataCache,
 } from '../../src/multitable/request-metadata-cache'
-import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { deriveCapabilities } from '../../src/multitable/sheet-capabilities'
+import { createMultitableAiRoutes } from '../../src/routes/multitable-ai'
+import {
+  createRecordWriteHelpers,
+  getYjsInvalidatorForRoutes,
+  setYjsInvalidatorForRoutes,
+  univerMetaRouter,
+} from '../../src/routes/univer-meta'
+import { AI_BULK_PREVIEW_CACHE_TABLE, insertBulkPreviewCacheRow } from '../../src/services/ai-bulk-preview-cache'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -227,6 +252,8 @@ export function defineFieldRetypeConvertRealDbCases(): void {
     heldRecordId: string,
     conversion: () => request.Test,
     writer: () => Promise<unknown>,
+    /** runs once the writer is proven parked on the fence, before the conversion is let go */
+    whileParked: () => Promise<void> = async () => {},
   ): Promise<{ conversion: request.Response; writer: Outcome }> {
     const holder = await poolManager.get().getInternalPool().connect()
     let conversionRun: Promise<Outcome> | null = null
@@ -241,6 +268,7 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       const conversionPid = await backendParkedBehind(holderPid, 'row', 'the conversion')
       writerRun = settle(writer())
       await backendParkedBehind(conversionPid, 'fence', 'the writer')
+      await whileParked()
       await holder.query('ROLLBACK')
       released = true
       const conversionOutcome = await conversionRun
@@ -281,6 +309,186 @@ export function defineFieldRetypeConvertRealDbCases(): void {
     (await q('SELECT source, count(*)::int AS n FROM meta_record_revisions WHERE sheet_id = $1 GROUP BY source ORDER BY source', [sheetId])).rows as Array<{ source: string; n: number }>
   const recordRows = async (sheetId: string) =>
     (await q('SELECT id, version, data FROM meta_records WHERE sheet_id = $1 ORDER BY id', [sheetId])).rows as Array<{ id: string; version: number; data: Record<string, unknown> }>
+
+  // ── the realtime (Yjs) side, as production assembles it ─────────────────────────────────────────────────
+  //
+  // Real classes end to end: socket.io server and client, YjsWebSocketAdapter, YjsSyncService on the real
+  // persistence adapter, YjsRecordBridge, RecordWriteService on the real pool — and the two functions src/index.ts
+  // calls to build the invalidator and the refusal handler. What is NOT the production code is `bridgeWriteInput`:
+  // the closure that builds the bridge's write input lives inside the server's start-up and cannot be imported, so
+  // it is written out here in the production shape (raw stored type, property riding along, lenient options) —
+  // the shape slice 3a's unit file holds to the source with a text tripwire.
+  const COLLAB_TOKEN = `tok_frc_${TS}`
+  const WRITE_PERMS = ['multitable:read', 'multitable:write']
+
+  async function bridgeWriteInput(recordId: string, patch: Record<string, unknown>, actorId: string): Promise<RecordPatchInput | null> {
+    const rec = await q('SELECT sheet_id FROM meta_records WHERE id = $1', [recordId])
+    if (rec.rows.length === 0) return null
+    const sheetId = String((rec.rows[0] as { sheet_id: unknown }).sheet_id)
+    const fieldRes = await q('SELECT id, name, type, property, "order" FROM meta_fields WHERE sheet_id = $1 ORDER BY "order" ASC, id ASC', [sheetId])
+    const fields = (fieldRes.rows as Array<Record<string, unknown>>).map((f) => {
+      const prop = (f.property && typeof f.property === 'object' ? f.property : {}) as Record<string, unknown>
+      return { id: String(f.id), name: String(f.name), type: f.type as string, property: prop, options: prop.options, order: Number(f.order ?? 0) }
+    })
+    const fieldById = new Map(fields.map((f) => {
+      const prop = f.property
+      const guard: Record<string, unknown> = { type: f.type, readOnly: isFieldAlwaysReadOnly(f as never), hidden: prop.hidden === true || prop.permissionHidden === true, property: prop }
+      if ((f.type === 'select' || f.type === 'multiSelect') && Array.isArray(prop.options)) {
+        guard.options = (prop.options as unknown[]).map((o) => (typeof o === 'string' ? o : (o as { value?: unknown })?.value ?? ''))
+      }
+      return [f.id, guard] as const
+    }))
+    return {
+      sheetId,
+      changesByRecord: new Map([[recordId, Object.entries(patch).map(([fieldId, value]) => ({ fieldId, value }))]]),
+      actorId,
+      fields,
+      visiblePropertyFields: fields,
+      visiblePropertyFieldIds: new Set(fields.map((f) => f.id)),
+      attachmentFields: [],
+      fieldById,
+      capabilities: deriveCapabilities(WRITE_PERMS, false),
+      access: { userId: actorId, permissions: WRITE_PERMS, isAdminRole: false },
+      source: 'yjs-bridge' as const,
+    } as unknown as RecordPatchInput
+  }
+
+  interface CollabStack {
+    url: string
+    bridge: YjsRecordBridge
+    syncService: YjsSyncService
+    invalidate: YjsInvalidate
+    close: () => Promise<void>
+  }
+
+  async function startCollab(): Promise<CollabStack> {
+    const http: HttpServer = createServer()
+    const io = new SocketServer(http)
+    const syncService = new YjsSyncService(new YjsPersistenceAdapter(db as never), async (recordId) => {
+      const row = (await q('SELECT data FROM meta_records WHERE id = $1', [recordId])).rows[0] as { data: unknown } | undefined
+      return row && row.data && typeof row.data === 'object' && !Array.isArray(row.data) ? (row.data as Record<string, unknown>) : null
+    })
+    const adapter = new YjsWebSocketAdapter(syncService)
+    adapter.setTokenVerifier(async (token) => (token === COLLAB_TOKEN ? ACTOR : null))
+    adapter.setAuthChecker(async () => ({ canRead: true, canWrite: true, canReadAllFields: true }))
+    const pool = poolManager.get()
+    const fakeReq = { user: { id: ACTOR, roles: [], perms: WRITE_PERMS } } as unknown as Request
+    const writeService = new RecordWriteService(
+      pool as unknown as ConstructorParameters<typeof RecordWriteService>[0],
+      new EventEmitter() as never,
+      createRecordWriteHelpers(fakeReq, pool as never),
+    )
+    const bridge = new YjsRecordBridge(
+      syncService,
+      writeService,
+      bridgeWriteInput,
+      { mergeWindowMs: 20, maxDelayMs: 50 }, // production: 200 / 500 — the same code path, a shorter wait
+      (socketId) => adapter.getSocketUserId(socketId),
+    )
+    adapter.setBridge(bridge)
+    adapter.register(io)
+    // from here on, the statements of src/index.ts
+    const invalidate = createYjsInvalidator({ bridge, syncService, adapter })
+    bridge.setRefusalHandler(createFieldSchemaRefusalHandler(invalidate))
+    writeService.setPostCommitHooks([createYjsInvalidationPostCommitHook(invalidate)])
+    await new Promise<void>((resolve) => { http.listen(0, '127.0.0.1', resolve) })
+    const port = (http.address() as AddressInfo).port
+    return {
+      url: `http://127.0.0.1:${port}`,
+      bridge,
+      syncService,
+      invalidate,
+      close: async () => {
+        bridge.destroy()
+        await syncService.destroy().catch(() => {})
+        await new Promise<void>((resolve) => { io.close(() => resolve()) })
+      },
+    }
+  }
+
+  const until = async (what: string, met: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (await met()) return
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    throw new Error(`timed out waiting for: ${what}`)
+  }
+
+  interface Editor {
+    doc: Y.Doc
+    /** every `yjs:invalidated` payload this editor received, in order */
+    invalidated: unknown[]
+    errors: unknown[]
+    cell: () => unknown
+    /** type into the text cell, as the web client's text binding does */
+    type: (suffix: string) => void
+    close: () => void
+  }
+
+  /** A collaborator with the record open: the web client's own protocol code (useYjsDocument.ts), nothing else. */
+  async function openEditor(stack: CollabStack, recordId: string, fieldId: string): Promise<Editor> {
+    const MSG_SYNC = 0
+    const socket: ClientSocket = socketClient(`${stack.url}/yjs`, { transports: ['websocket'], auth: { token: COLLAB_TOKEN }, forceNew: true, reconnection: false })
+    const doc = new Y.Doc()
+    const invalidated: unknown[] = []
+    const errors: unknown[] = []
+    let requestedServerState = false
+    const sendSyncStep1 = () => {
+      const encoder = encoding.createEncoder()
+      encoding.writeVarUint(encoder, MSG_SYNC)
+      syncProtocol.writeSyncStep1(encoder, doc)
+      socket.emit('yjs:message', { recordId, data: Array.from(encoding.toUint8Array(encoder)) })
+    }
+    socket.on('connect', () => { socket.emit('yjs:subscribe', { recordId }) })
+    socket.on('yjs:message', ({ recordId: rid, data }: { recordId: string; data: number[] }) => {
+      if (rid !== recordId) return
+      const decoder = decoding.createDecoder(new Uint8Array(data))
+      if (decoding.readVarUint(decoder) === MSG_SYNC) {
+        const encoder = encoding.createEncoder()
+        encoding.writeVarUint(encoder, MSG_SYNC)
+        syncProtocol.readSyncMessage(decoder, encoder, doc, 'remote')
+        const reply = encoding.toUint8Array(encoder)
+        if (reply.length > 1) socket.emit('yjs:message', { recordId, data: Array.from(reply) })
+      }
+      if (!requestedServerState) {
+        requestedServerState = true
+        sendSyncStep1()
+      }
+    })
+    socket.on('yjs:update', ({ recordId: rid, data }: { recordId: string; data: number[] }) => {
+      if (rid === recordId) Y.applyUpdate(doc, new Uint8Array(data), 'remote')
+    })
+    doc.on('update', (update: Uint8Array, origin: unknown) => {
+      if (origin !== 'remote' && socket.connected) socket.emit('yjs:update', { recordId, data: Array.from(update) })
+    })
+    socket.on('yjs:invalidated', (payload: unknown) => { invalidated.push(payload) })
+    socket.on('yjs:error', (payload: unknown) => { errors.push(payload) })
+    const cell = (): unknown => {
+      const value = doc.getMap('fields').get(fieldId)
+      return value instanceof Y.Text ? value.toString() : value
+    }
+    await until(`the editor of ${recordId} to receive the seeded document`, () => doc.getMap('fields').has(fieldId) || errors.length > 0)
+    expect(errors).toEqual([])
+    return {
+      doc,
+      invalidated,
+      errors,
+      cell,
+      type: (suffix: string) => {
+        const text = doc.getMap('fields').get(fieldId)
+        if (!(text instanceof Y.Text)) throw new Error('the cell is not a text cell in this document')
+        text.insert(text.length, suffix)
+      },
+      close: () => { socket.disconnect(); doc.destroy() },
+    }
+  }
+
+  const yjsRows = async (recordId: string): Promise<number> => {
+    const updates = (await q('SELECT count(*)::int AS n FROM meta_record_yjs_updates WHERE record_id = $1', [recordId])).rows[0] as { n: number }
+    const states = (await q('SELECT count(*)::int AS n FROM meta_record_yjs_states WHERE record_id = $1', [recordId])).rows[0] as { n: number }
+    return updates.n + states.n
+  }
 
   const SAVED_ENV: Record<string, string | undefined> = {}
   const FLAGS = [CONVERT_FLAG, FENCE_FLAG, LEGACY_FLAG, TIER2_FLAG, CACHE_FLAG, 'MULTITABLE_SHEET_REVERT_MAX_RECORDS', 'MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS', 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED']
@@ -324,6 +532,9 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       await q('DELETE FROM multitable_automation_executions WHERE rule_id = ANY($1::text[])', [automationRuleIds]).catch(() => {})
       for (const sheetId of createdSheets) {
         await q('DELETE FROM meta_views WHERE sheet_id = $1', [sheetId]).catch(() => {})
+        await q(`DELETE FROM ${AI_BULK_PREVIEW_CACHE_TABLE} WHERE sheet_id = $1`, [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_record_yjs_updates WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId]).catch(() => {})
+        await q('DELETE FROM meta_record_yjs_states WHERE record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_field_retype_conversions WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [sheetId]).catch(() => {})
         await q('DELETE FROM meta_config_revisions WHERE sheet_id = $1', [sheetId]).catch(() => {})
@@ -1233,6 +1444,199 @@ export function defineFieldRetypeConvertRealDbCases(): void {
       const settled = await snapshot(column)
       await expect(merge()).rejects.toBeInstanceOf(DerivedMergeTargetRetypedError)
       expect(await snapshot(column)).toEqual(settled)
+    })
+
+    // ── the realtime (Yjs) path, end to end (ADR 增补 C) ──────────────────────────────────────────────────
+    test('realtime: an edit refused FIELD_SCHEMA_CHANGED on the bridge is no longer dropped in silence — the editors are told, the document and its persisted state are gone, the cell holds what the conversion wrote', async () => {
+      const column = await seedColumn([])
+      const F = column.fieldId
+      const R = column.rec(1)
+      const HELD_ROW = column.rec(9)
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R, column.sheetId, JSON.stringify({ [F]: 'VAL-ORIG' }), ACTOR])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [HELD_ROW, column.sheetId, JSON.stringify({ [F]: 'VAL-HELD' }), ACTOR])
+      // the conversion runs "in another process": the route has NO invalidator, so whatever the editors are told
+      // can only come from the bridge's own refusal path
+      const routesInvalidator = getYjsInvalidatorForRoutes()
+      setYjsInvalidatorForRoutes(null)
+      const stack = await startCollab()
+      const editors: Editor[] = []
+      try {
+        const first = await openEditor(stack, R, F)
+        const second = await openEditor(stack, R, F)
+        editors.push(first, second)
+        expect([first.cell(), second.cell()]).toEqual(['VAL-ORIG', 'VAL-ORIG'])
+        // string → select: R already holds its option text, the conversion does not rewrite it
+        const token = await previewToken(F, 'select')
+
+        let persistedWhileParked = -1
+        const raced = await raceWithConversion(
+          HELD_ROW,
+          () => execute(F, { previewToken: token, confirm: CONVERT_CONFIRM }),
+          async () => {
+            first.type(' edited')
+            await until('both editors to be told', () => first.invalidated.length > 0 && second.invalidated.length > 0, 15_000)
+          },
+          async () => {
+            // the edit is in the shared document, in front of both editors, and persisted — and not in the database
+            expect([first.cell(), second.cell()]).toEqual(['VAL-ORIG edited', 'VAL-ORIG edited'])
+            persistedWhileParked = await yjsRows(R)
+            expect((await cellState(R, F)).value).toBe('VAL-ORIG')
+          },
+        )
+
+        expect([raced.conversion.status, raced.conversion.body?.data?.cells]).toEqual([200, { rewritten: 0, unchanged: 2 }])
+        expect(raced.writer.ok, String((raced.writer as { error?: unknown }).error ?? '')).toBe(true)
+        expect(persistedWhileParked).toBeGreaterThanOrEqual(1)
+        // told once each, with the message the web client already handles — nothing new on the wire
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect(first.invalidated).toEqual([{ recordId: R, reason: 'rest-write' }])
+        expect(second.invalidated).toEqual([{ recordId: R, reason: 'rest-write' }])
+        expect([first.errors, second.errors]).toEqual([[], []])
+        // the refusal is counted; nothing of the edit reached the record; no revision
+        expect(stack.bridge.getMetrics()).toMatchObject({ flushSuccessCount: 0, flushFailureCount: 1 })
+        expect(await fieldRow(F)).toMatchObject({ type: 'select' })
+        expect(await recordRows(column.sheetId)).toEqual([
+          { id: R, version: 1, data: { [F]: 'VAL-ORIG' } },
+          { id: HELD_ROW, version: 1, data: { [F]: 'VAL-HELD' } },
+        ])
+        expect(await revisionsBySource(column.sheetId)).toEqual([])
+        // the document is gone on the server, and so is its persisted state
+        expect(stack.syncService.getDoc(R)).toBeUndefined()
+        expect(await yjsRows(R)).toBe(0)
+        // reopening gives a document seeded from the committed row
+        const reopened = await openEditor(stack, R, F)
+        editors.push(reopened)
+        expect(reopened.cell()).toBe('VAL-ORIG')
+      } finally {
+        for (const editor of editors) editor.close()
+        await stack.close()
+        setYjsInvalidatorForRoutes(routesInvalidator)
+      }
+    })
+
+    test('realtime: an open collaborative session on the converted sheet is told at the conversion and at the undo — on a row the conversion rewrote AND on a row it did not', async () => {
+      const column = await seedColumn([])
+      const F = column.fieldId
+      const KEPT = column.rec(1) // holds its option text: not rewritten by string → select
+      const FILLED = column.rec(2) // holds '' after the conversion: rewritten (it had no key)
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [KEPT, column.sheetId, JSON.stringify({ [F]: 'VAL-ALPHA', [column.otherFieldId]: 'VAL-G1' }), ACTOR])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [FILLED, column.sheetId, JSON.stringify({ [column.otherFieldId]: 'VAL-G2' }), ACTOR])
+      const routesInvalidator = getYjsInvalidatorForRoutes()
+      const stack = await startCollab()
+      setYjsInvalidatorForRoutes(stack.invalidate)
+      const editors: Editor[] = []
+      try {
+        // both editors look at column G: FILLED has no F key, so F is absent from its document
+        const kept = await openEditor(stack, KEPT, column.otherFieldId)
+        const filled = await openEditor(stack, FILLED, column.otherFieldId)
+        editors.push(kept, filled)
+
+        const id = await convert(column, 'select')
+        await until('both editors to be told of the conversion', () => kept.invalidated.length > 0 && filled.invalidated.length > 0)
+        expect(kept.invalidated).toEqual([{ recordId: KEPT, reason: 'rest-write' }])
+        expect(filled.invalidated).toEqual([{ recordId: FILLED, reason: 'rest-write' }])
+        expect([stack.syncService.getDoc(KEPT), stack.syncService.getDoc(FILLED)]).toEqual([undefined, undefined])
+        expect((await recordRows(column.sheetId)).map((row) => [row.id, row.version])).toEqual([[KEPT, 1], [FILLED, 2]])
+
+        // reopened after the conversion: the documents carry the converted column
+        const keptAgain = await openEditor(stack, KEPT, F)
+        const filledAgain = await openEditor(stack, FILLED, F)
+        editors.push(keptAgain, filledAgain)
+        expect([keptAgain.cell(), filledAgain.cell()]).toEqual(['VAL-ALPHA', ''])
+
+        expect((await undo(F, { convertRevisionId: id, confirm: UNDO_CONFIRM })).status).toBe(200)
+        await until('both editors to be told of the undo', () => keptAgain.invalidated.length > 0 && filledAgain.invalidated.length > 0)
+        expect(keptAgain.invalidated).toEqual([{ recordId: KEPT, reason: 'rest-write' }])
+        expect(filledAgain.invalidated).toEqual([{ recordId: FILLED, reason: 'rest-write' }])
+        // no edit was in flight: nothing was refused, nothing was flushed
+        expect(stack.bridge.getMetrics()).toMatchObject({ flushSuccessCount: 0, flushFailureCount: 0 })
+      } finally {
+        for (const editor of editors) editor.close()
+        await stack.close()
+        setYjsInvalidatorForRoutes(routesInvalidator)
+      }
+    })
+
+    test('realtime CONTROL: with no conversion in the way the same edit through the same stack lands, and nobody is told anything', async () => {
+      const column = await seedColumn([])
+      const F = column.fieldId
+      const R = column.rec(1)
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R, column.sheetId, JSON.stringify({ [F]: 'VAL-ORIG' }), ACTOR])
+      const stack = await startCollab()
+      const editors: Editor[] = []
+      try {
+        const editor = await openEditor(stack, R, F)
+        editors.push(editor)
+        editor.type(' edited')
+        await until('the flush to land', () => stack.bridge.getMetrics().flushSuccessCount === 1)
+        expect(await recordRows(column.sheetId)).toEqual([{ id: R, version: 2, data: { [F]: 'VAL-ORIG edited' } }])
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect([editor.invalidated, editor.errors]).toEqual([[], []])
+        expect(stack.syncService.getDoc(R)).toBeDefined()
+        expect(stack.bridge.getMetrics()).toMatchObject({ flushSuccessCount: 1, flushFailureCount: 0 })
+      } finally {
+        for (const editor of editors) editor.close()
+        await stack.close()
+      }
+    })
+
+    // ── the AI bulk commit: a fenced writer that answers per row, not with a status code ────────────────────
+    test('AI bulk-commit: a confirmed row whose target column was converted while its write waited is `stale_reprev` — not written, not logged as a failure; the same record through the same route into a column nobody converted is written', async () => {
+      const column = await seedColumn([])
+      const F = column.fieldId
+      const G = column.otherFieldId
+      const R = column.rec(1)
+      const HELD_ROW = column.rec(9)
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R, column.sheetId, JSON.stringify({ [F]: 'VAL-ORIG', [G]: 'VAL-G' }), ACTOR])
+      await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [HELD_ROW, column.sheetId, JSON.stringify({ [F]: 'VAL-HELD' }), ACTOR])
+      // two previews the user confirmed, each reviewed against a TEXT column: one run fills F, one fills G
+      const runF = `run_frc_f_${column.sheetId}`
+      const runG = `run_frc_g_${column.sheetId}`
+      const cached = { actorId: ACTOR, sheetId: column.sheetId, recordId: R, previewVersion: 1, usageTokens: 1, costUsd: 0 }
+      await insertBulkPreviewCacheRow((sql, params) => q(sql, params), { ...cached, runId: runF, fieldId: F, proposedValue: 'VAL-AI-F' } as never)
+      await insertBulkPreviewCacheRow((sql, params) => q(sql, params), { ...cached, runId: runG, fieldId: G, proposedValue: 'VAL-AI-G' } as never)
+
+      let providerCalls = 0
+      const aiApp = express()
+      aiApp.use(express.json())
+      aiApp.use((req, _res, next) => {
+        ;(req as { user?: unknown }).user = { id: ACTOR, roles: ['member'], perms: PERMS, permissions: PERMS }
+        next()
+      })
+      aiApp.use('/api/multitable', createMultitableAiRoutes({ fetchFn: (async () => { providerCalls += 1; return new Response('{}', { status: 500 }) }) as typeof fetch }))
+      const commit = (runId: string) => request(aiApp).post(`/api/multitable/sheets/${column.sheetId}/ai/shortcut/bulk-commit`).send({ runId, recordIds: [R] })
+
+      const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        // string → select on F; R holds its option text, the conversion does not rewrite it
+        const token = await previewToken(F, 'select')
+        const raced = await raceWithConversion(HELD_ROW, () => execute(F, { previewToken: token, confirm: CONVERT_CONFIRM }), () => send(commit(runF)))
+
+        expect(raced.conversion.status).toBe(200)
+        expect(raced.writer.ok, String((raced.writer as { error?: unknown }).error ?? '')).toBe(true)
+        const res = (raced.writer as { value: request.Response }).value
+        expect([res.status, res.body]).toEqual([200, {
+          outcomes: [{ recordId: R, outcome: 'stale_reprev' }],
+          counts: { written: 0, stale_reprev: 1, write_conflict: 0, not_in_cache: 0, skipped_no_perm: 0 },
+          batchId: null,
+        }])
+        // a known refusal: nothing is reported as an unexpected write failure
+        expect(errorLog.mock.calls.filter((call) => String(call[0]).includes('commit row write failed'))).toEqual([])
+        expect((await fieldRow(F)).type).toBe('select')
+        expect(await recordRows(column.sheetId)).toEqual([
+          { id: R, version: 1, data: { [F]: 'VAL-ORIG', [G]: 'VAL-G' } },
+          { id: HELD_ROW, version: 1, data: { [F]: 'VAL-HELD' } },
+        ])
+        expect(await revisionsBySource(column.sheetId)).toEqual([])
+
+        // CONTROL — the same record, the same route, a column nobody converted: the confirmed value is written
+        const control = await commit(runG)
+        expect([control.status, control.body?.outcomes, control.body?.counts?.written]).toEqual([200, [{ recordId: R, outcome: 'written' }], 1])
+        expect((await recordRows(column.sheetId))[0]).toEqual({ id: R, version: 2, data: { [F]: 'VAL-ORIG', [G]: 'VAL-AI-G' } })
+        expect(providerCalls).toBe(0)
+      } finally {
+        errorLog.mockRestore()
+      }
     })
 
     // ── ⑬ ──────────────────────────────────────────────────────────────────────────────────────────────
