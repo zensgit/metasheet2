@@ -5902,6 +5902,20 @@ export interface ApprovalRoutePreviewResult {
   truncated: boolean
 }
 
+/**
+ * 撤销锁增补 P-11 (c) — the lock §14.1 seat-arm fence: the ONLY seat arms a cancel round may carry.
+ * `source_queue` is excluded on purpose (the todo-center lock records that arm's decision door,
+ * read admission and badge disagreeing), so the cancel line cannot inherit that disagreement.
+ */
+export const CANCEL_ROUND_ALLOWED_SEAT_ARMS: ReadonlySet<string> = new Set(['user', 'role'])
+
+export function cancelRoundSeatArmsWithinFence(assignments: ReadonlyArray<{ assignmentType?: unknown }>): boolean {
+  return assignments.every(
+    (assignment) =>
+      typeof assignment.assignmentType === 'string' && CANCEL_ROUND_ALLOWED_SEAT_ARMS.has(assignment.assignmentType),
+  )
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -9469,6 +9483,19 @@ export class ApprovalProductService {
       // assertion about an unreachable branch (the pre-check above carries the one that IS
       // constructible, `reason: 'no_human_approver'`).
       if (initial.status !== 'pending' || initial.currentNodeKey !== CANCEL_ROUND_APPROVAL_NODE_KEY || initialAssignmentCount === 0) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
+      // 增补 P-11 (c), lock §14.1 seat-arm fence (RATIFY 追记 2026-09-28, owner 「Adopt all 3, split
+      // locks (Recommended)」): a cancel round's seats may only be `user` / `role` arms, never
+      // `source_queue`. The seed graph seats people by id, so this is a fail-closed trip-wire for a
+      // future graph / resolver edit, answered like the backstop above (same registered code, no new
+      // one) and BEFORE any write. This path is the only writer of a cancel round's seats: §9-9 /
+      // §14.3 refuse every verb or job that could change one afterwards.
+      if (!cancelRoundSeatArmsWithinFence(initial.assignments)) {
         throw new ServiceError(
           'Cancel round could not be started: no eligible approver seat could be resolved',
           409,

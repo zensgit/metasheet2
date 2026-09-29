@@ -32,6 +32,32 @@
  * the STATIC census, not this probe, is the load-bearing half of the unreachability claim; this
  * probe exists to close the one hole the static census cannot see (runtime/dynamic dispatch).
  *
+ * ROUND 3 — WIRING DAY (registration item L-4 of the product-entry errata v2): the product entry's
+ * phase A registers exactly two routes whose path names the entry, `GET` and `POST
+ * /api/attendance/requests/:id/cancel-round` (plugin-attendance, P-1 Q1′ = (i)). L-4 requires this
+ * probe to move from 「no route names it, reach = 0」 to 「only the NAMED entry points exist, and any
+ * reach goes through the NAMED entry port」 in the same commit. So:
+ *   - `NAMED_ENTRY_ROUTES` is the exact (method, path) allow-list; any OTHER route matching a
+ *     cancel-round token still fails (exit 2), and a named route that is MISSING also fails (exit 5 —
+ *     the allow-list must not silently outlive the routes it names);
+ *   - a reach is tolerated only when its stack passes through `NAMED_ENTRY_PORT_MODULE`; any other
+ *     reach still fails (exit 1). With synthetic `:id` values the named routes answer 400 before any
+ *     lookup, so the expected real-run count is still 0 — the stack rule is what keeps the probe
+ *     honest if a future run fires them with real ids.
+ *
+ * ROUND 4 — A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the entry adds two
+ * more routes under the same path, `POST …/cancel-round/actions` (approver approve / reject) and
+ * `POST …/cancel-round/withdraw` (the requester's revoke). They reach the ENGINE dispatch on an
+ * existing round, never the creation path, so the reach rule is unchanged; the allow-list grows to
+ * exactly these four (method, path) pairs in the same commit that registers them, and the exit-2 /
+ * exit-5 rules keep holding it to exactly four.
+ *
+ * ROUND 5 — C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」): the approver's
+ * 「cancellations waiting for me」 list, `GET /api/attendance/cancel-rounds/pending`. Its path carries
+ * the `cancel-round` token, so it joins the allow-list in the same commit that registers it — exactly
+ * FIVE (method, path) pairs now. It reads (seats, rounds, request rows) and never reaches the creation
+ * path, so the reach rule is unchanged.
+ *
  * HOME: this file lives under `tests/` on purpose. It NAMES `createCancelRoundInstance`, and the
  * static census's whole point is that no PRODUCTION source may name it — a harness parked in a
  * production root would have to be waved through by an allowlist, i.e. exactly the hole the census
@@ -42,6 +68,21 @@
 import type { Server } from 'node:http'
 
 const CONTROL = process.env.DORMANCY_PROBE_CONTROL ?? 'none'
+
+/** Round 3 (L-4) + round 4 (A2) + round 5 (C2): the exact entry routes the product entry registers. */
+const NAMED_ENTRY_ROUTES: ReadonlyArray<{ method: string; path: string }> = [
+  { method: 'GET', path: '/api/attendance/requests/:id/cancel-round' },
+  { method: 'POST', path: '/api/attendance/requests/:id/cancel-round' },
+  { method: 'POST', path: '/api/attendance/requests/:id/cancel-round/actions' },
+  { method: 'POST', path: '/api/attendance/requests/:id/cancel-round/withdraw' },
+  { method: 'GET', path: '/api/attendance/cancel-rounds/pending' },
+]
+/** Round 3 (L-4): the one production module allowed on a reach stack. */
+const NAMED_ENTRY_PORT_MODULE = 'approval-cancel-round-entry-port'
+
+function isNamedEntryRoute(route: { method: string; path: string }): boolean {
+  return NAMED_ENTRY_ROUTES.some((named) => named.method === route.method && named.path === route.path)
+}
 
 async function main(): Promise<number> {
   const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
@@ -84,11 +125,17 @@ async function main(): Promise<number> {
   routes.sort((a, b) => (a.path + a.method).localeCompare(b.path + b.method))
 
   const CANCEL_ROUND_PATH_TOKENS = ['cancel-round', 'cancelround', 'cancel_round', '撤销轮']
-  const suspiciousRoutes = routes.filter((r) =>
+  const tokenRoutes = routes.filter((r) =>
     CANCEL_ROUND_PATH_TOKENS.some((t) => r.path.toLowerCase().includes(t)))
+  const suspiciousRoutes = tokenRoutes.filter((r) => !isNamedEntryRoute(r))
+  const missingNamedRoutes = NAMED_ENTRY_ROUTES.filter(
+    (named) => !routes.some((r) => r.method === named.method && r.path === named.path),
+  )
 
   console.log(`[probe] registered routes: ${routes.length}`)
-  console.log(`[probe] routes matching a cancel-round token: ${suspiciousRoutes.length} ${JSON.stringify(suspiciousRoutes)}`)
+  console.log(`[probe] routes matching a cancel-round token: ${tokenRoutes.length} ${JSON.stringify(tokenRoutes)}`)
+  console.log(`[probe] of which NOT in the named allow-list: ${suspiciousRoutes.length} ${JSON.stringify(suspiciousRoutes)}`)
+  console.log(`[probe] named entry routes missing from the table: ${missingNamedRoutes.length} ${JSON.stringify(missingNamedRoutes)}`)
 
   // ---- 4. fire every enumerated route ----
   const base = `http://127.0.0.1:${port}`
@@ -145,16 +192,23 @@ async function main(): Promise<number> {
     return 0
   }
 
-  if (reachCount !== 0) {
-    console.error(`[probe] FAIL: createCancelRoundInstance was reached ${reachCount} time(s):`)
-    for (const s of reachedVia) console.error(s)
+  const unnamedReaches = reachedVia.filter((stack) => !stack.includes(NAMED_ENTRY_PORT_MODULE))
+  if (unnamedReaches.length !== 0) {
+    console.error(`[probe] FAIL: createCancelRoundInstance was reached ${unnamedReaches.length} time(s) outside the named entry port:`)
+    for (const s of unnamedReaches) console.error(s)
     return 1
   }
   if (suspiciousRoutes.length !== 0) {
-    console.error('[probe] FAIL: a route path names a cancel-round entry point')
+    console.error('[probe] FAIL: a route path outside the named allow-list names a cancel-round entry point')
     return 2
   }
-  console.log('[probe] PASS: no registered route or handler reached the cancel-round creation path')
+  if (missingNamedRoutes.length !== 0) {
+    console.error('[probe] FAIL: a named entry route is missing — the allow-list outlived the routes it names')
+    return 5
+  }
+  console.log(
+    `[probe] PASS: only the named entry routes exist; reaches through the named port: ${reachCount - unnamedReaches.length}, elsewhere: 0`,
+  )
   return 0
 }
 
