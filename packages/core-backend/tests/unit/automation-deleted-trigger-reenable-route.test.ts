@@ -1,5 +1,5 @@
 /**
- * #6155 — an EXISTING「记录删除时 → 删除记录」rule (`record.deleted` + same-base `delete_record` of the trigger
+ * #6155 — an EXISTING rule with trigger `record.deleted` and action `delete_record` (same base, i.e. the trigger
  * record) that an operator switched OFF in the automation panel can be switched back ON from the same panel.
  *
  * Before: PATCH `{ enabled: false }` answered 200, then PATCH `{ enabled: true }` answered
@@ -29,7 +29,7 @@ function storedRow(overrides: Record<string, unknown> = {}): Record<string, unkn
   return {
     id: RULE_ID,
     sheet_id: SHEET_ID,
-    name: '记录删除时 → 删除记录',
+    name: 'Record-deleted sample rule',
     trigger_type: 'record.deleted',
     trigger_config: {},
     action_type: 'delete_record',
@@ -199,7 +199,7 @@ describe('#6155 — switching an existing record-deleted rule back on through th
     cleanup = () => setAutomationServiceInstance(null)
 
     const res = await request(pinned.url()).post(AUTOMATIONS).send({
-      name: '记录删除时 → 删除记录',
+      name: 'Record-deleted sample rule',
       triggerType: 'record.deleted',
       triggerConfig: {},
       actionType: 'delete_record',
