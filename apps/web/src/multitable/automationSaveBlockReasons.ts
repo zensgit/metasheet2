@@ -117,8 +117,9 @@ export interface SaveBlockActionSnapshot {
 
 // ── The ONE client-side detector for "record.deleted + an action that mutates the trigger record" ──────────
 // 客户反馈 2026-09-24 #3 (裁定 PR #6074) / #6155. Under a `record.deleted` trigger the trigger record no longer
-// exists, so a SAME-BASE update_record / delete_record / lock_record of it can only no-op (each run ends as
-// skipped). Two consumers share this decision so they cannot drift: the rule editor (the pre-evaluated
+// exists, so a SAME-BASE update_record / delete_record / lock_record of it can only no-op (a delete step ends as
+// skipped, an update / lock step as success; no table record is changed). Two consumers share this decision so
+// they cannot drift: the rule editor (the pre-evaluated
 // `deletedTriggerSelfMutation` above → its save-block reason, inline hint and disabled option) and the automation
 // panel (a non-blocking notice on a LISTED rule that is on or being switched on). It mirrors the backend's
 // STRUCTURAL check (automation-service.ts validateDeletedTriggerSelfMutation): a mutating action without a
