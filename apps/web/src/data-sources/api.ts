@@ -1,22 +1,31 @@
 // Typed client for the generic external data-source connector API.
 import { apiGet, apiFetch } from '../utils/api'
+import { DATA_SOURCE_LOAD_STATES } from './types'
 import type {
   CreateDataSourcePayload,
   DataSourceDetail,
   DataSourceDraftTestResult,
   DataSourceListItem,
+  DataSourceLoadFailedItem,
+  DataSourceLoadState,
   DataSourceSchemaInfo,
   DataSourceSelectPayload,
   DataSourceSelectResult,
   DataSourceTableInfo,
   DataSourceTestResult,
   RotateDataSourceCredentialsPayload,
+  RotateDataSourceCredentialsResult,
   UpdateDataSourcePayload,
 } from './types'
 
 interface ListEnvelope {
   ok: boolean
-  data?: { items?: DataSourceListItem[]; total?: number }
+  data?: { items?: DataSourceListItem[]; total?: number; loadFailed?: unknown }
+}
+
+interface RotateEnvelope {
+  ok?: boolean
+  data?: { restartRequired?: unknown }
 }
 
 interface DetailEnvelope {
@@ -59,8 +68,46 @@ async function errorFrom(res: Response, fallback: string): Promise<string> {
   return body?.error?.message || `${fallback} (${res.status} ${res.statusText})`
 }
 
-export async function listDataSources(): Promise<DataSourceListItem[]> {
+export interface ListDataSourcesOptions {
+  /**
+   * Receives the SAME response's `data.loadFailed` sibling (sources that exist but the server could
+   * not load), already validated. Opt-in on purpose: the return value stays `data.items` only, so a
+   * caller that treats every returned entry as a usable source (the workbench bridge picker) can
+   * never be handed a load-failed one.
+   */
+  onLoadFailed?: (entries: DataSourceLoadFailedItem[]) => void
+}
+
+/**
+ * Keep the well-formed load-failed entries (an object with a non-empty string id). A state this UI
+ * does not know is shown as `load_failed` — still listed (a source must never be invisible), but
+ * with the "ask an administrator" badge and no re-seal action: only a KNOWN credential failure is
+ * offered one.
+ */
+export function parseLoadFailedEntries(raw: unknown): DataSourceLoadFailedItem[] {
+  if (!Array.isArray(raw)) return []
+  const out: DataSourceLoadFailedItem[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue
+    const e = entry as Record<string, unknown>
+    if (typeof e.id !== 'string' || e.id.length === 0) continue
+    const loadState: DataSourceLoadState = (DATA_SOURCE_LOAD_STATES as readonly string[]).includes(e.loadState as string)
+      ? e.loadState as DataSourceLoadState
+      : 'load_failed'
+    out.push({
+      id: e.id,
+      name: typeof e.name === 'string' && e.name.length > 0 ? e.name : e.id,
+      type: typeof e.type === 'string' ? e.type : '',
+      loadState,
+      ownerId: typeof e.ownerId === 'string' ? e.ownerId : null,
+    })
+  }
+  return out
+}
+
+export async function listDataSources(options: ListDataSourcesOptions = {}): Promise<DataSourceListItem[]> {
   const res = await apiGet<ListEnvelope>('/api/data-sources')
+  options.onLoadFailed?.(parseLoadFailedEntries(res.data?.loadFailed))
   return res.data?.items ?? []
 }
 
@@ -89,10 +136,15 @@ export async function updateDataSource(id: string, payload: UpdateDataSourcePayl
   }
 }
 
+/**
+ * Rotate credentials — and, for a source the server could not load (`credentials_unreadable`), the
+ * same call re-seals it in place. `restartRequired` is true only when the server saved the
+ * credentials but can bring the source live only after a restart.
+ */
 export async function rotateDataSourceCredentials(
   id: string,
   payload: RotateDataSourceCredentialsPayload,
-): Promise<void> {
+): Promise<RotateDataSourceCredentialsResult> {
   const res = await apiFetch(`/api/data-sources/${encodeURIComponent(id)}/credentials`, {
     method: 'PUT',
     body: JSON.stringify(payload),
@@ -100,6 +152,8 @@ export async function rotateDataSourceCredentials(
   if (!res.ok) {
     throw new Error(await errorFrom(res, 'Failed to update data source credentials'))
   }
+  const body = (await res.json().catch(() => null)) as RotateEnvelope | null
+  return { restartRequired: body?.data?.restartRequired === true }
 }
 
 /**

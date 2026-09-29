@@ -20,6 +20,8 @@ import { Logger } from '../core/logger'
 import {
   c6WriteTargetQueryDisabledMessage,
   DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE,
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
   DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE,
   DataSourceManager,
   isGenericQueryDisabledConfig,
@@ -35,6 +37,14 @@ import {
 import { DATA_SOURCE_DEFAULT_LIMIT, DATA_SOURCE_MAX_ROWS } from '../data-adapters/BaseAdapter'
 
 const logger = new Logger('DataSourcesRouter')
+
+// Re-seal refusals whose values-free `details` (missing credential KEY names / a load state) reach
+// the client on PUT /:id/credentials. A closed set, so no other coded refusal on that route changes
+// its body shape.
+const RESEAL_DETAIL_CODES: ReadonlySet<string> = new Set([
+  DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+  DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
+])
 
 // A deliberate gate refusal — the outbound-SQL-write arm/provisioning guard, the K3 destination fence —
 // throws an Error carrying a numeric `status` and a fixed `code`. Surface those verbatim so the refusal
@@ -379,9 +389,10 @@ export function dataSourcesRouter(): Router {
         })
       }
       const manager = getManager()
+      const actor = resolveActor(req)
       // Authority model: owners see their own sources; platform admins see
       // every source (management metadata only — never credentials).
-      const sources = manager.listDataSources({ actor: resolveActor(req) })
+      const sources = manager.listDataSources({ actor })
       // ONE grouped count for the whole page (never one query per row). The
       // integer is management metadata like `connected`/`ownerId`: it says HOW
       // MANY integration bindings point here, never WHICH ones.
@@ -391,11 +402,17 @@ export function dataSourcesRouter(): Router {
         // Omitted, not 0, when unknown — see referenceCountsForDisplay.
         return referenceCount === undefined ? source : { ...source, referenceCount }
       })
+      // Sources that exist but FAILED TO LOAD (#6079): a SIBLING of `items`, never inside it, so no
+      // consumer that treats an `items` entry as a usable source can receive one. Same visibility
+      // as `items` (stored owner, or platform admin). Omitted when empty: for every caller with
+      // nothing to see, the body stays byte-identical to what it was before this field existed.
+      const loadFailed = manager.listLoadFailedDataSources({ actor })
       return res.json({
         ok: true,
         data: {
           items,
-          total: items.length
+          total: items.length,
+          ...(loadFailed.length > 0 ? { loadFailed } : {})
         }
       })
     } catch (error) {
@@ -762,6 +779,11 @@ export function dataSourcesRouter(): Router {
   /**
    * PUT /api/data-sources/:id/credentials
    * Rotate write-only credentials. Non-secret config updates stay on PUT /:id.
+   *
+   * Also the ONE route that addresses a source which exists but FAILED TO LOAD (#6079): for such an
+   * id, the stored owner or a platform admin can re-seal an unreadable credential in place (see
+   * DataSourceManager.resealLoadFailedDataSource). Every other id-addressed route keeps answering
+   * 404 for a load-failed id.
    */
   router.put('/api/data-sources/:id/credentials', rbacGuard('data_sources', 'write'), async (req: Request, res: Response) => {
     const parse = DataSourceCredentialsUpdateSchema.safeParse(req.body)
@@ -789,6 +811,44 @@ export function dataSourcesRouter(): Router {
       const manager = getManager()
       const id = req.params.id
       const actor = resolveActor(req)
+
+      // ONE access decision for both kinds of id, FIRST, synchronously and from memory only. A
+      // non-owner non-admin of a load-failed id and anyone naming a nonexistent id run the SAME
+      // lookups to the SAME "not found" (→ the same 404 body below): no database statement, no
+      // audit row, no extra work on either path (existence non-disclosure, incl. timing).
+      const target = manager.resolveCredentialRouteTarget(id, actor)
+
+      // RE-SEAL BRANCH (#6079): the id is not loaded but its row failed to load, and the actor is
+      // its stored owner or a platform admin. Loaded ids never enter this branch — their behavior
+      // is unchanged below.
+      if (target === 'load_failed') {
+        const resealed = await manager.resealLoadFailedDataSource(id, parse.data.credentials, actor)
+        await auditLog({
+          actorId: req.user?.id?.toString(),
+          actorType: 'user',
+          action: 'update_credentials',
+          resourceType: 'data_source',
+          resourceId: id,
+          meta: {
+            resealed: true,
+            loadState: resealed.priorLoadState,
+            restartRequired: resealed.restartRequired,
+            changedCredentialKeys,
+            ownerId: resealed.ownerId,
+            ...(isCrossOwnerAdminAction(actor, resealed.ownerId ?? undefined) ? { crossOwnerAdmin: true } : {})
+          }
+        })
+        return res.json({
+          ok: true,
+          data: {
+            ...sanitizeConfig(resealed.config),
+            connected: resealed.connected,
+            resealed: true,
+            restartRequired: resealed.restartRequired
+          }
+        })
+      }
+
       manager.assertAccess(id, actor)
 
       const existing = manager.getDataSource(id)
@@ -842,7 +902,17 @@ export function dataSourcesRouter(): Router {
       }
       const coded = codedGateRefusal(error)
       if (coded) {
-        return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
+        // The re-seal refusals carry values-free `details` (key NAMES / a load state) the client
+        // needs; every other coded refusal on this route keeps its pre-existing body shape.
+        const details = RESEAL_DETAIL_CODES.has(coded.code) ? (error as { details?: unknown }).details : undefined
+        return res.status(coded.status).json({
+          ok: false,
+          error: {
+            code: coded.code,
+            message: coded.message,
+            ...(details && typeof details === 'object' ? { details } : {})
+          }
+        })
       }
       return res.status(500).json({
         ok: false,
