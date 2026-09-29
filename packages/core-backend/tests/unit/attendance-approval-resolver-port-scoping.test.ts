@@ -58,15 +58,24 @@ describe('S7-2 precursor — approvalAssigneeResolver port is scoped to plugin-a
 // plugin the dedicated cancel-round creation path, so it carries the same least-privilege posture as
 // the resolver port above — plugin-attendance ONLY. Same builder, same three legs; the positive
 // control keeps the negatives from passing vacuously.
-describe('product entry phase A — approvalCancelRoundEntry port is scoped to plugin-attendance', () => {
-  type EntryPort = { canReadDocument?: unknown; readRoundSummary?: unknown; launch?: unknown }
+describe('product entry phase A + A2 — approvalCancelRoundEntry port is scoped to plugin-attendance', () => {
+  type EntryPort = {
+    canReadDocument?: unknown
+    readRoundSummary?: unknown
+    launch?: unknown
+    decide?: unknown
+    withdraw?: unknown
+  }
 
-  it('plugin-attendance receives the port with all three methods (positive control)', () => {
+  it('plugin-attendance receives the port with all five methods (positive control)', () => {
     const services = contextFor('plugin-attendance').services as { approvalCancelRoundEntry?: EntryPort }
     expect(services.approvalCancelRoundEntry).toBeDefined()
     expect(typeof services.approvalCancelRoundEntry?.canReadDocument).toBe('function')
     expect(typeof services.approvalCancelRoundEntry?.readRoundSummary).toBe('function')
     expect(typeof services.approvalCancelRoundEntry?.launch).toBe('function')
+    // A2: the approver's approve / reject and the requester's withdraw.
+    expect(typeof services.approvalCancelRoundEntry?.decide).toBe('function')
+    expect(typeof services.approvalCancelRoundEntry?.withdraw).toBe('function')
   })
 
   it('a non-attendance plugin does NOT receive the port', () => {

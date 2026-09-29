@@ -1,7 +1,8 @@
 /**
  * Approval change-request design lock v5.9 — product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
- * 2026-09-28), phase A: the host→plugin PORT behind the two attendance-side cancel-round endpoints
- * (`GET` / `POST /api/attendance/requests/:id/cancel-round`, `plugins/plugin-attendance/index.cjs`).
+ * 2026-09-28), phase A + A2: the host→plugin PORT behind the attendance-side cancel-round endpoints
+ * (`GET` / `POST /api/attendance/requests/:id/cancel-round`, and A2's `POST …/cancel-round/actions` /
+ * `POST …/cancel-round/withdraw`, `plugins/plugin-attendance/index.cjs`).
  *
  * Ratified values this module implements (owner-chosen; the lock header records the owner's option text):
  *   - §15.1 P-1, Q1′ = (i) attendance-side mounting. The ROUTES live in plugin-attendance behind
@@ -21,10 +22,15 @@
  *     `canReadApprovalInstance` applied to the original document instance (lock:153 I7 — no second
  *     「已到达」 predicate). `canWithdraw` is resolved here, server-side, by reading the SAME inputs the
  *     engine's revoke gate reads, so the FE never derives a second predicate. It answers the ENGINE-level
- *     gate only: phase A ships no employee-reachable HTTP withdraw path (the approval-side action route
- *     sits behind a permission the employee lane does not hold), so a `true` here is not yet an
- *     actionable button — see the phase A design MD residuals. The policy snapshots never leave this
- *     module.
+ *     gate; the employee-reachable HTTP path to that gate is the attendance-side withdraw route
+ *     (`withdraw` below, A2). The policy snapshots never leave this module.
+ *   - A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」 — option text in the phase A
+ *     design MD §A2): `decide` (approve / reject, behind `attendance:approve` in the plugin) and
+ *     `withdraw` (the requester's revoke, behind `attendance:write`) hand the action to the SAME
+ *     service entry `POST /api/approvals/:id/actions` uses for a template-runtime instance,
+ *     `ApprovalProductService.dispatchAction`, on the round's own engine instance. Seat ownership,
+ *     the §2-G3 seat rules, the §9-9 allowed-action set and the revoke gate are all enforced THERE,
+ *     unchanged; this module adds no predicate of its own and never writes a round or an instance.
  *   - §15.2 P-2. `status` is a machine token whose SUBJECT is part of the token (`cancellation_*` vs
  *     `leave_cancelled`), one per word-table row V1–V6; a system closure is distinguishable from an
  *     approver's reject on this surface via `closedBySystem` (derived from the terminal audit row's
@@ -43,8 +49,9 @@
  *     (phase B) still renders per code.
  *
  * Least-privilege posture (same as `approvalAssigneeResolver`): `src/index.ts` injects this port into
- * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port plugin-attendance
- * does not register the two routes at all (fail-closed: no entry rather than a half-wired one).
+ * plugin-attendance ONLY; every other plugin sees `undefined`. Without the port (all five methods)
+ * plugin-attendance registers none of the four routes (fail-closed: no entry rather than a half-wired
+ * one).
  */
 
 import { pool } from '../db/pg'
@@ -116,6 +123,28 @@ export type CancelRoundLaunchResultV1 =
   | { readonly ok: true; readonly summary: CancelRoundSummaryV1 }
   | { readonly ok: false; readonly status: number; readonly code: string; readonly message: string }
 
+/**
+ * A2 — the closed result of `decide` / `withdraw`. `noRound` means the document has no cancel round
+ * at all (the plugin answers it with the entry's not-found body). A refusal carries ONLY the service
+ * entry's own `(status, code, message)` — `ServiceError.details` never crosses this boundary. Any
+ * other error is rethrown for the caller's generic 500.
+ */
+export type CancelRoundActionResultV1 =
+  | { readonly ok: true; readonly summary: CancelRoundSummaryV1 }
+  | { readonly ok: false; readonly noRound: true }
+  | { readonly ok: false; readonly noRound?: false; readonly status: number; readonly code: string; readonly message: string }
+
+/** A2 — who acts. `userName` is the display name for the audit row (falls back to the id there). */
+export interface CancelRoundEntryActorV1 {
+  readonly userId: string
+  readonly userName?: string
+  readonly ip?: string | null
+  readonly userAgent?: string | null
+}
+
+/** A2 — the two approver verbs the attendance side offers (a subset of lock §9-9's allowed set). */
+export type CancelRoundDecisionActionV1 = 'approve' | 'reject'
+
 export interface ApprovalCancelRoundEntryPort {
   /** Lock I7 — the ONE read predicate, applied to the ORIGINAL document instance. */
   canReadDocument(viewerId: string, documentInstanceId: string): Promise<boolean>
@@ -133,6 +162,26 @@ export interface ApprovalCancelRoundEntryPort {
     actor: { userId: string; userName?: string },
     options?: { reason?: string | null },
   ): Promise<CancelRoundLaunchResultV1>
+  /**
+   * A2 — an approver's `approve` / `reject` on the document's latest cancel round, dispatched AS the
+   * caller through `ApprovalProductService.dispatchAction` (the service entry of
+   * `POST /api/approvals/:id/actions`). The seat check, the §2-G3 seat rules and the §9-9 action set
+   * are that entry's; a caller with no seat gets its existing refusal.
+   */
+  decide(
+    documentInstanceId: string,
+    actor: CancelRoundEntryActorV1,
+    request: { action: CancelRoundDecisionActionV1; comment?: string | null },
+  ): Promise<CancelRoundActionResultV1>
+  /**
+   * A2 — the requester's withdraw: the engine's `revoke` on the document's latest cancel round, through
+   * the same service entry, whose revoke gate (allowRevoke → requester → status → window) decides.
+   */
+  withdraw(
+    documentInstanceId: string,
+    actor: CancelRoundEntryActorV1,
+    request?: { comment?: string | null },
+  ): Promise<CancelRoundActionResultV1>
 }
 
 type RoundRow = {
@@ -201,10 +250,9 @@ function parseJsonish(value: unknown): unknown {
  * definition's `runtime_graph.policy` (`allowRevoke`, `revokeBeforeNodeKeys`), the engine instance's
  * `requester_snapshot.id`, `status` and `current_node_key`, and the handled-record count at that
  * node. A `true` here means the engine would accept this viewer's revoke right now; a `false` names
- * the code the engine would answer. It says nothing about an HTTP route: the approval-side action
- * route adds its own permission guard in front of the engine, which the employee lane does not pass
- * today (the integration suite pins that 403 as a witness), so an employee-reachable withdraw path
- * is a phase B precondition. The suite pins both engine directions in-process.
+ * the code the engine would answer. The employee-reachable HTTP path to this gate is the
+ * attendance-side withdraw route (A2); the approval-side action route keeps its own permission guard
+ * in front of the same engine. The suite pins both engine directions in-process and over HTTP.
  */
 async function resolveCanWithdraw(
   query: Queryable,
@@ -281,6 +329,24 @@ export async function readCancelRoundSummaryForDocumentV1(
   documentInstanceId: string,
   viewerId: string,
 ): Promise<CancelRoundSummaryV1> {
+  const row = await selectLatestCancelRoundRow(query, documentInstanceId)
+  if (!row) return { documentInstanceId, round: null }
+  if (!isRoundOutcome(row.outcome)) {
+    // Unreachable while the `approval_rounds` outcome CHECK holds. If that enum is ever widened
+    // without this reader, fail loudly: `round: null` would read as "no round" (P-8 ③ — an unknown
+    // state must not collapse into the empty result), and inventing a status token is not ours to do.
+    // The routes turn this into their generic 500 INTERNAL_ERROR; no new code.
+    throw new Error(`cancel-round summary: unrecognised round outcome ${JSON.stringify(row.outcome)} on round ${row.round_id}`)
+  }
+  return summarizeRoundRow(query, documentInstanceId, { ...row, outcome: row.outcome }, viewerId)
+}
+
+/**
+ * 「Latest」 = the pending round when one exists (at most one, I3), otherwise the most recently
+ * started one. ONE definition, shared by the summary and by A2's `decide` / `withdraw`, so the round
+ * a caller acts on is the round the summary shows them.
+ */
+async function selectLatestCancelRoundRow(query: Queryable, documentInstanceId: string): Promise<RoundRow | undefined> {
   const result = await query.query(
     `SELECT r.id AS round_id,
             r.engine_instance_id,
@@ -301,16 +367,15 @@ export async function readCancelRoundSummaryForDocumentV1(
       LIMIT 1`,
     [documentInstanceId],
   )
-  const row = result.rows[0] as RoundRow | undefined
-  if (!row) return { documentInstanceId, round: null }
-  if (!isRoundOutcome(row.outcome)) {
-    // Unreachable while the `approval_rounds` outcome CHECK holds. If that enum is ever widened
-    // without this reader, fail loudly: `round: null` would read as "no round" (P-8 ③ — an unknown
-    // state must not collapse into the empty result), and inventing a status token is not ours to do.
-    // The routes turn this into their generic 500 INTERNAL_ERROR; no new code.
-    throw new Error(`cancel-round summary: unrecognised round outcome ${JSON.stringify(row.outcome)} on round ${row.round_id}`)
-  }
+  return result.rows[0] as RoundRow | undefined
+}
 
+async function summarizeRoundRow(
+  query: Queryable,
+  documentInstanceId: string,
+  row: RoundRow & { outcome: CancelRoundOutcomeV1 },
+  viewerId: string,
+): Promise<CancelRoundSummaryV1> {
   const projection = row.engine_instance_id
     ? await readCancelRoundDurableProjectionV1(
         (text, values) => query.query(text, values) as Promise<{ rows: Record<string, unknown>[] }>,
@@ -354,6 +419,62 @@ const CANCEL_ROUND_SEAT_CLASS_CODES: ReadonlySet<string> = new Set([
 export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
   'A cancellation cannot be started for this document right now — please contact an administrator'
 
+/**
+ * A2 — `decide` and `withdraw` share this one path: the document's latest cancel round (the same
+ * 「latest」 the summary shows), then `ApprovalProductService.dispatchAction` on that round's OWN engine
+ * instance, AS the caller. `dispatchAction` is the service entry `POST /api/approvals/:id/actions`
+ * calls for a template-runtime instance; everything that decides whether the action is allowed —
+ * the §9-9 action gate (`assertCancelRoundActionAllowed`), the seat check (`actorCanAct` over the
+ * instance's active assignments), the revoke gate, the C-2 redemption and C-3 closure — runs there,
+ * unchanged. Nothing here re-derives or pre-empts any of it.
+ *
+ * `roles: []`: the actor carries no role claims. A cancel round's seats are PERSON seats — the
+ * creation path seats the original approvers by user id (lock §14.1), and §9-9 / §14.3 #12–#13
+ * refuse every verb or job that could change a seat — so a role claim can never be what seats an
+ * actor on it; passing none can only narrow, never widen (the integration suite asserts every
+ * assignment on a launched round is a `user` assignment).
+ *
+ * Not done here, on purpose: the approval-side route's post-dispatch pending-count publish (a todo
+ * badge refresh) — the todo presentation is phase C (P-11), recorded in the design MD.
+ */
+const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
+
+async function dispatchOnLatestCancelRound(
+  query: Queryable,
+  documentInstanceId: string,
+  actor: CancelRoundEntryActorV1,
+  action: 'approve' | 'reject' | 'revoke',
+  comment: string | null | undefined,
+): Promise<CancelRoundActionResultV1> {
+  if (!CANCEL_ROUND_DISPATCH_ACTIONS.has(action)) {
+    // The plugin validates the verb before calling; a caller that bypasses that is a programming
+    // error, answered with the generic 500 rather than a code of its own.
+    throw new Error(`cancel-round entry: action ${JSON.stringify(action)} is not dispatched through this port`)
+  }
+  const row = await selectLatestCancelRoundRow(query, documentInstanceId)
+  if (!row || !row.engine_instance_id) return { ok: false, noRound: true }
+  try {
+    const service = new ApprovalProductService()
+    await service.dispatchAction(
+      row.engine_instance_id,
+      { action, ...(typeof comment === 'string' ? { comment } : {}) },
+      {
+        userId: actor.userId,
+        userName: actor.userName || actor.userId,
+        roles: [],
+        ip: actor.ip ?? null,
+        userAgent: actor.userAgent ?? null,
+      },
+    )
+  } catch (error) {
+    if (error instanceof ServiceError) {
+      return { ok: false, status: error.statusCode, code: error.code, message: error.message }
+    }
+    throw error
+  }
+  return { ok: true, summary: await readCancelRoundSummaryForDocumentV1(query, documentInstanceId, actor.userId) }
+}
+
 export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPort {
   const db = (): Queryable => {
     if (!pool) throw new Error('Database not available')
@@ -378,5 +499,9 @@ export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPor
       }
       return { ok: true, summary: await readCancelRoundSummaryForDocumentV1(db(), documentInstanceId, actor.userId) }
     },
+    decide: (documentInstanceId, actor, request) =>
+      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, request.action, request.comment),
+    withdraw: (documentInstanceId, actor, request = {}) =>
+      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, 'revoke', request.comment),
   }
 }

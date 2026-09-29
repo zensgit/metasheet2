@@ -1303,14 +1303,17 @@ export interface PluginServices {
     >
   }
   /**
-   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A — host→plugin
-   * port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
-   * (P-1 Q1′ = (i) attendance-side mounting; P-3 = (iii) round-summary carrier; P-4 summary read).
-   * Same posture as `approvalAssigneeResolver` above: core-backend is the PROVIDER and ONLY
-   * plugin-attendance receives it; every other plugin gets `undefined`, and without it the consumer
-   * registers neither route (fail-closed). `launch` is the ONE plugin-reachable path to the dedicated cancel-round creation
-   * path (never the public `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance`
-   * applied to the ORIGINAL document instance. Implementation:
+   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A + A2 —
+   * host→plugin port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
+   * and `POST …/cancel-round/actions` / `…/cancel-round/withdraw` (P-1 Q1′ = (i) attendance-side
+   * mounting; P-3 = (iii) round-summary carrier; P-4 summary read; A2 = owner 2026-09-29
+   * 「Attendance-side + OFF flag (Recommended)」). Same posture as `approvalAssigneeResolver` above:
+   * core-backend is the PROVIDER and ONLY plugin-attendance receives it; every other plugin gets
+   * `undefined`, and without it the consumer registers none of the routes (fail-closed). `launch` is
+   * the ONE plugin-reachable path to the dedicated cancel-round creation path (never the public
+   * `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance` applied to the
+   * ORIGINAL document instance; `decide` / `withdraw` hand approve / reject / revoke on the round's
+   * own instance to `ApprovalProductService.dispatchAction`, unchanged. Implementation:
    * `approvals/approval-cancel-round-entry-port.ts`.
    */
   approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort

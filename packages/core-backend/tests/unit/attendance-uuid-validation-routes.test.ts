@@ -121,6 +121,13 @@ async function createHarness(
         launch: vi.fn(async () => {
           throw new Error('cancel-round entry port must not be reached in the unit harness')
         }),
+        // A2: the routes register only when all five methods are present.
+        decide: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        withdraw: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
       },
       attendanceW4SegmentCalculation: {
         resolveOrgSegmentCalculationPosture: async () => ({
@@ -1500,6 +1507,8 @@ describe('attendance UUID route validation', () => {
       { key: 'POST /api/attendance/requests/:id/cancel' },
       { key: 'GET /api/attendance/requests/:id/cancel-round' },
       { key: 'POST /api/attendance/requests/:id/cancel-round' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round/actions' },
+      { key: 'POST /api/attendance/requests/:id/cancel-round/withdraw' },
       { key: 'DELETE /api/attendance/requests/:id' },
       { key: 'PUT /api/attendance/integrations/:id' },
       { key: 'DELETE /api/attendance/integrations/:id' },

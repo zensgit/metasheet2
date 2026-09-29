@@ -2600,9 +2600,10 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
-        // Approval change-request lock v5.9, product entry v2 phase A (P-1 Q1′ = (i)): the cancel-round
-        // entry port. Least-privilege like approvalAssigneeResolver — ONLY plugin-attendance receives
-        // it; every other plugin gets undefined, and without it the consumer registers neither route.
+        // Approval change-request lock v5.9, product entry v2 phase A + A2 (P-1 Q1′ = (i)): the
+        // cancel-round entry port. Least-privilege like approvalAssigneeResolver — ONLY
+        // plugin-attendance receives it; every other plugin gets undefined, and without it the
+        // consumer registers none of its cancel-round routes.
         approvalCancelRoundEntry:
           manifest.name === 'plugin-attendance' ? buildApprovalCancelRoundEntryPort() : undefined,
         // E-learning L2: core owns eligibility and delivery-ledger insertion.
