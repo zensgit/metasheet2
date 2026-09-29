@@ -492,7 +492,13 @@ async function loadProductFeatures(
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
+    // Session-aware means "resolved from THIS session's payload". A load that skipped the session
+    // probe (the login, DingTalk callback and forced-password views run one right after a new token
+    // is set) resolved from an empty payload, so it must clear the mark: otherwise the router
+    // guard's next load returns early and a second sign-in in the same tab keeps features resolved
+    // without its session (tasks/elearning hidden until a hard reload). The guard's re-read hits
+    // the session those views have just primed, so it issues no extra request.
+    state.sessionAwareLoaded = requiresSessionProbe
     state.loading = false
 
     return state.features

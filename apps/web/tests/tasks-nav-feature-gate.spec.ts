@@ -68,8 +68,13 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
   let fetchLog: string[] = []
+  // Bumped per case. A case that timed out on a slow runner keeps running in the background; the
+  // mount below refuses to go ahead once a newer case has started, so it cannot mount a second
+  // shell onto the next case's freshly reset store and pollute its request log.
+  let caseSeq = 0
 
   beforeEach(() => {
+    caseSeq += 1
     vi.resetModules()
     window.localStorage.clear()
     mocks.route.path = '/multitable'
@@ -94,6 +99,7 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
    * starts from its defaults, exactly like a fresh page load.
    */
   async function mountShellAsAdmin(features: SessionFeatures) {
+    const myCase = caseSeq
     window.localStorage.setItem('auth_token', 'session-token')
     window.localStorage.setItem('user_roles', JSON.stringify(['admin']))
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -128,6 +134,7 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
       },
     }
 
+    if (myCase !== caseSeq) throw new Error('abandoned case: not mounting after its own teardown')
     container = document.createElement('div')
     document.body.appendChild(container)
     app = createApp(App as Component)
@@ -140,7 +147,7 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
     await vi.waitFor(() => {
       expect(flags.state.loaded).toBe(true)
       expect(flags.state.sessionAwareLoaded).toBe(true)
-    })
+    }, { timeout: 15_000 })
     await settle()
 
     return { root: container, flags, auth: useAuth() }
@@ -180,7 +187,7 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
       badge: tasksBadge(root) !== null,
       tasksRequests: tasksRequests(),
     }).toEqual({ navEntry: false, navGroup: false, badge: false, tasksRequests: [] })
-  })
+  }, 30_000)
 
   it('feature on (tasks=true): the same administrator gets the entry, the badge, and exactly the pending-count read', async () => {
     const { root, flags } = await mountShellAsAdmin({ tasks: true })
@@ -188,11 +195,20 @@ describe('tasks top-bar entry follows the tasks session feature (real shell, rea
     expect(flags.hasFeature('tasks')).toBe(true)
     await vi.waitFor(() => {
       expect(tasksBadge(root)?.getAttribute('data-state')).toBe('ready')
-    })
+    }, { timeout: 15_000 })
     expect(navTasks(root)?.getAttribute('href')).toBe('/tasks')
     expect(tasksBadge(root)?.getAttribute('data-count')).toBe('3')
     expect(tasksRequests().map((url) => new URL(url, 'http://localhost').pathname)).toEqual(['/api/tasks/pending-count'])
-  })
+    // EXHAUSTIVE and ordered: every request this shell makes with the badge mounted. The
+    // feature-off shell's list is pinned by App.spec; this one covers the badge-mounted shell, so
+    // a stray request added later (by the badge or anything mounted with it) reddens this line.
+    expect(fetchLog.map((url) => new URL(url, 'http://localhost').pathname)).toEqual([
+      '/api/todo/count',
+      '/api/approvals/admin/capability',
+      '/api/auth/me',
+      '/api/tasks/pending-count',
+    ])
+  }, 30_000)
 })
 
 describe('tasks session feature parsing and resolution', () => {
