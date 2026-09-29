@@ -37297,14 +37297,22 @@ module.exports = {
         })
       )
 
+      // `expectedRoundId` (optional; phase D D2): the round the caller has on screen. When present and
+      // it is not the document's latest round, the port refuses before dispatching anything (409, the
+      // engine's existing INVALID_STATUS_TRANSITION) — so a caller acting from a list never acts on a
+      // round other than the one listed, and needs no read of the document to know that.
       const cancelRoundDecisionBodySchema = z.object({
         action: z.enum(['approve', 'reject']),
         comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
       })
       const cancelRoundWithdrawBodySchema = z.object({
         comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
       })
       const normalizeCancelRoundComment = (value) =>
+        typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+      const normalizeCancelRoundExpectedRoundId = (value) =>
         typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 
       // A2 — an approver's approve / reject on the document's latest cancel round. The seat is the
@@ -37349,7 +37357,11 @@ module.exports = {
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },
-              { action: parsed.data.action, comment: normalizeCancelRoundComment(parsed.data.comment) }
+              {
+                action: parsed.data.action,
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
             )
             if (result && result.ok === false && result.noRound === true) {
               respondCancelRoundRequestNotFound(res)
@@ -37421,7 +37433,10 @@ module.exports = {
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },
-              { comment: normalizeCancelRoundComment(parsed.data.comment) }
+              {
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
             )
             if (result && result.ok === false && result.noRound === true) {
               respondCancelRoundRequestNotFound(res)

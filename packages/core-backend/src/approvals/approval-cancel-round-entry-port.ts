@@ -65,6 +65,7 @@
 import { pool } from '../db/pg'
 import { ApprovalProductService } from '../services/ApprovalProductService'
 import { ServiceError } from '../services/ApprovalBridgeService'
+import { APPROVAL_ERROR_CODES } from '../services/approval-bridge-types'
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import { isSystemSentinelActor } from '../services/ApprovalAssigneeResolver'
 import {
@@ -493,12 +494,14 @@ export interface ApprovalCancelRoundEntryPort {
    * caller through `ApprovalProductService.dispatchAction` (the service entry of
    * `POST /api/approvals/:id/actions`). The seat check, the §2-G3 seat rules and the §9-9 action set
    * are that entry's; a caller with no seat gets its existing refusal. Success carries only
-   * `CancelRoundActionOutcomeV1` — never the round summary.
+   * `CancelRoundActionOutcomeV1` — never the round summary. `expectedRoundId` (optional, phase D
+   * D2): the round the caller has on screen; when it is not the document's latest round the call is
+   * refused before anything is dispatched (see `dispatchOnLatestCancelRound`).
    */
   decide(
     documentInstanceId: string,
     actor: CancelRoundEntryActorV1,
-    request: { action: CancelRoundDecisionActionV1; comment?: string | null },
+    request: { action: CancelRoundDecisionActionV1; comment?: string | null; expectedRoundId?: string | null },
   ): Promise<CancelRoundActionResultV1>
   /**
    * A2 — the requester's withdraw: the engine's `revoke` on the document's latest cancel round, through
@@ -507,7 +510,7 @@ export interface ApprovalCancelRoundEntryPort {
   withdraw(
     documentInstanceId: string,
     actor: CancelRoundEntryActorV1,
-    request?: { comment?: string | null },
+    request?: { comment?: string | null; expectedRoundId?: string | null },
   ): Promise<CancelRoundActionResultV1>
   /**
    * C2 — the pending cancel rounds `viewerId` could decide RIGHT NOW through `decide`: the door's own
@@ -798,6 +801,20 @@ const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', '
 export const CANCEL_ROUND_DISPATCH_ROLE_CLAIMS: readonly string[] = Object.freeze([])
 
 /**
+ * Phase D D2 — the refusal when the caller names the round they have on screen
+ * (`expectedRoundId`) and it is not the document's latest round. No new code: it is the engine's
+ * existing `INVALID_STATUS_TRANSITION` with the engine's own message for a terminal instance. By
+ * lock I3 a document has at most one pending round and the latest pick puts it first, so a round
+ * other than the latest is a finished one (or not this document's at all). Checked before anything
+ * is dispatched or pushed, so the refusal writes nothing.
+ */
+export const CANCEL_ROUND_EXPECTED_ROUND_STALE = Object.freeze({
+  status: 409,
+  code: APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION,
+  message: 'Approval is already in a terminal status',
+})
+
+/**
  * Exported with its `Queryable` injected so the verb allow-list above can be pinned on its own by a
  * unit test (a verb outside it must throw BEFORE any query); the port below is its only production
  * caller.
@@ -809,6 +826,7 @@ export async function dispatchOnLatestCancelRound(
   action: 'approve' | 'reject' | 'revoke',
   comment: string | null | undefined,
   publishCounts?: CancelRoundCountPublisherV1,
+  expectedRoundId?: string | null,
 ): Promise<CancelRoundActionResultV1> {
   if (!CANCEL_ROUND_DISPATCH_ACTIONS.has(action)) {
     // The plugin validates the verb before calling; a caller that bypasses that is a programming
@@ -817,6 +835,12 @@ export async function dispatchOnLatestCancelRound(
   }
   const row = await selectLatestCancelRoundRow(query, documentInstanceId)
   if (!row || !row.engine_instance_id) return { ok: false, noRound: true }
+  // Phase D D2: the caller names the round on screen ⇒ it must be the round this call would act on.
+  // The action below is dispatched on THAT round's own engine instance, so a round that finishes after
+  // this check is refused by the engine itself.
+  if (typeof expectedRoundId === 'string' && row.round_id !== expectedRoundId) {
+    return { ok: false, ...CANCEL_ROUND_EXPECTED_ROUND_STALE }
+  }
   // The seats BEFORE the action: an approve / reject / withdraw deactivates them, and those are the
   // people whose pending count drops (the approval-side route only re-reads the seats left active).
   const seatsBefore = publishCounts
@@ -1025,9 +1049,13 @@ export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDeps
       return { ok: true, summary }
     },
     decide: (documentInstanceId, actor, request) =>
-      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, request.action, request.comment, deps.publishCounts),
+      dispatchOnLatestCancelRound(
+        db(), documentInstanceId, actor, request.action, request.comment, deps.publishCounts, request.expectedRoundId,
+      ),
     withdraw: (documentInstanceId, actor, request = {}) =>
-      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, 'revoke', request.comment, deps.publishCounts),
+      dispatchOnLatestCancelRound(
+        db(), documentInstanceId, actor, 'revoke', request.comment, deps.publishCounts, request.expectedRoundId,
+      ),
     listSeatedPendingRounds: (viewerId) => listSeatedPendingCancelRoundsV1(db(), viewerId),
   }
 }

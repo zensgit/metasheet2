@@ -2617,6 +2617,113 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         expect((await listPending(a.token)).json).toEqual(EMPTY_LIST)
       })
 
+      it('D2 — expectedRoundId (phase D): the delegator A acts on the round the list shows by naming it, with no read of the document (A still cannot read it); a stale expected round — an earlier, finished round of the same leave, or an id that is no round of it — is refused on the actions and withdraw routes with the engine\'s INVALID_STATUS_TRANSITION and writes nothing', async () => {
+        const delegatorA = `g4dc-d2-a-${TS}`
+        const delegateeD = `g4dc-d2-d-${TS}`
+        const a = await seedApprover(delegatorA)
+        const d = await seedApprover(delegateeD)
+        const delegationId = `g4dc-d2-dlg-${TS}`
+        createdDelegationIds.add(delegationId)
+        await pool().query(
+          `INSERT INTO approval_delegations (id, delegator_user_id, delegatee_user_id, scope, start_at, end_at, active)
+           VALUES ($1, $2, $3, 'all', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day', TRUE)`,
+          [delegationId, delegatorA, delegateeD],
+        )
+        const tpl = await publishTemplateFor('d2', [delegatorA], 'single')
+        const employee = `g4dc-d2-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const { requestId } = await seedApprovedLeave({
+          documentRequesterId: employee,
+          templateId: tpl,
+          approverTokens: [d.fixtureToken],
+        })
+        const first = await launch(employeeToken, requestId)
+        expect(roundIdsOf(await listPending(a.token))).toEqual([first.roundId])
+        // The requester withdraws and launches again: the list now shows the second round only.
+        const withdrawn = await http('POST', `${entryPath(requestId)}/withdraw`, employeeToken, {})
+        expect(withdrawn.status, withdrawn.text).toBe(200)
+        const second = await launch(employeeToken, requestId)
+        expect(roundIdsOf(await listPending(a.token))).toEqual([second.roundId])
+        expect(await activeSeats(second.roundInstanceId)).toEqual([delegatorA])
+
+        const STALE = {
+          ok: false,
+          error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' },
+        }
+        const injector = (server as unknown as { injector: { get: (id: unknown) => any } }).injector
+        const collab = injector.get(ICollabService)
+        const originalBroadcast = collab.broadcastTo
+        const pushes: unknown[] = []
+        collab.broadcastTo = (room: string, event: string, payload: unknown) => {
+          pushes.push({ room, event })
+          return originalBroadcast.call(collab, room, event, payload)
+        }
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const before = await countWriteSet()
+          const staleApprove = await http('POST', `${entryPath(requestId)}/actions`, a.token, {
+            action: 'approve',
+            expectedRoundId: first.roundId,
+          })
+          expect(staleApprove.status, staleApprove.text).toBe(409)
+          expect(staleApprove.json).toEqual(STALE)
+          const bogusReject = await http('POST', `${entryPath(requestId)}/actions`, a.token, {
+            action: 'reject',
+            comment: 'g4dc D2',
+            expectedRoundId: randomUUID(),
+          })
+          expect(bogusReject.status, bogusReject.text).toBe(409)
+          expect(bogusReject.json).toEqual(STALE)
+          const staleWithdraw = await http('POST', `${entryPath(requestId)}/withdraw`, employeeToken, {
+            expectedRoundId: first.roundId,
+          })
+          expect(staleWithdraw.status, staleWithdraw.text).toBe(409)
+          expect(staleWithdraw.json).toEqual(STALE)
+          // Nothing was written or pushed, and nothing reached the redemption.
+          expect(await countWriteSet()).toEqual(before)
+          expect(pushes).toEqual([])
+          expect(stub.calls).toHaveLength(0)
+          expect(await activeSeats(second.roundInstanceId)).toEqual([delegatorA])
+          expect(roundIdsOf(await listPending(a.token))).toEqual([second.roundId])
+
+          // A cannot read the document (I7 on the ORIGINAL, unchanged) …
+          const aSummary = await http('GET', entryPath(requestId), a.token)
+          expect(aSummary.status).toBe(404)
+          expect(aSummary.text).toBe(NOT_FOUND_BODY)
+          // … and acts on the listed round by naming it.
+          const approved = await http('POST', `${entryPath(requestId)}/actions`, a.token, {
+            action: 'approve',
+            expectedRoundId: second.roundId,
+          })
+          expect(approved.status, approved.text).toBe(200)
+          expect(approved.json).toEqual({
+            ok: true,
+            data: { requestId, roundId: second.roundId, outcome: 'applied', status: 'leave_cancelled' },
+          })
+          expect(stub.calls).toHaveLength(1)
+        } finally {
+          stub.stop()
+          collab.broadcastTo = originalBroadcast
+        }
+        expect((await listPending(a.token)).json).toEqual(EMPTY_LIST)
+      })
+
+      it('D2 — expectedRoundId on the requester\'s withdraw: naming the pending round withdraws it (200, the minimal body); the field is optional — the routes without it behave as before', async () => {
+        const approver = `g4dc-d2w-apr-${TS}`
+        const seated = await seedApprover(approver)
+        const tpl = await publishTemplateFor('d2w', [approver], 'single')
+        const employee = `g4dc-d2w-emp-${TS}`
+        const employeeToken = await seedEmployee(employee)
+        const { requestId } = await seedApprovedLeave({ documentRequesterId: employee, templateId: tpl, approverTokens: [seated.fixtureToken] })
+        const round = await launch(employeeToken, requestId)
+        const withdrawn = await http('POST', `${entryPath(requestId)}/withdraw`, employeeToken, { expectedRoundId: round.roundId })
+        expect(withdrawn.status, withdrawn.text).toBe(200)
+        expect(withdrawn.json).toEqual({
+          ok: true,
+          data: { requestId, roundId: round.roundId, outcome: 'withdrawn', status: 'cancellation_withdrawn' },
+        })
+      })
+
       it('the list follows the actions route\'s document gate and not the launch flag: a round whose request row moved to another org is not listed (the actions route answers it 404); with the flag OFF, rounds launched while it was ON are still listed', async () => {
         const approver = `g4c2-gate-${TS}`
         const seated = await seedApprover(approver)
