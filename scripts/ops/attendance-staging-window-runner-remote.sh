@@ -1948,14 +1948,17 @@ action_migrate_rehearse() {
   # the same functions so the rehearsal migration starts from the source DB's exact function
   # configuration. Candidates are read READ-ONLY from the real staging DB: public-schema sql and
   # plpgsql functions that are not extension members and do not already pin a search_path (a
-  # pinned one is left untouched). The real staging DB is never altered by this shim.
+  # pinned one is left untouched). The real staging DB is never altered by this shim. After the
+  # RESET a digest of every public function's (signature, proconfig) must match the source, or the
+  # rehearsal stops. Limit: the shim goes on after pre-data, so a function evaluated DURING
+  # pre-data (for example a STORED generated column's expression) is not covered.
   local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
   local shim_list="${OUTPUT_DIR}/rehearsal-search-path-shim.txt"
   local shim_count
   : > "$restore_log"
 
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
-    -c "SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang WHERE n.nspname = 'public' AND p.prokind = 'f' AND l.lanname IN ('sql', 'plpgsql') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') AND NOT EXISTS (SELECT 1 FROM unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search_path=%') ORDER BY 1;" \
+    -c "$(rehearsal_shim_candidates_sql)" \
     > "$shim_list" \
     || fail "rehearsal restore compatibility: candidate function query against the source DB failed"
   shim_count="$(rehearsal_shim_validate_signatures "$shim_list")" \
@@ -1983,6 +1986,16 @@ action_migrate_rehearse() {
       | docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \
       2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log"
   fi
+  local source_fn_digest clone_fn_digest
+  source_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the source DB failed"
+  clone_fn_digest="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \
+    -c "$(rehearsal_shim_parity_sql)" | tr -d '[:space:]')" \
+    || fail "rehearsal restore compatibility: function-config digest query against the rehearsal DB failed"
+  [[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]] \
+    || fail "rehearsal restore compatibility: the clone's public function configuration differs from the source after the shim reset (source=${source_fn_digest:-<none>} clone=${clone_fn_digest:-<none>}); refusing to rehearse on a drifted clone"
+  log "rehearsal: clone function configuration matches the source (digest ${source_fn_digest})"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} RESET session_replication_role;"
 

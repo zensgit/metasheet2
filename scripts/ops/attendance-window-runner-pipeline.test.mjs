@@ -314,7 +314,7 @@ test('rehearsal restore splits archive sections around a general clone-only func
   assert.ok(rehearseStart >= 0 && rehearseEnd > rehearseStart, 'expected rehearsal function bounds')
   const rehearse = remote.slice(rehearseStart, rehearseEnd)
 
-  const select = rehearse.indexOf('pg_catalog.pg_get_function_identity_arguments(p.oid)')
+  const select = rehearse.indexOf('-c "$(rehearsal_shim_candidates_sql)"')
   const validate = rehearse.indexOf('rehearsal_shim_validate_signatures "$shim_list"')
   const preData = rehearse.indexOf('--section=pre-data')
   const shim = rehearse.indexOf('rehearsal_shim_sql set "$shim_list"')
@@ -324,22 +324,35 @@ test('rehearsal restore splits archive sections around a general clone-only func
   assert.ok(select >= 0 && validate > select && preData > validate && shim > preData && data > shim && postData > data && reset > postData,
     'restore must run: select candidates -> validate -> pre-data -> clone shim -> data -> post-data -> clone reset')
 
-  // Candidates come from the SOURCE DB, read-only; the ALTERs go only to the rehearsal clone.
-  assert.match(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "SELECT pg_catalog\.quote_ident\(n\.nspname\)/,
-    'candidate selection must query the source DB read-only')
-  assert.match(rehearse, /rehearsal_shim_sql set "\$shim_list" \\\n\s+\| docker exec -i "\$POSTGRES_CONTAINER" psql -U "\$pg_user" -d "\$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f -/,
-    'the SET statements must be applied to the fixed rehearsal DB only, in one transaction, failing on the first error')
-  assert.match(rehearse, /rehearsal_shim_sql reset "\$shim_list" \\\n\s+\| docker exec -i "\$POSTGRES_CONTAINER" psql -U "\$pg_user" -d "\$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f -/,
-    'the RESET statements must be applied to the fixed rehearsal DB only, in one transaction, failing on the first error')
+  // The source DB (the real staging DB) is used exactly twice in the rehearsal, both times as a
+  // read-only SELECT built by a lib function: the candidate list and the parity digest.
+  const sourceUses = rehearse.match(/-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*\n[^\n]*/g) || []
+  assert.equal(sourceUses.length, 2, `the source DB must be touched exactly twice in the rehearsal, got ${sourceUses.length}`)
+  assert.match(sourceUses[0], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_candidates_sql\)" \\$/,
+    'first source use: the read-only candidate SELECT')
+  assert.match(sourceUses[1], /-d "\$MIGRATE_BACKUP_PG_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)" \| tr -d '\[:space:\]'\)" \\$/,
+    'second source use: the read-only parity digest')
   assert.doesNotMatch(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*ALTER FUNCTION/,
     'compatibility shim must never alter the real staging DB')
-  assert.doesNotMatch(rehearse, /rehearsal_shim_sql (set|reset)[^\n]*\n[^\n]*MIGRATE_BACKUP_PG_DB/,
-    'shim statements must never be piped to the real staging DB')
 
-  // Candidate filter: public sql/plpgsql functions, not extension members, no pinned search_path.
-  assert.match(rehearse, /n\.nspname = 'public' AND p\.prokind = 'f' AND l\.lanname IN \('sql', 'plpgsql'\)/)
-  assert.match(rehearse, /d\.deptype = 'e'\)/, 'extension member functions must be excluded')
-  assert.match(rehearse, /WHERE c LIKE 'search_path=%'\)/, 'a function that already pins its search_path must be left untouched')
+  // Exactly one SET and one RESET, each gated on a nonempty list, each piped only to the clone
+  // in one transaction, SET before RESET.
+  const setUses = rehearse.match(/rehearsal_shim_sql set "\$shim_list"/g) || []
+  const resetUses = rehearse.match(/rehearsal_shim_sql reset "\$shim_list"/g) || []
+  assert.equal(setUses.length, 1, 'exactly one SET pipeline')
+  assert.equal(resetUses.length, 1, 'exactly one RESET pipeline')
+  assert.ok(rehearse.lastIndexOf('rehearsal_shim_sql set') < rehearse.indexOf('rehearsal_shim_sql reset'), 'no SET may follow the RESET')
+  for (const mode of ['set', 'reset']) {
+    assert.match(rehearse, new RegExp(`if \\[\\[ "\\$shim_count" -gt 0 \\]\\]; then\\n\\s+log "[^"\\n]*"\\n\\s+rehearsal_shim_sql ${mode} "\\$shim_list" \\\\\\n\\s+\\| docker exec -i "\\$POSTGRES_CONTAINER" psql -U "\\$pg_user" -d "\\$REHEARSAL_DB" -v ON_ERROR_STOP=1 -q -1 -f - \\\\\\n`),
+      `the ${mode} pipeline must be gated on shim_count > 0 and go only to the rehearsal DB, in one transaction`)
+  }
+
+  // After the RESET the clone's function configuration must equal the source's, or the rehearsal stops.
+  const parity = rehearse.indexOf('[[ "$source_fn_digest" =~ ^[0-9a-f]{32}$ && "$source_fn_digest" == "$clone_fn_digest" ]]')
+  assert.ok(parity > rehearse.indexOf('rehearsal_shim_sql reset'), 'the parity check must run after the RESET')
+  assert.match(rehearse, /\[\[ "\$source_fn_digest" =~ \^\[0-9a-f\]\{32\}\$ && "\$source_fn_digest" == "\$clone_fn_digest" \]\] \\\n\s+\|\| fail "rehearsal restore compatibility: the clone's public function configuration differs/,
+    'a digest mismatch (or a non-digest) must fail the rehearsal')
+  assert.match(rehearse, /clone_fn_digest="\$\(docker exec "\$POSTGRES_CONTAINER" psql -U "\$pg_user" -d "\$REHEARSAL_DB" -tA -v ON_ERROR_STOP=1 \\\n\s+-c "\$\(rehearsal_shim_parity_sql\)"/)
 
   // Fail closed on a bad query or an unexpected signature shape.
   assert.match(rehearse, /> "\$shim_list" \\\n\s+\|\| fail "rehearsal restore compatibility: candidate function query/)
@@ -347,6 +360,24 @@ test('rehearsal restore splits archive sections around a general clone-only func
 
   assert.equal((rehearse.match(/pg_restore -j 2 --exit-on-error --section=/g) || []).length, 3,
     'all three archive sections must fail closed on the first restore error')
+})
+
+test('rehearsal shim SQL is pinned byte for byte (candidate filter direction and parity ordering are load-bearing)', () => {
+  const candidates = runPipefailBash(`source '${LIB}'\nrehearsal_shim_candidates_sql`)
+  assert.equal(candidates.status, 0, candidates.stderr)
+  assert.equal(candidates.stdout,
+    "SELECT pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')' "
+    + 'FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang '
+    + "WHERE n.nspname = 'public' AND p.prokind = 'f' AND l.lanname IN ('sql', 'plpgsql') "
+    + "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') "
+    + "AND NOT EXISTS (SELECT 1 FROM unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search_path=%') "
+    + 'ORDER BY 1;')
+  const parity = runPipefailBash(`source '${LIB}'\nrehearsal_shim_parity_sql`)
+  assert.equal(parity.status, 0, parity.stderr)
+  assert.equal(parity.stdout,
+    "SELECT md5(coalesce(string_agg(p.oid::pg_catalog.regprocedure::text || '|' || coalesce(pg_catalog.array_to_string(p.proconfig, ','), '-'), ';' "
+    + 'ORDER BY p.oid::pg_catalog.regprocedure::text COLLATE "C"), \'\')) '
+    + "FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public';")
 })
 
 test('EXECUTABLE (rehearsal_shim_validate_signatures): counts real catalog shapes, fails closed on anything else', () => {
@@ -369,6 +400,16 @@ test('EXECUTABLE (rehearsal_shim_validate_signatures): counts real catalog shape
   assert.equal(empty.stdout.trim(), '0')
   for (const bad of [
     'public.f(); DROP TABLE users; --()',
+    'public.f(a;b)',
+    "public.f(a'b)",
+    'public.f(a\\b)',
+    'public.f(a$$b)',
+    'public.f(a=b)',
+    'public.f(a*/b)',
+    'public.f(a-b)',
+    'public.f(a(b)',
+    'public.f(a)b)',
+    'x public.f(a text)',
     'public."Weird"(a text)',
     'other.f(a text)',
     'public.f(a text) ',
