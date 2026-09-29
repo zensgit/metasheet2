@@ -72,6 +72,75 @@ import {
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
 } from '../attendance/w4c0-identity'
+import { Logger } from '../core/logger'
+import { getCorrelationId } from '../context/request-context'
+import { isValidCorrelationId } from '../middleware/correlation'
+
+const logger = new Logger('AdminUsersRoutes')
+
+/**
+ * #6163 — how a 500 branch of this router answers.
+ *
+ * The RESPONSE keeps the router's jsonError shape `{ ok: false, error: { code, message } }` with the
+ * branch's own error code and a FIXED sentence written here, plus one additional field,
+ * `error.correlationId`: the id the correlation middleware gave this request (the same value it
+ * returns in the X-Correlation-ID response header and writes on every log line). Once the raw text
+ * is gone, that id is the one thing an administrator can hand to support.
+ *
+ * The LOG gets exactly one line per failed request: a fixed event name, the response's error code,
+ * the class name of the caught value, and the correlation id. The caught value itself is never
+ * handed to the logger (the repo logger copies `error.message` and `error.stack` into the line when
+ * it is given an error object), and nothing read from it but its class name is written anywhere: a
+ * crypto, driver or library message can carry a host, a role or a stored value (the demo-server
+ * fault behind #6163 put Node's GCM text on /admin/users).
+ */
+const ADMIN_USERS_FAILURE_EVENT = 'admin-users.server-failure'
+const SAFE_ERROR_CLASS = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+
+function describeCaughtClass(error: unknown): string {
+  try {
+    if (error === null) return 'null'
+    if (typeof error !== 'object' && typeof error !== 'function') return typeof error
+    const name = (error as { constructor?: { name?: unknown } }).constructor?.name
+    return typeof name === 'string' && SAFE_ERROR_CLASS.test(name) ? name : 'unknown'
+  } catch {
+    return 'unreadable'
+  }
+}
+
+function readFailureCorrelationId(req: Request): string | undefined {
+  const candidate = req.correlationId ?? getCorrelationId()
+  return isValidCorrelationId(candidate) ? candidate : undefined
+}
+
+function sendAdminUsersServerFailure(
+  req: Request,
+  res: Response,
+  code: string,
+  message: string,
+  error: unknown,
+): void {
+  const correlationId = readFailureCorrelationId(req)
+  try {
+    logger.error(
+      `${ADMIN_USERS_FAILURE_EVENT} code=${code} errorClass=${describeCaughtClass(error)}`
+      + (correlationId ? ` correlationId=${correlationId}` : ''),
+    )
+  } catch {
+    // Logging must never keep the fixed 500 from being sent.
+  }
+  res.status(500).json({
+    ok: false,
+    error: correlationId ? { code, message, correlationId } : { code, message },
+  })
+}
+
+/**
+ * PATCH /api/admin/users/:userId/dingtalk-grant can fail AFTER its transaction committed and its
+ * audit row was written (the snapshot read that builds the reply comes last), so its 500 must not
+ * claim the change failed. The page shows this sentence verbatim in its (Chinese) status banner.
+ */
+const DINGTALK_GRANT_UNCONFIRMED_MESSAGE = '钉钉扫码登录的更新结果未能确认，请刷新页面后查看当前状态'
 
 type AdminUserProfile = {
   id: string
@@ -4294,7 +4363,7 @@ export function adminUsersRouter(): Router {
         ...(await fetchDingTalkAccessSnapshot(userId)),
       })
     } catch (error) {
-      return jsonError(res, 500, 'DINGTALK_ACCESS_FAILED', (error as Error)?.message || 'Failed to load DingTalk access')
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_ACCESS_FAILED', 'Failed to load DingTalk access', error)
     }
   })
 
@@ -4314,7 +4383,7 @@ export function adminUsersRouter(): Router {
         ...snapshot,
       })
     } catch (error) {
-      return jsonError(res, 500, 'MEMBER_ADMISSION_FAILED', (error as Error)?.message || 'Failed to load member admission snapshot')
+      return sendAdminUsersServerFailure(req, res, 'MEMBER_ADMISSION_FAILED', 'Failed to load member admission snapshot', error)
     }
   })
 
@@ -4477,7 +4546,7 @@ export function adminUsersRouter(): Router {
       if (message.includes('missing DingTalk openId')) {
         return jsonError(res, 400, 'DINGTALK_OPEN_ID_REQUIRED', message)
       }
-      return jsonError(res, 500, 'DINGTALK_GRANT_UPDATE_FAILED', message)
+      return sendAdminUsersServerFailure(req, res, 'DINGTALK_GRANT_UPDATE_FAILED', DINGTALK_GRANT_UNCONFIRMED_MESSAGE, error)
     }
   })
 
