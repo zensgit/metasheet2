@@ -178,6 +178,8 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
 
 ## 3. 上机前只读检查
 
+**现在就跑：** 开发机已在 #6079 2026-09-29T03:53:39Z 请旧机现在就跑 C1–C7（都只读，结果与打包点是哪个提交无关；C1、C2、C3 的语句内联在那一帖里）。C3 在上机当天再跑一次（同帖）；C1 查的是「此刻」后端在不在运行，上机开始前也再跑一次。C8 是缺口说明与手工恢复，上机时备用。与那一帖让旧机读的 `d8e6d5d55` 版相比，C1–C7 里旧机要跑的 PowerShell 与 SQL 一字未改；改的是 C2 的标题与不通过时的说法，C6 的加解密检索结果、出处行号与「R61 起」的恢复办法，C7 的检索输出，C8 的说明与核对结果。
+
 每项只返回布尔、计数、枚举或键名。psql 一律 `-X -A -v ON_ERROR_STOP=1`，语句包在 `BEGIN READ ONLY; … ROLLBACK;` 里。按下面的顺序做。
 
 ### C1 后端此刻在运行（最先做）
@@ -194,9 +196,9 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
 - **通过：** `1`、`Running`、`1`、`200`。
 - **不通过：** 停下，不升级。先查后端为什么没在运行（`handoff-r59-two-machine-20260924.md:50`），回帖四个值。
 
-### C2 四张任务表与八个索引都不存在（包里有任务迁移就做：选项 A 和选项 B）
+### C2 四张任务表与八个索引都不存在（必做）
 
-- **目的：** `zzzz20260926120000_create_task_p0a_tables` 用不带 `IF NOT EXISTS` 的 `CREATE TABLE`、`CREATE INDEX`。只要同名关系已存在，migrate 就失败。整批迁移在同一个事务里回滚（§2.1），升级脚本进处理器、停后端、打印 `RESTORE REQUIRED`（`:1972-1990`），站点要等恢复。选项 B 也要做：排除变量没传进升级进程时（§1.4），这条迁移照样会跑。
+- **目的：** R61 带任务线的两条迁移（§1.0、§2.2）。`zzzz20260926120000_create_task_p0a_tables` 用不带 `IF NOT EXISTS` 的 `CREATE TABLE`、`CREATE INDEX`。只要同名关系已存在，migrate 就失败。整批迁移在同一个事务里回滚（§2.1），升级脚本进处理器、停后端、打印 `RESTORE REQUIRED`（`:1972-1990`），站点要等恢复。
 - **语句**（12 个名字取自该迁移 `:57`、`:97`、`:113`、`:124`、`:140-161`；`to_regclass` 按 `search_path` 解析，与迁移里不带 schema 的 `CREATE` 同口径）：
   ```sql
   BEGIN READ ONLY;
@@ -211,7 +213,7 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
   ROLLBACK;
   ```
 - **通过：** 12 行全是 `absent = t`，`task_migrations_recorded = 0`。
-- **不通过：** 不开始升级。回帖写出哪些名字 `absent = f`（这些是本文列出的固定名字，不是客户数据）以及计数。不要删任何对象，由开发机和 owner 改选 §1 的选项或另定办法。
+- **不通过：** 不开始升级。回帖写出哪些名字 `absent = f`（这些是本文列出的固定名字，不是客户数据）以及计数。不要删任何对象，由开发机和 owner 另定办法（#6079 2026-09-29T03:53:39Z）。
 
 ### C3 审计日志分区：上机当月与次月
 
@@ -272,15 +274,22 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
 
 - **目的：** R60 之前 `app.env` 里没有 `ENCRYPTION_KEY`、`ENCRYPTION_SALT`，旧代码退回到仓库内置默认值；R60 第一次写入了新的密钥（#6079 2026-09-28T02:03:25Z、10:34:09Z）。R60 之前用 `enc:` 格式（`packages/core-backend/src/security/encrypted-secrets.ts:10`、`:204-205`、`:236-242`）封存的值，用新密钥解不开。
 - **已知的部分：** PLM 连接原先就是这种情况（10:37:13Z）。2026-09-29 旧机在演示机上用内置默认密钥解出它的口令，用新密钥就地重新加密，只改这一个键；重启后日志是 `Loaded 1 data sources from database`、没有 skipped、解密失败 0（#6079 2026-09-29T01:26:41Z）。本项现在要回答的是：**其余**存储里，还有没有 R60 之前用默认密钥封存、至今没人用到过的值。
-- **与 R61 的关系：** R61 不改任何加解密代码，下面的检索无输出。所以这是 R60 留下的状态，不是 R61 带进来的：
+- **与 R61 的关系：** R61 不改加解密本身：`git diff --stat 583dfdf1a origin/main -- packages/core-backend/src/security/encrypted-secrets.ts` 在 `3a85b9c97` 上无输出。原来那条宽检索在 `2888addb4` 上无输出，在 `3a85b9c97` 上有输出（订正上一版「R61 不改任何加解密代码」的说法）：
   ```text
-  $ git diff --stat -G 'encrypted-secrets|ENCRYPTION_KEY|ENCRYPTION_SALT|decryptStoredSecretValue|encryptStoredSecretValue|isEncryptedSecretValue' 583dfdf1a 2888addb4 -- . ':!*.md' ':!docs'
-  （无输出）
+  $ git diff --stat -G 'encrypted-secrets|ENCRYPTION_KEY|ENCRYPTION_SALT|decryptStoredSecretValue|encryptStoredSecretValue|isEncryptedSecretValue' 583dfdf1a origin/main -- . ':!*.md' ':!docs'
+   apps/web/tests/dataSourcesLoadFailedReseal.spec.ts |  296 +++++
+   .../src/data-adapters/DataSourceManager.ts         |  504 +++++++-
+   .../data-source-reseal-load-failed-realdb.test.ts  |  511 ++++++++
+   .../unit/data-source-reseal-load-failed.test.ts    | 1340 ++++++++++++++++++++
+   scripts/ops/multitable-onprem-preflight.sh         |  353 +++++-
+   scripts/ops/multitable-onprem-preflight.test.mjs   | 1222 ++++++++++++++++++
+   6 files changed, 4178 insertions(+), 48 deletions(-)
   ```
+  命中的后端代码只有 `DataSourceManager.ts`（#6144）：数据源的凭据解不开时，记为可重封的装载失败；属主或平台管理员在界面上重新输入后，用当前密钥重新封存写回原行（`:1032` 经 `encryptCredentials`，`:500-510`）。其余存储的读写路径没有改。`multitable-onprem-preflight.sh`（#6138）是上机预检脚本，不在后端里运行（§6.2）。所以本项查的仍是 R60 留下的状态，不是 R61 带进来的。
 - **范围**：`git grep -l encrypted-secrets origin/main -- packages/core-backend/src plugins` 列出的每个存储，逐个看代码后得到：
   | 存储 | 位置 | 依据 |
   |---|---|---|
-  | 数据源凭据 | `data_sources.config->'credentials'` 的 `password`、`apiKey`、`token` | `DataSourceManager.ts:25`、`:374-405` |
+  | 数据源凭据 | `data_sources.config->'credentials'` 的 `password`、`apiKey`、`token` | `DataSourceManager.ts:30`、`:500-538` |
   | 钉钉目录集成 | `directory_integrations.config` 的 `appSecret`、`workNotificationAgentId`（旧名 `agentId`） | `directory/directory-sync.ts:1800-1806`、`:2436-2440`；`integrations/dingtalk/work-notification-settings.ts:114-118`、`:373-384`；`services/elearning-notification-dingtalk.ts:112-115` 读同一处 |
   | 审批卡片链接密钥 | `directory_integrations.config` 的 `approvalCardLinkSecret` | `integrations/dingtalk/approval-card-config.ts:66-80`、`:210-226` |
   | 钉钉群机器人 | `dingtalk_group_destinations.webhook_url`、`secret` | `multitable/dingtalk-group-destinations.ts:1-31` |
@@ -310,33 +319,40 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
   `v1:` 用的是另一把密钥 `INTEGRATION_ENCRYPTION_KEY`（`credential-store.cjs:32`、`:62-78`），不受 R60 写入 `ENCRYPTION_KEY` 的影响。有 `v1:` 行时，另报 `app.env` 里有没有这个键（只报有或无）。
 - **日志计数**：用 R60 复核时读过的同一份后端日志，从 R60 重启起算（切分方法同 #6079 2026-09-28T10:37:13Z 的 §4.6 日志检查），再以 2026-09-29 就地重加密之后那次重启（日志里出现 `Loaded 1 data sources` 的那次）为界分成**前段**和**后段**，分别报下面四个固定串在两段里各自的行数，不贴行内容：
   - `Unsupported state or unable to authenticate data`：Node 的 GCM 鉴权失败，10:37:13Z 回帖里见过；
-  - `Failed to decrypt credential`（`DataSourceManager.ts:402`）；
+  - `Failed to decrypt credential`（`DataSourceManager.ts:527-528`；R60 `583dfdf1a` 上是 `:402`，字串相同）；
   - `has unreadable credentials (decrypt failed)`（`dingtalk-group-destination-service.ts:70`）；
   - `Decryption failed:`（`ConfigService.ts:469`）。
-- **为什么启动日志看不出来：** 启动时逐行解密的只有数据源管理器，解不开就记进「Loaded … (N skipped)」（`DataSourceManager.ts:320-358`）；其余各处都是用到时才解密，所以 R60 启动日志里的「1 skipped」只说明数据源这一家。其余存储里用旧默认密钥封存的值，要等第一次被用到时才失败；其中审批卡片链接密钥解不开时直接当作未配置，不写日志（`approval-card-config.ts:76-79`、`:105-108`）。
+- **为什么启动日志看不出来：** 启动时逐行解密的只有数据源管理器，解不开就记进「Loaded … (N skipped)」（`DataSourceManager.ts:445-489`；R60 上是 `:320-358`）；其余各处都是用到时才解密，所以 R60 启动日志里的「1 skipped」只说明数据源这一家。其余存储里用旧默认密钥封存的值，要等第一次被用到时才失败；其中审批卡片链接密钥解不开时直接当作未配置，不写日志（`approval-card-config.ts:76-79`、`:105-108`）。
 - **通过：**
   - SQL：`data_sources.*` 三项不作判据。数据源在启动时逐条解密，重加密之后的启动日志已经说明全部装载成功（01:26:41Z）；经 `encrypted-secrets` 重新封存的值仍以 `enc:` 开头（`encrypted-secrets.ts:236-238`），会被计进 `data_sources.password`。其余各项计数都为 0。
   - 日志后段：四个串都为 0。
-  - 日志前段：`has unreadable credentials (decrypt failed)` 与 `Decryption failed:` 为 0。前段里 `Unsupported state or unable to authenticate data` 与 `Failed to decrypt credential` 预期成对出现、行数相等：PLM 连接装载失败时，这两串出现在同一行（`DataSourceManager.ts:353` 打印错误，`:402` 把原错误信息接在后面），重加密之前每次后端启动各记一次。
+  - 日志前段：`has unreadable credentials (decrypt failed)` 与 `Decryption failed:` 为 0。前段里 `Unsupported state or unable to authenticate data` 与 `Failed to decrypt credential` 预期成对出现、行数相等：PLM 连接装载失败时，这两串出现在同一行（前段日志出自 R60 的代码：`583dfdf1a` 上 `DataSourceManager.ts:353` 打印错误，`:402` 把原错误信息接在后面；R61 上对应 `:478` 与 `:527-528`，字串没变），重加密之前每次后端启动各记一次。
 - **不通过：** 回帖各项计数。计数不为 0 不等于解不开：R60 之后写入的值是用新密钥封存的，也带 `enc:`。由开发机按存储逐一判断并给出处理办法，不要自行改库。
-- **对升级的判定：不阻断升级。** 照常升级，回帖计数。R61 不改加解密代码（上面的检索），只要 `app.env` 里的密钥两行不变（C7），升级前后这些值能不能解开不会变。
+- **R61 起，数据源这一家的恢复办法：** 升级后若有数据源装载失败（启动日志出现「(N skipped)」），由该源的属主或平台管理员在界面上操作：数据源 → 无法装载 → 重新输入凭据，原 id 上重存（步骤与验收见 §6.2 的 #6144 行）。**#6079 早先贴出的「用原账号新建一个同 id 的数据源」R61 起回 409，不再可用**（`DataSourceManager.ts:647-649`；`routes/data-sources.ts:585-589`；#6079 2026-09-29T05:07:05Z）。其余存储没有这样的界面，仍按上一条回帖。
+- **对升级的判定：不阻断升级。** 照常升级，回帖计数。R61 不改 `encrypted-secrets.ts`（上面的检索），只要 `app.env` 里的密钥两行不变（C7），升级前后这些值能不能解开不会变；变的只是数据源解不开时有了界面上的重封办法。
 
 ### C7 `app.env` 重复键（卫生项）
 
-- **定位：** 这是卫生项，不是已知的 R61 阻断项。按下面的检索，仓库里没有任何 Windows 脚本或工作流调用 `multitable-onprem-preflight.sh`，调用它的只有 Linux 与打包侧脚本：
+- **定位：** 这是卫生项，不是已知的 R61 阻断项。按下面的检索（origin/main `3a85b9c97`），仓库里没有任何 Windows 脚本调用 `multitable-onprem-preflight.sh`；工作流里提到它的两处都是 #6138 加的，一处是 Linux 上 CI 的测试步骤，一处是注释。其余调用它的是 Linux 与打包侧脚本：
   ```text
-  $ git grep -n multitable-onprem-preflight origin/main -- '*.ps1' '*.bat' '*.cmd' '.github/workflows/*.yml'
+  $ git grep -n multitable-onprem-preflight origin/main -- '*.ps1' '*.bat' '*.cmd'
   （无输出）
+  $ git grep -n multitable-onprem-preflight origin/main -- '.github/workflows/*.yml'
+  .github/workflows/plugin-tests.yml:196       （`test` 作业，runs-on ubuntu-latest，:174-175；node --test 列表里的 scripts/ops/multitable-onprem-preflight.test.mjs）
+  .github/workflows/stock-prep-staging-window-rehearsal.yml:127   （注释）
   $ git grep -l multitable-onprem-preflight origin/main -- ':!docs' ':!*.md'
+  .github/workflows/plugin-tests.yml
+  .github/workflows/stock-prep-staging-window-rehearsal.yml
   scripts/ops/multitable-onprem-delivery-bundle.mjs
   scripts/ops/multitable-onprem-preflight.sh
+  scripts/ops/multitable-onprem-preflight.test.mjs
   scripts/ops/multitable-onprem-release-gate.sh
   scripts/ops/multitable-pilot-handoff.mjs
   scripts/ops/multitable-pilot-handoff.test.mjs
   scripts/ops/multitable-pilot-release-bound.sh
   scripts/ops/multitable-pilot-release-bound.test.mjs
   ```
-  旧机的 wrapper 不在仓库里，它是否调用这个预检脚本，本文不知道（§7）。
+  第二条的两行输出是缩写，括号里是本文的说明。旧机的 wrapper 不在仓库里，它是否调用这个预检脚本，本文不知道（§7）。
 - **为什么重复键仍然值得查：** 不同启动路径对重复键取值不一致。后端经 `ecosystem.config.cjs` 读 `app.env` 时取**第一次**出现的那行，而且不覆盖进程里已有的同名变量（`ecosystem.config.cjs:42`）。升级脚本的 `Import-AppEnvFile` 逐行覆盖，所以取**最后一次**（`:1367-1391`），随后 `pm2 restart --update-env`。R60 实际走的是计划任务回退拉起（#6079 2026-09-28T10:34:09Z）。
 - **命令（PowerShell 5.1，只出键名与次数）：** 这是 #6079 2026-09-28T13:52:05Z 那段脚本，本文加了一道过滤：只打印全大写、形如环境变量名的键，其余只计数。原因是一行被折开的密文可能以 `=` 结尾，原脚本会把它的前半段当成键名打印出来（开发机用合成文件复现过）。
   ```powershell
@@ -376,22 +392,29 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
   4. C1 第四行 health 应为 `200`。
   5. 维护标志正常情况下已被 `finally` 删掉。只有升级进程被杀、`finally` 没跑到时，才手工删 `<部署根目录>\output\maintenance.flag`（默认位置见 `:164-172`）。
   6. 回帖，查清备份失败的原因后再重试。
-- **修复：** #6157（OPEN，draft，2026-09-29T02:17:33Z 开）修这个缺口，只改升级脚本和它的测试：停服之后、第一次写入线上文件之前失败时，脚本把后端重新拉起，并打印 `UPGRADE NOT APPLIED`（该 PR 正文）。打包提交不含 #6157 时，上面的手工恢复照旧适用。
-- **升级脚本从哪里取、按什么顺序（不管 #6157 进不进包，都这样做）：**
-  1. **只从打包提交取**，不从 `git pull` 到 main 之后的工作区复制，因为 main 可能比打包提交新：
+- **R61 不带修复：** #6157（2026-09-29 约 05:40Z 仍为 OPEN，draft）修这个缺口，只改升级脚本和它的测试：停服之后、第一次写入线上文件之前失败时，脚本把后端重新拉起，并打印 `UPGRADE NOT APPLIED`（该 PR 正文）。owner 决定它不进 R61（#6079 2026-09-29T03:53:39Z），所以 R61 上机时上面的手工恢复适用。
+- **升级脚本从哪里取、按什么顺序：**
+  1. **只从打包提交取**，不从 `git pull` 到 main 之后的工作区复制，因为 main 可能比打包提交新（#6157 以后合入 main，main 上的脚本就不再是 R60 那一份）：
      ```bash
-     C=<打包提交>
+     C=PACKAGE_COMMIT_TBD
      git show "$C:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1" > <本地副本>
      git hash-object --no-filters <本地副本>   # 必须等于下一行的输出
      git rev-parse "$C:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1"
      ```
-     在 bash 里执行：PowerShell 5.1 的 `>` 会把输出改写成 UTF-16，两行就对不上。开发机在 `2888addb4` 上跑过这三条，两个值相同，也等于 `583dfdf1a`（R60）上该文件的值。
+     在 bash 里执行：PowerShell 5.1 的 `>` 会把输出改写成 UTF-16，两行就对不上。开发机在 `2888addb4` 上跑过这三条，两个值相同，也等于 `583dfdf1a`（R60）上该文件的值。main 到 `3a85b9c97` 为止，该文件的 blob 仍与 R60 相同：
+     ```text
+     $ git rev-parse origin/main:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1    # origin/main = 3a85b9c97
+     3aee13e2be4272e06e6c21fffd6c4991590b0c52
+     $ git rev-parse 583dfdf1a:scripts/ops/multitable-onprem-package-upgrade-inplace.ps1
+     3aee13e2be4272e06e6c21fffd6c4991590b0c52
+     ```
+     打包提交上第三条命令的输出也应是这个值；不是，就说明打包点之前有改动升级脚本的提交合入了（#6157 不应在内），停下回帖。
      包里没有这个脚本，没法拿包里的副本比对，只能对打包提交：`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS`（`:37-186`）里没有它，`git grep -n upgrade-inplace origin/main -- scripts/ops/multitable-onprem-package-build.sh` 无输出。
      为什么要同一个提交：脚本的 `MustExistManifest`、`BackupPaths`、`ReplaceDirs` 默认值（`:216-246`）是按包的目录结构写的。脚本与包出自不同提交时，这几份清单与包对不对得上，没人验证过。对不上的话，会在停服之后、替换进行中报错（第 4、5 步，`:1863-1867`），进 `RESTORE REQUIRED`。
   2. 用它替换旧机本地的升级脚本副本。
   3. 重跑本地门禁（R60 的门禁见 #6079 2026-09-28T10:34:09Z：字节、BOM、预检自测、sha256/gitSha）；传到演示机后，两端的 sha256 一致。
   4. 然后才上机。
-  #6157 在打包点之前合入：打包提交上的就是修过的脚本，第 3 步的门禁针对的是它，它不是 R60 验证过的那一份。在打包点之后合入：打包提交上仍是 R60 那一份，不要从 main 取新版。
+  #6157 不进 R61：打包提交上是 R60 验证过的那一份脚本。#6157 在打包点之后合入 main 时，不要从 main 取新版用于 R61。
 
 ---
 
@@ -497,7 +520,7 @@ $ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migra
 
 | 事项 | 怎样算结清 |
 |---|---|
-| PLM 连接「新建同 id」绕行前的只读预检（12:51:17Z） | **已结清，不再需要。** 没有走「新建同 id」，旧机在演示机上就地重新加密了这条连接的口令（#6079 2026-09-29T01:26:41Z）。 |
+| PLM 连接「新建同 id」绕行前的只读预检（12:51:17Z） | **已结清，不再需要。** 没有走「新建同 id」，旧机在演示机上就地重新加密了这条连接的口令（#6079 2026-09-29T01:26:41Z）。**R61 起**这条绕行本身也走不通：在装载失败的源的 id 上新建回 409（`DataSourceManager.ts:647-649`，`routes/data-sources.ts:585-589`）。R61 起的恢复办法是属主或平台管理员在 数据源 → 无法装载 → 重新输入凭据 原地重存（#6079 2026-09-29T05:07:05Z；§6.2 的 #6144 行）。 |
 | 客户 DBA 是否已轮换 PLM 只读口令 | **已结清。** owner 2026-09-29 裁决不轮换，已接受风险（01:56:03Z）。 |
 | 混表清理 2b（11:56:06Z 已定：保留与表名后缀一致的项目，另一项目的行置为无效） | **已结清。** 2026-09-29 已执行，走的是 SQL（00:37:05Z）。按本文原先的说明，直接 SQL 不留行修订（行修订由应用写，`multitable/record-history-service.ts`）；回滚靠同帖所说演示机上保存的 id 清单与回滚脚本。执行中停用又恢复的自动化规则，在界面上重新启用会被拒，已另立 issue #6155（01:49:32Z）。 |
 | BOM 层级 0 根选择规则的客户预设是否已配 | 旧机只报拉取动作 `plm.stock-preparation.pull-bom.v1` 的配置里有没有 `rootSelection` 块（布尔）。客户对该规则尚未确认（`customer-anomaly-triage-20260918.md:9`「规则待确认」）；在演示机加配置并重启由 owner 定，重启方式见 `stock-prep-root-selection-config.md`。 |
