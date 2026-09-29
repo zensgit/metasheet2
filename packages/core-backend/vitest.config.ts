@@ -1961,6 +1961,13 @@ export default defineConfig({
       // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
       // seven cancel-round files above, no EXPECT_DB).
       'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+      // Cancel-round product entry v2 (lock v5.9 header RATIFY 追记 2026-09-28), phase A: the
+      // attendance-side `GET`/`POST /api/attendance/requests/:id/cancel-round` acceptance — real
+      // DB, real running server with plugin-attendance, real login tokens, RBAC_BYPASS='false'.
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling of the cancel-round files above; s6a pin recomputed with it).
+      'tests/integration/approval-cancel-round-attendance-entry.db.test.ts',
       // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
       // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
       // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;
