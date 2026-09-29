@@ -1,9 +1,9 @@
 # R61 上机清单（打包点 `bf648922a`，已由 owner 决定；部署仍待 owner 放行）
 
-> **决定：** owner 2026-09-29（约 03:45Z，开发机窗口）决定：R61 = main 原样打包，打包点是 main 上含 #6144 与 #6162 两支的 first-parent 提交；#6157、#6151 不进 R61，放下一版；任务线两条迁移随包执行，所以 C2 必做。出处：#6079 2026-09-29T03:53:39Z。其后 owner 约 06:33Z 同意 R61 带上 06:16Z 合入 main 的 #5866；#6162 于 07:04:00Z 合入，**打包提交 = `bf648922a50a5c9740c9538cb11f5ac6f37257d7`**（#6079 2026-09-29T07:08:05Z）。**打包之前先等开发机在 #6079 回「打包提交 CI 已全绿」**（同帖）。**部署本身仍由 owner 在旧机放行，本文不是放行。** 详见 §1。
+> **决定：** owner 2026-09-29（约 03:45Z，开发机窗口）决定：R61 = main 原样打包，打包点是 main 上含 #6144 与 #6162 两支的 first-parent 提交；#6157、#6151 不进 R61，放下一版；任务线两条迁移随包执行，所以 C2 必做。出处：#6079 2026-09-29T03:53:39Z。其后 owner 约 06:33Z 同意 R61 带上 06:16Z 合入 main 的 #5866；#6162 于 07:04:00Z 合入，**打包提交 = `bf648922a50a5c9740c9538cb11f5ac6f37257d7`**（#6079 2026-09-29T07:08:05Z）。**打包之前先等开发机在 #6079 回帖 CI 结论**（同帖与 08:00:40Z）：结论已于 08:37:31Z 回帖；是否再等打包提交上被取消的 job 重跑，由 owner 决定（§1.0）。**部署本身仍由 owner 在旧机放行，本文不是放行。** 详见 §1。
 > **执行者：** 旧机（运维机）。开发机连不上演示机，演示机现状全部来自 #6079 的回帖，按回帖时间戳（UTC）引用。
 > **口径：** values-free。回帖只写布尔、计数、枚举、键名、用时；不写主机、地址、口令、令牌、客户名、项目号、单元格值。需要项目号、表 id 的地方用 `<项目号>`、`<表 id>` 或 psql 变量代入，不回显。
-> **基线：** 文中 `path:line` 以打包提交 `bf648922a` 为准，另注明者除外；附录两节仍以决定之前的 `2888addb4` 为准。PR 状态与 #6079 评论为 2026-09-29 约 07:25Z 用 `gh` 读到的结果（#6079 共 35 条评论，最后一条是 2026-09-29T07:08:05Z）。§1.1、§1.2、§2.1、C8 的命令已在 `bf648922a` 上跑过，输出写在各节。
+> **基线：** 文中 `path:line` 以打包提交 `bf648922a` 为准，另注明者除外；附录两节仍以决定之前的 `2888addb4` 为准。PR 状态与 #6079 评论为 2026-09-29 约 08:40Z 用 `gh` 读到的结果（#6079 共 37 条评论，最后一条是 2026-09-29T08:37:31Z）。§1.1、§1.2、§2.1、C8 的命令已在 `bf648922a` 上跑过，输出写在各节。
 > **上机手册：** 仍是 `handoff-r59-two-machine-20260924.md` §2–§3（#6079 正文第 0 节要求每次上机前读）。本文只补 R61 特有的事项。
 
 ---
@@ -13,14 +13,18 @@
 ### 1.0 决定
 
 - **选项 A：main 原样打包。** 打包提交 = main 上含 #6144 与 #6162 两支的 first-parent 提交：`bf648922a50a5c9740c9538cb11f5ac6f37257d7`（#6162 的合入提交，first parent 是 `28a7342e6`；`git log -1 --format='%H %P' bf648922a`）。开发机已在 #6079 2026-09-29T07:08:05Z 回帖这个提交号。
-- **先等 CI：** 这个提交上由合并触发的 CI 全绿之后，开发机会在 #6079 回「打包提交 CI 已全绿」；在那之前可以准备，不要打包上机（#6079 2026-09-29T07:08:05Z）。
+- **先等 CI 结论：** 旧机只在开发机于 #6079 回帖 CI 结论之后才打包；在那之前可以准备，不要打包上机（#6079 2026-09-29T07:08:05Z、08:00:40Z）。为什么不是一句「打包提交上全绿」：
+  - 分支保护的必跑检查有 13 项（`gh api repos/zensgit/metasheet2/branches/main/protection/required_status_checks`），其中只有 4 项会在合并到 main 的提交上运行：`test (20.x)`、`web-tests`、`stock-prep PowerShell 5.1 acceptance`、`observation-kit contract (read-only SQL census + runbook gating)`；其余 9 项只在 PR 上运行。打包提交上后三项已通过（`gh api repos/zensgit/metasheet2/commits/bf648922a50a5c9740c9538cb11f5ac6f37257d7/check-runs`）。
+  - `test (20.x)` 在打包提交由合并触发的「Plugin System Tests」运行里于 2026-09-29T07:52:52Z 被**取消**，不是失败：07:52:33Z #5972 合入 main，`plugin-tests.yml` 的并发规则取消同一分支上还在跑的旧运行（`.github/workflows/plugin-tests.yml:23-25`）。同一运行里 `test (18.x)` 07:35:24Z 全部通过，含「Run attendance integration tests」；`test (20.x)` 停在这一步的运行中（#6079 2026-09-29T08:00:40Z）。
+  - 所以开发机的 CI 结论写明两层：(a) 代码包含打包提交的 PR 上的运行，作为那 9 项在打包树上的结果（08:00:40Z 那帖列的是 #6166、#6160，两支都以 `bf648922a` 为祖先）；(b) 如果 owner 要等，再加上打包提交上被取消的 job 的重跑结果。要不要等 (b)，由 owner 决定。
+  - **(a) 已回帖**（#6079 2026-09-29T08:37:31Z）：#6166 那一轮的 13 项必跑检查全部通过（本文按 `gh api repos/zensgit/metasheet2/commits/829d978779ee52918b6370d728aa1c6789902125/check-runs` 逐项对过：13 项都是 success；该 head 与打包提交相差 8 个文字文件，同帖）。同帖说明 #6160 上 `test (20.x)` 两次因同一个云课堂用例超时失败，判断为偶发。**(b) 在本文写到的 2026-09-29 约 08:40Z 还没有回帖**；等不等它，由 owner 决定。
 - **#6144 在包里：** `3a85b9c97`，2026-09-29T05:04:03Z 合入，first parent 是 `f47054d88`。14 个文件（`git show --stat 3a85b9c97`），不带迁移（§2.2），不带开关（§4）。
 - **#6162 在包里：** 2026-09-29T07:04:00Z 合入，就是打包提交本身（`gh pr view 6162`：MERGED，merge commit `bf648922a`，head `d75b471f2`）。按 PR head 原样合入：`git diff e48d3307b d75b471f2` 与 `git diff 28a7342e6 bf648922a` 的增删行逐字相同，11 个文件。它不带迁移（§2.3）。它带一处已知的提示语问题，owner 决定照样上、下一版改（§6.3）。
 - **#5866 在包里：** 2026-09-29T06:16:03Z 合入 main（`28a7342e6`，不是本窗口合入的），在打包提交之前。owner 约 06:33Z 同意 R61 带上它（#6079 2026-09-29T07:08:05Z 的决定表）。它带 1 条迁移（§2.2 第 1 条）。
 - **不进 R61：** #6157（升级脚本的缺口，C8）与 #6151（源就绪预检 409），以及 #6153、#6163、#6164、云课堂插件，见 §6.4。
 - **迁移：** 5 条随包执行，其中两条是任务线的（§2.2）。所以 C2 必做（06:07:40Z 已通过）。
 - **命令用哪个提交：** 本文每一条需要打包提交的命令，都在 `bf648922a50a5c9740c9538cb11f5ac6f37257d7` 上跑，不用 main 此刻的头。
-- **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。工作流拿它与检出后 `git rev-parse HEAD` 的输出逐字比较，不一致就拒绝打包（`:122-131`），所以这里填 40 位完整提交号：`bf648922a50a5c9740c9538cb11f5ac6f37257d7`。旧机的打包脚本按 ref 指定打包点（#6079 2026-09-29T06:07:40Z）。
+- **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。工作流拿它与检出后 `git rev-parse HEAD` 的输出逐字比较，不一致就拒绝打包（`:122-131`），所以这里填 40 位完整提交号：`bf648922a50a5c9740c9538cb11f5ac6f37257d7`。**main 已经越过打包提交**（2026-09-29 约 08:30Z：`git log --first-parent --oneline bf648922a..origin/main` 列出 #5972 的 `88b6e1967`，07:52:33Z 合入）：在 main 上触发打包工作流，检出的是 main 的头，与 `expected_sha` 不一致，会被拒绝打包（`:122-131`）。所以要在指向 `bf648922a` 的 tag（或其它 ref）上触发。旧机的打包脚本按 tag 指定打包点（`R60_REF`/`R60_DISPATCH_REF`，#6079 2026-09-29T06:07:40Z）。
 - **与已验证流程的偏差：** 切法、tag、`expected_sha` 都与 R60 相同（§1.2）。升级脚本也与 R60 相同：#6157 不进包，§1.2 的命令在 `bf648922a` 上无输出，C8 的 blob 核对在 `bf648922a` 上两值相同。需要注意的是包里的两条任务线迁移与 #5866 那条乱序执行的迁移（§2.2）。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
 - **没有采用的做法：** 选项 B（用 `MIGRATION_EXCLUDE` 排除任务迁移）与选项 C（从 `b433ac814` 拉发布分支拣选）连同当时核过的事实移到文末附录。
 
@@ -122,6 +126,13 @@ R60 上机后 `kysely_migration` 共 421 行（#6079 2026-09-28T10:37:13Z）。R
 - 表里有没有行，取决于有没有人调用过回填的「执行」接口。按 §6.2 的 #5866 行，未经 owner 同意不在客户服务器上调用它们，所以 R61 期间这三张表应当是空的，手工 down() 也不需要这个变量。
 - 这个变量没有登记在开关清单里（§4、§8）。
 
+**回退到 R60 文件之后的陷阱（运维注意）：**
+
+- 升级在迁移成功之后才出错（第 7 步起后端及之后），或者上机后决定退回 R60：按 `RESTORE REQUIRED` 块把文件拷回 R60 之后，库里仍记着 R61 的 5 条迁移，而 R60 的包里没有这 5 个迁移文件。（迁移这一步本身失败时整批回滚、一条也不记，没有这个问题，§2.1。）
+- 这时再用 R60 包里的 `migrate.js` 跑迁移会失败：Kysely 0.28.8（`pnpm-lock.yaml:3222`）在计算待执行迁移之前，先检查库里记过的每条迁移在文件里都找得到，找不到就抛 `corrupted migrations: previously executed migration … is missing`（kysely 0.28.8 已发布包 `dist/cjs/migration/migrator.js:437-440`、`:484-488`）。这项检查不受 `allowUnorderedMigrations` 影响，乱序开关只跳过顺序检查（同文件 `:441-443`）。
+- 所以回退之后**不要**再用 R60 的包带着迁移步骤跑升级脚本：迁移那一步会失败，升级脚本停后端、打印恢复块（`:1972-1990`）。要么向前修复，再升级到 R61；要么在确实需要重跑 R60 包时关掉迁移步骤：升级脚本的参数是 `-RunMigrations 0`（声明 `:175`，判断 `:1881`，跳过时打印 `RunMigrations=0: skipped`，`:1895`；R60 的脚本是同一个 blob，C8）。
+- 后端启动本身不跑迁移，所以拷回 R60 文件后直接重启后端，不会撞上这个检查：R60 的 `ecosystem.config.cjs:58` 起的是 `packages/core-backend/dist/src/index.js`；`583dfdf1a` 上整个 `packages/core-backend/src` 里只有 `db/migrate.ts` 构造 `Migrator`、调用 `migrateToLatest`（`git grep -ln "migrateToLatest\|new Migrator(" 583dfdf1a -- packages/core-backend/src` 只列出这一个文件），`index.ts` 里没有 `migrat` 字样。R60 代码在带着 R61 表结构的库上运行没有测过；R61 的 5 条迁移都只是加表、加可空列或带默认值的列、插权限行（§2.2）。
+
 ### 2.3 在开 PR 的迁移不再影响 R61
 
 打包提交已固定为 `bf648922a`（§1.0），之后合入 main 的 PR 都不进 R61，所以在开 PR 带的迁移不改变 §2.2 的名单。上一版本节列过的 #5866 在打包点之前合入了 main（`28a7342e6`），它的迁移因此进了 R61（§2.2 第 1 条）；#6149、#6099 等其余在开 PR 的迁移，下一版再算。
@@ -205,8 +216,14 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 
 ### C2b 回填账本的三张表（#5866，本版新增，上机前跑）
 
-- **为什么：** §2.2 第 1 条的四句建表、建索引都带 `IF NOT EXISTS`。同名的表已存在时，PostgreSQL 跳过 `CREATE TABLE`、只发一条提示，不检查那张已有的表长什么样。形状对得上时这一步无害；对不上时有两种结果：已有的表缺 `org_id` 或 `created_at` 列，随后的 `CREATE INDEX … (org_id, created_at DESC)` 报错，整批 5 条迁移在同一个事务里回滚（§2.1），升级脚本停后端、打印 `RESTORE REQUIRED`；列在、其它地方不同，迁移照样记为已执行，回填接口日后读写这张表时才出错。另外，表不存在、却有别的关系占了这几张表的约束名（`atgbb_org_id_uni`，以及 PostgreSQL 给主键起的默认名 `<表名>_pkey`）时，`CREATE TABLE` 会报名字已存在而失败，结果同上。
-- **语句**（名字取自该迁移 `:34`、`:45`、`:55`、`:60`、`:84`；三个 `_pkey` 是按 PostgreSQL 默认命名推出来的，本文没有在真库上建表核对）：
+- **为什么：** §2.2 第 1 条的四句建表、建索引都带 `IF NOT EXISTS`。同名的表已存在时，PostgreSQL 跳过那句 `CREATE TABLE`、只发一条提示，不检查已有的表长什么样。已有的表形状不对时，迁移**不一定**记为已执行，要看哪一句先碰到它：
+  - 批次表 `approval_template_group_backfill_batches` 已存在：随后的 `CREATE INDEX IF NOT EXISTS … (org_id, created_at DESC)`（`:54-57`）在它缺这两列时报错。
+  - 两张明细表新建时各带一个外键 `(batch_id, org_id) REFERENCES approval_template_group_backfill_batches (id, org_id)`（`:71-73`、`:97-99`）。PostgreSQL 要求被引用的列上有主键或唯一约束；已有的批次表若没有恰好在 `(id, org_id)` 上的唯一约束（迁移自己建表时是 `atgbb_org_id_uni`，`:45`），或缺这两列，建明细表那一句就报错。
+  - 上面任何一句报错，整批 5 条迁移在同一个事务里回滚（§2.1），升级脚本停后端、打印 `RESTORE REQUIRED`（`:1972-1990`）。
+  - 只有这几句都没报错时（例如三张表都已存在，三句 `CREATE TABLE` 连同外键全被跳过），迁移才记为已执行，这时表的形状没人核过，回填接口日后读写时才可能出错。
+  - 表不存在、却有别的关系占用了名字 `atgbb_org_id_uni` 时，建批次表那一句报名字已存在而失败，结果同上。主键没有写名字，PostgreSQL 起的默认名（`<表名>_pkey`）被占用时会另起一个名字，不会让建表失败：这一点依据的是 PostgreSQL 公开的命名规则，没有在真库上跑过。所以下面不查 `_pkey`，C2 也不查。
+  - 索引名 `approval_template_group_backfill_batches_org_created_idx` 被占用时，`IF NOT EXISTS` 只是静默跳过、不建这个索引，迁移不失败。它仍列在下面，出现时回帖。
+- **语句**（名字取自该迁移 `:34`、`:45`、`:55`、`:60`、`:84`）：
   ```sql
   BEGIN READ ONLY;
   SELECT n AS relname, to_regclass(n) IS NULL AS absent
@@ -215,16 +232,13 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
     'approval_template_group_backfill_batch_groups',
     'approval_template_group_backfill_batch_links',
     'approval_template_group_backfill_batches_org_created_idx',
-    'atgbb_org_id_uni',
-    'approval_template_group_backfill_batches_pkey',
-    'approval_template_group_backfill_batch_groups_pkey',
-    'approval_template_group_backfill_batch_links_pkey'
+    'atgbb_org_id_uni'
   ]) AS n ORDER BY n;
   SELECT count(*) AS backfill_migration_recorded FROM kysely_migration
    WHERE name = 'zzzz20260919090000_create_approval_template_group_backfill_batches';
   ROLLBACK;
   ```
-- **通过：** 8 行全是 `absent = t`，`backfill_migration_recorded = 0`。
+- **通过：** 5 行全是 `absent = t`，`backfill_migration_recorded = 0`。
 - **不通过：** 不开始升级，不要删任何对象。回帖写出哪些名字 `absent = f`（都是本文列出的固定名字）以及计数，由开发机和 owner 另定办法。
 
 ### C3 审计日志分区：上机当月与次月
@@ -409,7 +423,7 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
   4. C1 第四行 health 应为 `200`。
   5. 维护标志正常情况下已被 `finally` 删掉。只有升级进程被杀、`finally` 没跑到时，才手工删 `<部署根目录>\output\maintenance.flag`（默认位置见 `:164-172`）。
   6. 回帖，查清备份失败的原因后再重试。
-- **R61 不带修复：** #6157（2026-09-29 约 07:25Z 仍为 OPEN，draft）修这个缺口，只改升级脚本和它的测试：停服之后、第一次写入线上文件之前失败时，脚本把后端重新拉起，并打印 `UPGRADE NOT APPLIED`（该 PR 正文）。owner 决定它不进 R61（#6079 2026-09-29T03:53:39Z），所以 R61 上机时上面的手工恢复适用。
+- **R61 不带修复：** #6157（2026-09-29 约 08:40Z 仍为 OPEN，draft）修这个缺口，只改升级脚本和它的测试：停服之后、第一次写入线上文件之前失败时，脚本把后端重新拉起，并打印 `UPGRADE NOT APPLIED`（该 PR 正文）。owner 决定它不进 R61（#6079 2026-09-29T03:53:39Z），所以 R61 上机时上面的手工恢复适用。
 - **升级脚本从哪里取、按什么顺序：**
   1. **只从打包提交取**，不从 `git pull` 到 main 之后的工作区复制，因为 main 可能比打包提交新（#6157 以后合入 main，main 上的脚本就不再是 R60 那一份）：
      ```bash
@@ -521,11 +535,11 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 | #6147（MERGED 2026-09-29T02:05:57Z，`e48d3307b`） | 客户看不到变化，不需要回归。两条配置恢复路由在 `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT` 与 `MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY` 后面，两个开关都默认关（该 PR 正文）。它改的是共享函数 `hasFullTableReadAccess`，先查 `canRead`（`univer-meta.ts:7465`）；复制入口的 `canCopySheet` 也调用它（`:9272`）。按该 PR 正文的调用点表（第 10 行），这个调用点在调用之前已经要求能读该表，所以复制入口的可见人群不变。 |
 | #6141（MERGED 2026-09-29T02:18:18Z，`2888addb4`） | 一般数据看不到变化，不需要专门回归。新的拒绝只针对超长输入（`docs/development/input-regex-redos-route-ii-design-20260925.md` §9.1）：字段规则里有 `pattern`、没有 `maxLength` 时，写入超过 10000 字符的值被拒；超过 4000 字符的正则（公式参数、校验规则、管道映射）被拒；`REGEXMATCH`、`REGEXEXTRACT`、`REGEXREPLACE` 对超限输入返回 `#ERROR!`，`SUBSTITUTE` 让整条公式变成 `#ERROR!`。上机后客户若报这几类错误，先对照这里。 |
 | #6062、#6092、#6123、#5878、#5927（MERGED；任务线与审批模板分组，§1.1 第 7–9、11、16 条） | 不是客户修复，但会被看到：「任务」入口与「!」角标（§5；这是 `TASKS_ENABLED` 未设时的样子）；「审批表单」页改动。回帖：演示机外壳（枚举）、管理员账号是否看到「任务」入口（布尔）。 |
-| #6138（MERGED 2026-09-29T03:27:31Z，`2908aeb7d`） | 客户看不到，后端运行时不变，不需要回归。它改上机预检脚本 `scripts/ops/multitable-onprem-preflight.sh` 与它的测试，另在 CI 加一步测试（`.github/workflows/plugin-tests.yml:196`）、改一段工作流注释和一行 pin（`git show --stat 2908aeb7d`）。这个脚本不进包：`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS`（`:37-186`）里既没有它，也没有它的上级目录（包只复制这份清单，`:590-592`）。旧机只有在自己的 wrapper 调用这个 bash 脚本时才会注意到变化；旧机回答 wrapper 不调用它（C7 末尾，#6079 2026-09-29T06:07:40Z），所以 R61 上机时注意不到。脚本本身的行为：`app.env` 里任何键声明不止一次都判失败，报文以 `DUPLICATE_ENV_KEY:` 开头，只列键名、次数和行号，不带值（`:724-816`，报文 `:814`）；看起来可能是值的一部分的键名印成 `<key withheld>`（`:623`、`:811-813`）；以 UTF-16 保存或含 NUL 字节的 `app.env` 判失败 `ENV_FILE is not UTF-8 text`（`:823-831`）；打不开的 `app.env` 判失败 `ENV_FILE is not readable`（`:880`）。修复建议里，`ENCRYPTION_KEY` / `ENCRYPTION_SALT` 两个非空值不同时哪一行都先别删（`:789-790`、`:199`），与 C7 一致；但它说「空值行挨着非空行时可以删」（`:198`），C7 对这种情况更保守（先回帖），以 C7 为准（§8）。无需回帖。 |
+| #6138（MERGED 2026-09-29T03:27:31Z，`2908aeb7d`） | 客户看不到，后端运行时不变，不需要回归。它改上机预检脚本 `scripts/ops/multitable-onprem-preflight.sh` 与它的测试，另把这个测试文件加进 CI 已有的一步 `node --test`（`.github/workflows/plugin-tests.yml:196`）、改一段工作流注释和一行 pin（`git show --stat 2908aeb7d`）。这个脚本不进包：`scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS`（`:37-186`）里既没有它，也没有它的上级目录（包只复制这份清单，`:590-592`）。旧机只有在自己的 wrapper 调用这个 bash 脚本时才会注意到变化；旧机回答 wrapper 不调用它（C7 末尾，#6079 2026-09-29T06:07:40Z），所以 R61 上机时注意不到。脚本本身的行为：`app.env` 里任何键声明不止一次都判失败，报文以 `DUPLICATE_ENV_KEY:` 开头，只列键名、次数和行号，不带值（`:724-816`，报文 `:814`）；看起来可能是值的一部分的键名印成 `<key withheld>`（`:623`、`:811-813`）；以 UTF-16 保存或含 NUL 字节的 `app.env` 判失败 `ENV_FILE is not UTF-8 text`（`:823-831`）；打不开的 `app.env` 判失败 `ENV_FILE is not readable`（`:880`）。修复建议里，`ENCRYPTION_KEY` / `ENCRYPTION_SALT` 两个非空值不同时哪一行都先别删（`:789-790`、`:199`），与 C7 一致；但它说「空值行挨着非空行时可以删」（`:198`），C7 对这种情况更保守（先回帖），以 C7 为准（§8）。无需回帖。 |
 | #6158（MERGED 2026-09-29T03:56:28Z，`f47054d88`） | 客户看不到，不需要回归。六个文件（`git show --stat f47054d88`）：`.github/workflows/attendance-staging-window-runner.yml`、`scripts/ops/attendance-staging-window-runner-remote.sh`、`scripts/ops/attendance-window-runner-pipeline.lib.sh`、`scripts/ops/attendance-window-runner-pipeline.test.mjs`、`scripts/ops/staging-tasks-smoke.mjs`、`scripts/ops/staging-tasks-smoke.test.mjs`。都不进包：包只按 `scripts/ops/multitable-onprem-package-build.sh` 的 `REQUIRED_PATHS`（`:37-186`）逐项复制（`:590-592` 调 `copy_path`，`:229-241`），这份清单是一个个文件和少数目录，没有 `scripts/ops` 整个目录，也没有这六个路径或它们的上级目录。`PACKAGE-METADATA.json` 的 `includedRuntimeRoots` 里写着 `scripts/ops`（`:466`），那只是写进元数据的文字，不决定复制什么。演示机上没有东西运行它们：工作流只能手动触发（`workflow_dispatch`，`attendance-staging-window-runner.yml:71-72`），头注释写明只对 staging，找不到 staging 的 compose 文件就失败（`:67-69`）。 |
 | #6144（MERGED 2026-09-29T05:04:03Z，`3a85b9c97`） | 见下面 6.2.1。演示机上预期没有「无法装载」分组，四步里只能验第 4 步（#6079 2026-09-29T06:07:40Z）。 |
-| #5866（MERGED 2026-09-29T06:16:03Z，`28a7342e6`；owner 约 06:33Z 同意随 R61） | 客户在页面上看不到变化：没有界面（§5）。新增四个管理员接口：`GET /api/approval-template-groups/backfill/preview`、`POST …/backfill/execute`、`POST …/backfill/batches/:batchId/rollback`、`GET …/backfill/batches`（`packages/core-backend/src/routes/approvals.ts:2083`、`:2104`、`:2129-2133`、`:2159`），都先过 `authenticate` 再过 `approvalTemplateAdminGuard`，（`:225`）：平台管理员直接放行，其余账号须持有 `approval-templates:manage` 或 `approvals:admin-templates` 之一（`rbacGuardAny`，`packages/core-backend/src/rbac/rbac.ts:119-131`）。**不写库就能核的：** 迁移后三张表都在，迁移已记录（在 §2.4 按名核对之外再跑一次，只出布尔和计数）：`BEGIN READ ONLY; SELECT to_regclass('approval_template_group_backfill_batches') IS NOT NULL AS batches_present, to_regclass('approval_template_group_backfill_batch_groups') IS NOT NULL AS batch_groups_present, to_regclass('approval_template_group_backfill_batch_links') IS NOT NULL AS batch_links_present, (SELECT count(*) FROM kysely_migration WHERE name = 'zzzz20260919090000_create_approval_template_group_backfill_batches') AS recorded; ROLLBACK;`，预期三个 `t`、`recorded = 1`。表里行数预期为 0（没人调用过「执行」接口）：`SELECT (SELECT count(*) FROM approval_template_group_backfill_batches) + (SELECT count(*) FROM approval_template_group_backfill_batch_groups) + (SELECT count(*) FROM approval_template_group_backfill_batch_links) AS backfill_rows;`（同样包在只读事务里）。**不要调用：** 这四个接口里「执行」会在客户服务器上建分组、挂接模板，「回滚」会撤销该批次写的挂接、归档该批次建的空分组（迁移头注释 `:16-18`）；「预览」只读，但读的是客户的审批模板。未经 owner 同意，这四个接口都不在客户服务器上调用。回帖：三个布尔、`recorded`、`backfill_rows`。 |
-| #6162（MERGED 2026-09-29T07:04:00Z，`bf648922a`，即打包提交；修 issue #6155；按 PR head `d75b471f2` 原样合入，§1.0） | **需 owner 放行：** 停用再启用是对演示机自动化配置的两次写入，停用期间这条规则不触发。**对象：** issue #6155 所说的那条已有规则（触发器「记录删除时」，动作删除触发的那条记录）；R60 上它在面板停用后，重新启用被拒 400 `DELETED_TRIGGER_SELF_MUTATION`，旧机改用 SQL 恢复为启用（#6079 2026-09-29T00:37:05Z），所以它现在应是开着的。**点什么：** 打开该表的「自动化」面板（标题 `meta-automation-labels.ts:1083`，`MetaAutomationManager.vue:11`），点这条规则卡片上的勾选框一次（文案「已启用」变「已停用」），再点一次。**应当：** 两次都成功，文案回到「已启用」（勾选框 `MetaAutomationManager.vue:723-731`，文案 `meta-automation-labels.ts:1103-1104`）；卡片的规则描述下出现提示「此规则在记录删除时运行，而它的动作需要这条记录，所以每次运行都会被跳过。如非预期，请改用其他动作，或换一个触发条件。」（`MetaAutomationManager.vue:736-743`，文案 `meta-automation-labels.ts:1108-1111`）；刷新面板后仍是「已启用」。对这条规则（动作是删除记录），提示说的是对的；对动作是「修改记录」「锁定记录」的同类规则，这句提示不准确，是已知问题（§6.3）。依据：面板的勾选只发 `{ enabled }`（`useMultitableAutomations.ts:83-90`）；后端对不带任何形状字段的 PATCH 不再做记录删除自改检查（`automation-service.ts:2084-2090`，条件里去掉了 `input.enabled === true`）；路由测试 `packages/core-backend/tests/unit/automation-deleted-trigger-reenable-route.test.ts:160-179` 走的正是「开着 → 停用 200 → 启用 200，库里的标志回到 true，只写了 `enabled` 和 `updated_at`」。**仍须被拒：** `enabled: true` 与形状字段（触发器类型、动作类型、动作配置、动作列表、执行方式）一起发，仍回 400 `DELETED_TRIGGER_SELF_MUTATION`，标志不变（同一测试文件 `:181-195`）；新建这个形状仍回 400（`:197-212`）；报文是「记录删除时触发记录已不存在，不能再修改/删除/锁定它」（`automation-service.ts:157`）。在规则编辑器里把规则改成这个形状再保存，也属于带形状字段的请求。这几项要写库，只在 owner 放行时做，不做就回帖「未做」。**失败时：** 面板重新读取规则，勾选框与文案按服务器存的状态显示，服务器的那句话留在面板的提示里（`useMultitableAutomations.ts:75-89`）。以上行号在 `bf648922a` 上与 `d75b471f2` 上相同（这 11 个文件在两个提交之间无差别）。回帖：两次点击是否都成功、刷新后是否「已启用」、提示是否出现（各一个布尔）。 |
+| #5866（MERGED 2026-09-29T06:16:03Z，`28a7342e6`；owner 约 06:33Z 同意随 R61） | 客户在页面上看不到变化：没有界面（§5）。新增四个管理员接口：`GET /api/approval-template-groups/backfill/preview`、`POST …/backfill/execute`、`POST …/backfill/batches/:batchId/rollback`、`GET …/backfill/batches`（`packages/core-backend/src/routes/approvals.ts:2083`、`:2104`、`:2129-2133`、`:2159`），都先过 `authenticate` 再过 `approvalTemplateAdminGuard`（`:225`）：平台管理员直接放行，其余账号须持有 `approval-templates:manage` 或 `approvals:admin-templates` 之一（`rbacGuardAny`，`packages/core-backend/src/rbac/rbac.ts:119-131`）。**不写库就能核的：** 迁移后三张表都在，迁移已记录（在 §2.4 按名核对之外再跑一次，只出布尔和计数）：`BEGIN READ ONLY; SELECT to_regclass('approval_template_group_backfill_batches') IS NOT NULL AS batches_present, to_regclass('approval_template_group_backfill_batch_groups') IS NOT NULL AS batch_groups_present, to_regclass('approval_template_group_backfill_batch_links') IS NOT NULL AS batch_links_present, (SELECT count(*) FROM kysely_migration WHERE name = 'zzzz20260919090000_create_approval_template_group_backfill_batches') AS recorded; ROLLBACK;`，预期三个 `t`、`recorded = 1`。表里行数预期为 0（没人调用过「执行」接口）：`SELECT (SELECT count(*) FROM approval_template_group_backfill_batches) + (SELECT count(*) FROM approval_template_group_backfill_batch_groups) + (SELECT count(*) FROM approval_template_group_backfill_batch_links) AS backfill_rows;`（同样包在只读事务里）。**不要调用：** 这四个接口里「执行」会在客户服务器上建分组、挂接模板，「回滚」会撤销该批次写的挂接、归档该批次建的空分组（迁移头注释 `:16-18`）；「预览」只读，但读的是客户的审批模板。未经 owner 同意，这四个接口都不在客户服务器上调用。回帖：三个布尔、`recorded`、`backfill_rows`。 |
+| #6162（MERGED 2026-09-29T07:04:00Z，`bf648922a`，即打包提交；修 issue #6155；按 PR head `d75b471f2` 原样合入，§1.0） | **需 owner 放行：** 停用再启用是对演示机自动化配置的两次写入，停用期间这条规则不触发。**对象：** issue #6155 所说的那条已有规则（触发器「记录删除时」，动作删除触发的那条记录）；R60 上它在面板停用后，重新启用被拒 400 `DELETED_TRIGGER_SELF_MUTATION`，旧机改用 SQL 恢复为启用（#6079 2026-09-29T00:37:05Z：「改为 SQL 按 id 把 `enabled` 恢复为 true（原状）」），所以它现在应是开着的。**谁能做：** 读规则列表与改规则的两条路由都先要 `canManageAutomation`，否则 403（`packages/core-backend/src/routes/univer-meta.ts:20794`、`:20802`；PATCH `:20860`、`:20871`）；它的基础判定是管理员角色，或持 `workflow:all`、`workflow:write`、`workflow:create`、`workflow:execute` 之一（`packages/core-backend/src/multitable/access.ts:126-131`）。**先不写库就能看的：** 规则开着时提示就会显示（`MetaAutomationManager.vue:2217-2220`），所以打开面板就能核对「已启用」与提示，不用点任何东西；这一步回帖一个布尔（提示是否出现）。下面两次点击（停用、再启用）仍需 owner 放行。**点什么：** 打开该表的「自动化」面板（标题 `meta-automation-labels.ts:1083`，`MetaAutomationManager.vue:11`），点这条规则卡片上的勾选框一次（文案「已启用」变「已停用」），再点一次。**应当：** 两次都成功，文案回到「已启用」（勾选框 `MetaAutomationManager.vue:723-731`，文案 `meta-automation-labels.ts:1103-1104`）；卡片的规则描述下出现提示「此规则在记录删除时运行，而它的动作需要这条记录，所以每次运行都会被跳过。如非预期，请改用其他动作，或换一个触发条件。」（`MetaAutomationManager.vue:736-743`，文案 `meta-automation-labels.ts:1108-1111`）；刷新面板后仍是「已启用」。对这条规则（动作是删除记录），提示说的是对的；对动作是「修改记录」「锁定记录」的同类规则，这句提示不准确，是已知问题（§6.3）。依据：面板的勾选只发 `{ enabled }`（`useMultitableAutomations.ts:83-90`）；后端对不带任何形状字段的 PATCH 不再做记录删除自改检查（`automation-service.ts:2084-2090`，条件里去掉了 `input.enabled === true`）；路由测试 `packages/core-backend/tests/unit/automation-deleted-trigger-reenable-route.test.ts:160-179` 走的正是「开着 → 停用 200 → 启用 200，库里的标志回到 true，只写了 `enabled` 和 `updated_at`」。**仍须被拒：** `enabled: true` 与形状字段（触发器类型、动作类型、动作配置、动作列表、执行方式）一起发，仍回 400 `DELETED_TRIGGER_SELF_MUTATION`，标志不变（同一测试文件 `:181-195`）；新建这个形状仍回 400（`:197-212`）；报文是「记录删除时触发记录已不存在，不能再修改/删除/锁定它」（`automation-service.ts:157`）。在规则编辑器里把规则改成这个形状再保存，也属于带形状字段的请求。这几项要写库，只在 owner 放行时做，不做就回帖「未做」。**失败时：** 面板重新读取规则，勾选框与文案按服务器存的状态显示，服务器的那句话留在面板的提示里（`useMultitableAutomations.ts:75-89`）。以上行号在 `bf648922a` 上与 `d75b471f2` 上相同（这 11 个文件在两个提交之间无差别）。回帖：两次点击是否都成功、刷新后是否「已启用」、提示是否出现（各一个布尔）。 |
 
 #### 6.2.1 #6144：装载失败的数据源原地重存凭据
 
@@ -543,12 +557,12 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 
 ### 6.3 已知问题（随 R61 上机，下一版改）
 
-- **#6162 的新提示对部分规则不准确**（owner 约 06:57Z 决定照样上、提早发版，#6079 2026-09-29T07:08:05Z 的「已知问题」）：规则卡片上的提示说「每次运行都会被跳过」（`meta-automation-labels.ts:1108-1111`）。这只在动作是「删除记录」时成立：删除找不到触发的那条记录，这一步记为 `skipped`（`packages/core-backend/src/multitable/automation-executor.ts:3620-3625`）。动作是「修改记录」时，这一步记为成功，输出带 `noop: true`，什么也没改（`:3353-3361`）；动作是「锁定记录」时，同表的 `UPDATE` 改到 0 行，这一步同样记为成功（`:5720-5725`、`:5762-5766`）。提示对这两种动作的说法不对，但它们实际也不改动任何数据。只是措辞问题，不影响规则能否重新启用。措辞修正下一版单独一个 PR。
+- **#6162 的新提示对部分规则不准确**（owner 约 06:57Z 决定照样上、提早发版，#6079 2026-09-29T07:08:05Z 的「已知问题」）：规则卡片上的提示说「每次运行都会被跳过」（`meta-automation-labels.ts:1108-1111`）。这只在动作是「删除记录」时成立：删除找不到触发的那条记录，这一步记为 `skipped`（`packages/core-backend/src/multitable/automation-executor.ts:3620-3625`）。动作是「修改记录」时，这一步记为成功，输出带 `noop: true`，什么也没改（`:3353-3361`）；动作是「锁定记录」时，同表的 `UPDATE` 改到 0 行，这一步同样记为成功（`:5720-5725`、`:5762-5766`）。提示对这两种动作的说法不对，但它们实际也不改动任何表格数据。（「锁定记录」这一步的事务里仍可能写内部记账行：运行时开关打开、且有真事务时，先写一条动作认领记录，`automation-executor.ts:5711`、`:3688-3690`、`:3702-3718`；运行日志也照常记这一步。）只是措辞问题，不影响规则能否重新启用。措辞修正下一版单独一个 PR。
 - **换钥之前封存的其它存储：** 演示机上已知的一处已结清（C6）；通用的自检与重录路径是 #6164，不进 R61（§6.4）。
 
 ### 6.4 R61 不带（owner 2026-09-29 决定，#6079 2026-09-29T03:53:39Z、07:08:05Z）
 
-| PR 或 issue（`gh` 现状，约 07:25Z） | 为什么不带、R61 上是什么样子 |
+| PR 或 issue（`gh` 现状，约 08:40Z） | 为什么不带、R61 上是什么样子 |
 |---|---|
 | #6151（OPEN，draft） | 修「源就绪预检」的 409：只从已验证令牌的租户声明取租户，带声明且能读该源的账号得到报告（该 PR 正文）。owner 决定放下一版，打包点记录之前不合入 main。所以 R61 上「源就绪预检」的「现在检查」（`apps/web/src/components/integration/stockPreparation/StockPreparationOpsPanel.vue:73-92`）与 R60 相同：路由那一段与这个面板从 R60 起没有改过（`git diff --stat 583dfdf1a bf648922a -- apps/web/src/components/integration/stockPreparation/StockPreparationOpsPanel.vue` 无输出；`git diff 583dfdf1a bf648922a -- plugins/plugin-integration-core/lib/http-routes.cjs | grep '^@@'` 列出的改动块在 R60 的第 527、814–875、9449、10443 行附近，都不在那段 409 `SOURCE_PREFLIGHT_NO_SOURCE` 附近：R60 上是 `:7030`，`bf648922a` 上是 `:7041-7046`）。下一版的条件②已由旧机的 Q1–Q4 回答（#6079 2026-09-29T06:07:40Z，§7）。 |
 | #6153（OPEN，draft） | 按 owner 裁决不合（#6079 2026-09-29T02:27:53Z）：保持草稿，独有的测试并入 #6151 后关闭。它修的是同一个 409，01:34:20Z 回帖里「随 R61 上机」的说法已被这次裁决取代。 |
@@ -559,13 +573,13 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 
 ### 6.5 打包点之后合入 main 的 PR
 
-打包提交已固定为 `bf648922a`。之后合入 main 的 PR（例如 #6145、#6149）都不进 R61，这里不再列回归。
+打包提交已固定为 `bf648922a`。之后合入 main 的 PR 都不进 R61，这里不再列回归。例如 #5972（2026-09-29T07:52:33Z 合入，`88b6e1967`，改 CI 工作流、测试、文档和一行 pin）。#6145、#6149 仍在开，合入后同样不进 R61。
 
 ---
 
 ## 7. 旧机侧状态未知的事项
 
-2026-09-29 约 07:25Z 查 #6079：共 35 条评论，最后一条是 2026-09-29T07:08:05Z。2026-09-28T14:02:47Z 之后的十一条（2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z、03:53:39Z、05:07:05Z、06:07:40Z、06:22:13Z、07:08:05Z）结清或改写了下表的几行。其中 03:53:39Z 是开发机转述的 owner 打包点决定；05:07:05Z 是另一开发窗口关于 #6144 的更正（§6.2.1）；06:07:40Z 是旧机的 Q1–Q4 与 C1–C7 回帖；06:22:13Z 是旧机关于用户管理页 500 的回帖（C6）；07:08:05Z 是开发机记录的打包点。已结清的行留在表里、注明出处，方便对照。
+2026-09-29 约 08:40Z 查 #6079：共 37 条评论，最后一条是 2026-09-29T08:37:31Z。2026-09-28T14:02:47Z 之后的十三条（2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z、03:53:39Z、05:07:05Z、06:07:40Z、06:22:13Z、07:08:05Z、08:00:40Z、08:37:31Z）结清或改写了下表的几行。其中 03:53:39Z 是开发机转述的 owner 打包点决定；05:07:05Z 是另一开发窗口关于 #6144 的更正（§6.2.1）；06:07:40Z 是旧机的 Q1–Q4 与 C1–C7 回帖；06:22:13Z 是旧机关于用户管理页 500 的回帖（C6）；07:08:05Z 是开发机记录的打包点；08:00:40Z 与 08:37:31Z 是开发机关于打包提交 CI 的说明与结论（§1.0）。已结清的行留在表里、注明出处，方便对照。
 
 | 事项 | 怎样算结清 |
 |---|---|
@@ -603,12 +617,14 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 - **演示机上后端的环境从哪里来：** 计划任务起的是 `start-pm2-runtime-persistent.bat`，再由它起 pm2-runtime（`handoff-r59-two-machine-20260924.md:22`）。这个 .bat 不在仓库里：`git grep -l 'MetaSheet-PM2\|pm2-runtime' bf648922a -- scripts ':!*.md'` 只列出升级脚本、它的测试，以及 #6138 之后的 `scripts/ops/multitable-onprem-preflight.sh`（只在一行注释里提到 pm2-runtime，`:706`），没有这个 .bat。它是否用 `ecosystem.config.cjs` 启动（从而「同一个键取第一次出现的那行」），要看这个 .bat 才能定。C7 与 `stock-prep-root-selection-config.md` 都受这一点影响。
 - **根选择订正里「改了 `app.env` 之后不能只用 `pm2 restart`」：** 依据是升级脚本 `:1360-1362` 的注释（单纯 restart 时 pm2 不能可靠地重读环境），没有在演示机上核对。01:26:41Z 那次 `pm2 restart`（`PM2_HOME` 指向 `.pm2-runtime`）让后端 33 秒恢复，说明在运行中的 pm2-runtime 上 restart 能把后端拉起来；那次没有改 `app.env`，回答不了重读环境的问题。
 - **#6146 的三条回归：** 读的是 `cd89c74dd` 上的界面代码与该 PR 正文，没有在浏览器里看过。
-- **打包提交上的 CI：** 2026-09-29 约 07:25Z 读 `bf648922a` 的检查结果时还有检查在跑（成功 17、跳过 3、进行中 1），没有失败的。打包之前要等开发机在 #6079 回「打包提交 CI 已全绿」（07:08:05Z），本文不替代那一条。
+- **打包提交上的 CI：** 本文写到 2026-09-29 约 08:40Z 为止的状态（§1.0）：开发机的 CI 结论已在 #6079 08:37:31Z 回帖，其中 #6166 的 13 项必跑检查本文逐项对过；打包提交上被取消的 `test (20.x)` 的重跑还没有结果。#6160 上那个超时用例是否偶发，本文没有另外核对。以开发机在 #6079 的回帖为准。
 - **#6162 的回归行（§6.2）：** 按 diff、测试与该 PR 正文写，没有在浏览器里看过。合入提交与 PR head 在这 11 个文件上逐字相同（§1.0），所以按 head 写的行号不变。
 - **#6144 验收第 3 步的后半句**（重存后手动试拉「不再报连接不可用」）：只来自 #6079 2026-09-29T05:07:05Z，本文只核到重存后按运行时路径装载（`DataSourceManager.ts:900-905`），没有核对试拉那一路。
 - **属主能不能自己打开数据源页：** 页面的前端路由要 `integration:write`（`appRoutes.ts:303-306`）。演示机上各数据源属主的账号有没有这个权限码，没有核对；平台管理员在前端路由守卫里是否不受这一条限制，本文没有读守卫代码去核对。后端重存凭据的权限只看属主或平台管理员（§6.2.1），另加 `rbacGuard('data_sources', 'write')`。
 - **#6144 界面：** 读的是 `3a85b9c97` 上的组件代码（到 `bf648922a` 没有再改），没有在浏览器里看过。
-- **#5866 的三个 `_pkey` 名字（C2b）：** 按 PostgreSQL 给主键起名的默认规则推出，没有在真库上建表核对。
+- **回退到 R60 文件之后：** R60 代码在带着 R61 5 条迁移的库上运行，没有测过；「后端启动不跑迁移」读的是 `583dfdf1a` 上的代码（§2.2 表后），没有在演示机上核对。kysely 的缺失迁移检查读的是 0.28.8 已发布包的 `migrator.js`，没有实际触发过。
+- **#6162 谁能做：** 只读到基础判定 `access.ts:126-131`；按表的权限会不会再收窄 `canManageAutomation`，本文没有逐项读。
+- **C2b 里 PostgreSQL 的行为：** 默认主键名被占用时另起名字、`IF NOT EXISTS` 只跳过不检查形状、外键要求被引用列上有唯一约束，这三点依据的是 PostgreSQL 公开的规则，没有在真库上建表核对。上一版把三个 `_pkey` 名字列进 C2b、说它们被占用会让建表失败，是错的，本版已删。
 - **#5866 的乱序执行（§2.2 第 1 条）：** 依据是 `migrate.ts:32` 与 kysely 0.28.8 的源码（见本节第一条），以及 421 行与迁移文件数相等这一点；R60 上机时只按名核对过它新增的 6 条，名字排在 #5866 那条之后的 8 条是否都已执行，是由行数相等推出来的。
 - **#5866 的回填接口：** 读了路由与守卫（`approvals.ts:225`、`:2083-2159`），没有调用过，也不应在客户服务器上调用（§6.2）。
 - **#6162 已知问题的运行结果（§6.3）：** 读的是 `automation-executor.ts` 三个动作的返回值，没有在库里跑过这三种规则。
@@ -621,7 +637,7 @@ $ git diff --name-status 28a7342e6 bf648922a -- packages/core-backend/src/db/mig
 
 - 上机手册：`handoff-r59-two-machine-20260924.md` §2–§3。
 - 复制数据表验收：`copy-sheet-r61-acceptance-checklist.md`。
-- 上机沟通：issue #6079（2026-09-29 约 07:25Z 共 35 条评论；本文引用的评论：2026-09-28T02:03:25Z、06:39:16Z、08:24:49Z、09:01:43Z、10:34:09Z、10:37:13Z、11:56:06Z、12:51:17Z、13:52:05Z、14:02:47Z；2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z、03:53:39Z（owner 打包点决定，请旧机现在跑 C1–C7）、05:07:05Z（#6144 合入后的恢复办法更正）、06:07:40Z（旧机的 Q1–Q4 与 C1–C7 结果）、06:22:13Z（用户管理页 500 与就地重加密，立 #6163、#6164）、07:08:05Z（打包点 `bf648922a`，打包前先等「打包提交 CI 已全绿」））。
+- 上机沟通：issue #6079（2026-09-29 约 08:40Z 共 37 条评论；本文引用的评论：2026-09-28T02:03:25Z、06:39:16Z、08:24:49Z、09:01:43Z、10:34:09Z、10:37:13Z、11:56:06Z、12:51:17Z、13:52:05Z、14:02:47Z；2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z、03:53:39Z（owner 打包点决定，请旧机现在跑 C1–C7）、05:07:05Z（#6144 合入后的恢复办法更正）、06:07:40Z（旧机的 Q1–Q4 与 C1–C7 结果）、06:22:13Z（用户管理页 500 与就地重加密，立 #6163、#6164）、07:08:05Z（打包点 `bf648922a`）、08:00:40Z（打包提交上 `test (20.x)` 被并发规则取消；13 项必跑检查里 4 项在合并后运行）、08:37:31Z（CI 结论：#6166 上 13 项必跑检查全部通过；重跑待回））。
 - 决策登记：`decision-register.md` R-18、R-19、R-20；R-24（R61 打包点）、R-25（合并前免重跑 CI 的范围）、R-26（云课堂试用）。
 
 ---
