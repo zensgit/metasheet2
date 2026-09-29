@@ -733,6 +733,14 @@
           <div class="meta-automation__card-desc">
             {{ describeTrigger(rule) }} &rarr; {{ describeAction(rule) }}
           </div>
+          <div
+            v-if="showsDeletedTriggerSkipNotice(rule)"
+            class="meta-automation__hint meta-automation__hint--warning"
+            role="note"
+            data-automation-deleted-trigger-notice="true"
+          >
+            {{ l('manager.deletedTriggerSkipNotice') }}
+          </div>
           <div v-if="dingTalkCardLinks(rule).length" class="meta-automation__card-links">
             <div
               v-for="link in dingTalkCardLinks(rule)"
@@ -928,6 +936,7 @@ import {
 } from '../utils/meta-automation-labels'
 import { loadRuleEntriesConcurrently, mergeRuleEntries } from '../utils/automation-rule-concurrent-merge'
 import { AUTOMATION_RECIPES, applyRecipeToDraft, type AutomationRecipe } from '../automationRecipes'
+import { storedRuleHasDeletedTriggerSelfMutation } from '../automationSaveBlockReasons'
 
 const props = defineProps<{
   visible: boolean
@@ -2197,13 +2206,30 @@ async function onSave() {
 // request fails the model value does not change, so nothing else would flip the input back.
 const toggleRenderEpoch = ref(0)
 
+// #6155: the rules whose switch-ON request is in flight — the notice below already applies to them.
+const pendingEnableRuleIds = ref(new Set<string>())
+
+/**
+ * #6155: a NON-blocking notice for a rule that is on (or being switched on) while its trigger is record.deleted
+ * and its action needs the trigger record — each run of it ends as skipped. The shape decision is the editor's
+ * own save-block detector (automationSaveBlockReasons.ts), applied to the rule as listed.
+ */
+function showsDeletedTriggerSkipNotice(rule: AutomationRule): boolean {
+  if (!rule.enabled && !pendingEnableRuleIds.value.has(rule.id)) return false
+  return storedRuleHasDeletedTriggerSelfMutation(rule)
+}
+
 async function onToggle(rule: AutomationRule) {
+  const enabling = !rule.enabled
+  if (enabling) pendingEnableRuleIds.value.add(rule.id)
   try {
-    await toggleRule(props.sheetId, rule.id, !rule.enabled)
+    await toggleRule(props.sheetId, rule.id, enabling)
     emit('updated')
   } catch {
     // error ref is set by composable (the server's sentence); the rules were re-read from the server there
     toggleRenderEpoch.value += 1
+  } finally {
+    if (enabling) pendingEnableRuleIds.value.delete(rule.id)
   }
 }
 
