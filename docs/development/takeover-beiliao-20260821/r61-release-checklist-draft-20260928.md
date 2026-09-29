@@ -1,23 +1,35 @@
-# R61 上机清单（草案，范围待 owner 确认）
+# R61 上机清单（打包点已由 owner 决定；部署仍待 owner 放行）
 
-> **状态：草案。** 打包点与范围由 owner 决定。§1 只列事实，不代 owner 推荐。owner 定下具体提交之后，§2 的迁移名单必须在那个提交上用命令重算，§5、§6 只看对应选项。
+> **决定：** owner 2026-09-29（约 03:45Z，开发机窗口）决定：R61 = main 原样打包，打包点是 main 上含 #6144 与 #6162 两支的 first-parent 提交；#6157、#6151 不进 R61，放下一版；任务线两条迁移随包执行，所以 C2 必做。出处：#6079 2026-09-29T03:53:39Z。**部署本身仍由 owner 在旧机放行，本文不是放行。** 详见 §1。
 > **执行者：** 旧机（运维机）。开发机连不上演示机，演示机现状全部来自 #6079 的回帖，按回帖时间戳（UTC）引用。
 > **口径：** values-free。回帖只写布尔、计数、枚举、键名、用时；不写主机、地址、口令、令牌、客户名、项目号、单元格值。需要项目号、表 id 的地方用 `<项目号>`、`<表 id>` 或 psql 变量代入，不回显。
-> **基线：** 文中 `path:line` 以 origin/main `2888addb4`（#6141，2026-09-29T02:18:18Z 合入）为准，另注明者除外。PR 状态与 #6079 评论为 2026-09-29 约 03:10Z 用 `gh` 读到的结果（#6079 共 30 条评论，最后一条是 2026-09-29T02:27:53Z）。交给旧机之前，按 §1.1 的命令和 §7 开头的说明再对一次。
+> **基线：** 文中 `path:line` 以 origin/main `3a85b9c97`（#6144，2026-09-29T05:04:03Z 合入）为准，另注明者除外；附录两节仍以决定之前的 `2888addb4` 为准。PR 状态与 #6079 评论为 2026-09-29 约 05:40Z 用 `gh` 读到的结果（#6079 共 32 条评论，最后一条是 2026-09-29T05:07:05Z）。打包提交会比这个基线新（至少多 #6162）：交给旧机之前，按 §1.1 的命令和 §7 开头的说明再对一次。
 > **上机手册：** 仍是 `handoff-r59-two-machine-20260924.md` §2–§3（#6079 正文第 0 节要求每次上机前读）。本文只补 R61 特有的事项。
 
 ---
 
-## 1. 打包点选项（待 owner 决定）
+## 1. 打包点（owner 已决定）
 
-### 1.1 决定性事实：R60 之后 main 的 first-parent 顺序
+### 1.0 决定
+
+- **选项 A：main 原样打包。** 打包提交 = main 上含 #6144 与 #6162 两支的 first-parent 提交：`PACKAGE_COMMIT_TBD`。两支合入之后，由开发机在 #6079 回帖具体提交号（#6079 2026-09-29T03:53:39Z）。
+- **#6144 已在 main：** `3a85b9c97`，2026-09-29T05:04:03Z 合入，first parent 是 `f47054d88`（`git log -1 --format='%H %P' 3a85b9c97`）。14 个文件（`git show --stat 3a85b9c97`），不带迁移（§2.2），不带开关（§4）。
+- **#6162 还没合：** 2026-09-29 约 05:40Z `gh pr view 6162` 为 OPEN、draft，head `d75b471f2`。它是打包点唯一剩下的前提。它不带迁移（§2.3）。
+- **不进 R61：** #6157（升级脚本的缺口，C8）与 #6151（源就绪预检 409，§6.4），放下一版；打包点记录之前，开发机不往 main 合这两支（#6079 2026-09-29T03:53:39Z）。
+- **迁移：** 4 条随包执行，其中两条是任务线的（§2.2）。所以 C2 必做。
+- **命令用哪个提交：** 本文每一条需要打包提交的命令，都必须在 `PACKAGE_COMMIT_TBD` 上跑，不用 main 此刻的头，也不用本文的基线 `3a85b9c97`。
+- **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。工作流拿它与检出后 `git rev-parse HEAD` 的输出逐字比较，不一致就拒绝打包（`:122-131`），所以这里填 40 位完整提交号，即 `git rev-parse PACKAGE_COMMIT_TBD` 的输出。
+- **与已验证流程的偏差：** 切法、tag、`expected_sha` 都与 R60 相同（§1.2）。升级脚本也与 R60 相同：#6157 不进包，§1.2 的命令在 `3a85b9c97` 上无输出，C8 在打包提交上再按 blob 核对一次。需要注意的只有包里的两条任务线迁移。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
+- **没有采用的做法：** 选项 B（用 `MIGRATION_EXCLUDE` 排除任务迁移）与选项 C（从 `b433ac814` 拉发布分支拣选）连同当时核过的事实移到文末附录。
+
+### 1.1 R60 之后 main 的 first-parent 顺序
 
 ```bash
 git fetch origin main --tags
-git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
+git log --first-parent --reverse --format='%h %s' 583dfdf1a..PACKAGE_COMMIT_TBD
 ```
 
-在 `2888addb4` 上共 21 条，从旧到新：
+下表是在 origin/main `3a85b9c97` 上跑 `git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main` 的结果，共 24 条，从旧到新。#6162 合入后至少再多一条。交给旧机之前，用上面的命令在 `PACKAGE_COMMIT_TBD` 上重算：多出来的若不止 #6162 那一条，就回到 §2.1 重算迁移，并在 §6 给多出的提交补行。
 
 | # | 提交 | PR | 内容 | 类别 |
 |---|---|---|---|---|
@@ -42,78 +54,35 @@ git log --first-parent --reverse --format='%h %s' 583dfdf1a..origin/main
 | 19 | `e48d3307b` | #6147 | 配置恢复里的有损类型回退要求对表有读：共享函数 `hasFullTableReadAccess` 先查 `canRead` | 修复，两个开关默认关，客户看不到（§6.2） |
 | 20 | `4aa0385cd` | #6148 | 修 bridge-agent 只读契约测试 | 仅测试与文档 |
 | 21 | `2888addb4` | #6141 | 用户提供的正则按模式长度与输入长度设上限（公式、字段校验、集成管道校验、公开表单） | 平台加固，超长输入才看得到（§6.2） |
+| 22 | `2908aeb7d` | #6138 | 上机预检脚本 `scripts/ops/multitable-onprem-preflight.sh`：任何键重复声明都判失败，判定不带值；另改两个工作流里调用它的测试步骤与注释、一行 pin | 运维脚本，后端运行时不变（§6.2） |
+| 23 | `f47054d88` | #6158 | staging 窗口 runner 的 `tasks_enabled` 输入与非管理员任务冒烟；只改一个工作流和 `scripts/ops/` 下五个文件 | 仅 staging 与 CI（§6.2） |
+| 24 | `3a85b9c97` | #6144 | 装载失败的数据源由属主或平台管理员原地重存凭据；在这种源的 id 上新建改回 409 | 客户修复（§6.2） |
 
 由此得出的事实：
 
-- 客户修复 #6136（第 10 条）排在任务线 #6062、#6092、#6123（第 7–9 条，含两条任务迁移）之后。#6142、#6140（第 12、13 条）排在审批模板分组 #5878（第 11 条）之后。所以**沿 first-parent 切的点只要带上 #6136，就一定带上任务线和它的两条迁移；只要带上 #6142 或 #6140，就一定带上 #5878。**
-- 不带任务线和 #5878 的最后一个 first-parent 点是 `b433ac814`（第 5 条）。它有复制数据表 S1，但没有 #6136、#6142、#6140。
-- #6146（第 17 条）排在 #5927（第 16 条）之后：沿 first-parent 切的点只要带上 #6146，就一定带上 #5927。切在 `33047ef94`（第 15 条）两者都不带；切在 `6cddab3e5` 带 #5927、不带 #6146。
-- #6147（第 19 条）与 #6141（第 21 条）排在 #5927、#6146 之后：沿 first-parent 切的点只要带上其中任何一个，就一定带上 #5927 和 #6146。第 18–21 条都不带新迁移（§2.2 的命令在 `2888addb4` 上的输出与 `cd89c74dd` 相同）。
-- main 还会前进（在开 PR 见 §2.3、§6.3）。owner 定的应是一个具体提交号。
+- 打包提交在第 24 条之后，所以上表 24 条都在包里，#6162 再加一条。
+- 任务线 #6062、#6092、#6123（第 7–9 条，含两条任务迁移）排在客户修复 #6136（第 10 条）之前；审批模板分组 #5878、#5927（第 11、16 条）排在 #6142、#6140、#6146（第 12、13、17 条）之前。沿 first-parent 切的点绕不开它们，所以它们都在包里（§5）。附录里的选项 C 就是为绕开它们而设的，没有采用。
+- 第 18–24 条都不带新迁移：`git diff --name-status cd89c74dd origin/main -- packages/core-backend/src/db/migrations packages/core-backend/migrations` 在 `3a85b9c97` 上无输出。
 
 ### 1.2 R59、R60 是怎么切的
 
 - **R59** = main `05461c739`（`handoff-r59-two-machine-20260924.md:9`），CI 打包（同文 `:10`）。它在 main 的 first-parent 链上（`git log --first-parent --format=%h origin/main | grep ^05461c739` 有输出）。origin 上没有指向它的 tag：`git ls-remote --tags origin` 里既没有指向 `05461c739` 的，也没有名字含 `r59` 的；`onprem-` 开头的发布 tag 只有 `onprem-r60`。
 - **R60** = main `583dfdf1a`，即 #6131 的合入提交，开发机在 #6079 2026-09-28T09:01:43Z 指定。origin 上 tag `onprem-r60` 指向它，它也在 first-parent 链上。旧机 2026-09-28T10:34:09Z 回帖：CI 打包按 `expected_sha` 复核，本地门禁全过。
 - **打包工作流：** `.github/workflows/multitable-onprem-package-build.yml`，`workflow_dispatch`（`:41`），输入 `expected_sha`（`:63`）。检出的提交与它不一致就拒绝打包（`:122-131`）。
-- **R60 之后没改过的东西：** 下面这条命令在 `2888addb4` 上无输出。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动：
+- **R60 之后没改过的东西：** 下面这条命令在 `3a85b9c97` 上无输出（在 `2888addb4` 上也无输出）。也就是说，升级脚本、打包工作流、`docker/`、`ecosystem.config.cjs` 从 R60 起一字未动。打包提交上要把 `origin/main` 换成 `PACKAGE_COMMIT_TBD` 再跑一次：
   ```bash
   git diff --stat 583dfdf1a origin/main -- scripts/ops/multitable-onprem-package-upgrade-inplace.ps1 \
     .github/workflows/multitable-onprem-package-build.yml docker ecosystem.config.cjs
   ```
 
-### 1.3 选项 A：在 main 上选一个 first-parent 提交，原样打包
-
-- **候选：** `2888addb4`（2026-09-29 约 03:10Z 的头，含 #5927、#6146、#6147、#6141）、`e48d3307b`（含 #5927、#6146、#6147，不含 #6141）、`cd89c74dd`（含 #5927 与 #6146）、`6cddab3e5`（含 #5927，不含 #6146），或 `33047ef94`（两者都不含）。排列不代表推荐。
-- **迁移：** 4 条（§2.2）。
-- **与已验证流程的偏差：** 切法、tag、`expected_sha` 都与 R60 相同；升级脚本在 `2888addb4` 及以前的提交上也与 R60 相同（§1.2），打包提交若含 #6157 则不同（C8）。需要注意的是包里带两条任务线迁移。其中 `zzzz20260926120000_create_task_p0a_tables` 的头注释写着「Draft migration: do not apply from this PR」（`:2`），但只要在包里，migrate 就会执行它。它建表、建索引都不带 `IF NOT EXISTS`（`:57`、`:97`、`:113`、`:124`、`:140-161`），所以上机前必须做 §3 的 C2。
-
-### 1.4 选项 B：选项 A 的提交，但在 migrate 这一步用 `MIGRATION_EXCLUDE` 排除两条任务迁移
-
-`MIGRATION_EXCLUDE` 在代码里的实际作用（`packages/core-backend/src/db/migration-provider.ts`）：
-
-- **读取：** 调用方没传 `excludedNames` 时读 `process.env.MIGRATION_EXCLUDE`，按逗号切分并去掉空白（`:267-272`）。每一项按「去目录、去 `.ts`/`.sql` 等扩展名」归一（`:167-178`），所以写迁移名或文件名都行。
-- **效果：** `getMigrations()` 的最后一步把命中的名字**整条丢掉**（`:309-311`）。迁移表里不留任何历史标记，Kysely 根本看不到这两条。
-- **谁读它：** 只有这个 provider。仓库里（测试与文档除外）只有 `migrate.ts:33` 构造它；`migrateToLatest` 的调用也只有 `migrate.ts:63`，后端启动时不跑迁移。
-- **登记：** 没有登记在 `scripts/ops/global-history-flag-manifest.mjs`（`grep -n MIGRATION_EXCLUDE` 无结果）。provider 的注释说它是 CI 用的机制（`:36-39`），并明写 production 与 on-prem 的 `db:migrate` 这两种排除机制都不用（`:52-57`）。
-- **怎么设（先看 wrapper 怎么起升级脚本）：** 升级脚本第 6 步先把 `docker/app.env` 导入自身进程（`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1885`），再起子进程 `node migrate.js`（`:1892`）。子进程继承的是**升级脚本那个进程**的环境，所以变量必须出现在升级脚本进程里。
-  - R60 的 wrapper（rev 3）不在 ssh 会话里直接跑升级脚本：「升级子进程经 WMI 在 ssh 会话外运行」，教训 ①「远端子进程一律 WMI 启动 + 哨兵文件轮询」（#6079 2026-09-28T10:34:09Z）。经 WMI 创建的进程由 WMI 服务一侧创建，父进程不是 ssh 会话，拿不到 ssh 会话里用 `$env:` 设的变量。这一条依据的是 Windows 的进程创建方式，没有在演示机上核对（§8）。wrapper 不在仓库里，本文没见过它怎么拼命令。
-  - 所以**在 ssh 会话里 `$env:MIGRATION_EXCLUDE = …` 不起作用**。变量要放进 wrapper 交给 WMI 的那条命令里，在调用升级脚本之前设置；或者由 wrapper 显式给出新进程的环境。具体写法由旧机按 wrapper 的实际写法改，本文不给现成命令。要设的值是：
-    ```text
-    MIGRATION_EXCLUDE=zzzz20260926120000_create_task_p0a_tables,zzzz20260926120100_add_task_permissions
-    ```
-  - **上机前先证明变量传得到：** 用与升级脚本**完全相同**的起法（同一个 WMI 调用、同样的设变量方式），只把调用升级脚本的那一段换成只报布尔的 `[bool]$env:MIGRATION_EXCLUDE`，结果写进哨兵文件。报 `True` 才继续；报 `False` 就停下回帖，不要升级。
-  - 不要写进 `app.env`。写进去之后，每次升级都会导入它（`Import-AppEnvFile`，`:1354-1394`），以后每次 migrate 都会排除这两条。
-- **上机后的证据（选项 B 必须回帖）：** migrate 为每条执行成功的迁移打印一行 `migration "<名字>" was executed successfully`（`packages/core-backend/src/db/migrate.ts:41-47`），这些行出现在升级脚本的输出里，也就是 wrapper 收集输出的地方。选项 B 下这样的行必须**恰好两行**，名字正是复制数据表那两条（§2.2 第 3、4 条）。只要出现任务迁移的名字，就说明排除没有生效，回帖。§2.4 按名核对时，两条任务迁移应为 `applied = f`，行数 = 421 + 2。
-- **C2 照做：** 排除没传到时，两条任务迁移照样会跑。所以只要包里有任务迁移，不管打不打算排除，都要先过 C2。
-- **以后会怎样：** 这两条在迁移表里没有行。下一次不带该变量的 migrate 会把它们当作待执行，按名字顺序执行（`migrate.ts:32` 允许乱序历史；执行顺序见 §2.1）。那一次上机前要重做 C2。
-- **界面上仍然看得到的：** 「任务」导航入口仍然出现（它是前端代码，只看 `tasks:read`，与迁移无关，见 §5）。`/api/tasks` 路由在 `TASKS_ENABLED` 未设时本来就不挂（`packages/core-backend/src/routes/tasks.ts:35-36`；返回 null 时 `packages/core-backend/src/index.ts:1879-1880` 不挂载）。三个 `tasks:*` 权限码不会写进 `permissions` 表；平台管理员不受影响（前端判定走管理员短路，`apps/web/src/composables/useAuth.ts:551-552`）。
-- **迁移：** 2 条（复制数据表的两条）。
-- **与已验证流程的偏差：** 用了一个未登记、按代码注释不用于 on-prem 的变量。它只对这一次升级进程生效，而且要改 wrapper，才能传进经 WMI 起的升级进程（上面「怎么设」）。按名核对（§2.4）时，预期名单是 2 条，而不是命令算出的 4 条。仍要做 C2。
-
-### 1.5 选项 C：从 `b433ac814` 拉发布分支，拣选客户修复
-
-- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试），再拣 `cd89c74dd`（#6146）、`e48d3307b`（#6147）。#6139 可拣可不拣，界面都无变化。
-- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）；在这四次的结果上再依次模拟拣选 `cd89c74dd`、`e48d3307b`，同样无冲突（2026-09-29 重做了整条链）。`2888addb4`（#6141）没有模拟：它改的 `apps/web/scripts/run-required-web-tests.tokens` 是 #5974 新建的文件，不拣 #5974 时这棵树里没有这个文件。四次拣选后的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
-- **迁移：** 2 条（复制数据表的两条）。
-- **与已验证流程的偏差：** R59、R60 都切在 main 的 first-parent 提交上（§1.2），选项 C 的包提交不在 main 上，main 的 CI 从没对这棵树整体跑过。打包工作流可以在任意 ref 上 `workflow_dispatch`，`expected_sha` 照样能钉住提交，但 tag 要打在发布分支的提交上。
-
-### 1.6 对照
-
-| 选项 | 迁移条数 | 客户会看到（详见 §5） | 与 R59/R60 做法的偏差 |
-|---|---|---|---|
-| A | 4 | 复制数据表；「通知下一步」修复（切在 `cd89c74dd` 或之后时含 #6146）；「任务」入口（管理员、默认外壳）；审批「审批表单」页改动 | 无；需做 C2 |
-| B | 2（两条任务迁移留待以后） | 与 A 相同，包括「任务」入口 | 未登记变量；要改 wrapper 才传得进经 WMI 起的升级进程，上机前要先证明传到了；以后的某次 migrate 会补跑两条任务迁移；需做 C2 |
-| C | 2 | 复制数据表；「通知下一步」修复（拣了 #6146 时含它）；没有「任务」入口，也没有审批页改动 | 包提交不在 main 上；整树未经 CI |
-
 ---
 
 ## 2. 迁移清单
 
-### 2.1 推导命令（在选定的打包提交上跑，不要照抄本文的名单）
+### 2.1 推导命令（在打包提交上跑，不要照抄本文的名单）
 
 ```bash
-C=<选定的打包提交>
+C=PACKAGE_COMMIT_TBD
 # 新增迁移，按执行顺序（名字排序）列出
 git diff --name-only --diff-filter=A 583dfdf1a "$C" -- packages/core-backend/src/db/migrations packages/core-backend/migrations \
   | sed 's#.*/##' | grep -E '^[^_.].*\.(ts|sql)$' | sed -E 's/\.(ts|sql)$//' | LC_ALL=C sort
@@ -128,9 +97,9 @@ git diff --name-status --diff-filter=DRM 583dfdf1a "$C" -- packages/core-backend
 - Kysely 版本是 0.28.8（`pnpm-lock.yaml:3222`）。它的 Migrator 把全部迁移名排序（`#resolveMigrations`：`Object.keys(...).sort()`），把历史表里没有的那些按这个顺序执行。
 - 在 PostgreSQL 上，一次 migrate 的**全部**待执行迁移在同一个事务里跑（Migrator 的 `#runMigrations` 在适配器支持事务型 DDL 时包一层 `db.transaction()`，PostgresAdapter 对此返回 true）。任何一条失败，这一批都不生效。
 
-### 2.2 在 `2888addb4` 上的输出（执行顺序；与 `cd89c74dd` 上相同）
+### 2.2 在 origin/main `3a85b9c97` 上的输出（执行顺序；与 `2888addb4`、`cd89c74dd` 上相同）
 
-`--diff-filter=DRM` 那条无输出。新增的 4 条：
+把 §2.1 的 `C` 设为 `origin/main`（当时是 `3a85b9c97`）跑：`--diff-filter=DRM` 那条无输出，新增的 4 条如下。#6144 不改迁移目录：`git diff --name-status 2888addb4 origin/main -- packages/core-backend/src/db/migrations packages/core-backend/migrations` 无输出。#6162 也不改，见 §2.3。
 
 | # | 迁移名 | 建什么、改什么 |
 |---|---|---|
@@ -139,7 +108,7 @@ git diff --name-status --diff-filter=DRM 583dfdf1a "$C" -- packages/core-backend
 | 3 | `zzzz20260927120500_add_meta_sheets_copy_provenance` | `meta_sheets` 加三列 `copied_from_sheet_id`、`copied_from_kind`、`copied_at`（可空，`IF NOT EXISTS`），并在约束不存在时加 CHECK `meta_sheets_copied_from_kind_check`（`:21-46`）。既有行保持 NULL。 |
 | 4 | `zzzz20260927121000_add_multitable_install_ledger_intent_kind` | `meta_multitable_template_installs` 加列 `intent_kind text NOT NULL DEFAULT 'template-install'`（`IF NOT EXISTS`，`:25-28`）。复制数据表的去重账本依赖它和 R60 已有的 `zzzz20260919140000_create_multitable_template_install_ledger`（`copy-sheet-service.ts:106-114`）。该文件头注释 `:19-20` 仍写「fail-open」，已被 #6136 改为拒绝，以 §6.2 为准。 |
 
-R60 上机后 `kysely_migration` 共 421 行（#6079 2026-09-28T10:37:13Z）。选项 A 预期新增 4 行，选项 B、C 预期新增 2 行。前提是打包点之前没有别的迁移合入。
+R60 上机后 `kysely_migration` 共 421 行（#6079 2026-09-28T10:37:13Z）。R61 预期新增 4 行，即 425 行。前提是 §2.1 的命令在 `PACKAGE_COMMIT_TBD` 上仍只列出这 4 条（§2.3 的在开 PR 没有在打包点之前合入）。
 
 ### 2.3 在开 PR 若在打包点之前合入，会增加的迁移
 
@@ -151,7 +120,21 @@ gh pr list --state open --limit 500 --json number,files \
 | while read n p; do git cat-file -e "origin/main:$p" 2>/dev/null || echo "$n $p"; done | sort -n
 ```
 
-`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-29 约 02:40Z 的结果（与约 00:30Z 那次相比只有 #5866 变了，现在只带一条迁移）：
+`gh` 每个 PR 最多返回 100 个文件。#4482、#4525 碰到这个上限，已用 `gh api --paginate repos/zensgit/metasheet2/pulls/<n>/files` 补查，没有多出新的迁移。2026-09-29 约 05:45Z 对 origin/main `3a85b9c97` 重跑（338 个在开 PR），结果与约 02:40Z 那次相同：
+
+**打包点的前提 #6162 不带迁移。** 取它的头逐项看，没有迁移文件：
+
+```text
+$ git fetch origin pull/6162/head      # FETCH_HEAD = d75b471f2
+$ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/src/db/migrations
+（无输出）
+$ git diff --name-status origin/main...FETCH_HEAD -- packages/core-backend/migrations
+（无输出）
+```
+
+它改的 11 个文件是自动化规则的前端、`packages/core-backend/src/multitable/automation-service.ts`、测试和 `decision-register.md`（同一 diff 去掉路径限制）。#6162 合入时若头已变，重跑这三条。
+
+下表里的 PR 若在打包点之前合入，它的迁移就会进包，§2.1 的名单跟着变：
 
 | PR | 状态 | 会新增的迁移 |
 |---|---|---|
@@ -173,7 +156,7 @@ gh pr list --state open --limit 500 --json number,files \
 
 - 升级脚本本身就是这个顺序：第 6 步迁移（`multitable-onprem-package-upgrade-inplace.ps1:1878-1896`）在第 7 步起后端（`:1898-1907`）之前。迁移失败时错误抛进处理器，处理器停 pm2 并打印恢复块（`:1842-1852`、`:1972-1990`），新代码不会在没迁移的库上起来。
 - 一次 migrate 的全部迁移在同一个事务里（§2.1）：要么都生效，要么一条都不生效。
-- 跑完后**按名字**逐条核对，不按条数。名单来自 §2.1 的命令；选项 B 要减去被排除的两条：
+- 跑完后**按名字**逐条核对，不按条数。名单来自 §2.1 的命令在 `PACKAGE_COMMIT_TBD` 上的输出：
   ```sql
   -- psql -X -A -v ON_ERROR_STOP=1
   BEGIN READ ONLY;
@@ -186,7 +169,7 @@ gh pr list --state open --limit 500 --json number,files \
   SELECT count(*) AS kysely_migration_rows FROM kysely_migration;
   ROLLBACK;
   ```
-  也可以用 `node packages/core-backend/dist/src/db/migrate.js --confirm <名字>`（`migrate.ts:85-103`：退出码 0 已执行、1 待执行、2 不认识），但要带与升级脚本相同的环境。选项 B 的两条任务迁移用上面的 SQL 核对：环境里带着 `MIGRATION_EXCLUDE` 时，provider 把这两条整条丢掉（`migration-provider.ts:309-311`），`--confirm` 对它们报 2，而不是 1。
+  也可以用 `node packages/core-backend/dist/src/db/migrate.js --confirm <名字>`（`migrate.ts:85-103`：退出码 0 已执行、1 待执行、2 不认识），但要带与升级脚本相同的环境。
 - **通过：** 每条 `applied = t`；行数 = 421 + 新增条数。
 - **不通过：** 不要重跑、不要手工补迁移，回帖列出 `applied = f` 的名字。
 - **R60 的教训：** 开发机清单写的是 4 条（#6079 2026-09-28T09:01:43Z），旧机按名核对时 git 实际是 6 条，多出 `create_approval_template_groups` 和 `add_approval_product_permissions`（#6079 2026-09-28T10:34:09Z）。所以名单一律在打包提交上用命令现算。
@@ -559,3 +542,44 @@ gh pr list --state open --limit 500 --json number,files \
 - 复制数据表验收：`copy-sheet-r61-acceptance-checklist.md`。
 - 上机沟通：issue #6079（本文引用的评论：2026-09-28T02:03:25Z、06:39:16Z、08:24:49Z、09:01:43Z、10:34:09Z、10:37:13Z、11:56:06Z、12:51:17Z、13:52:05Z、14:02:47Z；2026-09-29T00:37:05Z、01:26:41Z、01:34:20Z、01:49:32Z、01:56:03Z、02:27:53Z）。
 - 决策登记：`decision-register.md` R-18、R-19、R-20。
+
+---
+
+## 附录：未采用的选项
+
+下面两节是 owner 决定之前（2026-09-29 约 03:10Z）的事实核对，保留备查。其中的 `path:line` 以 `2888addb4` 为准，不再随 main 更新；「§2.4」「C2」等指本文正文。
+
+### 附录 B：选项 B，在 migrate 这一步用 `MIGRATION_EXCLUDE` 排除两条任务迁移
+
+**为什么没采用：** 排除变量传不进经 WMI 起的升级进程。R60 的 wrapper 经 WMI 在 ssh 会话外起升级子进程，会话里设的 `$env:MIGRATION_EXCLUDE` 到不了它（下文「怎么设」）；要用就得改 wrapper，并先在演示机上证明变量传到了。owner 选了原样打包（§1.0）。
+
+`MIGRATION_EXCLUDE` 在代码里的实际作用（`packages/core-backend/src/db/migration-provider.ts`）：
+
+- **读取：** 调用方没传 `excludedNames` 时读 `process.env.MIGRATION_EXCLUDE`，按逗号切分并去掉空白（`:267-272`）。每一项按「去目录、去 `.ts`/`.sql` 等扩展名」归一（`:167-178`），所以写迁移名或文件名都行。
+- **效果：** `getMigrations()` 的最后一步把命中的名字**整条丢掉**（`:309-311`）。迁移表里不留任何历史标记，Kysely 根本看不到这两条。
+- **谁读它：** 只有这个 provider。仓库里（测试与文档除外）只有 `migrate.ts:33` 构造它；`migrateToLatest` 的调用也只有 `migrate.ts:63`，后端启动时不跑迁移。
+- **登记：** 没有登记在 `scripts/ops/global-history-flag-manifest.mjs`（`grep -n MIGRATION_EXCLUDE` 无结果）。provider 的注释说它是 CI 用的机制（`:36-39`），并明写 production 与 on-prem 的 `db:migrate` 这两种排除机制都不用（`:52-57`）。
+- **怎么设（先看 wrapper 怎么起升级脚本）：** 升级脚本第 6 步先把 `docker/app.env` 导入自身进程（`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1885`），再起子进程 `node migrate.js`（`:1892`）。子进程继承的是**升级脚本那个进程**的环境，所以变量必须出现在升级脚本进程里。
+  - R60 的 wrapper（rev 3）不在 ssh 会话里直接跑升级脚本：「升级子进程经 WMI 在 ssh 会话外运行」，教训 ①「远端子进程一律 WMI 启动 + 哨兵文件轮询」（#6079 2026-09-28T10:34:09Z）。经 WMI 创建的进程由 WMI 服务一侧创建，父进程不是 ssh 会话，拿不到 ssh 会话里用 `$env:` 设的变量。这一条依据的是 Windows 的进程创建方式，没有在演示机上核对（§8）。wrapper 不在仓库里，本文没见过它怎么拼命令。
+  - 所以**在 ssh 会话里 `$env:MIGRATION_EXCLUDE = …` 不起作用**。变量要放进 wrapper 交给 WMI 的那条命令里，在调用升级脚本之前设置；或者由 wrapper 显式给出新进程的环境。具体写法由旧机按 wrapper 的实际写法改，本文不给现成命令。要设的值是：
+    ```text
+    MIGRATION_EXCLUDE=zzzz20260926120000_create_task_p0a_tables,zzzz20260926120100_add_task_permissions
+    ```
+  - **上机前先证明变量传得到：** 用与升级脚本**完全相同**的起法（同一个 WMI 调用、同样的设变量方式），只把调用升级脚本的那一段换成只报布尔的 `[bool]$env:MIGRATION_EXCLUDE`，结果写进哨兵文件。报 `True` 才继续；报 `False` 就停下回帖，不要升级。
+  - 不要写进 `app.env`。写进去之后，每次升级都会导入它（`Import-AppEnvFile`，`:1354-1394`），以后每次 migrate 都会排除这两条。
+- **上机后的证据（选项 B 必须回帖）：** migrate 为每条执行成功的迁移打印一行 `migration "<名字>" was executed successfully`（`packages/core-backend/src/db/migrate.ts:41-47`），这些行出现在升级脚本的输出里，也就是 wrapper 收集输出的地方。选项 B 下这样的行必须**恰好两行**，名字正是复制数据表那两条（§2.2 第 3、4 条）。只要出现任务迁移的名字，就说明排除没有生效，回帖。§2.4 按名核对时，两条任务迁移应为 `applied = f`，行数 = 421 + 2。
+- **C2 照做：** 排除没传到时，两条任务迁移照样会跑。所以只要包里有任务迁移，不管打不打算排除，都要先过 C2。
+- **以后会怎样：** 这两条在迁移表里没有行。下一次不带该变量的 migrate 会把它们当作待执行，按名字顺序执行（`migrate.ts:32` 允许乱序历史；执行顺序见 §2.1）。那一次上机前要重做 C2。
+- **界面上仍然看得到的：** 「任务」导航入口仍然出现（它是前端代码，只看 `tasks:read`，与迁移无关，见 §5）。`/api/tasks` 路由在 `TASKS_ENABLED` 未设时本来就不挂（`packages/core-backend/src/routes/tasks.ts:35-36`；返回 null 时 `packages/core-backend/src/index.ts:1879-1880` 不挂载）。三个 `tasks:*` 权限码不会写进 `permissions` 表；平台管理员不受影响（前端判定走管理员短路，`apps/web/src/composables/useAuth.ts:551-552`）。
+- **迁移：** 2 条（复制数据表的两条）。
+- **与已验证流程的偏差：** 用了一个未登记、按代码注释不用于 on-prem 的变量。它只对这一次升级进程生效，而且要改 wrapper，才能传进经 WMI 起的升级进程（上面「怎么设」）。按名核对（§2.4）时，预期名单是 2 条，而不是命令算出的 4 条。仍要做 C2。
+- **`--confirm` 对被排除的迁移：** 环境里带着 `MIGRATION_EXCLUDE` 时，provider 把这两条整条丢掉（`migration-provider.ts:309-311`），`--confirm` 对它们报 2，而不是 1，所以只能用 §2.4 的 SQL 核对。
+
+### 附录 C：选项 C，从 `b433ac814` 拉发布分支，拣选客户修复
+
+**为什么没采用：** owner 没有选它；这条拣选链只在文本上模拟过，从没建成分支，也没跑过 CI。
+
+- **例子（不是推荐）：** 在 `b433ac814` 上依次拣选 `5ac5b3ed1`（#6136）、`5e97c7116`（#6142）、`03202a1e9`（#6140）、`33047ef94`（#6143，仅测试），再拣 `cd89c74dd`（#6146）、`e48d3307b`（#6147）。#6139 可拣可不拣，界面都无变化。
+- **可行性，只做了模拟：** `git merge-tree --write-tree` 逐条模拟这四次拣选，文本上都无冲突（不建分支、不动工作区）；在这四次的结果上再依次模拟拣选 `cd89c74dd`、`e48d3307b`，同样无冲突（2026-09-29 重做了整条链）。`2888addb4`（#6141）没有模拟：它改的 `apps/web/scripts/run-required-web-tests.tokens` 是 #5974 新建的文件，不拣 #5974 时这棵树里没有这个文件。四次拣选后的树与 main `33047ef94` 相比，差别正好是被排除的六个提交（`601990756`、`0d1da4929`、`5e8f643a5`、`bbb92dab7`、`5143aed65`、`68578b56f`）改过的那 106 个文件，其中包括 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 的一行。这棵树没有构建过，也没跑过 CI。
+- **迁移：** 2 条（复制数据表的两条）。
+- **与已验证流程的偏差：** R59、R60 都切在 main 的 first-parent 提交上（§1.2），选项 C 的包提交不在 main 上，main 的 CI 从没对这棵树整体跑过。打包工作流可以在任意 ref 上 `workflow_dispatch`，`expected_sha` 照样能钉住提交，但 tag 要打在发布分支的提交上。
