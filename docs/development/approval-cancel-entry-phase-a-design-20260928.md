@@ -2,13 +2,13 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿(实现 + 本地真库验证已完成;未推送、未开 PR;独立门审 r1 / r2 已做,本稿为 r2 之后的修复轮;**合并未被授权**) |
+| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现并本地真库验证,A2 的独立门审未做;未推送、未开 PR;**合并未被授权**) |
 | 分支 | `feat/approval-cancel-entry-phase-a-read-launch` |
 | 基线 | `main @ f47054d88e`(第 2 轮 rebase;原基线 `68a703038e`。撤销轮 C-1 #5851 `44770107f`、C-2 #5856 `2594ca6e2` 已在其中) |
 | 权威锁 | 撤销锁 v5.9(RATIFIED 2026-09-18)及其抬头「**RATIFY 追记 —— 产品入口增补 v2(P-1…P-11)**」(2026-09-28) |
 | DDL | **零**(未新增、未修改任何迁移) |
 | 实现模型 | Claude Opus 5.5(Fable 回退) |
-| 修复轮 | 第 2 轮(门审 r1 / r2 结论的处理见 §7)。推送前已改写本分支历史并 rebase 到 `main @ f47054d88e`,提交号与门审 r1 / r2 所见不同;改写前后分支最终树相同,rebase 只带入 main 的改动与 s6a pin 重算(§5)。本轮修复为新提交 |
+| 修复轮 | 第 2 轮(门审 r1 / r2 结论的处理见 §7)。推送前已改写本分支历史并 rebase 到 `main @ f47054d88e`,提交号与门审 r1 / r2 所见不同;改写前后分支最终树相同,rebase 只带入 main 的改动与 s6a pin 重算(§5)。门审 r3 遗留与 A2 的处理见 §7.3 / §8,均为其后的新提交 |
 
 ---
 
@@ -22,7 +22,9 @@
 3. 两个端点背后的宿主→插件端口 `approvalCancelRoundEntry`(只注入 plugin-attendance)。
 4. 接线日守卫升级(登记项 L-4,见 §3.7)与 CI 接线。
 
-**本阶段不做的**(ratify 后的分期里属于后续阶段):前端入口与五渲染面文案(P-2 呈现、P-7/P-8 文案、P-3 ④ `formatLeaveBalanceMinutes`)、P-6′ 管理员通知、P-5 投递状态、P-11 待办中心呈现、员工侧「撤回本次撤销申请」端点。
+**本阶段不做的**(ratify 后的分期里属于后续阶段):前端入口与五渲染面文案(P-2 呈现、P-7/P-8 文案、P-3 ④ `formatLeaveBalanceMinutes`)、P-6′ 管理员通知、P-5 投递状态、P-11 待办中心呈现。
+
+**A2(同分支,§8)**:发起端点的默认 OFF 开关、考勤侧审批人办理(`POST …/cancel-round/actions`)、申请人撤回(`POST …/cancel-round/withdraw`)。
 
 ---
 
@@ -136,12 +138,14 @@
 
 读与**引擎层**撤回闸(`ApprovalProductService.dispatchAction` 的 revoke 分支)**相同的输入、相同的顺序**:已发布定义 `runtime_graph.policy.allowRevoke / revokeBeforeNodeKeys`、撤销轮实例 `requester_snapshot.id` / `status` / `current_node_key`、当前节点已处理记录数。给出的否定原因即引擎会回的码。测试在进程内双向钉住(§5 T-WD)。
 
-**它只回答引擎层**:本阶段员工**没有**可用的 HTTP 撤回路径 —— 审批侧动作路由在引擎之前另有权限闸,员工令牌在那里得 403(T-WD 的 HTTP 见证,钉住核心 403 体且轮次仍 `pending`)。因此 `canWithdraw: true` 在阶段 A 还不是可点的按钮;**阶段 B 的前置(建议,待 owner 裁决)**:考勤侧撤回端点,或 owner 另行裁定撤回走哪条通道(§6 第 2 项)。
+**它只回答引擎层**:审批侧动作路由在引擎之前另有权限闸,员工令牌在那里得 403(T-WD 的 HTTP 见证,钉住核心 403 体且轮次仍 `pending`)。员工可达的 HTTP 撤回路径是 A2 的考勤侧撤回端点(§8.3.3),它把 `revoke` 交给同一引擎闸。
+
+**判定顺序与引擎相同**(门审 r3 NIT-4 之后):`allowRevoke` → 请求人 → 终态(轮次 `outcome` 与引擎实例 `status`)→ 当前节点 → `revokeBeforeNodeKeys` → 本节点已处理记录数;唯一更早的出口是轮次行没有引擎实例。因此对**任何**查看者(请求人与否)给出的否定原因都等于引擎会回的码:非请求人读已结束的轮得 `APPROVAL_REVOKE_FORBIDDEN`,与引擎对其 403 同码。
 
 ### 3.4 端口与最小特权
 
-- `PluginServices.approvalCancelRoundEntry`:`canReadDocument` / `readRoundSummary` / `launch` 三个方法;`src/index.ts` 只对 `plugin-attendance` 注入(与 `approvalAssigneeResolver` 同姿态),其它插件得 `undefined`。守卫由 `tests/unit/attendance-approval-resolver-port-scoping.test.ts` 新增的三条用例钉住(正控:plugin-attendance 得到三方法齐全的端口;负控:`plugin-some-other`、`plugin-integration-core` 得 `undefined`);把端口注入所有插件(M9)⇒ 两条负控红。
-- 插件在激活时检查端口三方法齐全才注册两个路由;缺失 ⇒ 不注册(无入口,而不是半接线)。
+- `PluginServices.approvalCancelRoundEntry`:`canReadDocument` / `readRoundSummary` / `launch` 三个方法(A2 增 `decide` / `withdraw`,共五个,§8.4);`src/index.ts` 只对 `plugin-attendance` 注入(与 `approvalAssigneeResolver` 同姿态),其它插件得 `undefined`。守卫由 `tests/unit/attendance-approval-resolver-port-scoping.test.ts` 新增的三条用例钉住(正控:plugin-attendance 得到三方法齐全的端口;负控:`plugin-some-other`、`plugin-integration-core` 得 `undefined`);把端口注入所有插件(M9)⇒ 两条负控红。
+- 插件在激活时检查端口方法齐全(A2 起为五个)才注册本入口的全部路由;缺任一 ⇒ 一个都不注册(无入口,而不是半接线)。
 - 插件从不 import core,也不拼写创建方法名。
 
 ### 3.5 结果投影:一个投影器,三个读面
@@ -154,8 +158,8 @@
 
 ### 3.7 接线日守卫(登记项 L-4,与调用方同提交)
 
-- 静态普查 `tests/unit/approval-cancel-round-dormancy-unreachable.test.ts`:从「生产代码零调用方」改为「**恰好一个被点名调用方** = `src/approvals/approval-cancel-round-entry-port.ts`,恰一处调用;定义文件仍只声明、零调用;其余生产文件零提及 / 零调用 / 零声明 / 零字符串分派;`src/routes/` 零提及」。与端口同一提交(6099f3bfff)。升级前版本对新代码实测 **2 红**(提及、调用两条),升级后 **18/18 绿**。
-- 动态探针 `tests/harness/approval-cancel-round-dormancy-probe.ts`:路由 token 检查改为**精确 (method, path) 白名单**两条;白名单外命中仍失败(退出码 2);白名单路由缺失也失败(退出码 5);到达计数只容忍栈经过被点名端口的到达(否则退出码 1)。与路由同一提交(8b3493937c)。
+- 静态普查 `tests/unit/approval-cancel-round-dormancy-unreachable.test.ts`:从「生产代码零调用方」改为「**恰好一个被点名调用方** = `src/approvals/approval-cancel-round-entry-port.ts`,恰一处调用;定义文件仍只声明、零调用;其余生产文件零提及 / 零调用 / 零声明 / 零字符串分派;`src/routes/` 零提及」。与端口同一提交(不写提交号:推送 / squash 后会变)。升级前版本对新代码实测 **2 红**(提及、调用两条),升级后 **18/18 绿**。
+- 动态探针 `tests/harness/approval-cancel-round-dormancy-probe.ts`:路由 token 检查改为**精确 (method, path) 白名单**两条;白名单外命中仍失败(退出码 2);白名单路由缺失也失败(退出码 5);到达计数只容忍栈经过被点名端口的到达(否则退出码 1)。与路由同一提交(同上,不写提交号)。A2 把白名单扩到恰好四条(与注册两条新路由同一提交,§8.6)。
 
 ---
 
@@ -239,17 +243,19 @@
 
 ## 6. 残留与 NOT RUN
 
-0. **⚠️ 合并 / 部署顺序风险(请 owner 裁决;本 PR 不得被描述为「休眠」或「无行为变化」)**。本阶段让 C-1/C-2 的撤销轮在 API 面**可达**,且**无开关**:合入并部署后,持 `attendance:write` 的员工(`attendance_employee` 角色持有该码)即可对自己已批准的请假发起撤销轮,创建路径照常入队审批任务创建事件。而撤销轮的**审批人动作**与**请求人撤回**今天走的是:
-   - 本仓 HTTP 审批动作路由 `POST /api/approvals/:id/actions`、legacy `POST /api/approvals/:id/approve` / `reject`、`POST /api/approval-card-deliveries/:deliveryId/actions` —— 均挂 `rbacGuard('approvals','act')`,本仓迁移目录**无** `approvals:act` 行 ⇒ 非管理员无产品路径可获该码(管理员经 admin bypass 可操作);
-   - 唯一不经该闸的审批人通道是钉钉 Stream 互动卡片回调(`integrations/dingtalk/interactive-card-callback.ts` → `ApprovalCardDeliveryAction`),以钉钉卡片投递已配置为前提;**撤销轮任务是否会产生卡片,本阶段 UNVERIFIED**。
-   后果:在上述条件下轮次可能长期停在 `pending`,并按 I3 阻止同单再次发起。另 P-8 条款写明「入口不得在登记完成前上线」(码 + 用户文案 + FE 钉点属阶段 B)。**建议**(不是授权):阶段 A 不先于审批人 / 撤回通道与阶段 B 合并或部署;或由 owner 指定顺序 / 加开关。
+0. **合并前置:阶段 A 与 A2 同批合入(A2 的默认 OFF 发起开关是阶段 A 合入的前置)**。owner 已于 2026-09-29 11:0x 选定 「**Attendance-side + OFF flag (Recommended)**」——选项说明原文:Add cancel-round approve/reject on attendance:approve (attendance_approver role already holds it; seat/G3 rules unchanged) and withdraw on attendance:write, matching your #22 = (i). Plus a default-OFF flag on the launch endpoint until phase D acceptance passes, so merging never exposes a half-working flow.
+   - 落点:A2 在同一分支上叠加(§8),阶段 A 的提交**不单独合并**,也不先于 A2 合并。开关默认 OFF ⇒ 合入并部署后发起端点对任何人都回与不存在同形的 404、零写入(§8.2);读摘要、审批人办理、申请人撤回不受开关影响(它们只作用于已存在的轮次)。
+   - 开关何时打开:owner 的选项写明「until phase D acceptance passes」;打开属 owner / 运维动作,不在本分支。
+   - 背景(阶段 A 当时的事实,A2 之前):审批人动作与请求人撤回只经审批侧 `rbacGuard('approvals','act')` 之后的路由,本仓迁移目录无 `approvals:act` 行,非管理员无产品路径可得该码;唯一不经该闸的是钉钉互动卡片回调,撤销轮任务是否产生卡片 UNVERIFIED。A2 的考勤侧两条路由(`attendance:approve` / `attendance:write`)补上了这两条通道。
+   - 叠加的 ratify 条款:P-8「入口不得在登记完成前上线」(码 + 用户文案 + FE 钉点属阶段 B)—— 开关默认 OFF 期间入口不可发起,与之不冲突;开关打开前仍须阶段 B / D 完成(owner 选项原文)。
 0b. **⚠️ 合并 / 部署顺序的第二项 owner 输入:发起后原请假被既有直接取消通道取消 ⇒ 轮次停在 `pending`、审批人批准得 500**(门审 r2 探针 G2-X 实测;请 owner 知悉并与第 0 项一并裁决)。
    - 序列:员工对自己已批准的请假经本入口发起撤销轮(201,轮次 `pending`)→ 员工再经**既有**直接取消路由 `POST /api/attendance/requests/:id/cancel` 取消同一请假(200,请求 `cancelled`)→ 持席位审批人批准撤销轮 ⇒ **500 `APPROVAL_ACTION_DISPATCH_FAILED`**;摘要仍 `outcome: pending` / `status: cancellation_pending_approval`,而请假已 `cancelled`;再次发起 409 `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`。
    - 可恢复:持席位审批人**驳回**可清掉该轮(门审 r1 已证);请求人的目标(请假已取消)已经达成,I3 的阻断在此情形下没有实际损失。「窗口关闭后批准 ⇒ `expired` 收口」这条自愈路径未测。
    - 缺陷所在:已合入的 C-1 / C-2 兑现路径(#5851 / #5856)对「原单已不是已批准请假」这一业务拒绝走的是抛错,没有走锁 §3 C-3 的 `blocked` 持久化收口(C-3:「业务拒绝与基础设施异常是两条路径、两种返回,不共用 throw」)。不在本分支 diff 内,但**只能经本入口到达**;入口的请假谓词只在发起时判定(§2.2),无从拦截。
+   - **与 A2 开关的关系**:该序列要先有一个在途轮;开关默认 OFF 时经本入口开不出新轮,这条路径随之不可达。本分支**不修**它(归 C-1 线),开关打开之前须由 owner 知悉。
    - **建议**(不是授权):修复归 C-1 线 —— 兑现侧把这一拒绝改走 C-3 的 `blocked` 收口;或由 owner 另定「有在途撤销轮时直接取消路由拒绝」之类的守卫(锁级决定)。另请 owner 知悉:同一请假今天并存两条撤销通道(需审批的撤销轮、既有的本人直接取消),这是 main 既有行为,本分支未改。
 1. **P-3 三个读面**:`/history` 与两个 `getApproval` 的 `cancellationOutcome` 投影已随 #5856 在 main;本阶段按 owner 所选 (iii) 再加摘要端点。P-3 条款写「不得同批」,本 PR 只加 (iii),字面成立;摘要端点复用同一投影器且有一致性用例。**请 owner 知悉:同一事实现有三个读面、一个投影规则**;员工只能到达 (iii)(P-10)。
-2. **员工撤回本轮无 HTTP 路径(阶段 B 前置,建议,待 owner 裁决)**:`canWithdraw` 只回答**引擎层**撤回闸;员工唯一的 HTTP 撤回路径是审批侧动作路由,员工令牌在那里得 403(见 0;T-WD 钉住该 403 与轮次不变)。阶段 B 上线前端「撤回本次撤销申请」之前,须有考勤侧撤回端点,或 owner 另行裁定撤回通道;在此之前 FE 不应把 `canWithdraw: true` 渲染成可点按钮。
+2. **员工撤回的 HTTP 路径**:阶段 A 时没有(员工令牌在审批侧动作路由得 403,T-WD 钉住);A2 按 owner 11:0x 选项加了考勤侧撤回端点 `POST …/cancel-round/withdraw`(`attendance:write`,§8.3.3),`canWithdraw: true` 从此对应一个可达的 HTTP 动作。FE 呈现仍属阶段 B。
 3. **快照 requester ≠ 请假本人的单据**:插件自己的请求写入方今天不会产生这种形状(都把请求 `user_id` 写进 `requester_snapshot.id`),路由层的 requester 检查对它是**纵深防御**;若将来出现(例如另案的代理发起),请假本人不是原实例参与者时摘要对其 404、发起不可达(I7 与 lock:157 的直接后果)。
 4. **无审批实例的考勤请求 / 非请假请求 / 别 org 的请求行**:均返回与不存在同形的 404,不另给码。非请假单的拒绝形状是**暂定实现选择,待 owner / 门审择一**(三个选项见 §2.3)。
 5. **「无写权」主体的测试构造**:夹具角色承载授予 + 考勤命名空间准入(见私有记录)。
@@ -258,7 +264,7 @@
 8. **测试残留**:LEAVE ONLY 用例经真实插件批准补卡,会写入打卡侧行;套件清理打卡事件与考勤记录,但只追加的修订历史行(每次运行 1 行;第 2 轮 10 次运行后库内 10 行)被其守卫拒绝直接删除,保留;登录类 `operation_audit_logs` 行与第 0 轮一样保留。CI 的一次性服务库不受影响。
 9. **任务书措辞偏差(判据 (c))**:任务书写的是核心 403 体 `{"error":"Insufficient permissions"}`;考勤侧挂载下拒绝来自插件守卫,体为 `{"ok":false,"error":{"code":"FORBIDDEN","message":"Insufficient permissions"}}`,与所有既有考勤路由同形,测试钉住的是插件体。核心体只出现在审批侧路由(P-10 判别式、T-WD 见证、P-9 腿 B)。这是任务书措辞偏差,不是代码缺陷。
 10. **摘要撕裂读**:有意接受,理由见 §3.6。
-11. **NOT RUN**(本轮):前端(阶段 B);P-5 投递状态、P-11(阶段 C);P-6′ 管理员通知(阶段 B);撤销轮任务的钉钉卡片投递(UNVERIFIED);CI(未推送);`attendance-plugin.test.ts` 全量;单测大批 95 文件(第 1 轮读数);M9(第 1 轮与门审 r2 读数);以真实插件请假为原单、经新路由到真实 W4 边界的端到端 —— **本套件**不含(套件的请假原单由核心在进程内创建再改键为考勤单据,W4 执行方用替身),**门审 r1 已跑通**(§5 门审读数),本轮未复跑;CI 所用 PostgreSQL 版本未在本地复现(本地 15.17);第 2 轮修复后的独立复审未做。
+11. **NOT RUN**(本轮):前端(阶段 B);P-5 投递状态、P-11(阶段 C);P-6′ 管理员通知(阶段 B);撤销轮任务的钉钉卡片投递(UNVERIFIED);CI(未推送);`attendance-plugin.test.ts` 全量;单测大批 95 文件(第 1 轮读数);M9(第 1 轮与门审 r2 读数);以真实插件请假为原单、经新路由到真实 W4 边界的端到端 —— **本套件**不含(套件的请假原单由核心在进程内创建再改键为考勤单据,W4 执行方用替身),**门审 r1 已跑通**(§5 门审读数),本轮未复跑;CI 所用 PostgreSQL 版本未在本地复现(本地 15.17);第 2 轮修复后的独立复审未做(其后门审 r3 已做,见 §7.3)。A2 的 NOT RUN 另见 §8.8。
 
 ---
 
@@ -286,3 +292,159 @@
 | NIT | §2.2 把 owner P-6′ 选项写成中文转述并加引号 | 改为引 goal §0 原文(选项名与英文说明);端口常量注释同改 | 文档 / 注释 |
 | NIT | §6 第 11 项与 §5 对 redemption 是否重跑自相矛盾;把门审 r1 已跑通的真实插件请假端到端列为 NOT RUN | §5 / §6 改为本轮实测与门审读数分列 | 文档 |
 | NIT | 未知 outcome 回退 `round: null`,与「无轮次」同形(P-8 ③) | 改为显式错误(路由回既有通用 500,不新造码);新增桩查询单测 | MN3 ⇒ 1 红 |
+
+### 7.3 第 3 轮(门审 r3 → 与 A2 同批)
+
+| 级别 | 门审结论(摘要) | 处理 | 证据 |
+|---|---|---|---|
+| P2 | 中间提交的树中有一组测试辅助代码,须在推送前折叠(见私有记录) | 主会话已做历史折叠(折叠后树与门审所见逐字节相同);A2 的每个新提交(树 / diff / 提交信息)已按同一组私有短语表自扫 | 自扫 0 命中 |
+| P3 | §6 第 0 项在问一件 owner 已裁的事;阶段 A 单独合并会与 owner 11:0x 选项相悖 | §6 第 0 项改为逐字引 owner 选项原文,写明阶段 A 与 A2 同批合入、A2 的默认 OFF 开关是阶段 A 合入的前置 | 文档 |
+| P3 | 发起后原请假被既有直接取消通道取消 ⇒ 兑现 500(承接 r2) | **不改**(缺陷在 C-1 / C-2 兑现路径,归 C-1 线);§6 第 0b 项补记:开关 OFF 期间经本入口不可达 | 文档 |
+| NIT | `canWithdraw` 镜像对非请求人的已结束轮给出的码与引擎不同 | 终态判定挪到请求人判定之后(与引擎同序);文档同改(§3.3) | P-4 canWithdraw 用例增「轮次结束后」一段:管理员摘要 `APPROVAL_REVOKE_FORBIDDEN`、进程内引擎对管理员 403 同码、对请求人 409 `INVALID_STATUS_TRANSITION`;恢复旧序 ⇒ 1 红(§8.7 N4) |
+| NIT | §3.7 引用改写前的提交号 | 改为不写提交号 | 文档 |
+| NIT | 撤销轮 `created` 审计行的 actorName 是裸用户 id | 发起路由把显示名(插件既有 `getUserLabel`)传给创建路径 | 新用例钉住 `approval_records.actor_name`;去掉显示名 ⇒ 1 红(§8.7 N6) |
+
+---
+
+## 8. A2:审批人路径与开关
+
+### 8.1 授权(只引 owner 原话;我方建议不是授权)
+
+- owner 2026-09-29 11:0x(`goal-four-items-20260928.md` §0,AskUserQuestion 选项原文):「**Attendance-side + OFF flag (Recommended)**」——选项说明原文:Add cancel-round approve/reject on attendance:approve (attendance_approver role already holds it; seat/G3 rules unchanged) and withdraw on attendance:write, matching your #22 = (i). Plus a default-OFF flag on the launch endpoint until phase D acceptance passes, so merging never exposes a half-working flow.
+- 仍有效的锁正文:§2 G3(席位规则)、§9-9 允许集 {approve, reject, revoke, comment}(拒 transfer / add_sign / reduce_sign)、§14.1–14.3。A2 **不改**其中任何一条,只新增到达它们的考勤侧入口。
+- 事实核对:`attendance_approver` 角色的种子权限为 `attendance:read` + `attendance:approve`(迁移 `zzzz20260208100000_create_roles_table.ts`),与选项说明「attendance_approver role already holds it」一致。
+- 合并:撤销入口 PR 的合并**未被点名**(goal §0),完成后单独请示。
+
+### 8.2 开关 `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`
+
+| 项 | 值 |
+|---|---|
+| 写法 | `parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)`,插件既有写法(同族:`ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED` 等);**每次调用时读**,不在模块加载时缓存 |
+| 默认值 | **OFF**(未设置或无法识别的值 ⇒ OFF;只有 `true` / `1` / `yes` 为 ON,插件 `parseBoolean` 既有语义) |
+| 只门住 | `POST /api/attendance/requests/:id/cancel-round`(发起)。读摘要 `GET`、审批人办理、申请人撤回**不受影响**(它们只作用于已存在的轮次) |
+| 判定位置 | 401(无用户)与 UUID 400 之后、请求体解析与任何读写之前 |
+| OFF 形状 | 与不存在的 id 逐字节同形的 404:`{"ok":false,"error":{"code":"NOT_FOUND","message":"Request not found"}}` |
+| OFF 写入 | **零**:测试断言 `approval_instances` / `approval_rounds` / `approval_assignments` / `approval_records` 全表行数不变 |
+
+**为什么是 404,而不是「功能未开启」码**:插件里**没有**统一的「功能未开启」形状 —— 既有的「未开启」拒绝各自造码(环境开关:`AUTO_SHIFT_MATCHING_DISABLED` 403、`AUTO_SHIFT_MATCHING_APPLY_DISABLED` 403;策略开关:`ATTENDANCE_RESULT_EDIT_DISABLED` 403、`ANNUAL_LEAVE_NOT_ENABLED` 422)。为本入口造一个新码违反 P-8(码须先登记;「零新码」);复用本入口已有的 not-found 体不新造码、不泄露单据是否存在,且与 P-4「不可见与不存在同形」一致。代价:开关 OFF 时,调用方无法从响应区分「开关关闭」与「单据不存在」—— 阶段 B 的前端若需按开关决定是否渲染入口,需另有能力读(**建议,待 owner**,§8.8)。
+
+### 8.3 三条新路由合同
+
+#### 8.3.1 发起(A2 只加开关与显示名)
+
+`POST /api/attendance/requests/:id/cancel-round` 的合同见 §2.2,A2 只加两处:① 开关判定(§8.2);② 调用端口 `launch` 时带上调用者显示名(`getUserLabel`,门审 r3 NIT-6),撤销轮 `created` 审计行的 `actor_name` 不再回落为裸 id。
+
+#### 8.3.2 审批人办理 `POST /api/attendance/requests/:id/cancel-round/actions`
+
+- 守卫:`withPermission('attendance:approve')`(插件既有守卫)。
+- 请求体:`{ "action": "approve" | "reject", "comment"?: string (≤2000) | null }`(zod)。其它动作(transfer / add_sign / reduce_sign / revoke / comment / handle / return 等)⇒ 400 `VALIDATION_ERROR`,在任何查找之前;其后服务层 §9-9 闸仍在。
+- 顺序与响应:
+
+| # | 判据 | 不满足时 |
+|---|---|---|
+| 0 | 401 / UUID / 请求体 | 401 / 400 / 400 |
+| 1 | 请求行:org 限定 + 请假 + 有审批实例(与摘要同一加载器,**不加 I7**) | 404 与不存在同形 |
+| 2 | 该单据有撤销轮(取「最新轮」,与摘要同一定义) | 404 与不存在同形 |
+| 3 | 以调用者身份经 `ApprovalProductService.dispatchAction` 在**撤销轮自己的实例**上执行:席位校验、§9-9、C-2 兑现、C-3 收口全在服务层原样运行 | 透传服务层 `(status, code, message)`,不带 `details`。例:无席位 ⇒ 403 `APPROVAL_ASSIGNMENT_REQUIRED`「Approval assignment not found for actor」;驳回无意见 ⇒ 400 `REJECT_COMMENT_REQUIRED` |
+| — | 成功 | **200**,`data` 与摘要同形(`requestId` + 轮次摘要) |
+
+- **不加 I7**:与审批侧 `POST /api/approvals/:id/actions` 相同,席位是办理的依据;在席位之前再加可见谓词会与服务层的判据重复。无席位的 `attendance:approve` 持有者得服务层既有的拒绝码(任务要求的「既有拒绝码」)。
+
+#### 8.3.3 申请人撤回 `POST /api/attendance/requests/:id/cancel-round/withdraw`
+
+- 守卫:`withPermission('attendance:write')`。
+- 请求体:`{ "comment"?: string (≤2000) | null }`。
+- 顺序与响应:
+
+| # | 判据 | 不满足时 |
+|---|---|---|
+| 0 | 401 / UUID / 请求体 | 401 / 400 / 400 |
+| 1 | 请求行 + I7(与摘要、发起同一加载器) | 404 与不存在同形 |
+| 2 | 调用者 = 该请假的 `user_id`(lock:157 仅原 requester,与发起同一规则) | 403 `APPROVAL_REVOKE_FORBIDDEN`「Only the requester can revoke this approval」—— **引擎撤回闸自己的码与句**,不新造 |
+| 3 | 该单据有撤销轮 | 404 与不存在同形 |
+| 4 | 经同一 `dispatchAction` 对撤销轮实例执行 `revoke`:引擎撤回闸(allowRevoke → requester → 终态 → 窗口)原样判定 | 透传,例:已结束 ⇒ 409 `INVALID_STATUS_TRANSITION` |
+| — | 成功 | **200**,轮次 `withdrawn`(V4);I3 随即允许同单再次发起(开关 ON 时) |
+
+- 第 2 步是**纵深防御**:引擎撤回闸比对的是撤销轮实例的 `requester_snapshot.id`;插件自己的写入方不会产生「快照 requester ≠ 请假本人」的单据,测试直接构造该形状证明路由层这道检查生效(与阶段 A 发起的同名夹具同理)。
+
+### 8.4 端口与谓词复用点(不复制、不绕过)
+
+| 规则 | 在哪里判 | A2 做了什么 |
+|---|---|---|
+| 席位归属 | `dispatchAction` 内 `actorCanAct`(当前节点有效指派 × `assignmentMatchesActor`) | 以调用者身份调用,未改 |
+| §9-9 允许集 | `dispatchAction` 内 `assertCancelRoundActionAllowed` | 未改;考勤侧路由另只收 approve / reject(更窄) |
+| §2 G3 席位规则 | 创建路径的席位再验证(发起时)+ §14.3 拒绝一切改席位的动作 | 未改 |
+| 撤回闸 | `dispatchAction` 的 revoke 分支 | 未改;`canWithdraw` 镜像改为同序(§3.3) |
+| I7 可见 | `canReadApprovalInstance`(原单实例) | 撤回与摘要、发起共用加载器;办理路由不加(§8.3.2) |
+| C-2 兑现 / C-3 收口 | `dispatchAction` | 未改 |
+
+- 端口 `decide` / `withdraw` 共用一条路径:取单据最新轮(与摘要同一 SQL 定义)→ `new ApprovalProductService().dispatchAction(轮实例 id, { action, comment }, actor)`。这就是 `POST /api/approvals/:id/actions` 对模板运行时实例调用的同一服务层入口。
+- actor 带 `roles: []`:撤销轮的席位是**人**席位(创建路径按用户 id 落座;§9-9 / §14.3 拒绝一切能改席位的动作),角色声明不可能是落座依据;不传角色只会更窄、不会更宽。测试断言已发起轮次的每条指派都是 `user` 类型;若将来撤销轮出现角色席位,该断言与办理用例会一起变红。
+- 端口仍只注入 plugin-attendance;插件在五个方法齐全时才注册四条路由。
+
+### 8.5 测试矩阵与读数(本地真库 + 真 HTTP)
+
+**环境**:一次性库 `ms2_g4cancela2b_20260929`(`createdb -O ms2testbed`,非超级角色;每次运行前断言 `current_database()`);`DATABASE_URL` 与 `ATTENDANCE_TEST_DATABASE_URL` 都指向它(approval real-DB step 只用 `DATABASE_URL`);迁移 `tsx src/db/migrate.ts` + CI 的 `MIGRATION_EXCLUDE`,EXIT 0,419 条;PostgreSQL 15.17、Node 20.20.2;工具直调 `node_modules/.bin/*`,未经 pnpm。套件在 `beforeAll` 把开关设为 ON(阶段 A 的每个用例都要发起),`afterAll` 还原。员工 / 审批人令牌一律经真实登录路由签发;席位持有者是夹具审批人,它的 `attendance_approver` 角色在 A2 块内才授予。
+
+| 用例 | 判据 | 读数 |
+|---|---|---|
+| 开关 OFF | 未设置与 `"false"` 两种:发起 404 且与不存在 id 逐字节同形;同一请假 GET 仍 200(`round: null`);四表全表行数不变;随后 ON 同单发起 201(正控),`approval_instances` / `approval_rounds` 各 +1 | 绿 |
+| 无 `attendance:approve` | 席位持有者(仅员工角色)办理 ⇒ 插件 403 逐字节 `{"ok":false,"error":{"code":"FORBIDDEN","message":"Insufficient permissions"}}`,轮次仍 pending;授予 `attendance_approver` 后同人同轮 approve 200 | 绿 |
+| 有席位 approve | 轮次指派全为 `user` 类型且唯一有效席位 = 夹具审批人;approve 200 ⇒ `applied` / `leave_cancelled`,`cancellationOutcome` = C-2 形状 `{status:'cancelled', reversal:{reversed:480, lots:1, unrecoverableExpired:0, alreadyReversed:false}}`,与员工摘要、审批侧 `GET /api/approvals/<轮实例>` 深等;`approval_records` 的 approve 行 actor = 调用者、意见原样 | 绿 |
+| 有席位 reject | 无意见 ⇒ 400 `REJECT_COMMENT_REQUIRED`(服务层规则透传),轮次不变;带意见 ⇒ `rejected` / `cancellation_rejected`、`closedBySystem=false`;兑现边界未被调用;原单实例与请求行仍 `approved` | 绿 |
+| 无席位的审批人 | 持 `attendance_approver`、非席位、非请求人:approve / reject ⇒ 403 `APPROVAL_ASSIGNMENT_REQUIRED`(只含 code + message),轮次 pending、审计只有 `created`;无轮次的请假与不存在 id ⇒ 404 同形 | 绿 |
+| 非允许动作 | transfer / add_sign / reduce_sign / revoke / comment / handle / return ⇒ 400 `VALIDATION_ERROR`;轮次与审计不变 | 绿 |
+| 请求人撤回 | 员工真令牌 ⇒ 200 `withdrawn` / `cancellation_withdrawn`,引擎实例 `revoked`,revoke 审计行 actor = 员工;再撤回 ⇒ 409 `INVALID_STATUS_TRANSITION`;同单再发起 201(新轮),轮次序列 `withdrawn, pending` | 绿 |
+| 非请求人撤回 | 审批人(可读的参与者)⇒ 403 `APPROVAL_REVOKE_FORBIDDEN`(引擎原句);外人 ⇒ 404 同形;轮次 pending | 绿 |
+| 无 `attendance:write` 撤回 | 仅 `attendance:read` 的请假本人(轮次由进程内创建)⇒ 插件 403 逐字节,轮次 pending;补授 `attendance:write` 后同人撤回 200 | 绿 |
+| 撤回路由层 requester 见证 | 构造形状(快照 requester ≠ 请假本人,插件不会产生):快照 requester 撤回 ⇒ 403 `APPROVAL_REVOKE_FORBIDDEN`(仅路由层能拒,引擎单独会接受),轮次 pending | 绿 |
+| 身份来自令牌 | 无 Authorization、只带 `x-user-id` 头 ⇒ 办理与撤回均 401,轮次不变 | 绿 |
+| 显示名(NIT-6) | 发起后撤销轮 `created` 审计行 `actor_name` = 用户显示名 | 绿 |
+| canWithdraw 同序(NIT-4) | 轮次撤回后:管理员摘要 `APPROVAL_REVOKE_FORBIDDEN`;进程内引擎对管理员 403 同码、对请求人 409 `INVALID_STATUS_TRANSITION` | 绿 |
+
+| 运行 | 读数 |
+|---|---|
+| 本套件(`EXPECT_DB=1`,两条 URL) | **34/34**(阶段 A 22 + A2 12) |
+| CI 形(`env -i`,仅 `DATABASE_URL`) | 33 通过 / 1 跳过(EXPECT_DB 哨兵) |
+| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 71 通过 / 3 跳过(74) |
+| 撤销轮真库尾部(CI 同序)上半:lock-order-census / creation / redemption | 126 通过 / 3 跳过(129) |
+| 下半:seat-guards / attendance-fk-migration / outlet-guards / node-timeout-effect | 22 通过 / 4 跳过(26) |
+| 单测 `tests/unit/approval*`(88 文件) | 1706/1706 |
+| 单测 `tests/unit/attendance*`(97 文件,含 UUID 路由、端口作用域) | 1753/1753 |
+| 点名单测 8 文件:端口作用域、UUID 路由、静态普查、摘要单测、cancel-round ci-wiring、插件镜像常量、`dispatchAction` 版本前置条件普查、coverage-enumeration | 531/531 |
+| `required-web-lane-token-manifest-guard` | 29/29 |
+| `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0,0 error |
+
+### 8.6 守卫与 CI 接线(登记项 L-4,与路由同一提交)
+
+- **动态探针**:白名单从两条扩到**恰好四条**(新增 `POST …/cancel-round/actions`、`POST …/cancel-round/withdraw`)。实跑:注册 1158 条、打出 962 条,命中 cancel-round token 的 4 条全在白名单内,白名单外 0、缺失 0、创建路径到达 0,PASS;正控 `self` 到达 1,PASS。负控:白名单删去一条新路由 ⇒ 退出码 2。
+- **静态普查**(创建路径 `createCancelRoundInstance`):不变 —— 两条新路由只到达引擎的 `dispatchAction`,不到达创建路径;普查 18/18 仍绿。
+- **`dispatchAction` 版本前置条件普查**(`approval-legacy-decision-version-precondition-sites.test.ts`):调用方文件按发现式人口计入端口,端口的请求对象不带 `expectedVersion`,仍绿。
+- **CI 接线**:A2 用例都在已接线的同一文件里 ⇒ `plugin-tests.yml` approval real-DB step、`vitest.config.ts` exclude、ci-wiring 常量均无需改;`plugin-tests.yml` 未改 ⇒ s6a `pluginTestsWorkflow` pin 不动;`sealed-export-package-provenance.test.cjs` OK(本分支未触碰任何被钉文件)。
+
+### 8.7 mutation(每条:一处替换 → 核与备份的 numstat 恰 `1 1` → 跑 → cp 还原 → `cmp` 逐字节)
+
+| # | 手术 | 读数 | 失败点 |
+|---|---|---|---|
+| F1 | 去掉发起路由的开关判定 | 1 failed / 22 | 开关 OFF 用例:201 ≠ 404 |
+| F2 | 开关默认值改 ON | 1 failed / 22 | 开关 OFF 用例(未设置一腿) |
+| R1 | 办理路由去掉 `withPermission('attendance:approve')` | 1 failed / 32 | 无 `attendance:approve` 用例:200 ≠ 403 |
+| R2 | 撤回路由去掉请假本人检查 | 1 failed / 32 | 撤回路由层 requester 见证:200 ≠ 403 |
+| R3a | 端口改为以轮次席位持有者身份分发(跳过席位校验的路径) | 3 failed / 30 | 无席位用例 200 ≠ 403;两条撤回用例 |
+| R3b | 服务层席位校验失效 | 1 failed / 32 | 无席位用例 |
+| X1 | 撤回路由去掉 `withPermission('attendance:write')` | 1 failed / 32 | 无 `attendance:write` 撤回用例 |
+| X2 | 办理动作枚举放入 `transfer` | 1 failed / 32 | 非允许动作用例 |
+| X3 | 撤回路由去掉 I7(改用不带可见谓词的加载器) | 1 failed / 32 | 非请求人撤回用例(外人不再 404) |
+| P1 | 探针白名单删去一条新路由 | 探针退出码 2 | 白名单外命中 |
+| N4 | `canWithdraw` 恢复旧序(终态先判) | 1 failed / 33 | P-4 canWithdraw 用例 |
+| N6 | 发起不传显示名 | 1 failed / 33 | 显示名用例 |
+
+### 8.8 残留与 NOT RUN
+
+1. **办理路由对无席位持有者的应答**:有轮次的单据 403 `APPROVAL_ASSIGNMENT_REQUIRED`,无轮次 / 不存在 404 —— 与审批侧 `POST /api/approvals/:id/actions`(403 / 404)同形,是任务要求的「既有拒绝码」。若 owner 要求两者统一为 404,属合同变更,待裁。
+2. **待办角标刷新**:审批侧动作路由在分发之后发布待办计数;考勤侧两条路由不做(待办呈现属阶段 C / P-11)。
+3. **开关的可观测性**(阶段 B 输入,**建议,待 owner**):OFF 与「不存在」同形,前端无从得知开关状态;若阶段 B 要按开关显示 / 禁用入口,需另定能力读取方式(不属本切片)。
+4. **§6 第 0b 项**(兑现侧 500)未修,归 C-1 线;开关 OFF 期间经本入口不可达。
+5. **`roles: []` 的前提**(撤销轮只有人席位)由测试断言钉住;若将来改变,见 §8.4。
+6. **NOT RUN**:前端(阶段 B);投递与待办(阶段 C);阶段 D 验收;CI(未推送);A2 的独立门审;CI 所用 PostgreSQL 版本(本地 15.17);`attendance-plugin.test.ts` 全量;`scripts/ops/*.test.mjs`;`tests/unit` 中 approval / attendance 前缀之外的文件;钉钉卡片回调对撤销轮的办理(UNVERIFIED,未改)。
+7. **测试残留**:与 §6 第 8 项同类(只追加的修订历史行、登录类审计行),随一次性库 drop。
