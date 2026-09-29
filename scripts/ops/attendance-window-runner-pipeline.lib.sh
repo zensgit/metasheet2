@@ -111,3 +111,39 @@ backend_override_environment_lines() {
     echo "      TASKS_ENABLED: \"true\""
   fi
 }
+
+# Rehearsal restore: clone-only function search_path shim (see action_migrate_rehearse in
+# attendance-staging-window-runner-remote.sh). The candidate list comes from the source DB's
+# catalog; these two helpers never let catalog text shape SQL beyond one exact line format.
+#
+# rehearsal_shim_validate_signatures <file>
+#   Prints the number of non-empty lines. Returns 1 (printing nothing) if any line is not a
+#   plain `public.<snake_case_name>(<identity arguments>)` signature — fail closed rather than
+#   build an ALTER statement from an unexpected shape.
+rehearsal_shim_validate_signatures() {
+  local file="$1" line count=0
+  # POSIX bracket expression: `]` must come first to be literal; backslash is literal inside.
+  local re='^public\.[a-z_][a-z0-9_]*\([]A-Za-z0-9_ ,."[]*\)$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ $re ]] || return 1
+    count=$((count + 1))
+  done < "$file"
+  echo "$count"
+}
+
+# rehearsal_shim_sql <set|reset> <file>
+#   One `ALTER FUNCTION <signature> SET search_path = pg_catalog, public;` (or `RESET
+#   search_path;`) per signature. Call only on a list rehearsal_shim_validate_signatures accepted.
+rehearsal_shim_sql() {
+  local mode="$1" file="$2" line clause
+  case "$mode" in
+    set) clause="SET search_path = pg_catalog, public" ;;
+    reset) clause="RESET search_path" ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    printf 'ALTER FUNCTION %s %s;\n' "$line" "$clause"
+  done < "$file"
+}
