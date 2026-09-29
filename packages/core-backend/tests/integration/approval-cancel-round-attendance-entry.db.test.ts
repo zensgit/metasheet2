@@ -2226,6 +2226,70 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
 
+      it('T6 (requester actor): a requester who also holds attendance:approve, with a pending item seated only on the permission-queue arm, is pushed after their OWN launch and their OWN withdraw the same todo count their own GET /api/todo/count answers at that moment', async () => {
+        const queueItemId = await seedPermissionQueueItem('requester-actor')
+        // An attendance approver taking their own leave: the requester holds attendance:approve (role),
+        // reads the todo center (approvals:read, fixture), with the same extra preparation
+        // `seedScopedAttendanceUser` makes (see private record).
+        const employee = `g4dc-t6-requester-${TS}`
+        await seedLoginUser(employee, { roles: ['attendance_employee'] })
+        await grantAttendanceApproverRole(employee)
+        await pool().query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+          [employee],
+        )
+        await pool().query(
+          `INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', TRUE)
+           ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = TRUE`,
+          [employee],
+        )
+        invalidateUserPerms(employee)
+        const employeeToken = await loginToken(employee)
+        const recorder = recordPushes()
+        try {
+          const countOf = async (): Promise<number> => {
+            const response = await http('GET', '/api/todo/count', employeeToken)
+            expect(response.status, response.text).toBe(200)
+            return response.json.count as number
+          }
+          // Precondition, so the legs cannot pass vacuously: the requester's own read includes the
+          // permission-queue item, and it is part of their count.
+          const items = await http('GET', '/api/todo/items', employeeToken)
+          expect(items.status, items.text).toBe(200)
+          expect(items.json.items.some((entry: { id: string }) => entry.id === queueItemId)).toBe(true)
+          const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+          const before = await countOf()
+          expect(before).toBeGreaterThanOrEqual(1)
+
+          // Leg 1 — the requester launches (they hold no seat on their own round).
+          recorder.pushes.length = 0
+          const launch = await http('POST', entryPath(requestId), employeeToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          const afterLaunch = await countOf()
+          expect(afterLaunch).toBe(before)
+          expect(todoPushesFor(recorder.pushes, employee)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, employee).at(-1)?.payload?.count).toBe(afterLaunch)
+
+          // Leg 2 — the requester withdraws the round.
+          recorder.pushes.length = 0
+          const withdrawn = await http('POST', withdrawPath(requestId), employeeToken, {})
+          expect(withdrawn.status, withdrawn.text).toBe(200)
+          const afterWithdraw = await countOf()
+          expect(afterWithdraw).toBe(before)
+          expect(todoPushesFor(recorder.pushes, employee)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, employee).at(-1)?.payload?.count).toBe(afterWithdraw)
+        } finally {
+          recorder.stop()
+          await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [queueItemId])
+          await pool().query(
+            `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+            [employee],
+          )
+          await pool().query(`DELETE FROM user_namespace_admissions WHERE user_id = $1 AND namespace = 'attendance'`, [employee])
+          invalidateUserPerms(employee)
+        }
+      })
+
       it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
         const fixture = await launchedRound('fence')
         const arms = await pool().query<{ assignment_type: string }>(
