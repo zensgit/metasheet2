@@ -501,6 +501,22 @@ export async function decideCancelRound(
   return typeof data?.roundId === 'string' && data.roundId.length > 0 ? data.roundId : null
 }
 
+/**
+ * Display predicate for the approver decision on a cancel round, shared by the detail view and the
+ * approval center (inline, pane, batch). It mirrors the grant the attendance decision route actually
+ * checks: `withPermission('attendance:approve')`, which the plugin's `withAnyPermission` satisfies for
+ * an admin, a holder of `attendance:approve`, or a holder of `attendance:admin`. Display only — the
+ * route (grant, seat, §9-9) decides.
+ */
+export function canDecideCancelRoundWith(
+  access: { readonly isAdmin: boolean; readonly permissions: readonly string[] } | null | undefined,
+): boolean {
+  if (!access) return false
+  return access.isAdmin
+    || access.permissions.includes('attendance:approve')
+    || access.permissions.includes('attendance:admin')
+}
+
 // ---------------------------------------------------------------------------
 // Approver path from the approval side (④). A cancel-round instance's `businessKey` is the ORIGINAL
 // approval instance id (not the attendance request id), and that original instance's `businessKey`

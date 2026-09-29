@@ -33,6 +33,7 @@ import {
   CANCEL_ROUND_SEAT_CLASS_COPY,
   CANCEL_ROUND_STATUS_KEYS,
   approvalStatusTagProps,
+  canDecideCancelRoundWith,
   cancelRoundStatusKeyFromApproval,
   cancelRoundStatusKeyFromSummary,
   decideCancelRound,
@@ -356,5 +357,15 @@ describe('approver path: the round on screen is the round decided (stale-page gu
     expect(actionCalls()).toHaveLength(1)
     routeFetch({ round: pendingRound('cr_shown'), action: () => jsonResponse(200, { ok: true, data: { requestId: 'req-7' } }) })
     await expect(decideCancelRoundFromApproval(approval, 'approve')).rejects.toMatchObject({ code: CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED })
+  })
+})
+
+describe('approver decision display predicate (mirrors the attendance route grant)', () => {
+  it('admin, attendance:approve or attendance:admin — nothing else', () => {
+    expect(canDecideCancelRoundWith(null)).toBe(false)
+    expect(canDecideCancelRoundWith({ isAdmin: true, permissions: [] })).toBe(true)
+    expect(canDecideCancelRoundWith({ isAdmin: false, permissions: ['attendance:approve'] })).toBe(true)
+    expect(canDecideCancelRoundWith({ isAdmin: false, permissions: ['attendance:admin'] })).toBe(true)
+    expect(canDecideCancelRoundWith({ isAdmin: false, permissions: ['approvals:act', 'attendance:read', 'attendance:write'] })).toBe(false)
   })
 })

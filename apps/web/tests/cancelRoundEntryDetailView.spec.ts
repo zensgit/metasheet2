@@ -375,6 +375,13 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(elSuccessSpy).toHaveBeenCalledWith('审批已通过')
   })
 
+  it('attendance:admin alone shows the decision buttons (the route admits it for attendance:approve)', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:admin'] }
+    await mountView()
+    expect(q(container!, 'approval-approve-button')).not.toBeNull()
+    expect(q(container!, 'approval-reject-button')).not.toBeNull()
+  })
+
   it('approvals:act alone does not show the decision buttons on a cancel round (the route checks attendance:approve)', async () => {
     mockCanAct.value = true
     await mountView()

@@ -1141,6 +1141,7 @@ import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
 import {
   approvalStatusTagProps,
+  canDecideCancelRoundWith,
   cancelRoundStatusKeyFromApproval,
   decideCancelRoundFromApproval,
   isCancelRoundClientRefusal,
@@ -1699,10 +1700,7 @@ const canDecideCurrentNode = computed(() => approval.value?.canDecideCurrentNode
 // other member verbs stay hidden — the lock's §9-9 allowed set refuses transfer / add_sign /
 // reduce_sign / return on a cancel round. The server (seat check, §9-9, grant) remains the authority.
 const isCancelRound = computed(() => isCancelRoundWorkflow(approval.value))
-const canActOnCancelRound = computed(() => {
-  const access = approvalAccess?.value
-  return Boolean(access && (access.isAdmin || access.permissions.includes('attendance:approve')))
-})
+const canActOnCancelRound = computed(() => canDecideCancelRoundWith(approvalAccess?.value))
 const canDecidePrimary = computed(() =>
   (isCancelRound.value ? canActOnCancelRound.value : canAct.value) && canDecideCurrentNode.value,
 )

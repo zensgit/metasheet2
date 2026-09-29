@@ -242,6 +242,8 @@ beforeEach(async () => {
   })
   elSuccessSpy.mockClear()
   elErrorSpy.mockClear()
+  // The cancel-round affordances follow the attendance decision route's grant.
+  localStorage.setItem('user_permissions', JSON.stringify(['attendance:approve']))
   container = document.createElement('div')
   document.body.appendChild(container)
 })
@@ -250,6 +252,7 @@ afterEach(() => {
   if (app) app.unmount()
   container?.remove()
   document.body.innerHTML = ''
+  localStorage.removeItem('user_permissions')
   app = null
   container = null
   vi.clearAllMocks()
@@ -354,5 +357,31 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     await flushUi()
     expect(attendanceCalls()).toHaveLength(1)
     expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')?.textContent).toContain('未执行任何操作')
+  })
+})
+
+describe('ApprovalCenterView — cancel-round affordances follow the attendance route grant', () => {
+  it('without attendance:approve / attendance:admin a cancel-round row offers no inline decision and is not batch-selectable', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['approvals:act']))
+    mockPendingApprovals.value = [pendingRow({ id: 'apv_plain' }), cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-cr_1"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-approve-apv_plain"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
+    expect(attendanceCalls()).toHaveLength(0)
+  })
+
+  it('attendance:admin alone offers the inline decision (the route admits it)', async () => {
+    localStorage.setItem('user_permissions', JSON.stringify(['attendance:admin']))
+    mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    expect(container!.querySelector('[data-testid="approval-row-approve-cr_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-row-reject-cr_1"]')).not.toBeNull()
   })
 })

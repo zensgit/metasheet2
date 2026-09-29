@@ -621,7 +621,12 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
-import { dispatchApprovalDecision, isCancelRoundClientRefusal } from '../../approvals/cancelRound'
+import {
+  canDecideCancelRoundWith,
+  dispatchApprovalDecision,
+  isCancelRoundClientRefusal,
+  isCancelRoundWorkflow,
+} from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
@@ -639,7 +644,7 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useApprovalStore()
-const { canWrite } = useApprovalPermissions()
+const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 
 // B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
 // shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
@@ -880,8 +885,12 @@ function waitClass(createdAt: string): string {
 function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
   return row.currentNodeType === 'handler'
 }
+// 撤销轮 rows decide through the attendance route, so their approve / reject affordances (inline,
+// pane, batch) follow the grant that route checks (`canDecideCancelRoundWith`) — the same predicate
+// the detail view uses. Display only; the route remains the authority.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
+    && (!isCancelRoundWorkflow(row) || canDecideCancelRoundWith(approvalAccess?.value))
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
