@@ -2072,7 +2072,8 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
       })
 
       /**
-       * Phase D T6 (owner-accepted fix route (c), see the design MD §12): an unrelated pending item
+       * Phase D T6 (fix route (c): 主会话无人值守取舍(brief 2026-09-30 01:0x),非 owner 裁定; see the design MD §12):
+       * an unrelated pending item
        * whose ONLY active seat is a permission-queue arm (`source_queue` on `attendance:approve`, the
        * shape the attendance approval flow seats). It is in a viewer's count only when that viewer's
        * permission context reaches the count. Returns the item id; the caller deactivates it.
