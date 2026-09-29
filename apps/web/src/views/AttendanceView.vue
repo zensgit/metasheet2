@@ -933,6 +933,12 @@
                     </button>
                   </template>
                 </div>
+                <!-- 请假撤销入口(撤销锁 P-1):only on LEAVE rows of this list — never the shift-swap list below. -->
+                <AttendanceCancelRoundPanel
+                  v-if="item.request_type === 'leave'"
+                  :request="item"
+                  :current-user-id="currentUserId"
+                />
               </li>
             </ul>
           </div>
@@ -10132,6 +10138,7 @@ import AttendanceShiftFlexPolicyEditor from './attendance/AttendanceShiftFlexPol
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
 // W5-1 (Wave 5 explainability design-lock, RATIFIED §6/§9 W5-1): dual-face decision-trace wiring.
 import AttendanceDecisionTrace from './attendance/AttendanceDecisionTrace.vue'
+import AttendanceCancelRoundPanel from './attendance/AttendanceCancelRoundPanel.vue'
 import {
   ATTENDANCE_DECISION_TRACE_CATEGORIES,
   attendanceTraceCategoryLabel,
