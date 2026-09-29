@@ -1947,7 +1947,18 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
             ),
           }
         })
+        // The request-number sequence is the creation path's first write, and it is NOT transactional:
+        // a refusal placed after `nextval` (or after the first INSERT, which the rollback would hide)
+        // still moves it. Its state unchanged across the refused call is what 「before ANY write」 means
+        // here; zero rows alone would only show that nothing was left behind.
+        const requestNoSequence = async (): Promise<string> =>
+          JSON.stringify(
+            (await pool().query<{ last_value: string; is_called: boolean }>(
+              'SELECT last_value::text AS last_value, is_called FROM approval_request_no_seq',
+            )).rows[0],
+          )
         const instancesBefore = await pool().query<{ count: string }>('SELECT COUNT(*)::text AS count FROM approval_instances')
+        const sequenceBefore = await requestNoSequence()
         try {
           await expect(service().createCancelRoundInstance(documentId, { userId: employee })).rejects.toMatchObject({
             statusCode: 409,
@@ -1957,13 +1968,16 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         } finally {
           spy.mockRestore()
         }
+        expect(await requestNoSequence()).toBe(sequenceBefore)
         expect(await roundsFor(documentId)).toHaveLength(0)
         const instancesAfter = await pool().query<{ count: string }>('SELECT COUNT(*)::text AS count FROM approval_instances')
         expect(instancesAfter.rows[0].count).toBe(instancesBefore.rows[0].count)
-        // Positive control on the same document: without the rewrite the same call opens the round.
+        // Positive control on the same document: without the rewrite the same call opens the round —
+        // and moves the sequence, so the probe above is live.
         const round = await service().createCancelRoundInstance(documentId, { userId: employee })
         createdApprovalIds.add(round.id)
         expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
+        expect(await requestNoSequence()).not.toBe(sequenceBefore)
       })
     })
   })
