@@ -2114,6 +2114,13 @@ describe('Attendance self-service dashboard', () => {
     expect(markedRow()?.dataset.cancelRoundPendingItem).toBe('request-leave-focused')
     // no section yet ⇒ the page has not scrolled; the approver row is the last thing brought into view
     expect(scroll.mock.instances.at(-1)).toBe(markedRow())
+    // `requestId` alone already opened the request tools at mount; collapse them through their own summary
+    // so that seeing them open again below proves the page's deep-link pass really re-ran on `section`.
+    const requestTools = container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')!
+    expect(requestTools.open).toBe(true)
+    requestTools.querySelector<HTMLElement>('summary')!.click()
+    await flushUi()
+    expect(requestTools.open).toBe(false)
     const callsBefore = scroll.mock.calls.length
 
     routeProps.initialSectionId = 'attendance-overview-requests'
