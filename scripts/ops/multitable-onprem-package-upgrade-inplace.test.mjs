@@ -2152,13 +2152,16 @@ function runUpgradeScriptAsync(args, envOverrides = {}) {
 // That pair is the runtime witness for the r29 ordering fix: the backend-direct
 // probe must arrive while the flag is still up, and the nginx probe must arrive
 // after it is gone.
-function startHealthServer({ flagPath = null, backendUp = () => true } = {}) {
+// gateWired: answer 503 to everything but the backend-direct /health while the flag
+// exists, the way a host whose nginx reads the gate does.
+function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false } = {}) {
   return new Promise((resolve) => {
     const requests = []
     const server = http.createServer((req, res) => {
       // backendUp only governs the backend-direct /health path: it lets the R59
       // fixtures model "the backend is down until the scheduled task starts it".
-      const up = req.url === '/health' ? Boolean(backendUp()) : true
+      const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
+      const up = req.url === '/health' ? Boolean(backendUp()) : !gated
       requests.push({
         url: req.url,
         flagExists: flagPath ? fs.existsSync(flagPath) : null,
@@ -2706,12 +2709,14 @@ function childEnv(overrides = {}, removals = []) {
   return { ...env, ...overrides }
 }
 
-function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams) {
+// extraStubSource: more PowerShell the wrapper runs after the task stubs and before the
+// script (the stop-gap tests below define a failing Copy-Item there).
+function writeStubbedUpgradeWrapper(root, taskStub, upgradeParams, extraStubSource = '') {
   const wrapperPath = path.join(root, 'run-upgrade-with-task-stubs.ps1')
   const splat = Object.entries(upgradeParams).map(([key, value]) => `  ${key} = ${psSingleQuote(value)}`)
   fs.writeFileSync(
     wrapperPath,
-    [scheduledTaskStubSource(taskStub), '$upgradeParams = @{', ...splat, '}', `& ${psSingleQuote(scriptExecPath)} @upgradeParams`, ''].join('\n'),
+    [scheduledTaskStubSource(taskStub), extraStubSource, '$upgradeParams = @{', ...splat, '}', `& ${psSingleQuote(scriptExecPath)} @upgradeParams`, ''].join('\n'),
   )
   return wrapperPath
 }
@@ -3754,6 +3759,99 @@ test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pi
     assert.match(section('UNKNOWN_UNMANAGED'), /could not be queried; stopping 'metasheet-backend' anyway/)
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+// ── 3d. The stop gap: a failure after the step 2 stop, before anything was replaced ──
+//
+// Recorded in #6079 (comment of 2026-09-28T08:24:49Z): the script stopped the backend
+// at step 2 and made the backup at step 3 OUTSIDE the failure handler, so a failed
+// backup left the site down with no restart and no guidance. Now the handler covers
+// everything after the stop and decides on one recorded fact -- whether anything of the
+// installed version has been replaced yet (Register-LiveTreeReplacement, set right
+// before the first write to a live path):
+//   nothing replaced -> start the backend again the way step 7 does (pm2 restart, then
+//                       the scheduled-task fallback), check it answers, say so, exit
+//                       non-zero, no restore block;
+//   anything replaced -> as before: stop, restore block, never start the backend.
+
+// PowerShell for a Copy-Item stand-in the wrapper defines before the script runs: the
+// script's Copy-Item calls resolve to it (a function wins over a cmdlet of the same
+// name). A copy whose -Destination lies under failUnder throws, the way a full disk or
+// a locked file would; every other copy is the real cmdlet.
+function copyItemFailureStubSource(failUnder) {
+  return [
+    `$global:StubCopyFailUnder = ${psSingleQuote(failUnder)}`,
+    'function global:Copy-Item {',
+    '  [CmdletBinding()]',
+    '  param([string[]]$LiteralPath, [string[]]$Path, [string]$Destination, [switch]$Recurse, [switch]$Force)',
+    "  $dest = ([string]$Destination) -replace '[\\\\/]+', '/'",
+    "  $under = (($global:StubCopyFailUnder -replace '[\\\\/]+', '/').TrimEnd('/')) + '/'",
+    '  if ($dest.StartsWith($under, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    throw "STUB_COPY_FAILED: cannot write $Destination"',
+    '  }',
+    '  Microsoft.PowerShell.Management\\Copy-Item @PSBoundParameters',
+    '}',
+    '',
+  ].join('\n')
+}
+
+// The installed version's own files (the pm2 stub excluded: the harness wrote it).
+function liveInstallSnapshot(liveRoot) {
+  const files = snapshotFiles(liveRoot)
+  for (const rel of Object.keys(files)) {
+    if (rel.startsWith('node_modules/.bin/')) delete files[rel]
+  }
+  return files
+}
+
+test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing replaced -- brings the backend back the way step 7 does (pm2 restart, "not found", pm2 kill, the MetaSheet-PM2 task), checks it answers, says so and exits non-zero; no restore block (RED on the pre-fix script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-gap-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  // The backend stays DOWN until the scheduled task has started pm2-runtime again.
+  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const before = liveInstallSnapshot(fx.liveRoot)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub(),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.notEqual(result.status, 0, `a failed upgrade must exit non-zero.\n${report}`)
+    assert.match(combined, /STUB_COPY_FAILED: cannot write /, 'the injected backup failure must be what failed the run')
+    assert.doesNotMatch(result.stdout, /BACKUP_PATH=/, 'the run must have failed inside the backup step')
+
+    // The step 2 stop, then exactly the step 7 start path: the restart answers "not
+    // found" (pm2-runtime exited after the stop), the empty daemon it started is killed,
+    // and the task is started with no daemon left -- all under the one resolved home.
+    const homes = readPm2HomeLog(fx.homeLogPath)
+    assert.deepEqual(homes.map((entry) => entry.command), ['stop', 'restart', 'kill'], `the backend must be started again after the stop.\n${report}`)
+    for (const entry of homes) assert.equal(entry.home, fx.runtimeHome)
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start')), ['start MetaSheet-PM2', 'start-path=\\', 'start-saw-daemon=no'])
+    // It checked the backend answers, directly (the gate is still up), after the start.
+    const probes = health.requests.filter((entry) => !entry.gateProbe)
+    assert.ok(probes.length >= 1, `the backend-direct probe must run after the start.\n${report}`)
+    assert.equal(probes[0].url, '/health')
+    assert.equal(probes[0].backendUp, true, 'the probe must come after the task started the backend')
+
+    // What the operator reads: nothing was replaced, the backend is back, no restore.
+    assert.match(result.stdout, /NOTHING_REPLACED: /)
+    assert.match(result.stdout, /=+ UPGRADE NOT APPLIED =+/)
+    assert.match(result.stdout, /Backend: started again \(scheduled-task\) and answered http:\/\/127\.0\.0\.1:\d+\/health on attempt 1\./)
+    assert.match(result.stdout, /The installed version was not changed and no migration ran\. Nothing needs to be restored\./)
+    assert.doesNotMatch(combined, /RESTORE REQUIRED/, 'nothing was replaced: there is nothing to restore, and the backup may be incomplete')
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'the failure handler\'s stop is for a replaced install only')
+
+    assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
+    assert.ok(!fs.existsSync(fx.witness.flagPath), 'the finally drops the gate')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
