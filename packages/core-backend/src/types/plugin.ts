@@ -1303,6 +1303,18 @@ export interface PluginServices {
     >
   }
   /**
+   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A — host→plugin
+   * port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
+   * (P-1 Q1′ = (i) attendance-side mounting; P-3 = (iii) round-summary carrier; P-4 summary read).
+   * Same posture as `approvalAssigneeResolver` above: core-backend is the PROVIDER and ONLY
+   * plugin-attendance receives it; every other plugin gets `undefined`, and the consumer answers a
+   * fail-closed 503. `launch` is the ONE plugin-reachable path to the dedicated cancel-round creation
+   * path (never the public `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance`
+   * applied to the ORIGINAL document instance. Implementation:
+   * `approvals/approval-cancel-round-entry-port.ts`.
+   */
+  approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort
+  /**
    * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
    * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
    * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
