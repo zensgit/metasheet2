@@ -808,6 +808,25 @@ export class DataSourceManager extends EventEmitter {
   }
 
   /**
+   * Load state of an id, read from memory — the input of the integration facade's server-side
+   * refusal reason (#6067 §5 R1). It takes NO actor and decides NO access: its answer names a word
+   * in the server log and is never returned to a caller.
+   *
+   * EQUAL COST, by construction: the same three in-memory lookups run whatever the id is — loaded,
+   * failed to load, or nonexistent — and the verdict is taken only afterwards. No database read, no
+   * promise, no allocation. `loaded` mirrors the registry predicate of assertAccess (adapter AND
+   * scope present), so an id that is only half registered is not reported as loaded.
+   */
+  getLoadState(id: string): 'loaded' | DataSourceLoadState | 'absent' {
+    const adapterPresent = this.adapters.has(id)
+    const scopePresent = this.scopes.has(id)
+    const failure = this.loadFailures.get(id)
+    if (adapterPresent && scopePresent) return 'loaded'
+    if (failure !== undefined) return failure.reason
+    return 'absent'
+  }
+
+  /**
    * Access for PUT /:id/credentials — the ONE route that addresses both a loaded id and a
    * load-failed id. Returns which of the two the actor may act on; every refusal throws the SAME
    * "not found" as assertAccess does for a nonexistent id.

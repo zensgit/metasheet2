@@ -1,0 +1,66 @@
+=== stdout ===
+[multitable-onprem-upgrade-inplace] pm2 home: <ROOT>/profile/.pm2-runtime (source: pm2-runtime (.pm2-runtime + scheduled task 'MetaSheet-PM2'))
+[multitable-onprem-upgrade-inplace] === Step 1/8: verify package checksum ===
+[multitable-onprem-upgrade-inplace] Package verified: acid-fixture-multitable-onprem-package.zip sha256=<SHA256>
+[multitable-onprem-upgrade-inplace] === Step 2/8: stop pm2 app (maintenance gate raised first) ===
+MAINTENANCE_FLAG=<ROOT>/live/output/maintenance.flag
+[multitable-onprem-upgrade-inplace] MAINTENANCE_GATE_WIRED: http://127.0.0.1:<PORT>/api/health answered 503 while <ROOT>/live/output/maintenance.flag exists -- nginx really is reading this flag.
+[multitable-onprem-upgrade-inplace] Stop pm2 app: metasheet-backend
+[multitable-onprem-upgrade-inplace] === Step 3/8: back up current install ===
+[multitable-onprem-upgrade-inplace] Backed up docker -> <ROOT>/backups/upgrade-backup-<TIMESTAMP>/docker (1 files, 0 node_modules files preserved-in-place/skipped)
+[multitable-onprem-upgrade-inplace] Backup skip (not present on this host): config
+[multitable-onprem-upgrade-inplace] Backed up packages/core-backend/dist -> <ROOT>/backups/upgrade-backup-<TIMESTAMP>/packages/core-backend/dist (1 files, 0 node_modules files preserved-in-place/skipped)
+[multitable-onprem-upgrade-inplace] Backed up apps/web/dist -> <ROOT>/backups/upgrade-backup-<TIMESTAMP>/apps/web/dist (1 files, 0 node_modules files preserved-in-place/skipped)
+[multitable-onprem-upgrade-inplace] Backed up packages/core-backend/migrations -> <ROOT>/backups/upgrade-backup-<TIMESTAMP>/packages/core-backend/migrations (1 files, 0 node_modules files preserved-in-place/skipped)
+[multitable-onprem-upgrade-inplace] Backed up plugins -> <ROOT>/backups/upgrade-backup-<TIMESTAMP>/plugins (3 files, 1 node_modules files preserved-in-place/skipped)
+BACKUP_PATH=<ROOT>/backups/upgrade-backup-<TIMESTAMP>
+[multitable-onprem-upgrade-inplace] === Step 4/8: extract + replace runtime paths ===
+[multitable-onprem-upgrade-inplace] Staging extract root: <ROOT>/staging/mspui-<ID>
+[multitable-onprem-upgrade-inplace] Extracted package root: <ROOT>/staging/mspui-<ID>/acid-fixture-multitable-onprem-package
+[multitable-onprem-upgrade-inplace] Replaced packages/core-backend/dist (1 files)
+[multitable-onprem-upgrade-inplace] Replaced apps/web/dist (1 files)
+[multitable-onprem-upgrade-inplace] Replaced packages/core-backend/migrations (1 files)
+[multitable-onprem-upgrade-inplace] Replaced plugins/README.txt (loose file)
+[multitable-onprem-upgrade-inplace] Replaced plugins/plugin-integration-core (5 files, node_modules preserved)
+[multitable-onprem-upgrade-inplace] === Step 5/8: assert must-exist files (F22 tripwire) + per-file hash verification ===
+[multitable-onprem-upgrade-inplace] Must-exist manifest: OK, all files present
+[multitable-onprem-upgrade-inplace] Plugin hash verification: OK (6 files checked)
+[multitable-onprem-upgrade-inplace] Plugin node_modules leak check: OK (1 excluded package files checked)
+[multitable-onprem-upgrade-inplace] Plugin lib/ file count (package vs deployed):
+[multitable-onprem-upgrade-inplace]   plugin-integration-core          package=   3  deployed=   3
+[multitable-onprem-upgrade-inplace] === Step 6/8: run migrations ===
+[multitable-onprem-upgrade-inplace] Loaded 3 vars from <ROOT>/live/docker/app.env (migration/restart/healthcheck inherit these)
+[multitable-onprem-upgrade-inplace] Run database migrations (<ROOT>/live/packages/core-backend/dist/src/db/migrate.js)
+migrate-ok marker=from-app-env
+[multitable-onprem-upgrade-inplace] === Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ===
+[PM2][ERROR] Process or Namespace metasheet-backend not found
+[multitable-onprem-upgrade-inplace] PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports 'metasheet-backend' not found; scheduled task '/MetaSheet-PM2' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead.
+[multitable-onprem-upgrade-inplace] Removing the empty pm2 daemon the restart above started in this session, so the task's pm2-runtime hosts the backend itself (pm2 kill).
+[multitable-onprem-upgrade-inplace] Scheduled task 'MetaSheet-PM2' started; the health polling below decides whether the backend came back.
+[multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health); dropping the maintenance gate before the nginx probe
+[multitable-onprem-upgrade-inplace] Maintenance flag removed: <ROOT>/live/output/maintenance.flag
+[multitable-onprem-upgrade-inplace] Plugins summary:
+[multitable-onprem-upgrade-inplace]   plugin-integration-core          version=unknown
+[multitable-onprem-upgrade-inplace] === Step 8/8: final report ===
+
+===== multitable-onprem-package-upgrade-inplace: final report =====
+package:          acid-fixture-multitable-onprem-package.zip
+backup path:      <ROOT>/backups/upgrade-backup-<TIMESTAMP>
+migration exit:   0
+pm2 home:         <ROOT>/profile/.pm2-runtime (source: pm2-runtime (.pm2-runtime + scheduled task 'MetaSheet-PM2'))
+backend started:  scheduled-task
+backend health:   OK (attempt=1, url=http://127.0.0.1:<PORT>/health)
+health:           OK (attempt=1, status=200)
+maintenance flag: <ROOT>/live/output/maintenance.flag (removed)
+maintenance gate: WIRED (probed http://127.0.0.1:<PORT>/api/health while the flag was up; NOT_WIRED = this nginx.conf never got the gate, the window was unshielded)
+
+Next (do not skip these):
+  1) Preflight:
+       GET <base-url>/api/integration/stock-preparation/preflight
+     Fix every listed blocker with its own fix.run until "ready": true.
+  2) Acceptance bootstrap (env-only input, see script header for full list):
+       node scripts/ops/stock-prep-acceptance-bootstrap.mjs
+     Requires MS_API, MS_TOKEN, MS_PROJECT_NO, MS_PACK_ID, MS_DATA_SOURCE_ID,
+     MS_EXTERNAL_SYSTEM_ID set in the environment beforehand.
+====================================================================
+=== stderr ===

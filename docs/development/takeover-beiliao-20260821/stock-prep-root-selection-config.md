@@ -25,7 +25,10 @@
 ```
 
 上面这一块就是**本客户**的预设(#5862 客户口径:总图 = `J` 开头且 `-00` 结尾;钣金图 = 图号**含** `-A`/`-B`/`-C`/`-D`)。
-其余键不写,落到老系统默认。改完 `pm2 restart metasheet-backend --update-env`,配置错误会在启动/注册时以 `TABLE_ACTION_CONFIG_INVALID`(422)拒绝,不会静默跑成别的规则。
+其余键不写,落到老系统默认。改完要重启后端才生效,配置错误会在启动/注册时以 `TABLE_ACTION_CONFIG_INVALID`(422)拒绝,不会静默跑成别的规则。重启方式看主机的托管方式:
+
+- **后端由计划任务 `MetaSheet-PM2` → pm2-runtime 托管的主机**(演示机就是这种,见 `handoff-r59-two-machine-20260924.md` §2):改了 `docker/app.env` 之后,**不要**只用 `pm2 restart`。原因是环境不会重读:单纯的 `pm2 restart <名字>` 沿用进程启动时的环境,不重新读 `docker/app.env`(升级脚本 `scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1360-1362` 的注释:pm2 在单纯 restart 时不能可靠地重读环境;演示机上没有核对过)。原因**不是**「restart 拉不起后端」:pm2-runtime 在运行时,在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里 `pm2 restart` 能让后端恢复(#6079 2026-09-29T01:26:41Z,33 秒;那次没有改 `app.env`)。只有先 stop、pm2-runtime 因没有在线应用而自行退出之后,才只能靠计划任务拉起(同文 §2「补充根因」);那时会话里的 pm2 命令找不到守护进程,会在会话里另起一个空守护进程(同文 §2「为什么要先 kill」)。做法与同文 §2「向前修复」和手工恢复顺序一致:先停应用(升级脚本第 2 步的做法:在 `PM2_HOME` 指向 pm2-runtime home 的会话里 `pm2 stop metasheet-backend`,`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:542-590`),确认 pm2 的命名管道 `\\.\pipe\rpc.sock` 上已没有守护进程(还在就 `pm2 kill` 后再查),再 `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'`,然后查 health。这种主机上后端的环境从哪里来,**没有核对**:计划任务起的是 `start-pm2-runtime-persistent.bat`,再由它起 pm2-runtime(同文 `:22`),这个 .bat 不在仓库里(`git grep -l 'MetaSheet-PM2\|pm2-runtime' origin/main -- scripts ':!*.md'` 只列出升级脚本和它的测试)。如果它用 `ecosystem.config.cjs` 启动,`docker/app.env` 里同一个键取**第一次**出现的那行,且不覆盖进程里已有的同名变量(`ecosystem.config.cjs:42`);升级脚本导入时则取最后一次(同一脚本 `:1367-1391`)。所以这个键要**原地改**那一行,不要在文件末尾追加第二份:文件里只有一行时,两种取法结果一样(#6079 2026-09-28T14:02:47Z)。
+- **其它用 pm2 直接托管的主机**:`pm2 restart metasheet-backend --update-env`,照升级脚本的顺序做:先把 `docker/app.env` 导入执行命令的那个会话,再重启(`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1:1885` 导入、`:1904` 重启;该脚本 `:1355-1363` 的注释说明了原因:pm2 在单纯 restart 时不能可靠地重读环境)。
 
 ## 键与默认值(全部可选;不写 = 老系统 `StockInfoController.java` 的行为)
 
