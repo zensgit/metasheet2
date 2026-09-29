@@ -671,7 +671,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'low',
     purpose:
-      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. The same exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled) sets the session feature `tasks`: while OFF the web shows no 任务 top-bar entry or pending badge, /tasks redirects home, and the browser issues no /api/tasks request.',
     source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
 ])

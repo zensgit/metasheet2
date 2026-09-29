@@ -52,6 +52,14 @@ export interface ProductFeatures {
    * an explicit boolean — never inferred from admin role, product mode, or plugin state.
    */
   elearning: boolean
+  /**
+   * Tasks (/tasks, the top-bar 任务 entry and its pending badge). Mirrors the backend's
+   * TASKS_ENABLED switch, the same switch that decides whether /api/tasks is mounted at all.
+   * Default OFF: true only from an explicit boolean in the session payload (or the authorized dev
+   * override). A session payload that carries no tasks value (an older backend) is OFF. Never
+   * inferred from admin role, product mode or plugin state.
+   */
+  tasks: boolean
   mode: ProductMode
 }
 
@@ -88,6 +96,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalFwbWriteback: false,
   attendanceGroupEffectivePolicyPanel: false,
   elearning: false,
+  tasks: false,
   mode: 'platform',
 }
 
@@ -275,6 +284,7 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
     elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
+    tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -410,6 +420,13 @@ function resolveFeatures(
     backend.elearning,
   )
 
+  // Tasks: same default-OFF discipline. A payload without a tasks boolean (an older backend)
+  // resolves to false here; no admin/mode/plugin inference.
+  const tasks = boolOrDefault(
+    override.tasks,
+    backend.tasks,
+  )
+
   return {
     attendance,
     workflow,
@@ -422,6 +439,7 @@ function resolveFeatures(
     approvalFwbWriteback,
     attendanceGroupEffectivePolicyPanel,
     elearning,
+    tasks,
     mode,
   }
 }
