@@ -2211,8 +2211,9 @@ const pendingEnableRuleIds = ref(new Set<string>())
 
 /**
  * #6155: a NON-blocking notice for a rule that is on (or being switched on) while its trigger is record.deleted
- * and its action needs the trigger record — each run of it ends as skipped. The shape decision is the editor's
- * own save-block detector (automationSaveBlockReasons.ts), applied to the rule as listed.
+ * and an update/delete/lock action of it is aimed at the trigger record — that action changes nothing (a delete
+ * step ends as skipped, an update / lock step as success; other actions still run). The shape decision is the
+ * editor's own save-block detector (automationSaveBlockReasons.ts), applied to the rule as listed.
  */
 function showsDeletedTriggerSkipNotice(rule: AutomationRule): boolean {
   if (!rule.enabled && !pendingEnableRuleIds.value.has(rule.id)) return false

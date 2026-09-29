@@ -235,7 +235,7 @@ export type AutomationLabelKey =
   | 'recipe.fieldChangedUpdateDesc'
   | 'manager.enabled'
   | 'manager.disabled'
-  // #6155: non-blocking notice on a rule that is on (or being switched on) whose every run ends as skipped.
+  // #6155: non-blocking notice on a rule that is on (or being switched on) with an action that can only no-op.
   | 'manager.deletedTriggerSkipNotice'
   | 'manager.allowedAudiencePrefix'
   | 'manager.statOk'
@@ -1104,10 +1104,12 @@ const LABELS: Record<AutomationLabelKey, { en: string; zh: string }> = {
   'manager.disabled': { en: 'Disabled', zh: '已停用' },
   // #6155: shown (never blocking) on the automation panel card of a rule that is on or being switched on while its
   // trigger is record.deleted and its action updates/deletes/locks the trigger record — the same shape the editor
-  // refuses to save ('actionConfig.deletedTriggerSelfMutation'); an existing rule of it runs and ends as skipped.
+  // refuses to save ('actionConfig.deletedTriggerSelfMutation'). An existing rule of it runs, and that action
+  // changes nothing: a delete_record step ends as skipped, an update_record / lock_record step as success with no
+  // row touched, and the rule's other actions still run — so the sentence names no run status.
   'manager.deletedTriggerSkipNotice': {
-    en: 'This rule runs when a record is deleted, and its action needs that record, so each run will be skipped. If that is not intended, change the action or the trigger.',
-    zh: '此规则在记录删除时运行，而它的动作需要这条记录，所以每次运行都会被跳过。如非预期，请改用其他动作，或换一个触发条件。',
+    en: 'This rule runs when a record is deleted, but it has an update, delete or lock action aimed at that deleted record, so that action has no effect. If that is not intended, change the action or the trigger.',
+    zh: '此规则在记录删除时运行，但其中有修改、删除或锁定动作针对的正是这条已删除的记录，这个动作不会生效。如非预期，请改用其他动作，或换一个触发条件。',
   },
   'manager.allowedAudiencePrefix': { en: 'Allowed audience:', zh: '允许范围：' },
   'manager.statOk': { en: 'ok', zh: '成功' },

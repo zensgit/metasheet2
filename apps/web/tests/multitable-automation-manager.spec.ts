@@ -1078,10 +1078,11 @@ describe('MetaAutomationManager', () => {
       expect(container.querySelector('.meta-automation__error[role="alert"]')?.textContent?.trim()).toBe('Automation service is not available')
     })
 
-    // #6155 panel notice: a rule of this shape that is on (or being switched on) runs and every run ends as skipped;
-    // the panel says so without blocking anything. The shape is decided by the editor's own save-block detector.
-    const NOTICE_EN = 'This rule runs when a record is deleted, and its action needs that record, so each run will be skipped. If that is not intended, change the action or the trigger.'
-    const NOTICE_ZH = '此规则在记录删除时运行，而它的动作需要这条记录，所以每次运行都会被跳过。如非预期，请改用其他动作，或换一个触发条件。'
+    // #6155 panel notice: a rule of this shape that is on (or being switched on) runs, and its update/delete/lock
+    // action aimed at the deleted trigger record changes nothing; the panel says so without blocking anything. The
+    // shape is decided by the editor's own save-block detector.
+    const NOTICE_EN = 'This rule runs when a record is deleted, but it has an update, delete or lock action aimed at that deleted record, so that action has no effect. If that is not intended, change the action or the trigger.'
+    const NOTICE_ZH = '此规则在记录删除时运行，但其中有修改、删除或锁定动作针对的正是这条已删除的记录，这个动作不会生效。如非预期，请改用其他动作，或换一个触发条件。'
     const notice = (container: HTMLElement) => container.querySelector('[data-automation-deleted-trigger-notice]') as HTMLElement | null
 
     it('an ENABLED rule of this shape shows the notice, in English and in Chinese', async () => {

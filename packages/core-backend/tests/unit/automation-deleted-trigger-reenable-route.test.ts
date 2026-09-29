@@ -4,7 +4,8 @@
  *
  * Before: PATCH `{ enabled: false }` answered 200, then PATCH `{ enabled: true }` answered
  * 400 DELETED_TRIGGER_SELF_MUTATION, so the only way back was a database edit. The rule's shape did not change,
- * and a rule of this shape that is already on keeps firing (each run ends as skipped, #6078), so an enable-only
+ * and a rule of this shape that is already on keeps firing (its self-targeting action changes nothing: a
+ * delete_record step ends as skipped, an update_record / lock_record step as success, #6078), so an enable-only
  * PATCH no longer runs the deleted-trigger shape check. Everything that creates the shape or changes a rule INTO it
  * stays refused — including `enabled: true` sent TOGETHER with a shape field.
  *
@@ -178,7 +179,7 @@ describe('#6155 — switching an existing record-deleted rule back on through th
     expect(await listedEnabled()).toBe(true)
   })
 
-  it('an enable PATCH that ALSO carries a shape field (the editor save with enabled) is still refused 400, and the flag stays off', async () => {
+  it('a direct API PATCH carrying enabled: true together with shape fields is still refused 400, and the flag stays off', async () => {
     const { table, setAutomationServiceInstance } = await mountApp(storedRow({ enabled: false }))
     cleanup = () => setAutomationServiceInstance(null)
 
