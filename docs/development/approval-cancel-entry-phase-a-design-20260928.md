@@ -600,6 +600,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | s6a:`computePackageProvenancePinSet` 全量重算 | 66 / 66 键,差 0,与已提交 pins 逐字节同;`sealed-export-package-provenance.test.cjs` OK |
 | `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 |
 | 零 DDL | 本阶段未改任何迁移 / 种子 / SQL 文件 |
+| 被本阶段改动文件触发的其它真库 lane(23 个 `approval-realdb-*` / policy-carrier workflow,各自 `run` 行里的文件原样,`EXPECT_DB=1`,两条 URL 指向一次性库) | 在同一个一次性库上顺序跑:19 个 lane 全绿;4 个 lane 红 —— p7r1-coverage-repair 9 红(待办计数期望 2 / 3 / 0,实得 10 / 11 / 8)、projection-key-parity 3 红、sequential-mode 2 红、comments 1 个钩子超时。四个 lane 换到**新建的第二个一次性库** `ms2_g4cancelc2_20260929`(同样迁移 419 条)后:p7r1 67/67、projection-key-parity 17/17、sequential-mode 10/10、comments 58/58。判定:第一个库上的红来自共享库残留(动态探针对 962 条路由打过请求,另有前序 lane 的数据),不是本阶段改动;CI 每个 lane 用自己的新库 |
 
 ### 9.8 mutation(每条:cp 备份 → 一处精确替换 → 核 numstat → 跑 → cp 还原 → `cmp` 逐字节 → 工作树无改动)
 
@@ -629,5 +630,5 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 3. **投递条数可推出通知过几次**(约等于审批人数 × 渠道数):不含人名 / id,P-6 的「不渲染具体人名」不受影响;如 owner 认为条数本身也不宜给员工,属合同变更。
 4. **待办中心可见性依赖 `approvals:read`**(§9.5.1),默认零授予 —— 既有状况,本阶段不授予。
 5. **§6 第 0b 项**(发起后原请假被既有直接取消通道取消 ⇒ 兑现 500)仍未修,归 C-1 线;开关 OFF 期间经本入口不可达。
-6. **NOT RUN**:CI(未推送);CI 所用 PostgreSQL 版本(本地 15.17);前端(阶段 B,另一分支);阶段 D 验收;真实钉钉发送(两本账本由其写函数 / 夹具写入,未经真实提供方);钉钉卡片回调对撤销轮的办理(UNVERIFIED,未改);`attendance-plugin.test.ts` 全量;`scripts/ops/*.test.mjs`;`tests/unit` 中 approval / attendance 前缀之外的文件(已跑的待办相关单测除外);阶段 C 的独立门审。
+6. **NOT RUN**:CI(未推送);`attendance-web-guard.yml`(被插件改动触发,但它只跑 `apps/web` 的 spec,属前端 lane);CI 所用 PostgreSQL 版本(本地 15.17);前端(阶段 B,另一分支);阶段 D 验收;真实钉钉发送(两本账本由其写函数 / 夹具写入,未经真实提供方);钉钉卡片回调对撤销轮的办理(UNVERIFIED,未改);`attendance-plugin.test.ts` 全量;`scripts/ops/*.test.mjs`;`tests/unit` 中 approval / attendance 前缀之外的文件(已跑的待办相关单测除外);阶段 C 的独立门审。
 7. **测试残留**:同 §6 第 8 项、§8.8 第 7 项;阶段 C 用例写入的两本投递账本行在 `afterAll` 显式删除(待办镜像无外键级联),运行后库内两表均为 0 行;动态探针对全部路由打请求,会在一次性库留下探针数据,随库 drop。
