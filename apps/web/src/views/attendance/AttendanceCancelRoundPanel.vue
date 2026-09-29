@@ -208,9 +208,16 @@ const readable = computed(() =>
 const round = computed(() => summary.value?.round ?? null)
 const isOwnLeave = computed(() => Boolean(props.currentUserId) && props.request.user_id === props.currentUserId)
 
-/** P-1 (a)(b) + entryEnabled. (c) is `launchBlocked`: it disables, it does not hide. */
+/**
+ * P-1 (a)(b) + entryEnabled. (c) is `launchBlocked`: it disables, it does not hide. The `request` prop
+ * comes from the parent list and is not refreshed here, so a round this panel has re-read as applied
+ * (V2 — the leave is cancelled) also removes the entry.
+ */
 const showEntry = computed(() =>
-  summary.value?.entryEnabled === true && props.request.status === 'approved' && isOwnLeave.value,
+  summary.value?.entryEnabled === true
+  && props.request.status === 'approved'
+  && round.value?.outcome !== 'applied'
+  && isOwnLeave.value,
 )
 const launchBlocked = computed(() => round.value?.outcome === 'pending')
 

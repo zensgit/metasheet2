@@ -124,6 +124,16 @@ describe('entry visibility (P-1 + entryEnabled)', () => {
     expect(apiFetchMock).not.toHaveBeenCalled()
   })
 
+  it('a round re-read as applied (V2) removes the entry even while the parent row still says approved', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({
+      entryEnabled: true,
+      round: round({ outcome: 'applied', status: 'leave_cancelled', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' }),
+    }))]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe('请假已取消')
+    expect($(root, 'data-cancel-round-launch')).toBeNull()
+  })
+
   it('I3 unmet ⇒ DISABLED (not hidden) with a subject-bearing reason and an in-page link to the progress', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round() }))]
     const root = await mountPanel()

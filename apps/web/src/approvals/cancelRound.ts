@@ -171,14 +171,6 @@ export function cancelRoundStatusKeyFromApproval(
   return 'status_unavailable'
 }
 
-/** The `<code>` of a `business_blocked:<code>` close reason, or `null`. */
-export function blockCodeFromCloseReason(closeReason: string | null | undefined): string | null {
-  if (typeof closeReason !== 'string') return null
-  if (!closeReason.startsWith(CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX)) return null
-  const code = closeReason.slice(CANCEL_ROUND_CLOSE_REASON_BLOCKED_PREFIX.length)
-  return code.length > 0 ? code : null
-}
-
 /** Minimal row shape the five `StatusTag` render points share. */
 export interface ApprovalStatusTagSource {
   status: string

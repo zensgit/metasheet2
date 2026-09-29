@@ -954,8 +954,13 @@ async function dispatchBatchAndHandleResult(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
     // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
-    // at launch carries each row's workflowKey / businessKey for that decision.
-    (id, req) => dispatchApprovalDecision(batchRowSnapshot.get(id) ?? { id, workflowKey: null, businessKey: null }, req, dispatchAction),
+    // at launch carries each row's workflowKey / businessKey for that decision. Every id comes from
+    // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
+    (id, req) => {
+      const row = batchRowSnapshot.get(id)
+      if (!row) throw new Error('操作失败，请刷新后重试')
+      return dispatchApprovalDecision(row, req, dispatchAction)
+    },
   )
   if (result.failed.length === 0) {
     ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
