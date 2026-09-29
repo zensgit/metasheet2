@@ -832,7 +832,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | 席位 | 端口以调用者身份、角色声明 `[]` 分发到 `dispatchAction`,其 403 `APPROVAL_ASSIGNMENT_REQUIRED` 闸 = 可决节点上的有效指派 × `assignmentMatchesActor` | `decisionDoorIsSeatGated` + `resolveCanDecideCurrentNode`(`services/approval-seat-authorization.ts`)。输入是该轮引擎实例行与其**有效**指派;`viewerRoles` 用分发时同一个常量 `CANCEL_ROUND_DISPATCH_ROLE_CLAIMS`(今天为空) |
 | I7 | 不加(席位是依据,§8.3.2) | 不加 |
 
-- **为什么这两个函数就是「同一来源」**:`resolveCanDecideCurrentNode` 是这道门的判定函数,由门的两个原件组成,即 `assignmentMatchesActor` 与 `decidableNodeKeysForInstance`(门的节点键集合,含并行分支前沿)。已有三处调用它:待办中心的 `actionable`、详情 DTO 的 `canDecideCurrentNode`、`resolveLegacyDecisionSeat`(`routes/approvals.ts`;它也先用 `decisionDoorIsSeatGated` 分出门是否按席位判)。对门不按席位判的行,`resolveCanDecideCurrentNode` 回 `true`(维持现状);但撤销轮办理路由经 `dispatchAction`,后者对无已发布定义的实例直接拒绝,因此列表用 `decisionDoorIsSeatGated &&` 把这类行排除,不列出办理路由会拒的项。它与门的一致性由 `approval-can-decide-current-node.db.test.ts` 钉住(本轮在一次性库亲跑 10/10)。列表只**调用**这两个函数,不重述席位规则。
+- **为什么这两个函数就是「同一来源」**:门(`dispatchAction`)内联判席位,**不调用** `resolveCanDecideCurrentNode`。`resolveCanDecideCurrentNode` 是与门结论共享 `assignmentMatchesActor` 的既有镜像:二者共享叶子 `assignmentMatchesActor`(及 `readParallelBranchStates`);`decidableNodeKeysForInstance` 是门内联的并行分支前沿选取的集合形式重述(其 docblock 给出等价论证)。已有三处调用它:待办中心的 `actionable`、详情 DTO 的 `canDecideCurrentNode`、`resolveLegacyDecisionSeat`(`routes/approvals.ts`;它也先用 `decisionDoorIsSeatGated` 分出门是否按席位判)。对门不按席位判的行,`resolveCanDecideCurrentNode` 回 `true`(维持现状);但撤销轮办理路由经 `dispatchAction`,后者对无已发布定义的实例直接拒绝,因此列表用 `decisionDoorIsSeatGated &&` 把这类行排除,不列出办理路由会拒的项。它与门的一致性由 pin 测试 `approval-can-decide-current-node.db.test.ts` 钉住(本轮在一次性库亲跑 10/10)。C2 调用这一既有镜像而不复述席位规则。
 - **角色声明同源**:端口把分发用的角色声明提成一个导出常量 `CANCEL_ROUND_DISPATCH_ROLE_CLAIMS`(值仍为 `[]`,§8.4 前提不变),分发与列表读同一个常量。以后若改,两边一起变。分发 actor 仍由既有单测 `approval-cancel-round-entry-port-actor-narrowing.test.ts` 逐键钉住。
 - **候选收窄不是第二个谓词**:
   - 第一条读只保留这样的 pending 撤销轮:其引擎实例上**有任何一条**指派行(不论是否有效、不论类型)的 `assignee_id` ∈ {查看者} ∪ 分发角色声明。
@@ -852,7 +852,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
   - 委托人 A 坐在撤销轮上,能在列表看到该项并从列表办理(成功体恰 4 键,owner 14:3x ①);
   - A 不是原单参与者,读摘要 `GET …/cancel-round` 仍是 404(I7 挂在原单上)。
   - 这与办理路由一致:席位是依据。列表给了 A 一个办理前的考勤侧入口,并附请假摘要(类型、起止、申请人);阶段 D 验收方案 D2 项预判的正是「A 找不到办理入口」。摘要读面(I7)不变。
-- **一单多请求行**:`attendance_requests.approval_instance_id` 无唯一约束。同一原单若对应多行,取 id 最小的一行,与待办中心撤销轮深链的取法相同(`resolveCancelRoundOriginalHrefs`)。每轮只出一项(按 `roundId` 去重)。
+- **一单多请求行**:`attendance_requests.approval_instance_id` 无唯一约束。同一原单若对应多行,在**通过单据门**(org 限定 + `toCancelRoundRequest`:请假 + 有审批实例)的行中取 id 最小的一行。待办中心撤销轮深链(`resolveCancelRoundOriginalHrefs`)不经该门、直接取最小 id,边缘情形(最小 id 那行在别的 org 或不是请假)两者可不同。每轮只出一项(按 `roundId` 去重)。
 - **性能残留**:`attendance_requests.approval_instance_id` 无索引(本切片零 DDL)。批量读是 org 限定下的 `= ANY(...)`,与待办中心深链那条读同形。
 
 ### 10.4 接线与守卫(与路由同一提交)
@@ -861,6 +861,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
   - 插件在六个方法齐全时才注册全部五条撤销轮路由,缺一个就一条都不注册(fail-closed 不变)。
   - 端口作用域单测改为断言六个方法。
   - UUID 单测 harness 的端口桩补上第六个方法。去掉该桩(harness 回到提交前版本)⇒ 1 红,四条撤销轮路由不注册。
+  - 中和方向(C2 门审 r1 P3-1 的修复):`approval-cancel-round-plugin-port-registration.test.ts` 对六个方法参数化,缺任一方法(或该键不是函数、或未借出端口)⇒ 撤销轮路由零注册;六个方法齐全 ⇒ 恰好五条(正控)。mutation:逐一删去守卫里的一条 `typeof` 条件 ⇒ 恰好对应那一条用例红;守卫恒假 ⇒ 正控红。
 - **动态休眠探针(登记项 L-4)**:新路径含 `cancel-round` token,所以与路由同一提交把白名单扩到**恰好五条** (method, path)。
   - 实跑:注册 1159、打出 963;命中 token 的 5 条全在白名单;白名单外 0、缺失 0;创建路径到达 0,PASS。
   - 正控 `self`:到达 1,PASS。
