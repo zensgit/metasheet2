@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App } from 'vue'
+import { createApp, h, nextTick, reactive, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
@@ -2059,6 +2059,81 @@ describe('Attendance self-service dashboard', () => {
     // … and the last thing scrolled into view is the approver row
     const scroll = vi.mocked(HTMLElement.prototype.scrollIntoView)
     expect(scroll.mock.instances.at(-1)).toBe(marked[0])
+  })
+
+  // The other order: the approver row has already landed for this request id when the page's own
+  // deep-link section scroll (re-)runs. Constructed here by adding the `section` query after the card
+  // has landed (same request id); the page's scroll to the request tools must not pull the view away.
+  it('a section scroll that re-runs after the approver row landed for the same request id leaves that row in view', async () => {
+    authMockState.accessSnapshot = { isAdmin: false, permissions: ['attendance:read', 'attendance:approve'] }
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                requestId: 'request-leave-focused', roundId: 'round-1', engineInstanceId: 'cr-1', requesterUserId: 'employee-7',
+                requesterName: 'Employee Seven', requestType: 'leave', startAt: '2026-04-20T01:00:00.000Z',
+                endAt: '2026-04-20T10:00:00.000Z', launchedAt: '2026-04-15T01:00:00.000Z',
+              },
+            ],
+            total: 1,
+          },
+        })
+      }
+      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            request: {
+              id: 'request-leave-focused', work_date: '2026-04-20', request_type: 'leave',
+              requested_in_at: '2026-04-20T09:00:00+08:00', requested_out_at: '2026-04-20T18:00:00+08:00',
+              reason: 'Leave with a pending cancellation', status: 'approved', user_id: 'employee-7', metadata: {},
+            },
+          },
+        })
+      }
+      if (url.endsWith('/api/attendance/requests/request-leave-focused/cancel-round')) {
+        return jsonResponse(404, { ok: false, error: { code: 'NOT_FOUND', message: 'x' } })
+      }
+      return baseImpl(input, init)
+    })
+
+    const routeProps = reactive({ mode: 'overview', initialSectionId: '', initialRequestId: 'request-leave-focused' })
+    app = createApp({ render: () => h(AttendanceView, { ...routeProps }) })
+    app.mount(container!)
+    await flushUi(16)
+
+    const scroll = vi.mocked(HTMLElement.prototype.scrollIntoView)
+    const markedRow = () => container!.querySelector<HTMLElement>(
+      '[data-cancel-round-pending] [data-cancel-round-pending-focused="true"]',
+    )
+    expect(markedRow()?.dataset.cancelRoundPendingItem).toBe('request-leave-focused')
+    // no section yet ⇒ the page has not scrolled; the approver row is the last thing brought into view
+    expect(scroll.mock.instances.at(-1)).toBe(markedRow())
+    const callsBefore = scroll.mock.calls.length
+
+    routeProps.initialSectionId = 'attendance-overview-requests'
+    await flushUi(16)
+
+    expect(container!.querySelector<HTMLDetailsElement>('[data-attendance-request-tools]')?.open).toBe(true)
+    const sectionScrolls = scroll.mock.calls.slice(callsBefore)
+      .filter(call => (call[0] as ScrollIntoViewOptions | undefined)?.block === 'start')
+    expect(sectionScrolls).toEqual([])
+    expect(scroll.mock.instances.at(-1)).toBe(markedRow())
+
+    // control: a deep link to a leave that is NOT in the approver list gets the page's own section scroll
+    const toolsCallsBefore = scroll.mock.calls.length
+    routeProps.initialRequestId = 'request-not-in-approver-list'
+    await flushUi(16)
+    const tools = container!.querySelector<HTMLElement>('[data-attendance-request-tools]')
+    const laterSectionScrolls = scroll.mock.calls.slice(toolsCallsBefore)
+      .filter(call => (call[0] as ScrollIntoViewOptions | undefined)?.block === 'start')
+    expect(laterSectionScrolls.length).toBeGreaterThan(0)
+    expect(scroll.mock.instances.at(-1)).toBe(tools)
   })
 
   it('keeps focused attendance rejection comment required before calling the API', async () => {
