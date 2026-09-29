@@ -1785,29 +1785,52 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         const noNetwork = async (): Promise<never> => {
           throw new Error('no network in this suite')
         }
+        // The worker's clock is FIXED one minute ahead. The consumer's row takes `next_attempt_at` from
+        // the database's `now()` (microseconds), while the worker's due check compares it with its own
+        // clock as a millisecond ISO string; with the real clock, a claim in the same millisecond as
+        // the insert finds the row not yet due and claims nothing. Fixed (not moving), so the round's
+        // own row can be shown below to carry exactly this worker's claim instant.
+        const workerNow = new Date(Date.now() + 60_000)
         const worker = new DingTalkTodoMirrorWorker({
           query: ((text: string, values?: unknown[]) => pool().query(text, values)) as unknown as TodoMirrorWorkerQuery,
           maxAttempts: 1,
+          now: () => workerNow,
           readConfig: noNetwork,
           fetchAccessToken: noNetwork,
           resolveOperatorUnionId: noNetwork,
           createTodoTask: noNetwork,
           completeTodoTask: noNetwork,
         })
+        // The worker claims from the WHOLE ledger, not from this round. Before it runs, no live row
+        // (the claim's statuses) may exist outside this round's instance, so the throwing fakes can
+        // only ever reach this round's row and the batch counters below are this row's alone.
+        const otherLive = await pool().query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM dingtalk_todo_mirrors
+            WHERE instance_id <> $1 AND status IN ('pending', 'completing', 'sending')`,
+          [fixture.roundInstanceId],
+        )
+        expect(otherLive.rows[0].n, 'a live todo-mirror row outside this round exists; the worker would claim it too').toBe(0)
         const run = await worker.runBatch()
         expect(run.claimed).toBe(1)
         // The approver has no DingTalk binding, so the attempt ends before any send: `failed` when the
         // org has no active DingTalk integration (retry budget exhausted), `skipped` when it has one
         // (recipient not bound). Which one depends on directory rows other suites may leave in the
         // shared database; the ledger row must be one of the two, attempted once, and never sent.
-        const ledger = await pool().query<{ status: string; attempt_count: number; dingtalk_task_id: string | null }>(
-          'SELECT status, attempt_count, dingtalk_task_id FROM dingtalk_todo_mirrors WHERE instance_id = $1',
+        const ledger = await pool().query<{
+          status: string
+          attempt_count: number
+          dingtalk_task_id: string | null
+          last_attempt_at: Date | null
+        }>(
+          'SELECT status, attempt_count, dingtalk_task_id, last_attempt_at FROM dingtalk_todo_mirrors WHERE instance_id = $1',
           [fixture.roundInstanceId],
         )
         expect(ledger.rows).toHaveLength(1)
         expect(['failed', 'skipped']).toContain(ledger.rows[0].status)
         expect(ledger.rows[0].attempt_count).toBe(1)
         expect(ledger.rows[0].dingtalk_task_id).toBeNull()
+        // This worker's claim, on this round's row.
+        expect(ledger.rows[0].last_attempt_at?.toISOString()).toBe(workerNow.toISOString())
         expect(run.failed + run.skipped).toBe(1)
 
         const read = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
