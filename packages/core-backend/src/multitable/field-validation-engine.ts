@@ -11,6 +11,11 @@ import type {
   FieldValidationRule,
   ValidationResult,
 } from './field-validation'
+import {
+  describeUserRegexRefusal,
+  runUserRegex,
+  type UserRegexLengthRefusal,
+} from '../formula/regex-safety'
 
 // ---------------------------------------------------------------------------
 // Default messages
@@ -97,15 +102,30 @@ function validateMaxLength(value: unknown, maxLen: number): boolean {
   return len <= maxLen
 }
 
-function validatePattern(value: unknown, regex: string, flags?: string): boolean {
-  if (typeof value !== 'string') return false
-  try {
-    const re = new RegExp(regex, flags)
-    return re.test(value)
-  } catch {
-    // If the regex is invalid, treat as failed validation
-    return false
+/**
+ * The `pattern` rule compiles a caller-supplied regex and runs it on the record
+ * value. Both go through the shared length gate in `../formula/regex-safety.ts`
+ * (the constants there name the product limits they are taken from). Inside the
+ * limits the outcome is the same `re.test(value)` as before; an invalid regex is
+ * still a failed validation. A value or pattern over the limits is ALSO a failed
+ * validation, but it is reported through `refusal` so the caller can give it a
+ * message that says the check declined to run, rather than the format message.
+ */
+function evaluatePatternRule(
+  value: unknown,
+  regex: string,
+  flags?: string,
+): { valid: boolean; refusal?: UserRegexLengthRefusal } {
+  if (typeof value !== 'string') return { valid: false }
+  const outcome = runUserRegex(regex, flags, value, (re, subject) => re.test(subject), {
+    site: 'field-validation:pattern',
+  })
+  if (outcome.status === 'ok') return { valid: outcome.value }
+  if (outcome.refusal.kind === 'invalid-pattern') {
+    // If the regex is invalid, treat as failed validation (unchanged behaviour)
+    return { valid: false }
   }
+  return { valid: false, refusal: outcome.refusal }
 }
 
 function validateEnum(value: unknown, values: string[]): boolean {
@@ -140,6 +160,7 @@ export function validateFieldValue(
 
   for (const rule of rules) {
     let valid = true
+    let refusalMessage: string | null = null
     const params = rule.params as Record<string, unknown> | undefined
 
     switch (rule.type) {
@@ -163,14 +184,17 @@ export function validateFieldValue(
         if (isEmpty(value)) continue
         valid = validateMaxLength(value, Number(params?.value))
         break
-      case 'pattern':
+      case 'pattern': {
         if (isEmpty(value)) continue
-        valid = validatePattern(
+        const outcome = evaluatePatternRule(
           value,
           String(params?.regex ?? ''),
           typeof params?.flags === 'string' ? params.flags : undefined,
         )
+        valid = outcome.valid
+        if (outcome.refusal) refusalMessage = describeUserRegexRefusal(outcome.refusal, fieldName)
         break
+      }
       case 'enum':
         if (isEmpty(value)) continue
         valid = validateEnum(value, Array.isArray(params?.values) ? params.values as string[] : [])
@@ -188,7 +212,9 @@ export function validateFieldValue(
         fieldId,
         fieldName,
         rule: rule.type,
-        message: rule.message ?? defaultMessage(rule, fieldName),
+        // A length refusal is not a format mismatch: it gets its own message so a
+        // reader can tell "the value did not match" from "the check did not run".
+        message: refusalMessage ?? rule.message ?? defaultMessage(rule, fieldName),
       })
     }
   }

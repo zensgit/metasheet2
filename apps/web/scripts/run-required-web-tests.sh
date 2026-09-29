@@ -1507,6 +1507,7 @@ exec npx vitest run \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
+  formViewValidation \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
   lineDerivation \
