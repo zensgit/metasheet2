@@ -1065,6 +1065,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
   - 端口在选出该请假的最新轮次后先做比较,不符即返回 409 并且不 dispatch、不推送。409 用引擎既有的 `INVALID_STATUS_TRANSITION` 码,message 用引擎对终态实例的原句 `Approval is already in a terminal status`。**零新码。**
   - 这个码为什么贴切:按 I3,一单至多一个 pending 轮,「最新」选取会把它排在最前;所以不是最新的那一轮必然已经终结(或者根本不是本单的轮次)。
   - 竞态:动作仍 dispatch 到被比对那一轮自己的引擎实例上,比对之后才终结的轮次由引擎自己拒绝。
+  - 顺序(门审 r1 NIT-1):比对在端口里、先于 dispatch,而席位检查在引擎内,所以比对先于席位检查。无席位的 `attendance:approve` 持有者带陈旧或随机的 id ⇒ 409 `INVALID_STATUS_TRANSITION`(零写入),不是 A7 的 403 `APPROVAL_ASSIGNMENT_REQUIRED`;带当前轮次的 id 或不带该字段时,按代码仍由引擎给 403。这一顺序没有单独的用例钉住。
   - I7 不放宽:actions 路由本来就不挂 I7(席位即权威);摘要路由不变。
 - **用例**(C2 块):
   - 「D2 — expectedRoundId (phase D)」,委托夹具与 C2 委托用例相同:
