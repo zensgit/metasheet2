@@ -596,7 +596,9 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     expect(res.body.data).toMatchObject({ recordCount: 4, cells: { restored: 2, unchanged: 2 } })
     expect(arranged.pg.world.records.map((r) => [r.id, r.version, r.data])).toEqual([['r1', 1, { [FIELD]: 'A' }], ['r2', 1, { [FIELD]: '' }], ['r3', 3, {}], ['r4', 3, { [FIELD]: null }]])
     expect(arranged.pg.world.recordRevisions.filter((r) => r.source === 'retype-convert-undo').map((r) => r.record_id).sort()).toEqual(['r3', 'r4'])
-    expect(yjsInvalidated.map((ids) => [...ids].sort())).toEqual([['r3', 'r4']])
+    // post-commit: the collaborative document of EVERY live record is invalidated — r1 and r2 were not rewritten,
+    // but the column they sit in changed type, and an open document still holds the cell as a select
+    expect(yjsInvalidated.map((ids) => [...ids].sort())).toEqual([['r1', 'r2', 'r3', 'r4']])
   })
 
   test('an empty-sheet conversion can be undone: the field comes back, no record revision, no endpoint', async () => {

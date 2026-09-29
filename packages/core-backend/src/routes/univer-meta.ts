@@ -14933,7 +14933,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const { result } = outcome
       invalidateFieldCache(sheetId)
-      await bestEffortYjsInvalidate(result.touchedRecordIds, 'field retype convert')
+      // every live record of the sheet, not only the rewritten ones: the column changed type for all of them, and an
+      // open collaborative document still holds the cell in its old representation
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype convert')
       return res.json({
         ok: true,
         data: {
@@ -15001,7 +15003,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
       const { result } = outcome
       invalidateFieldCache(sheetId)
-      await bestEffortYjsInvalidate(result.touchedRecordIds, 'field retype undo')
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype undo')
       return res.json({
         ok: true,
         data: {

@@ -311,8 +311,11 @@ export interface ExecuteFieldRetypeConvertResult {
   recordCount: number
   cells: { rewritten: number; unchanged: number }
   options: { final: number; droppedValidationRuleCount: number }
-  /** 被改写的 recordId（提交后的协同失效用；不进响应）。 */
-  touchedRecordIds: string[]
+  /**
+   * 转换时本表**全部** live 记录的 id（提交后的协同失效用；不进响应）。不只是被改写的那些：整列换了类型，任何一份
+   * 打开着的协同文档里这一格都还是旧类型的表示——单选目标下「原文本恰是选项」的行不被改写，但它的文档同样过期。
+   */
+  liveRecordIds: string[]
 }
 
 export type ExecuteFieldRetypeConvertOutcome =
@@ -514,7 +517,7 @@ export async function executeFieldRetypeConvert(
       recordCount: preImages.length,
       cells: { rewritten: touched.length, unchanged: preImages.length - touched.length },
       options: { final: plan.optionValues.length, droppedValidationRuleCount: plan.droppedValidationRuleCount },
-      touchedRecordIds: touched.map((row) => row.recordId),
+      liveRecordIds: preImages.map((row) => row.recordId),
     },
   }
 }
@@ -546,7 +549,8 @@ export interface UndoFieldRetypeConvertResult {
   restoredType: string
   recordCount: number
   cells: { restored: number; unchanged: number }
-  touchedRecordIds: string[]
+  /** 撤销时本表全部 live 记录的 id（提交后的协同失效用；不进响应）。理由同执行。 */
+  liveRecordIds: string[]
 }
 
 export type UndoFieldRetypeConvertOutcome =
@@ -717,7 +721,6 @@ export async function undoFieldRetypeConvert(
 
   // 只碰「原值 ≠ 后态」的行——正是转换碰过的那些（③ 已证当前值 == 后态）。
   const expectedTouched = preImages.filter((row) => !(row.hasKey && typeof row.value === 'string' && row.value === row.post))
-  let touchedRecordIds: string[] = []
   if (expectedTouched.length > 0) {
     // lock-exempt: field retype undo — schema op restoring the converted field's key sheet-wide from its pre-image under canManageFields + the full-table-read gate; not a per-record user edit.
     // revision-emitted: one record revision per restored row at its new version — recordRecordRevisionsBatch below, same txn.
@@ -761,7 +764,6 @@ export async function undoFieldRetypeConvert(
       }
     })
     await recordRecordRevisionsBatch(query, revisions)
-    touchedRecordIds = restoredRows.map((row) => String(row.id))
   }
 
   await recordConfigRevision(query, {
@@ -810,7 +812,7 @@ export async function undoFieldRetypeConvert(
       restoredType: String(job.source_type ?? ''),
       recordCount,
       cells: { restored: expectedTouched.length, unchanged: recordCount - expectedTouched.length },
-      touchedRecordIds,
+      liveRecordIds: liveRows.map((row) => row.recordId),
     },
   }
 }

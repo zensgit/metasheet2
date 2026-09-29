@@ -690,7 +690,7 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
       actor_id: ACTOR, action: 'multitable.field.retype-convert', resource_type: 'meta_field', resource_id: FIELD,
       metadata: { sheetId: SHEET, fieldId: FIELD, convertRevisionId: id, sourceType: 'string', targetType: 'multiSelect', recordCount: 6, rewrittenRecordCount: 6, optionCount: 2, droppedValidationRuleCount: 0 },
     }])
-    // post-commit: the rewritten records' collaborative documents are invalidated
+    // post-commit: the collaborative document of every live record is invalidated
     expect(yjsInvalidated.map((ids) => [...ids].sort())).toEqual([['r1', 'r2', 'r3', 'r4', 'r5', 'r6']])
   })
 
@@ -709,6 +709,9 @@ describe('POST /fields/:fieldId/retype-execute (ADR §3)', () => {
     ])
     expect(pg.world.operations).toHaveLength(1)
     expect(pg.world.operations[0]).toMatchObject({ event_count: 2 })
+    // post-commit: r1 and r2 were not rewritten, their collaborative documents are invalidated all the same — the
+    // column they sit in changed type, and an open document still holds the cell as text
+    expect(yjsInvalidated.map((ids) => [...ids].sort())).toEqual([['r1', 'r2', 'r3', 'r4']])
   })
 
   test('an empty sheet converts: job row and config revision, no pre-image, no record revision, NO endpoint', async () => {
