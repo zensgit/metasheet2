@@ -29,6 +29,9 @@ import { ApprovalGraphExecutor } from '../../src/services/ApprovalGraphExecutor'
 import { ICollabService } from '../../src/di/identifiers'
 import { buildAuthenticatedUserRoom } from '../../src/services/CollabService'
 import { invalidateUserPerms } from '../../src/rbac/service'
+import { applyTodoMirrorTaskCreated } from '../../src/services/dingtalk-todo-mirror-service'
+import { DingTalkTodoMirrorWorker, type TodoMirrorWorkerQuery } from '../../src/services/dingtalk-todo-mirror-worker'
+import { buildApprovalTaskCreatedEvent } from '../../src/services/ApprovalTaskCreatedEvent'
 
 /**
  * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
@@ -1724,6 +1727,113 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         const after = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
         expect(after.json.data.round.outcome).toBe('applied')
         expect(after.json.data.round.deliveries.map((d: Record<string, unknown>) => d.status)).toEqual(['failed', 'delivered', 'failed'])
+      })
+
+      it('P-5 invariant through the todo mirror\'s OWN service and worker: the round\'s seat is mirrored by the consumer, the worker\'s send attempt ends in a terminal non-delivery, the summary lists it as failed — and the round outcome, the engine status and the seats are untouched; the seat holder still approves', async () => {
+        await grantAttendanceApproverRole(approverId)
+        const approverToken = await loginToken(approverId)
+        const fixture = await launchedRound('p5-mirror')
+        const q = (text: string, values?: unknown[]) => pool().query(text, values)
+        const seatRows = async () =>
+          (
+            await pool().query<{ id: string; assignee_id: string; is_active: boolean; node_key: string; entry_epoch: number | null }>(
+              'SELECT id::text AS id, assignee_id, is_active, node_key, entry_epoch FROM approval_assignments WHERE instance_id = $1 ORDER BY id',
+              [fixture.roundInstanceId],
+            )
+          ).rows
+        const engineStatus = async () =>
+          (await pool().query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [fixture.roundInstanceId]))
+            .rows[0]?.status
+        const seatsBefore = await seatRows()
+        const activeSeats = seatsBefore.filter((row) => row.is_active)
+        expect(activeSeats.map((row) => row.assignee_id)).toEqual([approverId])
+
+        // The consumer leg: the round's own task_created, built from its active seat by the producer's
+        // builder, through the mirror's service entry. The flag is handed to the call only
+        // (`deps.env`), so the server's own mirror stays OFF for every other case.
+        const instance = (
+          await pool().query<{
+            id: string
+            request_no: string | null
+            template_id: string | null
+            template_version_id: string | null
+            published_definition_id: string | null
+            business_key: string | null
+            workflow_key: string | null
+            requester_snapshot: unknown
+          }>(
+            `SELECT id, request_no, template_id::text AS template_id, template_version_id::text AS template_version_id,
+                    published_definition_id::text AS published_definition_id, business_key, workflow_key, requester_snapshot
+               FROM approval_instances WHERE id = $1`,
+            [fixture.roundInstanceId],
+          )
+        ).rows[0]
+        const event = buildApprovalTaskCreatedEvent({
+          instance,
+          task: {
+            nodeKey: activeSeats[0].node_key,
+            entryEpoch: activeSeats[0].entry_epoch,
+            assigneeUserId: approverId,
+            sourceStep: 0,
+          },
+        })
+        const applied = await applyTodoMirrorTaskCreated(q, event, { env: { DINGTALK_TODO_MIRROR_ENABLED: 'true' } })
+        expect(applied).toMatchObject({ handled: true, insertedRows: 1 })
+
+        // The worker leg: the real worker on the real ledger. Every network seam is a fake that throws,
+        // so nothing can leave the process; `maxAttempts: 1` makes the first failed attempt terminal.
+        const noNetwork = async (): Promise<never> => {
+          throw new Error('no network in this suite')
+        }
+        const worker = new DingTalkTodoMirrorWorker({
+          query: ((text: string, values?: unknown[]) => pool().query(text, values)) as unknown as TodoMirrorWorkerQuery,
+          maxAttempts: 1,
+          readConfig: noNetwork,
+          fetchAccessToken: noNetwork,
+          resolveOperatorUnionId: noNetwork,
+          createTodoTask: noNetwork,
+          completeTodoTask: noNetwork,
+        })
+        const run = await worker.runBatch()
+        expect(run.claimed).toBe(1)
+        // The approver has no DingTalk binding, so the attempt ends before any send: `failed` when the
+        // org has no active DingTalk integration (retry budget exhausted), `skipped` when it has one
+        // (recipient not bound). Which one depends on directory rows other suites may leave in the
+        // shared database; the ledger row must be one of the two, attempted once, and never sent.
+        const ledger = await pool().query<{ status: string; attempt_count: number; dingtalk_task_id: string | null }>(
+          'SELECT status, attempt_count, dingtalk_task_id FROM dingtalk_todo_mirrors WHERE instance_id = $1',
+          [fixture.roundInstanceId],
+        )
+        expect(ledger.rows).toHaveLength(1)
+        expect(['failed', 'skipped']).toContain(ledger.rows[0].status)
+        expect(ledger.rows[0].attempt_count).toBe(1)
+        expect(ledger.rows[0].dingtalk_task_id).toBeNull()
+        expect(run.failed + run.skipped).toBe(1)
+
+        const read = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+        expect(read.status, read.text).toBe(200)
+        expect(
+          (read.json.data.round.deliveries as Array<Record<string, unknown>>).map((d) => ({
+            channelType: d.channelType,
+            status: d.status,
+            attempts: d.attempts,
+          })),
+        ).toEqual([{ channelType: 'dingtalk_todo', status: 'failed', attempts: 1 }])
+
+        // The invariant: the mirror's failure moved nothing.
+        expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+        expect(await engineStatus()).toBe('pending')
+        expect(await seatRows()).toEqual(seatsBefore)
+        expect(read.json.data.round).toMatchObject({ outcome: 'pending', status: 'cancellation_pending_approval', canWithdraw: true })
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const approved = await http('POST', actionsPath(fixture.requestId), approverToken, { action: 'approve' })
+          expect(approved.status, approved.text).toBe(200)
+          expect(approved.json.data).toMatchObject({ roundId: fixture.roundId, outcome: 'applied' })
+        } finally {
+          stub.stop()
+        }
       })
     })
 
