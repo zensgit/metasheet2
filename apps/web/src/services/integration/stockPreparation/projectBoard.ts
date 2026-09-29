@@ -108,13 +108,17 @@ export interface StockPreparationHandoffCursor {
   stepCount: number
   terminal: boolean
   completed: boolean
-  /** Whether the CALLER is the current handler — decides whether 通知下一步 may be pressed. */
+  /**
+   * Whether the CALLER is the current handler — one of the two ways 通知下一步 may be pressed; the
+   * other is an owed resend (confirmationQueue.ts `stockPreparationHandoffMayPress`).
+   */
   isCurrentHandler: boolean
   /**
    * The step whose group notice is still owed and still sendable by this caller (server-computed).
-   * Carried only so a press can send it as `fromStepKey` ahead of `currentStepKey` — the same order
-   * the confirmation queue uses (confirmationQueue.ts `stockPreparationHandoffFromStepKey`). Absent on
-   * a backend older than that field, which reads as "nothing owed".
+   * Carried for the same two uses the confirmation queue makes of it: a press sends it as
+   * `fromStepKey` ahead of `currentStepKey` (`stockPreparationHandoffFromStepKey`), and its handler
+   * may press to send it even after the turn has moved on (`stockPreparationHandoffMayPress`). Absent
+   * on a backend older than that field, which reads as "nothing owed".
    */
   resendableStepKey?: string | null
 }
