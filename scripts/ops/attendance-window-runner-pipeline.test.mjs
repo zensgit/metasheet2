@@ -4677,7 +4677,7 @@ test('EXECUTABLE (owner exclusions): a bad migration or table name fails closed;
   assert.equal(empty.stdout, '[]\nSELECT 0;')
 })
 
-function ownerCheckHarness({ applied, present }) {
+function ownerCheckHarness({ applied, present, phase = 'before' }) {
   const dir = mkdtempSync(join(tmpdir(), 'wr-owner-excl-'))
   const fn = extractRunnerFunctions(['assert_owner_exclusions_hold'])
   const script = `#!/bin/bash
@@ -4687,20 +4687,24 @@ OUTPUT_DIR="${dir}"
 POSTGRES_CONTAINER="fake-postgres"
 log() { echo "LOG:$*"; }
 fail() { echo "FAIL:$*" >&2; exit 1; }
+TABLE_SQL="$(staging_owner_excluded_tables_present_sql)"
 docker() {
   echo "docker $*" >> "${dir}/docker.log"
-  case "$*" in
-    *"SELECT name FROM kysely_migration"*) printf '%s\\n' ${applied.map((n) => JSON.stringify(n)).join(' ')} ;;
-    *"to_regclass"*) echo "${present}" ;;
-    *) return 9 ;;
-  esac
+  local sql="\${@: -1}"
+  if [[ "$sql" == "SELECT name FROM kysely_migration ORDER BY name;" ]]; then
+    printf '%s\\n' ${applied.map((n) => JSON.stringify(n)).join(' ')}
+  elif [[ "$sql" == "$TABLE_SQL" ]]; then
+    echo "${present}"
+  else
+    return 9
+  fi
 }
 ${fn}
-assert_owner_exclusions_hold pguser stagingdb before
+assert_owner_exclusions_hold pguser stagingdb ${phase}
 `
   const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
   const docker = existsSync(join(dir, 'docker.log')) ? readFileSync(join(dir, 'docker.log'), 'utf8') : ''
-  const record = existsSync(join(dir, 'owner-exclusions-before.txt')) ? readFileSync(join(dir, 'owner-exclusions-before.txt'), 'utf8') : ''
+  const record = existsSync(join(dir, `owner-exclusions-${phase}.txt`)) ? readFileSync(join(dir, `owner-exclusions-${phase}.txt`), 'utf8') : ''
   rmSync(dir, { recursive: true, force: true })
   return { ...r, docker, record }
 }
@@ -4723,6 +4727,14 @@ test('EXECUTABLE (owner exclusions): holds on a clean DB; stale exclusion or a p
 
   const unreadable = ownerCheckHarness({ applied: ['0001_init'], present: '' })
   assert.equal(unreadable.status, 1, 'an unreadable table count must not certify absence')
+
+  for (const phase of ['before', 'rehearsal', 'after-apply', 'deploy-before', 'deploy-after']) {
+    const r = ownerCheckHarness({ applied: ['0001_init'], present: 0, phase })
+    assert.equal(r.status, 0, `${phase}: ${r.stderr}`)
+    assert.match(r.record, /^excluded_tables_present=0$/m, `${phase}: the record is written under the phase name`)
+    const bad = ownerCheckHarness({ applied: ['0001_init'], present: 1, phase })
+    assert.equal(bad.status, 1, `${phase}: a present table must fail in every phase`)
+  }
 })
 
 test('owner exclusions: compute_in_play subtracts the owner list; every migration step checks the exclusions on the right DB', () => {
@@ -4765,4 +4777,51 @@ cat "${dir}/migration-in-play.txt"
   rmSync(dir, { recursive: true, force: true })
   assert.equal(r.status, 0, r.stderr)
   assert.equal(r.stdout, 'zzzz20260926120000_create_task_p0a_tables\n')
+})
+
+test('owner exclusions: deploy checks sit directly around its inline migrate; summaries derive the absence claim from the check record', () => {
+  const deploy = extractRunnerFunctions(['action_deploy'])
+  assert.match(deploy, /\n  assert_owner_exclusions_hold "\$deploy_pg_user" "\$deploy_db" deploy-before\n  staging_exec_env "MIGRATION_EXCLUDE=\$\{owner_exclude\}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "\$MIGRATE_JS" --list /,
+    'deploy-before must directly precede the first inline migrate call (no wrapper, no gap)')
+  assert.match(deploy, /\n    \|\| fail "migrations did not end at pending=0 \(see migrate-list-after\.txt\)"\n  assert_owner_exclusions_hold "\$deploy_pg_user" "\$deploy_db" deploy-after\n/,
+    'deploy-after must directly follow the pending=0 gate (no wrapper, no gap)')
+  assert.match(deploy, /grep -qx 'excluded_tables_present=0' "\$\{OUTPUT_DIR\}\/owner-exclusions-deploy-after\.txt" 2>\/dev\/null \\\n\s+&& echo "owner_excluded_tables_absent=yes" \|\| echo "owner_excluded_tables_absent=unverified"/,
+    'the deploy summary must derive the absence claim from the deploy-after record')
+  const migrate = extractRunnerFunctions(['action_migrate'])
+  assert.match(migrate, /grep -qx 'excluded_tables_present=0' "\$\{OUTPUT_DIR\}\/owner-exclusions-after-apply\.txt" 2>\/dev\/null \\\n\s+&& echo "owner_excluded_tables_absent=yes" \|\| echo "owner_excluded_tables_absent=unverified"/,
+    'the migrate summary must derive the absence claim from the after-apply record')
+  assert.doesNotMatch(extractRunnerFunctions(['action_deploy', 'action_migrate']), /echo "owner_excluded_tables_absent=yes"\n/, 'no unconditional absence claim')
+})
+
+test('EXECUTABLE (owner_excluded_only_pending): true only when every pending name is owner-excluded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wr-owner-pending-'))
+  const run = (text) => {
+    const f = join(dir, 'list.txt')
+    writeFileSync(f, text)
+    return runPipefailBash(`source '${LIB}'\nowner_excluded_only_pending '${f}' && echo YES || echo NO`).stdout.trim()
+  }
+  const A3 = 'zzzz20260919090000_create_approval_template_group_backfill_batches'
+  assert.equal(run(`Applied: 425\nPending: 1\n  - ${A3}\n`), 'YES')
+  assert.equal(run(`Applied: 425\nPending: 0\n`), 'NO', 'nothing pending is not an owner-excluded-only state')
+  assert.equal(run(`Applied: 424\nPending: 2\n  - ${A3}\n  - zzzz20260926120000_create_task_p0a_tables\n`), 'NO', 'any other pending name must keep the plain refusal')
+  assert.equal(run(`Applied: 424\nPending: 2\n  - ${A3}\n`), 'NO', 'a count that does not match the listed names is not trusted')
+  assert.equal(run('garbage\n'), 'NO', 'an unreadable list is not trusted')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('soak-seed stays strict on pending=0 but names an owner-ruled exclusion instead of sending the operator to migrate', () => {
+  const seed = executableLines(extractRunnerFunctions(['action_soak_seed']))
+  assert.match(seed, /if ! grep -q '\^Pending: 0\$' "\$\{OUTPUT_DIR\}\/seed-migrate-list\.txt"; then\n\s*if owner_excluded_only_pending "\$\{OUTPUT_DIR\}\/seed-migrate-list\.txt"; then\n\s*fail "staging's only pending migration\(s\) are owner-ruled exclusions/,
+    'the owner-excluded case must fail with its own message')
+  assert.match(seed, /\n\s*fi\n\s*fail "staging has pending migrations — the transition manifests attest pendingMigrations=0/,
+    'every other pending state keeps the original refusal')
+  assert.match(seed, /staging_exec node "\$MIGRATE_JS" --list < \/dev\/null > "\$\{OUTPUT_DIR\}\/seed-migrate-list\.txt" 2>&1/,
+    'the seed list stays unscoped: scoping the attestation is an owner decision')
+})
+
+test('status summary names the owner exclusions so a pending owner-excluded migration is not read as drift', () => {
+  const status = extractRunnerFunctions(['action_status'])
+  assert.match(status, /echo "owner_excluded_migrations=\$\(staging_owner_exclude_csv 2>\/dev\/null \|\| echo '<invalid list>'\)"/)
+  assert.match(status, /if \[\[ -s "\$\{OUTPUT_DIR\}\/migrate-list\.txt" \]\] && owner_excluded_only_pending "\$\{OUTPUT_DIR\}\/migrate-list\.txt"; then\n\s*echo "pending_is_owner_excluded_only=yes"/)
+  assert.match(status, /staging_exec node "\$MIGRATE_JS" --list < \/dev\/null 2>&1 \| tee "\$\{OUTPUT_DIR\}\/migrate-list\.txt"/, 'the status list itself stays unscoped')
 })

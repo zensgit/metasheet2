@@ -216,3 +216,21 @@ staging_owner_excluded_tables_present_sql() {
   fi
   printf 'SELECT count(*) FROM (VALUES %s) AS t(n) WHERE pg_catalog.to_regclass(t.n) IS NOT NULL;' "$values"
 }
+
+# owner_excluded_only_pending <migrate --list output file>
+#   Exit 0 when the listed Pending count is nonzero AND every pending name is an owner-excluded
+#   migration (the pending set is exactly what the owner ruled to keep unapplied); exit 1
+#   otherwise (nothing pending, any other name pending, or an unreadable list). Prints nothing.
+#   Used only to explain a strict pending=0 refusal accurately — it never turns one into a pass.
+owner_excluded_only_pending() {
+  local file="$1" count names name listed=0
+  count="$(sed -n 's/^Pending: \([0-9][0-9]*\)$/\1/p' "$file" | tail -n 1)"
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || return 1
+  names="$(staging_owner_excluded_names)" || return 1
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    grep -qxF -- "$name" <<< "$names" || return 1
+    listed=$((listed + 1))
+  done < <(sed -n 's/^  - \(.*\)$/\1/p' "$file")
+  [[ "$listed" == "$count" ]]
+}

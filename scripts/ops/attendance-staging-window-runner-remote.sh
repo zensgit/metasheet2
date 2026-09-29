@@ -1068,7 +1068,8 @@ action_deploy() {
     echo "force_recreate=${FORCE_RECREATE}"
     echo "tasks_enabled=${TASKS_WINDOW_ENABLED}"
     echo "owner_excluded_migrations=${owner_exclude}"
-    echo "owner_excluded_tables_absent=yes"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-deploy-after.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
     echo "result=ok"
@@ -1728,6 +1729,12 @@ action_status() {
     echo "action=status"
     echo "live_commit=${live_commit:-unreachable}"
     grep '^override_shape=' "${OUTPUT_DIR}/override-shape.txt" 2>/dev/null || echo "override_shape=unrecorded"
+    # The status list is unscoped on purpose (it reports the whole ledger); these lines say which
+    # pending entries are owner-ruled exclusions rather than drift.
+    echo "owner_excluded_migrations=$(staging_owner_exclude_csv 2>/dev/null || echo '<invalid list>')"
+    if [[ -s "${OUTPUT_DIR}/migrate-list.txt" ]] && owner_excluded_only_pending "${OUTPUT_DIR}/migrate-list.txt"; then
+      echo "pending_is_owner_excluded_only=yes"
+    fi
     echo "status_rc=${status_rc}"
   } > "${OUTPUT_DIR}/summary.txt"
   return "$status_rc"
@@ -2209,7 +2216,8 @@ action_migrate() {
     echo "target_pending_after=0"
     echo "076_create_integration_stock_prep_pack_installs.sql=applied"
     echo "owner_excluded_migrations=$(staging_owner_exclude_csv)"
-    echo "owner_excluded_tables_absent=yes"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-after-apply.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
     echo "rollout_shadow_flags=OFF"
     echo "application_deployed=no"
     echo "result=ok"
@@ -3078,8 +3086,16 @@ action_soak_seed() {
   # --- manifest-attestation preflight: verify BEFORE attesting -------------------------
   prepare_container_runner
   staging_exec node "$MIGRATE_JS" --list < /dev/null > "${OUTPUT_DIR}/seed-migrate-list.txt" 2>&1
-  grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt" \
-    || fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  # Strict on purpose: the manifests attest pendingMigrations=0 over the WHOLE ledger. An
+  # owner-ruled exclusion (STAGING_OWNER_EXCLUDED_MIGRATIONS) leaves a migration pending by
+  # design, which this gate must not paper over; it only names that cause so the operator is not
+  # sent to a migrate that cannot clear it. Scoping the attestation is an owner decision.
+  if ! grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+    if owner_excluded_only_pending "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+      fail "staging's only pending migration(s) are owner-ruled exclusions ($(staging_owner_exclude_csv)) — the transition manifests attest pendingMigrations=0 over the whole ledger, so soak-seed cannot attest until the owner lifts the exclusion or rules that the attestation may be scoped (action=migrate will not change this)"
+    fi
+    fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  fi
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true' \
     || fail "staging /api/health is not ok — the transition manifests attest serviceHealthy=true"
   local worker_env
