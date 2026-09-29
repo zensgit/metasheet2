@@ -684,7 +684,9 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | `approval-realdb-org-writer-w4-s1`(被插件改动触发;其 `run` 行的文件原样) | 15/15 |
 | 点名单测 15 文件:撤销轮 ci-wiring / 休眠不可达 / 端口投递 / 端口动词 / 端口摘要 / 插件镜像常量 / 席位臂围栏、coverage-enumeration、双发布接线、端口作用域、UUID 路由、待办镜像配置与迁移 / 消费者 / worker、待办实时 | 636/636 |
 | `tests/unit/attendance*`(97 文件) | 1753/1753 |
-| `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 |
+| `tests/unit/approval*`(91 文件;含 `dispatchAction` 版本前置普查、`approvals-routes`) | 1741/1741 |
+| 待办注册表、web-lane manifest 守卫、钉钉互动卡片回调、售后审批桥(4 文件) | 87/87 |
+| `tsc --noEmit -p tsconfig.json`(core-backend;CI 无对测试文件的类型检查步骤) | EXIT 0 |
 | s6a:`computePackageProvenancePinSet` 全量重算 | 与已提交 pins 深等,差 0(本轮未触碰任何被钉文件);`sealed-export-package-provenance.test.cjs` OK |
 | 私有短语自扫(三份短语表) | 本轮每个提交的新增行与提交信息 0 命中;树命中数与各自父提交相同(均为 main 既有文件的旧命中) |
 
