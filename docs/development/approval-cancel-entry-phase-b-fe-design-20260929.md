@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿:实现 7 个提交 + 门审 r1(0 P1 / 1 P2 / 7 P3 / 4 NIT)后的修复轮 1(4 个代码 / 测试提交 + 本文件修订,见 §8、§10);修复轮之后的复审未做;未推送、未开 PR;合并按 owner 2026-09-29 17:1x 的条件式预授权(§1),条件尚未满足 |
+| 状态 | 草稿:实现 7 个提交 + 门审 r1(0 P1 / 1 P2 / 7 P3 / 4 NIT)后的修复轮 1(5 个代码 / 测试提交 + 本文件两次修订,见 §8、§10);修复轮之后的复审未做;未推送、未开 PR;合并按 owner 2026-09-29 17:1x 的条件式预授权(§1),条件尚未满足 |
 | 分支 | `feat/approval-cancel-entry-phase-b-fe` |
 | 基线 | 后端分支 `feat/approval-cancel-entry-phase-a-read-launch` 的 `2e44d6053`(阶段 A + A2;其基线 `main @ f47054d88e`) |
 | 改动面 | 只 `apps/web/**` 与本文件;**后端零改动**,**DDL 零** |
@@ -233,7 +233,7 @@ ratify 的 P-6(§15.6)在其解除条件满足前禁止撤销进度界面渲染�
 | `cancelRoundEntryCenterRoute.spec.ts` | 行内通过 / 行驳回(带意见)/ 批量(撤销轮行 → 考勤路由,普通行 → `dispatchAction`);无席位 403 原句;不可解析的请假不回落 | 4/4 |
 | `cancelRoundEntryAttendancePanel.spec.ts` | entryEnabled 缺失 ⇒ 不渲染、false+有轮 ⇒ 仅进度;仅本人已批准请假有入口、非请假 / pending 不读;**I3 不满足 ⇒ 禁用 + 原因 + 页内链接**;读失败与 404 不同形;发起对话框 → POST → 重读 → V1;席位类弱版、503 ⇒ V8 warning;撤回 → V4、入口重新可用;撤回窗口关闭原因、非本人无撤回;**V2 三值**(1天 / 1天 1小时 + 过期 1小时 + 已返还附注 / unreported 不出现 0);V5 与 V3 可辨;V6 未知 code 折叠;AttendanceView 挂载位置(请假行、最近申请内、换班列表前、唯一一处) | 12/12 |
 
-合计 **53/53**(按 lane token 过滤一次跑五个文件;提交 5 时为 49/49,提交 6 加 4 条 P-6 用例)。修复轮 1 之后是 **71/71**,新增用例见 §10。
+合计 **53/53**(按 lane token 过滤一次跑五个文件;提交 5 时为 49/49,提交 6 加 4 条 P-6 用例)。修复轮 1 之后是 **72/72**,新增用例见 §10。
 
 ### 7.2 mutation(每条:恰一处替换 → 跑 → cp 还原 → `cmp` 逐字节;脚本 `g4cb-mut.py`)
 
@@ -314,6 +314,8 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 10. `test(web): pin four cancel-round guards that no spec covered`(P3,门审 U1 / U3 / U5 / U7)
 11. `fix(web): cancel-round cleanups — applied round hides the entry, batch refuses a missing row, drop an unused helper`(三条 NIT)
 12. 本文件修订(门审 r1 的合并行、残留、§10)
+13. `test(web): pin the approval center's list reload after a cancel-round client refusal`
+14. 本文件再修订(§9 第 18 项、§10 读数)
 
 每个提交(树 / diff / 提交信息)已按私有短语表自扫,0 命中(修复轮的扫描把提交触及文件的**全文**也扫了,不只 diff)。
 
@@ -338,7 +340,7 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 15. **开关 OFF 时仍显示已有轮次的进度与撤回(门审 r1 P3)**:见 §4.3;门审认为「入口 = 发起入口」的读法可接受,待 owner 确认;确认则无需改代码。
 16. **服务端的期望实例校验(门审 r1 P2 的服务端一半)**:`/actions` 与 `/withdraw` 接受期望的 `engineInstanceId`、不符回 409 —— 归后端 lane / owner。本分支的轮次确认(§4.2)只是客户端一半:它挡住陈旧页面,挡不住读与写之间的毫秒级竞态,那种情况下只保证不报「成功」。
 17. **申请人撤回(考勤自助面)没有做轮次确认**:另一个标签页里撤回并重新发起后,旧标签页的「撤回」会撤回新一轮(申请人自己的、可再发起的动作)。不在门审 r1 的前端修复范围内,由第 16 项的服务端校验覆盖;未改。
-18. **审批中心行内通过 / 行驳回在客户端拒绝后重载列表**:已实现,但**没有** spec 钉住(该 spec 的 store mock 每次调用都新建 `loadPending`,无法断言);批量路径的「重试失败项被拒」有 spec。
+18. **审批中心在客户端拒绝后的呈现**:行内通过 / 行驳回重载列表,已由 spec 钉住(提交 13;两条 mutation 均红)。**批量结果清单的计数**:`CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED` 进 `failed`,而清单抬头写「成功 N 项,失败 M 项」/「全部 M 项处理失败」——那一行的决定其实已被服务端接受,行内文案(「操作已提交,但无法确认…」)与抬头的「失败」不一致。「重试失败项」会被预读拒绝,不会发第二次写(spec 钉住)。批量对话框的计数语义本切片未改。
 19. **批量快照缺行即拒(NIT)**:今天不可达(每个 id 都来自发起时的快照),所以没有 spec;把它改回「回落到通用路由」的 mutation 存活,属预期(§10)。
 20. **审批侧 V 词只看 `cancelRoundCloseReason`(门审 r1 NIT,只记录)**:锁 lock:131 的判据是「系统终结身份 + 专用 reason」,审批侧只用了后一半。今天等价:该键唯一的写入点是系统收口路径(基线 `ApprovalProductService.ts:9842`)。未改。
 21. **门审 r1 的自报残留(P3,owner 定是否扩范围)**:第 2 项(审批侧撤回仍走通用路由)、第 4 项(第二跳对非原实例参与者的席位持有者失败关闭)、第 12 项(会签驳回时 `cancelledAssigneesLabel` 列出已失效席位人名)——本切片不改。
@@ -370,7 +372,7 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 |---|---|
 | `cancelRoundEntryCore` | 先读摘要再办理(调用顺序);新一轮 ⇒ 拒绝、零写;轮次非 pending / 无轮次 ⇒ 拒绝、零写;摘要读失败 ⇒ 失败关闭、零写;成功体 `roundId` 不符或缺失 ⇒ 「无法确认」且不含「失败」;谓词真值表;200 + `ok:false` 四个客户端函数都抛错。另:既有 V7 用例的 409 改由按路由分派的 mock 落在 POST 上(断言不变);「写路由」用例改为断言办理返回 `roundId` |
 | `cancelRoundEntryDetailView` | 陈旧页面:零考勤写、对话框报「未执行任何操作」、重读详情与时间线;`roundId` 不符 ⇒ 不弹「审批已通过」;`attendance:admin` 单独可见按钮;`canDecideCurrentNode === false` 时撤销轮按钮隐藏;既有成功用例加断言「审批已通过」确实弹出 |
-| `cancelRoundEntryCenterRoute` | 行内通过遇新一轮 ⇒ 零写、无成功提示;批量:`roundId` 不符进失败清单,「重试失败项」被预读拒绝、不发第二次写;无授予 ⇒ 撤销轮行无行内按钮且不进批量(普通行照常);`attendance:admin` 单独有行内按钮。既有「无席位 403」用例的 403 改为只落在 POST 上(断言不变) |
+| `cancelRoundEntryCenterRoute` | 行内通过遇新一轮 ⇒ 零写、无成功提示、列表重载;行驳回遇非 pending 轮 ⇒ 零写、行内报错、对话框不关、列表重载(提交 13);批量:`roundId` 不符进失败清单,「重试失败项」被预读拒绝、不发第二次写;无授予 ⇒ 撤销轮行无行内按钮且不进批量(普通行照常);`attendance:admin` 单独有行内按钮。既有「无席位 403」用例的 403 改为只落在 POST 上(断言不变) |
 | `cancelRoundEntryAttendancePanel` | 本人行上服务端回 `APPROVAL_REVOKE_FORBIDDEN` ⇒ 无撤回;V2 之后入口消失 |
 | `cancelRoundEntrySurfaces` | `useCancelRoundCloseReasons`:读失败后下一次 `ensure()` 重试,已解析 / 在途不重复读 |
 
@@ -384,6 +386,7 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 | F1d | 去掉事后 `roundId` 核对 | red(3) |
 | F1e | 不读成功体 `roundId` | red(4) |
 | F1f | 详情页客户端拒绝后不重读 | red(1) |
+| F1g / F1h | 中心行内通过 / 行驳回在客户端拒绝后不重载列表 | red(1) / red(1) |
 | F2a / F2b | 谓词去掉 `attendance:admin` / `attendance:approve` | red(3) / red(12) |
 | F2c | 中心 `isRowBatchSelectable` 不查授予 | red(1) |
 | F2d | 详情页回到私有谓词(漏 `attendance:admin`) | red(1) |
@@ -393,11 +396,11 @@ manifest 的 540 个 token 按字母序每 60 个一块(9 块),每块一次 `vit
 
 全部还原 `cmp` OK。
 
-### 10.3 回归与守卫(修复轮头 `c3c632ab5a`)
+### 10.3 回归与守卫(修复轮代码头 `c3c632ab5a`;五个 spec 另在提交 13 后重跑)
 
 | 项 | 读数 |
 |---|---|
-| 五个新 spec | 5 文件 / **71/71** |
+| 五个新 spec | 5 文件 / **72/72**(提交 13 之后;`c3c632ab5a` 时 71/71) |
 | `vue-tsc -b`(先删本地 `.tmp`) | 与门审 r1 留存的基线 `2e44d6053` 输出**逐字节相同**(EXIT 2,仅已知 TS2769) |
 | 引用 `ApprovalDetailView` / `ApprovalCenterView` / `ApprovalCenterDetailPane` / `approvals/cancelRound` / `useCancelRoundCloseReasons` 的 38 个 spec | 826 通过 / 5 失败 —— 与 §7.3 记录的同 5 条(`approval-ui-workspace` 2、`approvalMobileDetailActions` 3)逐条相同;失败原因(源文件样式正则、store mock 缺 `pendingApprovals`)与本轮改动无关;本轮未在基线上重跑(未新建基线工作树) |
 | 引用 `AttendanceView` / `AttendanceCancelRoundPanel` 的 29 个 spec | 658 通过 / 9 失败 —— 同 §7.3 的 9 条(`attendance-import-batch-timezone-status` 5、`attendance-record-timeline` 4) |
