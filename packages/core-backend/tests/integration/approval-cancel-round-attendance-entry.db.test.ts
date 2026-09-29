@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import net from 'net'
 import * as path from 'path'
 import { randomUUID } from 'node:crypto'
@@ -25,6 +25,10 @@ import {
   markDingTalkApprovalCardDeliverySendFailed,
   markDingTalkApprovalCardDeliverySent,
 } from '../../src/integrations/dingtalk/approval-card-deliveries'
+import { ApprovalGraphExecutor } from '../../src/services/ApprovalGraphExecutor'
+import { ICollabService } from '../../src/di/identifiers'
+import { buildAuthenticatedUserRoom } from '../../src/services/CollabService'
+import { invalidateUserPerms } from '../../src/rbac/service'
 
 /**
  * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
@@ -1720,6 +1724,141 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         const after = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
         expect(after.json.data.round.outcome).toBe('applied')
         expect(after.json.data.round.deliveries.map((d: Record<string, unknown>) => d.status)).toEqual(['failed', 'delivered', 'failed'])
+      })
+    })
+
+    describe('phase C (backend): P-11 — the round in the todo center, the seat-arm fence, the count refresh', () => {
+      type Push = { room: string; event: string; payload: any }
+      /** Records every realtime push the server's collab service makes, passing each one through. */
+      function recordPushes(): { pushes: Push[]; stop: () => void } {
+        const injector = (server as unknown as { injector: { get: (id: unknown) => any } }).injector
+        const collab = injector.get(ICollabService)
+        const original = collab.broadcastTo
+        const pushes: Push[] = []
+        collab.broadcastTo = (room: string, event: string, payload: unknown) => {
+          pushes.push({ room, event, payload })
+          return original.call(collab, room, event, payload)
+        }
+        return { pushes, stop: () => { collab.broadcastTo = original } }
+      }
+      const todoPushesFor = (pushes: Push[], userId: string) =>
+        pushes.filter((push) => push.room === buildAuthenticatedUserRoom(userId) && push.event === 'todo:counts-updated')
+
+      it('P-11 (a)(b): the round\'s seat is a todo item (source approval, workflowKey approval.cancel-round, href to the ORIGINAL leave request) and count == list; the seat holder\'s todo count is pushed after the launch, after the attendance-side approve and after the requester\'s withdraw', async () => {
+        await grantAttendanceApproverRole(approverId)
+        // The todo routes sit behind approvals:read (catalogued, granted to nobody by default); the
+        // fixture approver gets it here, with the permission cache cleared for the grant to be read.
+        await pool().query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+          [approverId],
+        )
+        invalidateUserPerms(approverId)
+        const approverToken = await loginToken(approverId)
+        const recorder = recordPushes()
+        try {
+          const fixture = await launchedRound('todo')
+          const toWithdraw = await launchedRound('todo-wd')
+          // Launch ⇒ a push to the new seat holder (and to the requester).
+          expect(todoPushesFor(recorder.pushes, approverId).length).toBeGreaterThanOrEqual(2)
+          expect(todoPushesFor(recorder.pushes, fixture.employee).length).toBeGreaterThanOrEqual(1)
+
+          const items = await http('GET', '/api/todo/items', approverToken)
+          const count = await http('GET', '/api/todo/count', approverToken)
+          expect(items.status, items.text).toBe(200)
+          expect(count.status, count.text).toBe(200)
+          expect(items.json.sources).toEqual({ approval: 'ok' })
+          expect(count.json.count).toBe(items.json.items.length)
+          const item = items.json.items.find((entry: { id: string }) => entry.id === fixture.roundInstanceId)
+          expect(item).toEqual({
+            source: 'approval',
+            id: fixture.roundInstanceId,
+            title: expect.stringContaining('撤销'),
+            href: `/attendance?section=attendance-overview-requests&requestId=${fixture.requestId}`,
+            updatedAt: expect.any(String),
+            actionable: true,
+            workflowKey: 'approval.cancel-round',
+          })
+          expect(items.json.items.filter((entry: { id: string }) => entry.id === fixture.roundInstanceId)).toHaveLength(1)
+          // The latest push to the seat holder carried the same number the count route answers.
+          const lastLaunchPush = todoPushesFor(recorder.pushes, approverId).at(-1)
+          expect(lastLaunchPush?.payload?.count).toBe(count.json.count)
+
+          const before = count.json.count as number
+          recorder.pushes.length = 0
+          const stub = bindCancellationPort(async () => cancelledResponse)
+          try {
+            const approved = await http('POST', actionsPath(fixture.requestId), approverToken, { action: 'approve' })
+            expect(approved.status, approved.text).toBe(200)
+          } finally {
+            stub.stop()
+          }
+          const afterApprovePush = todoPushesFor(recorder.pushes, approverId).at(-1)
+          expect(afterApprovePush?.payload?.count).toBe(before - 1)
+          const itemsAfter = await http('GET', '/api/todo/items', approverToken)
+          expect(itemsAfter.json.items.some((entry: { id: string }) => entry.id === fixture.roundInstanceId)).toBe(false)
+          expect((await http('GET', '/api/todo/count', approverToken)).json.count).toBe(before - 1)
+
+          recorder.pushes.length = 0
+          const withdrawn = await http('POST', withdrawPath(toWithdraw.requestId), toWithdraw.employeeToken, {})
+          expect(withdrawn.status, withdrawn.text).toBe(200)
+          // The withdraw deactivates the approver's seat: the push reaches the seat holder, not only the caller.
+          const afterWithdrawPush = todoPushesFor(recorder.pushes, approverId).at(-1)
+          expect(afterWithdrawPush?.payload?.count).toBe(before - 2)
+          expect((await http('GET', '/api/todo/count', approverToken)).json.count).toBe(before - 2)
+        } finally {
+          recorder.stop()
+          await pool().query(
+            `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+            [approverId],
+          )
+          invalidateUserPerms(approverId)
+        }
+      })
+
+      it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
+        const fixture = await launchedRound('fence')
+        const arms = await pool().query<{ assignment_type: string }>(
+          'SELECT DISTINCT assignment_type FROM approval_assignments WHERE instance_id = $1',
+          [fixture.roundInstanceId],
+        )
+        expect(arms.rows.length).toBeGreaterThan(0)
+        expect(arms.rows.every((row) => row.assignment_type === 'user' || row.assignment_type === 'role')).toBe(true)
+
+        // A fence witness: the seed graph cannot produce a queue seat, so the executor's answer is
+        // rewritten for ONE call to carry one; the creation path must refuse before writing anything.
+        const employee = `g4a-c-fence-${TS}`
+        await seedLoginUser(employee, { roles: ['attendance_employee'] })
+        const { documentId } = await seedApprovedLeave({ documentRequesterId: employee })
+        const original = ApprovalGraphExecutor.prototype.resolveInitialState
+        const spy = vi.spyOn(ApprovalGraphExecutor.prototype, 'resolveInitialState').mockImplementationOnce(function (
+          this: ApprovalGraphExecutor,
+          ...args: Parameters<typeof original>
+        ) {
+          const state = original.apply(this, args)
+          return {
+            ...state,
+            assignments: state.assignments.map((assignment, index) =>
+              index === 0 ? { ...assignment, assignmentType: 'source_queue' as unknown as 'user' } : assignment,
+            ),
+          }
+        })
+        const instancesBefore = await pool().query<{ count: string }>('SELECT COUNT(*)::text AS count FROM approval_instances')
+        try {
+          await expect(service().createCancelRoundInstance(documentId, { userId: employee })).rejects.toMatchObject({
+            statusCode: 409,
+            code: 'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+          })
+          expect(spy).toHaveBeenCalledTimes(1)
+        } finally {
+          spy.mockRestore()
+        }
+        expect(await roundsFor(documentId)).toHaveLength(0)
+        const instancesAfter = await pool().query<{ count: string }>('SELECT COUNT(*)::text AS count FROM approval_instances')
+        expect(instancesAfter.rows[0].count).toBe(instancesBefore.rows[0].count)
+        // Positive control on the same document: without the rewrite the same call opens the round.
+        const round = await service().createCancelRoundInstance(documentId, { userId: employee })
+        createdApprovalIds.add(round.id)
+        expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
       })
     })
   })

@@ -26,6 +26,11 @@ export interface PendingItem {
    *  source only, for the current slice — see `approval-pending-source.ts`). Absent for a source
    *  that has no such notion. */
   actionable?: boolean
+  /** Domain-specific: the approval source's `approval_instances.workflow_key` (`null` when unset),
+   *  so a client can pick a sub-type presentation by key rather than by title prefix —撤销锁
+   *  增补 P-11 (b), landed on this lock's §3 `PendingItem` contract (RATIFY 追记 2026-09-28).
+   *  Absent for a source that has no such notion. */
+  workflowKey?: string | null
 }
 
 /** The three-input viewer contract §3.0 pins for the approval source; used as the ONE shape every

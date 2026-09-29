@@ -245,7 +245,7 @@ import {
   correlationErrorHandler,
   correlationIdMiddleware,
 } from './middleware/correlation'
-import { approvalsRouter } from './routes/approvals'
+import { approvalsRouter, publishApprovalCountsForUsers } from './routes/approvals'
 import { todoRouter } from './routes/todo'
 import { tasksRouter } from './routes/tasks'
 import { pendingSourceRegistry } from './services/pending-source-registry'
@@ -2604,8 +2604,15 @@ export class MetaSheetServer {
         // cancel-round entry port. Least-privilege like approvalAssigneeResolver — ONLY
         // plugin-attendance receives it; every other plugin gets undefined, and without it the
         // consumer registers none of its cancel-round routes.
+        // Phase C (增补 P-11): the port's post-action todo count refresh is bound to the SAME publisher
+        // the approval-side action routes call, on this server's injector.
         approvalCancelRoundEntry:
-          manifest.name === 'plugin-attendance' ? buildApprovalCancelRoundEntryPort() : undefined,
+          manifest.name === 'plugin-attendance'
+            ? buildApprovalCancelRoundEntryPort({
+                publishCounts: (users, reason) =>
+                  publishApprovalCountsForUsers({ injector: this.injector }, users, reason),
+              })
+            : undefined,
         // E-learning L2: core owns eligibility and delivery-ledger insertion.
         // The persisted job worker gets only this narrow port; other plugins
         // cannot submit reminder intents through the host service surface.

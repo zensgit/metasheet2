@@ -65,6 +65,63 @@ import {
   type CancelRoundCancellationOutcomeV1,
 } from '../core/attendance-cancellation-execution-port'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
+import { Logger } from '../core/logger'
+
+const logger = new Logger('ApprovalCancelRoundEntryPort')
+
+/**
+ * 增补 P-11 — the todo count refresh after a launch / approve / reject / withdraw on the attendance
+ * side. The host binds this to the SAME publisher every approval-side action route calls
+ * (`publishApprovalCountsForUsers`: `approval:counts-updated` + `todo:counts-updated`, the latter
+ * through the todo center's one shared pending query), so the attendance-side routes refresh the
+ * same badges without a second copy of either. Optional: an unbound port simply does not push.
+ */
+export type CancelRoundCountPublisherV1 = (
+  users: Array<{ userId: string; roles?: string[] }>,
+  reason: string,
+) => Promise<void>
+
+export interface CancelRoundEntryPortDepsV1 {
+  readonly publishCounts?: CancelRoundCountPublisherV1
+}
+
+/** The round's ACTIVE person seats — whose pending counts a transition on the round can move. */
+async function listActiveUserSeatIds(query: Queryable, engineInstanceId: string): Promise<string[]> {
+  const result = await query.query(
+    `SELECT DISTINCT assignee_id
+       FROM approval_assignments
+      WHERE instance_id = $1
+        AND is_active = TRUE
+        AND assignment_type = 'user'`,
+    [engineInstanceId],
+  )
+  return (result.rows as Array<{ assignee_id?: unknown }>)
+    .map((row) => row.assignee_id)
+    .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+}
+
+/**
+ * Best effort by contract: the action has already committed, so a failed push is logged
+ * (values-free: the reason token only) and never turns a done action into an error.
+ */
+async function publishCancelRoundCounts(
+  publishCounts: CancelRoundCountPublisherV1 | undefined,
+  userIds: Array<string | null | undefined>,
+  reason: string,
+): Promise<void> {
+  if (!publishCounts) return
+  try {
+    const users = [...new Set(userIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0))]
+    if (users.length === 0) return
+    await publishCounts(users.map((userId) => ({ userId })), reason)
+  } catch (error) {
+    try {
+      logger.warn(`cancel-round todo count publish failed (${reason})`, error instanceof Error ? error : undefined)
+    } catch {
+      // logging is diagnostic only
+    }
+  }
+}
 
 /** `approval_rounds.outcome` — the six ratified values (lock §4 CHECK). */
 export type CancelRoundOutcomeV1 = 'pending' | 'applied' | 'rejected' | 'withdrawn' | 'expired' | 'blocked'
@@ -616,8 +673,9 @@ export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
  * actor on it; passing none can only narrow, never widen (the integration suite asserts every
  * assignment on a launched round is a `user` assignment).
  *
- * Not done here, on purpose: the approval-side route's post-dispatch pending-count publish (a todo
- * badge refresh) — the todo presentation is phase C (P-11), recorded in the design MD.
+ * The pending-count refresh (增补 P-11) runs after the action when the host bound a publisher: the
+ * caller plus the round's person seats as they were BEFORE and AFTER the action, through the same
+ * publisher the approval-side action routes use. Best effort — the action has already committed.
  */
 const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
 
@@ -632,6 +690,7 @@ export async function dispatchOnLatestCancelRound(
   actor: CancelRoundEntryActorV1,
   action: 'approve' | 'reject' | 'revoke',
   comment: string | null | undefined,
+  publishCounts?: CancelRoundCountPublisherV1,
 ): Promise<CancelRoundActionResultV1> {
   if (!CANCEL_ROUND_DISPATCH_ACTIONS.has(action)) {
     // The plugin validates the verb before calling; a caller that bypasses that is a programming
@@ -640,6 +699,11 @@ export async function dispatchOnLatestCancelRound(
   }
   const row = await selectLatestCancelRoundRow(query, documentInstanceId)
   if (!row || !row.engine_instance_id) return { ok: false, noRound: true }
+  // The seats BEFORE the action: an approve / reject / withdraw deactivates them, and those are the
+  // people whose pending count drops (the approval-side route only re-reads the seats left active).
+  const seatsBefore = publishCounts
+    ? await listActiveUserSeatIds(query, row.engine_instance_id).catch(() => [] as string[])
+    : []
   try {
     const service = new ApprovalProductService()
     await service.dispatchAction(
@@ -659,7 +723,12 @@ export async function dispatchOnLatestCancelRound(
     }
     throw error
   }
-  return { ok: true, round: await readActedRoundOutcome(query, row.round_id) }
+  const round = await readActedRoundOutcome(query, row.round_id)
+  if (publishCounts) {
+    const seatsAfter = await listActiveUserSeatIds(query, row.engine_instance_id).catch(() => [] as string[])
+    await publishCancelRoundCounts(publishCounts, [actor.userId, ...seatsBefore, ...seatsAfter], `cancel-round:${action}`)
+  }
+  return { ok: true, round }
 }
 
 /**
@@ -676,7 +745,7 @@ async function readActedRoundOutcome(query: Queryable, roundId: string): Promise
   return { roundId, outcome, status: statusTokenFor(outcome) }
 }
 
-export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPort {
+export function buildApprovalCancelRoundEntryPort(deps: CancelRoundEntryPortDepsV1 = {}): ApprovalCancelRoundEntryPort {
   const db = (): Queryable => {
     if (!pool) throw new Error('Database not available')
     return pool as unknown as Queryable
@@ -698,11 +767,16 @@ export function buildApprovalCancelRoundEntryPort(): ApprovalCancelRoundEntryPor
         }
         throw error
       }
-      return { ok: true, summary: await readCancelRoundSummaryForDocumentV1(db(), documentInstanceId, actor.userId) }
+      const summary = await readCancelRoundSummaryForDocumentV1(db(), documentInstanceId, actor.userId)
+      if (deps.publishCounts && summary.round?.engineInstanceId) {
+        const seats = await listActiveUserSeatIds(db(), summary.round.engineInstanceId).catch(() => [] as string[])
+        await publishCancelRoundCounts(deps.publishCounts, [actor.userId, ...seats], 'cancel-round:launch')
+      }
+      return { ok: true, summary }
     },
     decide: (documentInstanceId, actor, request) =>
-      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, request.action, request.comment),
+      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, request.action, request.comment, deps.publishCounts),
     withdraw: (documentInstanceId, actor, request = {}) =>
-      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, 'revoke', request.comment),
+      dispatchOnLatestCancelRound(db(), documentInstanceId, actor, 'revoke', request.comment, deps.publishCounts),
   }
 }
