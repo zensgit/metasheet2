@@ -121,11 +121,15 @@ async function createHarness(
         launch: vi.fn(async () => {
           throw new Error('cancel-round entry port must not be reached in the unit harness')
         }),
-        // A2: the routes register only when all five methods are present.
+        // A2 / C2: the routes register only when all six methods are present.
         decide: vi.fn(async () => {
           throw new Error('cancel-round entry port must not be reached in the unit harness')
         }),
         withdraw: vi.fn(async () => {
+          throw new Error('cancel-round entry port must not be reached in the unit harness')
+        }),
+        // C2: all six methods, or none of the cancel-round routes registers.
+        listSeatedPendingRounds: vi.fn(async () => {
           throw new Error('cancel-round entry port must not be reached in the unit harness')
         }),
       },

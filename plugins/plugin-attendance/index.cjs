@@ -37029,8 +37029,14 @@ module.exports = {
     //    `attendance:approve`, the requester's withdraw behind `attendance:write`, and a default-OFF
     //    flag (`ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`) on the launch only.
     //
+    // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」): the approver's 「cancellations
+    // waiting for me」 list, `GET /api/attendance/cancel-rounds/pending`, behind `attendance:approve`,
+    // listing only the viewer's own live seats — the seat verdict is the port's, i.e. the decision
+    // door's own predicate on the role claims the actions route dispatches with, and the document gate
+    // is the actions route's own (`toCancelRoundRequest` below).
+    //
     // The routes reach core ONLY through `context.services.approvalCancelRoundEntry`, which core
-    // injects into this plugin alone. No port (or a port missing any of its five methods) ⇒ none of
+    // injects into this plugin alone. No port (or a port missing any of its six methods) ⇒ none of
     // the routes is registered (fail-closed: no entry rather than a half-wired one).
     //
     // VISIBILITY is lock I7 — `canReadApprovalInstance` on the request's ORIGINAL approval instance
@@ -37060,18 +37066,16 @@ module.exports = {
       && typeof cancelRoundEntryPort.launch === 'function'
       && typeof cancelRoundEntryPort.decide === 'function'
       && typeof cancelRoundEntryPort.withdraw === 'function'
+      && typeof cancelRoundEntryPort.listSeatedPendingRounds === 'function'
     ) {
       const respondCancelRoundRequestNotFound = (res) => {
         res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
       }
 
-      // Org scope + LEAVE ONLY + an approval instance to key on. Shared by every cancel-round route.
-      const loadCancelRoundRequestRow = async (requestId, orgId) => {
-        const rows = await db.query(
-          'SELECT id, user_id, status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
-          [requestId, orgId]
-        )
-        const row = rows[0]
+      // LEAVE ONLY + an approval instance to key on, over a request row already read org-scoped. The
+      // ONE document gate: the single-row loader below (every per-request cancel-round route) and the
+      // C2 list's batch read both pass their rows through it.
+      const toCancelRoundRequest = (row) => {
         if (!row || !row.approval_instance_id) return null
         if (row.request_type !== 'leave') return null
         return {
@@ -37080,6 +37084,15 @@ module.exports = {
           status: row.status,
           documentInstanceId: String(row.approval_instance_id),
         }
+      }
+
+      // Org scope + the document gate above. Shared by every per-request cancel-round route.
+      const loadCancelRoundRequestRow = async (requestId, orgId) => {
+        const rows = await db.query(
+          'SELECT id, user_id, status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
+          [requestId, orgId]
+        )
+        return toCancelRoundRequest(rows[0])
       }
 
       // The row above, visible to the viewer by lock I7 on the ORIGINAL document (summary, launch,
@@ -37406,6 +37419,103 @@ module.exports = {
             }
             logger.error('Attendance cancel-round withdraw failed', error)
             res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to withdraw cancellation' } })
+          }
+        })
+      )
+
+      const toCancelRoundIsoOrNull = (value) => {
+        if (value === null || value === undefined) return null
+        const parsed = value instanceof Date ? value : new Date(value)
+        return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+      }
+
+      // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」) — the approver's 「cancellations
+      // waiting for me」: every pending cancel round the caller could approve / reject RIGHT NOW on
+      // `POST …/cancel-round/actions`, and nothing else.
+      //   - Guard: `attendance:approve`, the actions route's own guard (no grant-policy change).
+      //   - Seat: the port's `listSeatedPendingRounds` — the decision door's own predicate over the
+      //     round's active assignments, with the role claims the actions route dispatches with. A holder
+      //     of `attendance:approve` without a seat gets an EMPTY list (200), not a refusal.
+      //   - Document: org scope + `toCancelRoundRequest`, the actions route's own gate (no I7, like the
+      //     actions route: the seat is the authority). A round whose request row is in another org, is
+      //     not a leave, or has no approval instance is not listed — the actions route answers it 404.
+      //   - Fields: the round, the leave it cancels (type, start, end) and the leave owner's directory
+      //     name — the same directory `name` this plugin's other `attendance:approve`-reachable reads
+      //     join from `users`, never the original document's requester snapshot (`null` when absent).
+      //     No delivery data, no other seat holder, no status field (every item is pending by
+      //     construction).
+      //   - Paging: the plugin's `parsePagination` (default 50, max 200), newest launch first;
+      //     `total` counts every listed round.
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/cancel-rounds/pending',
+        withPermission('attendance:approve', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const { pageSize, offset } = parsePagination(req.query)
+          try {
+            const seated = await cancelRoundEntryPort.listSeatedPendingRounds(viewerId)
+            if (!Array.isArray(seated)) {
+              throw new Error('cancel-round pending list: the port answered a non-array')
+            }
+            const documentIds = Array.from(new Set(
+              seated
+                .map((round) => round?.documentInstanceId)
+                .filter((id) => typeof id === 'string' && id.length > 0)
+            ))
+            const requestByDocument = new Map()
+            if (documentIds.length > 0) {
+              const rows = await db.query(
+                `SELECT ar.id, ar.user_id, ar.status, ar.request_type, ar.approval_instance_id,
+                        ar.requested_in_at, ar.requested_out_at, u.name AS requester_name
+                   FROM attendance_requests ar
+                   LEFT JOIN users u ON u.id = ar.user_id
+                  WHERE ar.org_id = $1
+                    AND ar.approval_instance_id = ANY($2::text[])
+                  ORDER BY ar.id`,
+                [getOrgId(req), documentIds]
+              )
+              for (const row of rows) {
+                const request = toCancelRoundRequest(row)
+                // One request per document: the lowest id, the same pick the todo center's cancel-round
+                // deep link makes when two request rows share one approval instance.
+                if (!request || requestByDocument.has(request.documentInstanceId)) continue
+                requestByDocument.set(request.documentInstanceId, { request, row })
+              }
+            }
+            const listed = []
+            const seenRounds = new Set()
+            for (const round of seated) {
+              if (!round || typeof round.roundId !== 'string' || seenRounds.has(round.roundId)) continue
+              const match = requestByDocument.get(round.documentInstanceId)
+              if (!match) continue
+              seenRounds.add(round.roundId)
+              const requesterName = typeof match.row.requester_name === 'string' && match.row.requester_name.trim().length > 0
+                ? match.row.requester_name
+                : null
+              listed.push({
+                requestId: match.request.requestId,
+                roundId: round.roundId,
+                engineInstanceId: String(round.engineInstanceId),
+                requesterUserId: match.request.userId,
+                requesterName,
+                requestType: match.row.request_type,
+                startAt: toCancelRoundIsoOrNull(match.row.requested_in_at),
+                endAt: toCancelRoundIsoOrNull(match.row.requested_out_at),
+                launchedAt: typeof round.launchedAt === 'string' ? round.launchedAt : null,
+              })
+            }
+            res.json({ ok: true, data: { items: listed.slice(offset, offset + pageSize), total: listed.length } })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round pending list failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list cancellations' } })
           }
         })
       )

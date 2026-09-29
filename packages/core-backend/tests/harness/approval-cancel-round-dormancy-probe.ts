@@ -52,6 +52,12 @@
  * exactly these four (method, path) pairs in the same commit that registers them, and the exit-2 /
  * exit-5 rules keep holding it to exactly four.
  *
+ * ROUND 5 — C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」): the approver's
+ * 「cancellations waiting for me」 list, `GET /api/attendance/cancel-rounds/pending`. Its path carries
+ * the `cancel-round` token, so it joins the allow-list in the same commit that registers it — exactly
+ * FIVE (method, path) pairs now. It reads (seats, rounds, request rows) and never reaches the creation
+ * path, so the reach rule is unchanged.
+ *
  * HOME: this file lives under `tests/` on purpose. It NAMES `createCancelRoundInstance`, and the
  * static census's whole point is that no PRODUCTION source may name it — a harness parked in a
  * production root would have to be waved through by an allowlist, i.e. exactly the hole the census
@@ -63,12 +69,13 @@ import type { Server } from 'node:http'
 
 const CONTROL = process.env.DORMANCY_PROBE_CONTROL ?? 'none'
 
-/** Round 3 (L-4) + round 4 (A2): the exact entry routes the product entry registers. */
+/** Round 3 (L-4) + round 4 (A2) + round 5 (C2): the exact entry routes the product entry registers. */
 const NAMED_ENTRY_ROUTES: ReadonlyArray<{ method: string; path: string }> = [
   { method: 'GET', path: '/api/attendance/requests/:id/cancel-round' },
   { method: 'POST', path: '/api/attendance/requests/:id/cancel-round' },
   { method: 'POST', path: '/api/attendance/requests/:id/cancel-round/actions' },
   { method: 'POST', path: '/api/attendance/requests/:id/cancel-round/withdraw' },
+  { method: 'GET', path: '/api/attendance/cancel-rounds/pending' },
 ]
 /** Round 3 (L-4): the one production module allowed on a reach stack. */
 const NAMED_ENTRY_PORT_MODULE = 'approval-cancel-round-entry-port'
