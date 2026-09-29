@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,其中 P-6′(ii) 管理员通知 **BLOCKED**(§9.6),阶段 C 的独立门审未做;未推送、未开 PR;**合并未被授权**) |
+| 状态 | 草稿(阶段 A 实现 + 门审 r1 / r2 / r3 已做;**A2**(默认 OFF 发起开关 + 考勤侧审批人办理 + 申请人撤回,§8)已实现,A2 独立门审 r1 已做(APPROVE-with-hardening,0 P1 / 0 P2 / 3 P3 / 2 NIT,遗留处理见 §9.3);**阶段 C(后端)**(§9)已实现并本地真库验证,P-6′(ii) 管理员通知按 owner 2026-09-29 16:5x ① 暂缓(§9.6);阶段 C 门审 r1 已做(1 P2 / 2 P3 / 2 NIT),修复轮 1 见 §9.10,修复轮的复审未做;未推送、未开 PR;合并见 goal §0 owner 17:1x 选项原文「Yes, merge under those conditions (Recommended)」及其条件,本修复轮不涉合并) |
 | 分支 | `feat/approval-cancel-entry-phase-a-read-launch` |
 | 基线 | `main @ f47054d88e`(第 2 轮 rebase;原基线 `68a703038e`。撤销轮 C-1 #5851 `44770107f`、C-2 #5856 `2594ca6e2` 已在其中) |
 | 权威锁 | 撤销锁 v5.9(RATIFIED 2026-09-18)及其抬头「**RATIFY 追记 —— 产品入口增补 v2(P-1…P-11)**」(2026-09-28) |
@@ -381,7 +381,7 @@
 | C-2 兑现 / C-3 收口 | `dispatchAction` | 未改 |
 
 - 端口 `decide` / `withdraw` 共用一条路径:取单据最新轮(与摘要同一 SQL 定义)→ `new ApprovalProductService().dispatchAction(轮实例 id, { action, comment }, actor)`。这就是 `POST /api/approvals/:id/actions` 对模板运行时实例调用的同一服务层入口。
-- actor 带 `roles: []`:撤销轮的席位是**人**席位(创建路径按用户 id 落座;§9-9 / §14.3 拒绝一切能改席位的动作),角色声明不可能是落座依据;不传角色只会更窄、不会更宽。测试断言已发起轮次的每条指派都是 `user` 类型;若将来撤销轮出现角色席位,该断言与办理用例会一起变红。
+- 分发的动作带 `roles: []`(办理 / 撤回之后的计数推送另带调用者自己的角色声明,见 §9.5.3,不进分发):撤销轮的席位是**人**席位(创建路径按用户 id 落座;§9-9 / §14.3 拒绝一切能改席位的动作),角色声明不可能是落座依据;不传角色只会更窄、不会更宽。测试断言已发起轮次的每条指派都是 `user` 类型;若将来撤销轮出现角色席位,该断言与办理用例会一起变红。
 - 端口仍只注入 plugin-attendance;插件在五个方法齐全时才注册四条路由。
 
 ### 8.5 测试矩阵与读数(本地真库 + 真 HTTP)
@@ -465,7 +465,10 @@
 | 14:3x ③ | 「**Keep, same as approval side (Recommended)**」 | 无席位码不改(§8.8 第 1 项维持) |
 | P-5 | 「**(iii) Full delivery**」+ 字段「**Full status, no raw ids/errors (Recommended)**」(选项说明原文:Per delivery: status (delivered/pending/failed), channel TYPE, attempt count, timestamps. No external message ids, no raw provider error text (show a fixed category message instead)) | §9.4 |
 | P-11 | 「**Adopt all 3, split locks (Recommended)**」((a)(b) → lock B v2.14 §3 PendingItem; (c) → cancel lock §14.1) | §9.5 |
-| P-6′ ③ | 「**(ii) Reuse approval notices (Recommended)**」 | §9.6 **BLOCKED** |
+| P-6′ ③ | 「**(ii) Reuse approval notices (Recommended)**」 | §9.6(其后由 16:5x ① 答复) |
+| 16:5x ① | 「**Defer: weak copy only (Recommended)**」(§0 记录的选项说明:保持员工面弱版中性文案、code 不变;暂不发管理员通知,作为对 lock:75 的已知缺口记录,待 #5746 与通知通道另定;无新代码) | §9.6 |
+| 16:5x ② | 「**Attendance-side list (Recommended)**」(§0 记录的选项说明:考勤侧「待我审批的撤销」列表,挂 `attendance:approve`,只列查看者自己的在席席位,席位来源与 actions 路由同一——与 #22 = (i) 一致,不改授予政策;小后端路由 + 前端面板) | **新范围,不在阶段 C**;本分支未实现(§9.9 第 8 项) |
+| 16:5x ③ | 「**Show the list (Recommended)**」(§0 记录的选项说明:保持逐条投递列表,outcome_unknown→pending、零尝试的 superseded/skipped 不列出,按设计 MD 记录) | §9.4.3 |
 
 - ratify 文本 = 撤销锁 v5.9 抬头「RATIFY 追记 —— 产品入口增补 v2」所引的 errata v2 各条「建议增补原文」,按 owner 取值;P-11 (a)(b) 另见待办中心锁 v2.14 抬头的同日追记。
 - 仍只动后端(`packages/core-backend/**`、`plugins/**`)与本文档;**零 DDL**;未碰 `apps/web/**`。合并未被点名,完成后单独请示。
@@ -519,7 +522,7 @@ errata P-5 理由 1–3 的锚点对照:① 考勤投递读面挂 `attendance:ad
 - 范围 = 该单据最新一轮**自己的**引擎实例;原单自身的投递不列(用例有负控)。
 - **不变量**(草案 §15.5 半句,owner 选择保留):投递失败不改变 `approval_rounds.outcome`、引擎实例 `status`、席位。本节的读路径与两本账本的写方都不写这三者;用例实测(§9.7)。
 
-#### 9.4.3 账本状态 → 三值(**暂定实现选择,待门审 / owner 确认**;单测逐行钉住)
+#### 9.4.3 账本状态 → 三值(单测逐行钉住;owner 16:5x ③ 见本节末)
 
 | 账本 | 账本状态 | → status | attempts | lastAttemptAt |
 |---|---|---|---|---|
@@ -536,6 +539,7 @@ errata P-5 理由 1–3 的锚点对照:① 考勤投递读面挂 `attendance:ad
 
 - 卡片的 `attempts = 1`:卡片行在唯一一次发送调用前插入,一行就是一次发送;重发是新的一行。卡片账本没有计数列,这是推导值,不是读出值。
 - 钉钉待办的计数在待办建成之后会被账本复用于「完成待办」阶段(节点前移时重置为 0),所以 delivered 行的 `attempts` 是账本当前计数,不一定是建成前的尝试次数 —— 已知口径差异,记为残留。
+- **owner 2026-09-29 16:5x ③**:「**Show the list (Recommended)**」,§0 记录的选项说明原文:保持逐条投递列表,outcome_unknown→pending、零尝试的 superseded/skipped 不列出,按设计 MD 记录。选项点名的是三件事:逐条列出;`outcome_unknown` → pending;计数为 0 的 `superseded` / `skipped` 不列出。表中其余各行照本节原样记录,选项对它们只有「按设计 MD 记录」一句,本文不另加解释。(本节标题原写「暂定实现选择,待门审 / owner 确认」,写于该选项之前。)
 
 ### 9.5 P-11:待办中心呈现与席位臂围栏
 
@@ -549,7 +553,10 @@ errata P-5 理由 1–3 的锚点对照:① 考勤投递读面挂 `attendance:ad
 #### 9.5.2 (c) 席位臂围栏(落撤销锁 §14.1)
 
 - 创建路径在任何写入之前判定:撤销轮的每个席位臂 ∈ {`user`, `role`},否则以已登记的 `CANCEL_ROUND_NO_ELIGIBLE_APPROVER`(409)拒绝 —— 与紧邻的「种子图被改坏」兜底同码,不新造码。
-- 创建路径是撤销轮席位的唯一写方(§9-9 / §14.3 拒绝一切改席位的动作),因此围栏只立在这一处。种子图按用户 id 落座,正常路径不可达;真库见证用例把执行器的一次应答改写成队列席位,证明拒绝发生在写入之前(零实例、零轮次),同单不改写即可正常发起(正控)。
+- 创建路径是撤销轮席位的唯一写方(§9-9 / §14.3 拒绝一切改席位的动作),因此围栏只立在这一处。种子图按用户 id 落座,正常路径不可达;真库见证用例把执行器的一次应答改写成队列席位,判据两条:
+  1. 拒绝前后 `approval_request_no_seq` 的 `(last_value, is_called)` 不变。单号由 `nextval` 在创建事务**之外**分配,不随回滚撤销(该序列 CACHE = 1,每次 `nextval` 都会移动 `last_value`),它不变说明拒绝发生在分配单号之前,也就在第一条 INSERT 之前;
+  2. 零轮次、`approval_instances` 行数不变 —— 这一条只说明没有留下行:事务内的 INSERT 会被回滚掩盖,单靠它量不出「在任何写入之前」。
+  同单不改写即可正常发起,且序列前进(正控,说明探针是活的)。门审 r1 所见版本只有第 2 条,围栏整块移到分配单号或第一条 INSERT 之后仍全绿(门审 r1 P3,§9.10)。
 - A2 的 `roles: []` 前提(撤销轮只有人席位,§8.4)不受影响:围栏允许 `role` 臂,是比 A2 断言更宽的锁级围栏;A2 用例仍断言已发起轮次全为 `user`。
 
 #### 9.5.3 办理后计数刷新(复用既有发布机制)
@@ -557,9 +564,15 @@ errata P-5 理由 1–3 的锚点对照:① 考勤投递读面挂 `attendance:ad
 - 宿主注入端口时绑定审批侧动作路由用的**同一个**发布函数(同时发 `approval:counts-updated` 与 `todo:counts-updated`,后者经待办中心的共享查询),不另写计数。
 - 发起:发起人 + 新轮的人席位;办理 / 撤回:调用者 + 该轮**分发前**与分发后的人席位(办理 / 撤回会让席位失效,失效前的持有者正是计数下降的人;审批侧路由只读分发后仍有效的席位,这一处更完整)。
 - 尽力而为:动作已提交,发布失败只记日志(只含 reason 记号),不把成功的动作变成错误。
-- 既有限制照旧:推送里只带调用者的角色为空集,只凭 `role` / 队列席位计数的用户在推送里看不到该席位,下一次 `GET /api/todo/count` 不受影响(`todo-realtime.ts` 自述的既有限制);撤销轮只有人席位,不受其影响。
+- **调用者带自己的角色声明**(门审 r1 P2 的修复,§9.10):插件按核心 `resolveApprovalActorRoles` 的同一读法(`req.user.role` 去空白后并上 `req.user.roles` 里的非空字符串,去重)取调用者的角色声明,在发起 / 办理 / 撤回三处交给端口;端口把调用者作为**第一项**、带这些声明交给发布函数,席位上的其他用户不带声明,且不再重复调用者(发布函数对同一用户只取第一项;审批人办理自己的席位时,调用者本人也在席位里)—— 与审批侧动作路由的 `{ userId, roles: actor.roles }` 同形。于是调用者收到的计数与其自己 `GET /api/todo/count` 用的是同一个 viewer。角色声明只用于这次推送:不进创建路径,也不进分发的动作(`dispatchAction` 仍是 `roles: []`,§8.4 前提不变)。
+- 仍在的既有限制(与审批侧相同,`todo-realtime.ts` 自述):**非调用者**在推送里没有角色声明,所有人在推送里都没有 `permissions`;只凭 `role` / 队列席位计数的非调用者,推送的数可能小于其下一次 `GET /api/todo/count`,后者不受影响。
+- **更正**:本节旧版写「推送里只带调用者的角色为空集 …… 撤销轮只有人席位,不受其影响」,不对。调用者的计数涵盖其**全部**待办,不只本轮的席位;以角色席位落座的其它待办(例如考勤兜底队列的 `role: admin` 席位)也在其中。门审 r1 以真库 + 真 HTTP 见证:`users.role = admin` 的审批人另有一条 `role: admin` 席位的无关待办,考勤侧办理后推送 0 / GET 2;同一场景经 `/api/approvals/:id/actions` 办理为推送 1 / GET 1。
 
-### 9.6 P-6′ (ii) 管理员通知 —— **BLOCKED(ratify 条款与 main 现状冲突,未实现)**
+### 9.6 P-6′ (ii) 管理员通知 —— **按 owner 16:5x ① 暂缓(未实现,无新代码)**
+
+**当前状态**:owner 2026-09-29 16:5x ①「**Defer: weak copy only (Recommended)**」,§0 记录的选项说明原文:保持员工面弱版中性文案、code 不变;暂不发管理员通知,作为对 lock:75 的已知缺口记录,待 #5746 与通知通道另定;无新代码。本分支据此不实现管理员通知;员工面弱版文案早已在位(见下「已在位的一半」)。
+
+下文是 16:5x 之前写的 BLOCKED 记录(写时属实),保留作为该已知缺口的依据;其末条「需 owner 择一」已由上述选项答复。
 
 owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 “Send the existing approval notification to the admin resolved by A0 `process`; ratify §15.6.1 ③ (ii) shape; weaker employee-facing copy until RC (c) lands”。与 main 的两处冲突:
 
@@ -567,9 +580,11 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 2. **main 上没有可寻址到任意管理员的「既有审批通知」出口**。按人投递的审批通知只有 `approval.task_created` 事件(→ 按模板路由的自动化规则 → 钉钉审批卡片 / 钉钉待办镜像),它按**席位**产生,卡片只对在席者可操作;为不在席的管理员合成一条 task_created,等于向他宣布一条不属于他的待办。审批 SLA 超时通知(`ApprovalBreachNotifier`)走部署级配置的通道(钉钉群 webhook、`APPROVAL_BREACH_EMAIL_TO` 固定收件地址),不按单据寻址到管理员。errata P-6′ 理由 2 本身也写着「今天没有任何投递通道」。
 
 - **已在位的一半**:员工面弱版文案 —— 阶段 A 起,端口对两个席位类码(`CANCEL_ROUND_SEAT_INELIGIBLE`、`CANCEL_ROUND_NO_ELIGIBLE_APPROVER`)回不声称原因的中性句,code 不变(§2.2),与选项说明的 “weaker employee-facing copy until RC (c) lands” 一致;本阶段未改。
-- **需 owner 择一**(不是建议):① 先裁 #5746 的处置(合入后按其 `process` 能力解析收件人),并点名用哪条通知出口;② 另定收件人口径与出口(锁级决定);③ 维持现状(员工面弱版文案 + 管理员不另收通知)。
+- (写于 16:5x 之前,已由 16:5x ① 答复)**需 owner 择一**(不是建议):① 先裁 #5746 的处置(合入后按其 `process` 能力解析收件人),并点名用哪条通知出口;② 另定收件人口径与出口(锁级决定);③ 维持现状(员工面弱版文案 + 管理员不另收通知)。
 
 ### 9.7 测试矩阵与读数(本地真库 + 真 HTTP)
+
+(本节是门审 r1 之前的读数,保持原样;修复轮 1 之后的读数见 §9.10。)
 
 **环境**:一次性库 `ms2_g4cancelc_20260929`(`createdb -O ms2testbed`,非超级角色;每次运行前断言 `current_database()`);`DATABASE_URL` 与 `ATTENDANCE_TEST_DATABASE_URL` 都指向它;迁移 `tsx src/db/migrate.ts` + CI 的 `MIGRATION_EXCLUDE`,EXIT 0,419 条;`approvals:read` 目录行在(#5901);PostgreSQL 15.17、Node 20.20.2;工具直调 `node_modules/.bin/*`,未经 pnpm。全部用例都在已接线的同一个 `.db.test.ts` 里 ⇒ `plugin-tests.yml`、`vitest.config.ts` exclude、ci-wiring 常量、s6a pins 都无需改。
 
@@ -625,10 +640,67 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 
 ### 9.9 残留与 NOT RUN
 
-1. **P-6′(ii) BLOCKED**(§9.6),待 owner 择一。
-2. **§9.4.3 映射是暂定实现选择**,待门审 / owner 确认;钉钉待办 delivered 行的计数口径见 §9.4.3 末条。
+1. **P-6′(ii)**:owner 16:5x ①「Defer: weak copy only (Recommended)」⇒ 不发管理员通知、员工面弱版文案与 code 不变,作为对 lock:75 的已知缺口记录,待 #5746 与通知通道另定(§9.6)。
+2. **§9.4.3 映射**:owner 16:5x ③「Show the list (Recommended)」点名了逐条列出、`outcome_unknown` → pending、零尝试的 `superseded` / `skipped` 不列出;其余行照 §9.4.3 记录(选项说明「按设计 MD 记录」);钉钉待办 delivered 行的计数口径见 §9.4.3 末条。
 3. **投递条数可推出通知过几次**(约等于审批人数 × 渠道数):不含人名 / id,P-6 的「不渲染具体人名」不受影响;如 owner 认为条数本身也不宜给员工,属合同变更。
-4. **待办中心可见性依赖 `approvals:read`**(§9.5.1),默认零授予 —— 既有状况,本阶段不授予。
+4. **待办中心可见性依赖 `approvals:read`**(§9.5.1),默认零授予 —— 既有状况,本阶段不授予。门审 r1 NIT 复核同此:待办列表与计数两条路由都挂 `rbacGuard('approvals','read')`,非管理员的考勤审批人在这两处得 403,P-11 (a)(b) 今天只到达管理员与显式获授者(真库套件的 P-11 用例须先补授该码并清权限缓存)。审批人的可见性去处:owner 16:5x ② 的考勤侧列表(第 8 项),或另行的授予决定(不在授权内)。阶段 C 不改代码。
 5. **§6 第 0b 项**(发起后原请假被既有直接取消通道取消 ⇒ 兑现 500)仍未修,归 C-1 线;开关 OFF 期间经本入口不可达。
 6. **NOT RUN**:CI(未推送);`attendance-web-guard.yml`(被插件改动触发,但它只跑 `apps/web` 的 spec,属前端 lane);CI 所用 PostgreSQL 版本(本地 15.17);前端(阶段 B,另一分支);阶段 D 验收;真实钉钉发送(两本账本由其写函数 / 夹具写入,未经真实提供方);钉钉卡片回调对撤销轮的办理(UNVERIFIED,未改);`attendance-plugin.test.ts` 全量;`scripts/ops/*.test.mjs`;`tests/unit` 中 approval / attendance 前缀之外的文件(已跑的待办相关单测除外);阶段 C 的独立门审。
 7. **测试残留**:同 §6 第 8 项、§8.8 第 7 项;阶段 C 用例写入的两本投递账本行在 `afterAll` 显式删除(待办镜像无外键级联),运行后库内两表均为 0 行;动态探针对全部路由打请求,会在一次性库留下探针数据,随库 drop。
+8. **owner 16:5x ②「Attendance-side list (Recommended)」**(考勤侧「待我审批的撤销」列表,挂 `attendance:approve`,只列查看者自己的在席席位,席位来源与 actions 路由同一;小后端路由 + 前端面板):**新范围,不在阶段 C**,本分支未实现。
+
+### 9.10 阶段 C 门审 r1 的修复轮(修复轮 1)
+
+- **对象**:门审 r1 所见的 6 个提交(`2e44d6053..9a661b2d2b`)。本轮新提交(不 amend、未推送、未开 PR):`43111fde0a`(P2)、`a6a2420ba7`(P3 围栏见证)、`6f9e1cc5dc`(P3 待办镜像失败路径),以及本文档的提交。零 DDL;未碰 `apps/web/**`。⑤ P-6′(ii) 不在本轮范围(§9.6)。
+- **实现模型**:Claude Opus 5.5。
+
+| 门审 r1 结论 | 级 | 处理 | 证据 |
+|---|---|---|---|
+| 考勤侧发起 / 办理 / 撤回的计数推送对调用者传空角色集,审批侧(10 处调用点)传调用者的 `actor.roles`;调用者以角色席位落座的待办从推送计数里消失;MD §9.5.3 误称不受影响 | P2 | 端口 actor 增可选 `roles`;插件按 `resolveApprovalActorRoles` 的同一读法在三处填入;端口把调用者作首项、带声明发布,席位里不再重复调用者;分发的动作仍是 `roles: []`;创建路径只收 `{ userId, userName }`;§9.5.3 更正 | 下表 R 用例;R-* 五条 mutation 各 1 红 |
+| 围栏见证只能量出「没留下行」,量不出「在任何写入之前」 | P3 | 见证增序列判据与正控(§9.5.2) | F-* 两条各 1 红 |
+| P-5 不变量用例只经卡片账本的写函数,待办镜像行是裸 SQL,镜像 worker 的失败路径没走到 | P3 | 新用例经镜像服务与 worker 走失败路径 | M-* 三条各 1 红;worker 两个终态分支本地各实测 |
+| MD §9 早于 16:5x 三项答复 | NIT | §9.0 / §9.4.3 / §9.6 / §9.9 引 16:5x 选项原文;16:5x ② 记为新范围;不作我方裁决 | 文档 |
+| 待办中心仍挂 `approvals:read`,非管理员考勤审批人 403 | NIT | 阶段 C 不改代码(§9.5.1、§9.9 第 4 项) | — |
+
+**新增 / 改动的真库用例**(同一已接线文件,CI 接线不变):
+
+| 用例 | 判据 | 读数 |
+|---|---|---|
+| R:计数推送带调用者的角色声明(新) | 一张无关的待办只有 `role: admin` 席位;请求人与审批人 `users.role = admin`、补授 `approvals:read`(清权限缓存)后重新登录。前置:两人各自的 `/api/todo/items` 都含这张无关待办(否则下面三段会空过)。① 请求人发起 ⇒ 请求人恰收 1 次 `todo:counts-updated`,计数 == 其自己的 `GET /api/todo/count`;② 审批人考勤侧 approve ⇒ 审批人恰收 1 次,计数 == 其 GET;③ 请求人对第二张请假发起后撤回 ⇒ 请求人恰收 1 次,计数 == 其 GET。`finally` 还原 `users.role`、撤回授予、停用无关席位 | 绿 |
+| P-11 (c) 围栏(改) | 拒绝前后序列 `(last_value, is_called)` 相等;零轮次、实例行数不变;正控后序列前进 | 绿 |
+| P-5 不变量经待办镜像(新) | 用生产方的构造函数 `buildApprovalTaskCreatedEvent` 由本轮在席席位造 task_created,经 `applyTodoMirrorTaskCreated`(开关只经 `deps.env` 传入,服务器自身的镜像仍 OFF)⇒ 插入 1 行 pending;真实 `DingTalkTodoMirrorWorker`(真库查询、`maxAttempts: 1`、全部网络注入点为抛错假件)跑一批 ⇒ 恰领 1 行,终态 `failed`(该 org 无启用的钉钉集成,重试额度用尽)或 `skipped`(有集成、收件人未绑定),尝试 1 次、无外部任务号;摘要 `deliveries` 恰为 `[{ dingtalk_todo, failed, 1 }]`;轮次仍 `pending`、引擎实例仍 `pending`、席位行逐行相等;持席位审批人 approve 200 ⇒ `applied` | 绿。两个终态分支本地各实测一次(临时改判后还原,`cmp` 一致):无集成时改判 `toBe('failed')` 过;临时插入一条启用集成后改判 `toBe('skipped')` 过;无集成时改判 `skipped` 红(负控)。临时集成行用后删除,库内 0 行 |
+
+**读数**(一次性库 `ms2_g4cancelc_fix1_20260929`,`createdb -O ms2testbed`,每次运行前断言 `current_database()`;`DATABASE_URL` 与 `ATTENDANCE_TEST_DATABASE_URL` 都指向它;迁移 `tsx src/db/migrate.ts` + CI 的 `MIGRATION_EXCLUDE`,EXIT 0,419 条;Node 20.20.2;工具直调 `node_modules/.bin/*`,未经 pnpm):
+
+| 运行 | 读数 |
+|---|---|
+| 修复前基线(同库,门审所见头) | 40/40 |
+| 本套件(`EXPECT_DB=1`,两条 URL) | **42/42**(40 + 新增 2) |
+| 逐提交 | `43111fde0a` 41/41;`a6a2420ba7` 41/41;`6f9e1cc5dc` 42/42 |
+| CI 形(`env -i`,仅 `DATABASE_URL`) | 41 通过 / 1 跳过(EXPECT_DB 哨兵) |
+| CI 相邻同序:seed-template-visibility → attendance-entry → template-groups-lifecycle | 82/82 |
+| 撤销轮真库尾部上半(lock-order-census / creation / redemption) | 129/129 |
+| 下半(seat-guards / attendance-fk-migration / outlet-guards / node-timeout-effect) | 26/26 |
+| `approval-realdb-org-writer-w4-s1`(被插件改动触发;其 `run` 行的文件原样) | 15/15 |
+| 点名单测 15 文件:撤销轮 ci-wiring / 休眠不可达 / 端口投递 / 端口动词 / 端口摘要 / 插件镜像常量 / 席位臂围栏、coverage-enumeration、双发布接线、端口作用域、UUID 路由、待办镜像配置与迁移 / 消费者 / worker、待办实时 | 636/636 |
+| `tests/unit/attendance*`(97 文件) | 1753/1753 |
+| `tsc --noEmit -p tsconfig.json`(core-backend) | EXIT 0 |
+| s6a:`computePackageProvenancePinSet` 全量重算 | 与已提交 pins 深等,差 0(本轮未触碰任何被钉文件);`sealed-export-package-provenance.test.cjs` OK |
+| 私有短语自扫(三份短语表) | 本轮每个提交的新增行与提交信息 0 命中;树命中数与各自父提交相同(均为 main 既有文件的旧命中) |
+
+**mutation**(每条:cp 备份 → 精确替换,每处须恰匹配一次 → 只跑点名用例 `-t` → cp 还原 → `cmp` 逐字节 → `git status` 与改前相同):
+
+| # | 手术 | 读数 |
+|---|---|---|
+| R-launch | 插件发起处去掉 `roles` 一行 | 1 红(① 段:推送 0 / GET 1) |
+| R-decide | 插件办理处去掉 `roles` 一行 | 1 红(② 段) |
+| R-withdraw | 插件撤回处去掉 `roles` 一行 | 1 红(③ 段) |
+| R-port | 端口的调用者项不带 `roles` | 1 红(① 段) |
+| R-order | 调用者项移到席位之后,且不再从席位中剔除调用者 | 1 红(② 段:审批人本人也在席位里,发布函数取到的是不带声明的那一项) |
+| F-below-alloc | 13 行围栏整块移到分配单号之后 | 1 红(序列 `last_value` 前进 1) |
+| F-below-insert | 整块移到第一条 INSERT 之后 | 1 红(同上) |
+| M-seat | worker 终态写之后追加一条停用本实例席位的 UPDATE | 1 红(席位行不等) |
+| M-status | 同处追加一条改引擎实例状态的 UPDATE | 1 红(引擎状态 ≠ `pending`) |
+| M-noop | 终态写的 WHERE 恒假(终态写不进去) | 1 红(账本停在 `sending`) |
+
+**本轮 NOT RUN**:CI(未推送);本修复轮的独立复审;待办中心真库闸(未被本轮文件触发,共享待办查询未改);动态休眠探针(路由未增减);被 `packages/core-backend/**` 宽匹配触发的 `batch2-test-stabilization` / `migration-replay` / `observability-*`;`attendance-web-guard.yml`(前端 lane);CI 所用 PostgreSQL 版本(本地同 §9.7)。
