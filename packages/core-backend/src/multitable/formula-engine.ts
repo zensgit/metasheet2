@@ -9,6 +9,7 @@ import type { MultitableField } from './field-codecs'
 import type { MultitableRecordsQueryFn } from './records'
 import { isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from './derived-write-fence'
+import { DerivedMergeTargetRetypedError } from './field-schema-fence-recheck'
 import { Logger } from '../core/logger'
 
 const logger = new Logger('MultitableFormulaEngine')
@@ -377,7 +378,12 @@ export class MultitableFormulaEngine {
         )
       } catch (error) {
         if (error instanceof SheetWriterBlockedError) {
-          logger.error('recalculateRecordFromData skipped under recovery block:', error as Error)
+          logger.error(
+            error instanceof DerivedMergeTargetRetypedError
+              ? 'recalculateRecordFromData skipped: target field is no longer a derived field:'
+              : 'recalculateRecordFromData skipped under recovery block:',
+            error as Error,
+          )
           return null
         }
         if (isWriterFenceEnabled()) {
