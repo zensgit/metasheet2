@@ -381,6 +381,49 @@ function isOrgIdValuePresent(value: unknown): boolean {
   return true
 }
 
+// Approval form grouping — daily-ops fix round (P3-1, groups-daily-ops-real-browser-acceptance-
+// 20260920.md). `:id` on the link/unlink endpoints is bound into a query against a `uuid` column
+// on BOTH sides (`approval_templates.id` in `isApprovalTemplateVisibleForGroupLink`'s SELECT,
+// `approval_template_group_links.template_id` in the link/unlink service functions —
+// `zzzz20260918090000_create_approval_template_groups.ts`). A malformed id (e.g. "not-a-uuid")
+// never reaches `mapGroupConstraintError`: Postgres raises `22P02 invalid_text_representation` on
+// the query itself, which is not a `ServiceError` and falls through `handleApprovalsError`'s
+// generic branch as a bare 500 `*_FAILED` code — a client input error mis-filed as a server
+// failure (measured pre-fix, real DB: 500 `APPROVAL_TEMPLATE_GROUP_LINK_FAILED` /
+// `APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED`). Checked BEFORE either query fires — same
+// "validate request shape before any DB access" discipline as `resolveApprovalTemplateGroupOrgId`
+// just below.
+//
+// Scope, stated as measured (P3-1a, impl-gate-A5-daily-ops-round1-20260920.md — an earlier draft
+// of this comment claimed this predicate "is not narrower than any real id, only narrower than the
+// strings that could never have been one", and that claim is FALSE, withdrawn here): this accepts
+// the canonical 8-4-4-4-12 hex form and nothing else, case-insensitively. Postgres' own `uuid`
+// input parser accepts more textual forms of the SAME value — an A/B run of this head against the
+// pre-fix head on one database measured `383f976ea2f24757ac25b6f501bbb0ef` (no hyphens) and
+// `{383f976e-a2f2-4757-ac25-b6f501bbb0ef}` (braces) both LINKING successfully (201/204) before this
+// check and both 400 after it, and `SELECT 'a0eebc999c0b4ef8bb6d6bb9bd380a11'::uuid` /
+// `SELECT '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'::uuid` both normalize to the canonical string.
+// Those are alternative spellings of a real id, not strings that "could never have been one", so
+// this IS a deliberate narrowing of the accepted request shape — chosen over normalizing (strip
+// braces / re-insert hyphens) because one canonical spelling per id keeps the endpoint's input
+// space equal to what the product's own clients send: the UI only ever passes ids it read back
+// from these APIs, which are always canonical.
+//
+// The real-DB census (`SELECT count(*) FROM approval_templates WHERE id::text !~
+// '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'` = 0 on a freshly migrated
+// database, where every id is `DEFAULT gen_random_uuid()`) is kept, with its scope corrected: it
+// shows no STORED id fails this pattern, i.e. no existing row becomes unaddressable. It says
+// nothing about which INPUT spellings are accepted — those are two different sets, and conflating
+// them is exactly what the withdrawn sentence did.
+//
+// A well-formed-but-nonexistent id is UNAFFECTED — it still reaches the pre-existing 404
+// `APPROVAL_TEMPLATE_NOT_FOUND` (link) / idempotent 204 (unlink) path.
+const WELL_FORMED_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isWellFormedUuid(value: string): boolean {
+  return WELL_FORMED_UUID_PATTERN.test(value)
+}
+
 function resolveApprovalTemplateGroupOrgId(req: Request, res: Response): string | undefined {
   const bodyOrgId = isPlainRecord(req.body) ? req.body.orgId : undefined
   const queryOrgId = (req.query as Record<string, unknown> | undefined)?.orgId
@@ -1637,6 +1680,13 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — validate shape before the visibility SELECT or the upsert ever touch the uuid
+      // columns; see the doc comment on `isWellFormedUuid` above.
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       const actorId = resolveApprovalActorId(req)
       if (!actorId) {
         return res.status(401).json(approvalErrorResponse('APPROVAL_ACTOR_REQUIRED', 'Authenticated actor is required'))
@@ -1664,6 +1714,13 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     try {
       const orgId = resolveApprovalTemplateGroupOrgId(req, res)
       if (!orgId) return
+      // P3-1 — see the doc comment on `isWellFormedUuid` above (link handler applies the same
+      // check for the same reason: `template_id` is a `uuid` column here too).
+      if (!isWellFormedUuid(req.params.id)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_TEMPLATE_ID_INVALID', 'templateId must be a well-formed UUID'),
+        )
+      }
       await unlinkApprovalTemplateFromGroup(orgId, req.params.id)
       res.status(204).end()
     } catch (error) {

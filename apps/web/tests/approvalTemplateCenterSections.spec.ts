@@ -32,7 +32,7 @@
  * leaving the row exactly where it was.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, defineComponent, h, nextTick, provide, ref, type App as VueApp } from 'vue'
 import { ApprovalApiError } from '../src/approvals/api'
 import { useAuth } from '../src/composables/useAuth'
 import { useLocale } from '../src/composables/useLocale'
@@ -514,14 +514,21 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     // Moving changes membership, not either section's already-loaded content — no re-fetch.
     expect(listTemplatesBySectionSpy).toHaveBeenCalledTimes(fetchCountBeforeMove)
 
-    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeNull()
+    const sourceSection = container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
+    const targetSection = container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
+    expect(sourceSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).toBeNull()
+    // P2-3 fix (groups-daily-ops-real-browser-acceptance-20260920.md): the moved row must now be
+    // RENDERED in the target, not merely counted — the pre-fix version bumped `total` without
+    // ever inserting it into `target.items`, which is exactly the phantom-"load more" defect this
+    // fix closes. `container`-wide absence is no longer the right assertion (the row legitimately
+    // reappears, just under `atg_b`); scoping the two checks to their own sections is what tells
+    // "moved" apart from "vanished".
+    expect(targetSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
     expect(
-      container!.querySelector('[data-testid="template-group-section-group:atg_a"]')!
-        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+      sourceSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
     ).toBe('0')
     expect(
-      container!.querySelector('[data-testid="template-group-section-group:atg_b"]')!
-        .querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
+      targetSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim(),
     ).toBe('1')
   })
 
@@ -652,6 +659,182 @@ describe('TemplateGroupSections — lock v2.13 §6 phase 3 (A-4) grouped view', 
     await flushUi()
     expect(selectSpy).toHaveBeenCalledWith('tpl_1')
   })
+
+  // ── P2-3 (groups-daily-ops-real-browser-acceptance-20260920.md) ──────────────────────────────
+  // `applyItemMove` used to only bump `target.total` without ever touching `target.items`, so a
+  // target section that already held its COMPLETE row set (the common case: `hasMore` false
+  // because `items.length === total`) went to `items.length < total` = true right after a move —
+  // a phantom "load more" that fetches an out-of-range page and comes back empty forever (P1/P2/P3
+  // in the acceptance report's scenario P). The SAME shape exists symmetrically on the SOURCE side
+  // when it was ALREADY paginated before the move (advisor review, this fix round): decrementing
+  // `total` without knowing the true row now sitting at the freed slot leaves `loadMore`'s
+  // page-number offset pointing past the end.
+  it('P2-3 (target, common case): moving into a section that already holds its full loaded set keeps count === rendered rows and shows no phantom "load more"', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) => {
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      // Purchase already holds its COMPLETE set: 2 rows loaded, total 2 — `hasMore` is false
+      // before the move (this is the report's exact repro shape).
+      if (section === 'group:atg_purchase') {
+        return Promise.resolve({
+          data: [template('tpl_p1', 'P1'), template('tpl_p2', 'P2')],
+          total: 2,
+        })
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const purchaseSection = container!.querySelector('[data-testid="template-group-section-group:atg_purchase"]')!
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('3')
+    // The moved row is actually RENDERED — not just counted — and no "load more" button appears.
+    expect(purchaseSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(3)
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]')).toBeNull()
+    // The common case needs zero extra network round-trips — same invariant the sibling "no
+    // re-fetch" test above pins for the already-empty-target case.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove)
+
+    // Negative control: clicking "load more" would be exactly the bug (a request against an
+    // out-of-range page that always comes back empty) — assert the button is simply absent rather
+    // than asserting a click is a no-op, which is the stronger, more direct claim.
+  })
+
+  it('P2-3 (source, symmetric case): moving OUT of an already-paginated section re-syncs its loaded range instead of leaving a stale, permanently-empty "load more"', async () => {
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    // Leave starts ALREADY paginated: page 1 has 10 of 11 rows loaded (`hasMore` true) — same
+    // shape as the acceptance report's `Leave` fixture (11 rows, PAGE_SIZE=10).
+    const leavePage1 = Array.from({ length: 10 }, (_, i) => template(`tpl_L${i}`, `Leave ${i}`))
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave') {
+        if (page === 1) return Promise.resolve({ data: leavePage1, total: 11 })
+        // After the move, the section has shrunk to 10 rows total — an unrefreshed page-1 request
+        // would still legitimately return the SAME 10 rows (minus the moved one, plus whichever
+        // row now fills the tail) — model that as one row fewer, to prove the refresh actually
+        // re-read page 1 rather than reusing stale client state.
+        throw new Error(`unexpected page ${page} requested for group:atg_leave`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_leave"]'),
+    ).not.toBeNull()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    // After the move, the backend's page 1 for this bucket has only 9 rows now (10 - the one that
+    // moved out) and total 10 — modelling "the section shrank below one full page" so the fix's
+    // refresh can be asserted precisely (`hasMore` must flip to false, not stay stuck true).
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave' && page === 1) {
+        return Promise.resolve({ data: leavePage1.slice(0, 9), total: 9 })
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_L0"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const leaveSection = container!.querySelector('[data-testid="template-group-section-group:atg_leave"]')!
+    expect(leaveSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('9')
+    expect(leaveSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(9)
+    // The section was fully re-synced (9 == 9, no more unfetched rows) — the stale "load more"
+    // from before the move must be gone, not stuck showing forever.
+    expect(container!.querySelector('[data-testid="template-group-section-more-group:atg_leave"]')).toBeNull()
+    // Exactly one refresh round-trip (page 1) — not a silent no-op, and not an unbounded re-fetch
+    // of every page the section ever had.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove + 1)
+  })
+
+  // P2-B (impl-gate-A5-daily-ops-round1-20260920.md): of `applyItemMove`'s three post-move
+  // branches, the two above cover "target already complete" and "source already paginated". The
+  // THIRD — target already paginated — shipped with no case at all, and the gate's mutation M2
+  // (revert `:582` to the pre-fix `target.hasMore = target.items.length < target.total`) survived
+  // the whole 22-case file. The mirror of the source test does NOT discriminate it: with page 1 =
+  // 10 of 11 and one row moved in, the pre-fix line also computes `hasMore = 10 < 12 = true` and
+  // the rendered count is `12` either way. The two observables that separate them are the target's
+  // page-1 REFRESH REQUEST (fix: exactly one; pre-fix: none) and the server's post-move page 1
+  // actually being RENDERED (fix: the moved row is in it; pre-fix: the stale ten rows stand).
+  it('P2-3 (target, already-paginated case): moving INTO an already-paginated section re-reads its loaded range instead of guessing where the new row landed', async () => {
+    const purchasePage1 = Array.from({ length: 10 }, (_, i) => template(`tpl_P${i}`, `Purchase ${i}`))
+    listApprovalTemplateGroupsSpy.mockResolvedValue([
+      group({ id: 'atg_leave', name: 'Leave', sortOrder: 1 }),
+      group({ id: 'atg_purchase', name: 'Purchase', sortOrder: 2 }),
+    ])
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      // Source: one row, complete — so the source side contributes ZERO requests and every
+      // request counted below belongs to the target branch under test.
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+      // Target: 10 of 11 loaded before the move — `hasMore` true, i.e. ALREADY paginated.
+      if (section === 'group:atg_purchase') {
+        if (page === 1) return Promise.resolve({ data: purchasePage1, total: 11 })
+        throw new Error(`unexpected page ${page} requested for group:atg_purchase`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    await mountView()
+    // Pre-state sanity: the target really is in the paginated branch. If it were complete, the
+    // sibling case above would be the one exercised and this test would assert nothing new.
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]'),
+    ).not.toBeNull()
+    const fetchCountBeforeMove = listTemplatesBySectionSpy.mock.calls.length
+
+    // After the move the backend's page 1 for this bucket CHANGES: the moved row sorts into it and
+    // pushes the old page 1's last row down to page 2. A client cannot derive that from a local
+    // `total` bump — which is exactly why the fix re-reads the loaded range.
+    listTemplatesBySectionSpy.mockImplementation(({ section, page }: { section: string; page: number }) => {
+      if (section === 'group:atg_leave') return Promise.resolve({ data: [], total: 0 })
+      if (section === 'group:atg_purchase') {
+        if (page === 1) {
+          return Promise.resolve({ data: [template('tpl_1', 'Row 1'), ...purchasePage1.slice(0, 9)], total: 12 })
+        }
+        throw new Error(`unexpected page ${page} requested for group:atg_purchase`)
+      }
+      return Promise.resolve({ data: [], total: 0 })
+    })
+
+    const select = container!.querySelector(
+      '[data-testid="template-group-section-move-tpl_1"]',
+    ) as HTMLSelectElement
+    await selectMoveTarget(select, 'group:atg_purchase')
+
+    const purchaseSection = container!.querySelector('[data-testid="template-group-section-group:atg_purchase"]')!
+    // (1) The moved row is RENDERED inside the target, not merely counted.
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
+    // (2) Exactly one extra round-trip, and it is the target's page 1.
+    expect(listTemplatesBySectionSpy.mock.calls.length).toBe(fetchCountBeforeMove + 1)
+    expect(listTemplatesBySectionSpy.mock.calls.at(-1)![0]).toMatchObject({
+      section: 'group:atg_purchase',
+      page: 1,
+    })
+    // (3) Count, rendered rows and the remaining-rows affordance all agree with the server after
+    //     the refresh: 12 in the bucket, 10 loaded, more genuinely available.
+    expect(purchaseSection.querySelector('[data-testid="template-group-section-count"]')!.textContent!.trim()).toBe('12')
+    expect(purchaseSection.querySelectorAll('[data-testid^="template-group-section-item-"]').length).toBe(10)
+    expect(
+      container!.querySelector('[data-testid="template-group-section-more-group:atg_purchase"]'),
+    ).not.toBeNull()
+  })
 })
 
 /**
@@ -776,5 +959,316 @@ describe('TemplateGroupSections — acceptance J page-level entry (design lock v
     expect(error!.textContent).toContain('模板分组服务暂不可用')
     // The reactive-not-proactive rule: no session-org lookup is made for a non-J failure.
     expect(httpMocks.apiFetch).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — HOSTED mode.
+ *
+ * Every case above mounts this view standalone, where it keeps its own `useSessionOrg()` instance,
+ * draws its own switcher and replays its own blocked `loadAll()` (the D3-1 block below pins that
+ * whole loop, and acceptance J's "remove the handling of that code" mutation is red there). Inside
+ * TemplateCenterView a host now provides the page's single instance, and this view must then draw
+ * NOTHING of its own — a second live `useSessionOrg()` instance is not a cosmetic duplicate: the
+ * composable's `onAuthPrincipalChange` empties `orgs` on every instance that did not perform the
+ * switch, so a real browser measured the page dropping to ZERO switchers when the admin happened
+ * to use the sections view's copy instead of the page's.
+ */
+describe('TemplateGroupSections — hosted session-org entry (P1-A)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let notifySessionOrgRequired: ReturnType<typeof vi.fn>
+  const sectionsRef = ref<{ loadAll: () => Promise<void> } | null>(null)
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    useAuth().setToken(
+      `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: 'org-a', exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`,
+    )
+    listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockReset()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    httpMocks.apiFetch.mockReset()
+    httpMocks.apiFetch.mockImplementation(async (path: string) => {
+      if (String(path).startsWith('/api/auth/session-orgs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } }),
+        }
+      }
+      throw new Error(`unexpected call: ${path}`)
+    })
+    notifySessionOrgRequired = vi.fn()
+    sectionsRef.value = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountHosted() {
+    const { default: TemplateGroupSections } = await import('../src/views/approval/TemplateGroupSections.vue')
+    const { SessionOrgHostKey } = await import('../src/components/SessionOrgSwitcher.vue')
+    const { useSessionOrg } = await import('../src/composables/useSessionOrg')
+    const Host = defineComponent({
+      setup() {
+        // The real composable — the host's single instance, exactly as TemplateCenterView builds
+        // it, plus the host's own one fetch of the org list. Populating `orgs` is what makes "this
+        // view draws no switcher" discriminating: `SessionOrgSwitcher`'s own `v-if` hides it while
+        // `orgs` is empty, so a view that FAILED to defer would still render nothing here and the
+        // case would pass vacuously.
+        const sessionOrg = useSessionOrg()
+        void sessionOrg.loadSessionOrgs()
+        provide(SessionOrgHostKey, { sessionOrg, notifySessionOrgRequired })
+        return () => h(TemplateGroupSections as any, { ref: sectionsRef, onSelect: vi.fn() })
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  function sessionOrgRequired(): ApprovalApiError {
+    return new ApprovalApiError(
+      'An authenticated session organization is required',
+      403,
+      'SESSION_ORG_REQUIRED',
+    )
+  }
+
+  it('a 403 SESSION_ORG_REQUIRED draws NO switcher here, makes no session-org lookup of its own, and reports the code to the host exactly once', async () => {
+    listApprovalTemplateGroupsSpy.mockRejectedValue(sessionOrgRequired())
+
+    await mountHosted()
+
+    const sessionOrgLookups = () =>
+      httpMocks.apiFetch.mock.calls.filter(([path]) => String(path).startsWith('/api/auth/session-org')).length
+    // Sanity: the host's instance holds two orgs, so anything that rendered a switcher here would
+    // actually be visible (the component hides itself while `orgs` is empty).
+    expect(sessionOrgLookups()).toBe(1)
+
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(notifySessionOrgRequired).toHaveBeenCalledTimes(1)
+    // No SECOND lookup: the one `/api/auth/session-orgs` call belongs to the host.
+    expect(sessionOrgLookups()).toBe(1)
+    // The generic load error is NOT what is shown for this code — that regression is what D3-1
+    // fixed and it must survive hosting.
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+  })
+
+  it('the host replaying loadAll() after its switch brings the sections back', async () => {
+    listApprovalTemplateGroupsSpy.mockRejectedValueOnce(sessionOrgRequired())
+    listApprovalTemplateGroupsSpy.mockResolvedValue([group({ id: 'atg_a', name: 'Group A', sortOrder: 1 })])
+    listTemplatesBySectionSpy.mockImplementation(({ section }: { section: string }) =>
+      section === 'group:atg_a'
+        ? Promise.resolve({ data: [template('tpl_1', 'Row 1')], total: 1 })
+        : Promise.resolve({ data: [], total: 0 }),
+    )
+
+    await mountHosted()
+    expect(container!.querySelector('[data-testid="template-group-section-group:atg_a"]')).toBeNull()
+
+    // This is literally what TemplateCenterView.onPageSessionOrgChange calls on a successful switch.
+    await sectionsRef.value!.loadAll()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="template-group-section-group:atg_a"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="template-group-section-item-tpl_1"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
+})
+
+/**
+ * (ii) Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+ * scenario asked for alongside P2-C/P3-D): `TemplateCenterView.onPageSessionOrgChange` calls
+ * `groupSectionsRef.value?.loadAll()` after EVERY successful switch. Two rapid, back-to-back
+ * switches therefore fire two overlapping `loadAll()` calls — this drives that directly, at the
+ * component level, by controlling exactly when each call's underlying `listApprovalTemplateGroups`
+ * promise settles, rather than trying to race real timers.
+ */
+describe('TemplateGroupSections — request algebra guard (rapid org switch)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const sectionsRef = ref<{ loadAll: () => Promise<void> } | null>(null)
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    listApprovalTemplateGroupsSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue([])
+    listTemplatesBySectionSpy.mockReset()
+    listTemplatesBySectionSpy.mockResolvedValue({ data: [], total: 0 })
+    sectionsRef.value = null
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: TemplateGroupSections } = await import('../src/views/approval/TemplateGroupSections.vue')
+    const Host = defineComponent({
+      setup() {
+        return () => h(TemplateGroupSections as any, { ref: sectionsRef, onSelect: vi.fn() })
+      },
+    })
+    app = createApp(Host)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  it('(ii) a stale loadAll() answer that arrives AFTER a newer one must not overwrite the newer org\'s rendered sections', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    // onMounted's own loadAll() is the first call — let it settle cleanly before the race below.
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+
+    // Two rapid successive org switches: TemplateCenterView.onPageSessionOrgChange calls
+    // `loadAll()` again on EACH switch, before either has necessarily returned.
+    const stale = sectionsRef.value!.loadAll() // fired for the org being switched AWAY from
+    const fresh = sectionsRef.value!.loadAll() // fired for the org just switched TO
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+
+    // Resolve OUT OF ORDER: the request fired SECOND (the org now current) answers first — a
+    // slower network round trip for the org the admin has already left answers last.
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await flushUi()
+    resolvers[1]([group({ id: 'atg_stale', name: 'Stale Org Group', sortOrder: 1 })])
+    await Promise.all([stale, fresh])
+    await flushUi()
+
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('Stale Org Group')
+  })
+
+  // ── Boundary ③ of the round-3 acceptance — sibling of `ApprovalTemplateGroupsPanel.spec.ts`'s
+  // pair. `loadAll()`'s guard has three exits and the case above drives only the first; these two
+  // delay the stale request into its CATCH and into its FINALLY respectively.
+
+  it('(③ catch exit) a stale loadAll() FAILURE landing after a newer one must not replace the new org\'s sections with the previous org\'s error', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    const rejecters: Array<(err: Error) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve, reject) => {
+        resolvers.push(resolve)
+        rejecters.push(reject)
+      }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+
+    const stale = sectionsRef.value!.loadAll() // the org being switched AWAY from
+    const fresh = sectionsRef.value!.loadAll() // the org just switched TO
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+
+    // The new org answers first and renders; THEN the abandoned org's request fails.
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await flushUi()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    rejecters[1](new Error('stale org boom'))
+    await Promise.all([stale, fresh])
+    await flushUi()
+
+    // The error branch also does `sections.value = []`, so an unguarded stale failure does not
+    // merely add a banner — it wipes the organization the admin is actually looking at.
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('stale org boom')
+  })
+
+  it('(③ finally exit) a stale loadAll() settling while the newer one is STILL in flight must not clear the newer request\'s loading state', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([])
+    await flushUi()
+    // Positive control for the selector asserted below: once a load has settled, the loading
+    // state is GONE, so its presence later is genuinely "still loading" and not a leftover.
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).toBeNull()
+
+    const stale = sectionsRef.value!.loadAll()
+    const fresh = sectionsRef.value!.loadAll()
+    await flushUi(1)
+    expect(resolvers.length).toBe(3)
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).not.toBeNull()
+
+    // Only the ABANDONED org's request answers. The current org's is still on the wire.
+    resolvers[1]([group({ id: 'atg_stale', name: 'Stale Org Group', sortOrder: 1 })])
+    await stale
+    await flushUi()
+
+    // Without the guard on the `finally`, the stale call lowers `loadingGroups` and this view
+    // drops out of its loading state into the (empty) settled render for an organization it has
+    // not heard from yet.
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).not.toBeNull()
+    expect(container!.textContent).not.toContain('Stale Org Group')
+
+    resolvers[2]([group({ id: 'atg_fresh', name: 'Fresh Org Group', sortOrder: 1 })])
+    await fresh
+    await flushUi()
+    expect(container!.querySelector('[data-testid="template-group-sections-loading"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+  })
+
+  // ── Boundary ① at the component that OWNS the state ────────────────────────────────────────
+  // Sibling of `ApprovalTemplateGroupsPanel.spec.ts`'s case. The sections are this view's own
+  // per-organization state; a change of identity must drop them, and the read that was already on
+  // the wire for the previous identity must not be able to paint them back.
+  it('(①) an external principal change drops the rendered sections, and the load in flight for the previous identity cannot commit afterwards', async () => {
+    const resolvers: Array<(groups: ApprovalTemplateGroupDTO[]) => void> = []
+    listApprovalTemplateGroupsSpy.mockImplementation(
+      () => new Promise<ApprovalTemplateGroupDTO[]>((resolve) => { resolvers.push(resolve) }),
+    )
+
+    await mountView()
+    expect(resolvers.length).toBe(1)
+    resolvers[0]([group({ id: 'atg_a', name: 'Previous Identity Group', sortOrder: 1 })])
+    await flushUi()
+    expect(container!.textContent).toContain('Previous Identity Group')
+
+    const inFlight = sectionsRef.value!.loadAll()
+    await flushUi(1)
+    expect(resolvers.length).toBe(2)
+
+    useAuth().setToken(`header.${btoa(JSON.stringify({ userId: 'other', tenantId: 'org-z', exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`)
+    await flushUi(4)
+
+    expect(container!.textContent).not.toContain('Previous Identity Group')
+
+    resolvers[1]([group({ id: 'atg_a', name: 'Previous Identity Group', sortOrder: 1 })])
+    await inFlight
+    await flushUi()
+    expect(container!.textContent).not.toContain('Previous Identity Group')
+    expect(container!.querySelector('[data-testid="template-group-sections-error"]')).toBeNull()
   })
 })
