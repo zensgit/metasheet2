@@ -1501,12 +1501,14 @@ exec npx vitest run \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
   data-sources-ui \
+  dataSourcesLoadFailedReseal \
   dingtalk-internal-view-link-warnings \
   dingtalk-public-form-link-warnings \
   dingtalk-recipient-field-warnings \
   DirectoryDeprovisionEvidencePanel.spec.ts \
   directoryManagementView \
   featureFlagsApprovalMobile \
+  formViewValidation \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
   lineDerivation \

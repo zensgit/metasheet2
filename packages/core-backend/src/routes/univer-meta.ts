@@ -440,6 +440,11 @@ import {
   prepareSheetLinkDeleteFencePlan,
   type FieldLinkRestoreFencePlan,
 } from '../multitable/link-writer-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  DerivedMergeTargetRetypedError,
+  FieldSchemaChangedError,
+} from '../multitable/field-schema-fence-recheck'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -3304,7 +3309,9 @@ async function recalculateFormulaFields(
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
-              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
               throw err
             }
@@ -4311,7 +4318,9 @@ async function computeDependentLookupRollupRecords(
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
-              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] fan-out relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
             throw err
@@ -6985,7 +6994,7 @@ type PatchFailurePayload = {
 
 type WriterFenceConflictPayload = {
   statusCode: 409
-  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED'
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED' | 'FIELD_SCHEMA_CHANGED'
   message: string
 }
 
@@ -6998,6 +7007,14 @@ function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload 
     }
   }
   if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  // Field retype slice 3a: a touched field changed type / options while the write waited on the fence.
+  if (err instanceof FieldSchemaChangedError) {
     return {
       statusCode: err.statusCode,
       code: err.code,
@@ -7466,6 +7483,14 @@ function lossyRetypeTargetProperty(rev: ConfigRevisionRow): Record<string, unkno
  *   2. FIELD: the actor's field_permissions scope masks nothing — the allowed set with the per-subject scope applied
  *      equals the set with that axis lifted.
  *   3. FORMULA TAINT: no allowed field is dropped by the §2a.3 stored-data taint mask.
+ *
+ * The three axes only look for RESTRICTIONS; none of them asks whether the actor may read the sheet at all. That is
+ * the precondition below: `capabilities.canRead`, the sheet's resolved read plane. It is NOT implied by every
+ * capability a caller may have gated on before reaching here — `canManageFields` holds on `multitable:manage-schema`
+ * alone (manage-schema-permission.ts) while `canRead` needs read/write/admin (access.ts `deriveCapabilities`), so
+ * without it a schema manager who cannot read the sheet passed as "full read" on any unrestricted sheet (the lossy
+ * config-restore retype-revert preview/execute, which gate on `canManageFields`). Checked FIRST and with no DB
+ * access, so a refused actor causes no row-level/field/taint read either. Config-derived like the three axes.
  */
 export async function hasFullTableReadAccess(
   req: Request | undefined,
@@ -7475,6 +7500,7 @@ export async function hasFullTableReadAccess(
   capabilities: MultitableCapabilities,
 ): Promise<boolean> {
   if (!access.userId) return false // anonymous/unscoped → fail closed
+  if (!capabilities.canRead) return false // no read plane on this sheet → no full read (see above)
   if (!access.isAdminRole && (await loadRowLevelReadDenyEnabled(query, sheetId))) return false
   const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
   const scopeMap = await loadFieldPermissionScopeMap(query, sheetId, access.userId)
@@ -9333,7 +9359,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // Copy-sheet S1 (ADR §3): `canCopySheet` = the SAME two gates the copy route enforces —
       // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
       // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
-      // in-transaction re-check) ∧ hasFullTableReadAccess (source, three axes, no counts). The target gate runs
+      // in-transaction re-check) ∧ hasFullTableReadAccess (source: read on the sheet plus the three axes, no counts;
+      // the read is this handler's own `capabilities.canRead`, and /context does not apply the projection fences —
+      // see the #5936 note above — while the copy route's gate reads it as the fences leave it). The target gate runs
       // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
       // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
       // entry, never 500s the load, and logs values-free.
@@ -18390,6 +18418,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           await acquireAutoNumberSheetWriteLock(query, view.sheetId)
           if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
         }
+        // Field retype slice 3a (ADR §3.11 row 5, form submit EDIT + CREATE incl. public forms): the submission
+        // was validated against `fieldById`, loaded through the pool before this transaction. Re-read the
+        // submitted fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift — one call covers both
+        // branches. No query unless the convert flag is 'true'.
+        await assertFieldSchemaUnchangedAfterFence(query, view.sheetId, fieldById, Object.keys(data))
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)

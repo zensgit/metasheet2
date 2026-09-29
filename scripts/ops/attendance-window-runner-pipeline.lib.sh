@@ -85,3 +85,29 @@ dsn_database_name() {
   fi
   printf '%s' "${base##*/}"
 }
+
+# backend_override_environment_lines <set_window_env> <tasks_window_enabled>
+#
+# Pure text generator for action_deploy's persistent runner override (docker-compose.window-
+# runner.override.yml, services.backend). Emits AT MOST ONE `    environment:` stanza (4-space
+# indent, matching the override writer's `  backend:` nesting one level up) containing the
+# rd-window keys (when set_window_env=rd-window) and/or TASKS_ENABLED (when
+# tasks_window_enabled=true) — every key appears AT MOST ONCE across the whole stanza, and
+# nothing is printed at all when neither flag applies (the `none` shape, matching the writer's
+# pre-tasks_enabled behavior byte-for-byte). No I/O, no env reads: pure argv -> stdout, callable
+# standalone (proven by scripts/ops/attendance-window-runner-pipeline.test.mjs) and by
+# action_deploy in attendance-staging-window-runner-remote.sh.
+backend_override_environment_lines() {
+  local set_window_env="$1" tasks_window_enabled="$2"
+  if [[ "$set_window_env" != "rd-window" && "$tasks_window_enabled" != "true" ]]; then
+    return 0
+  fi
+  echo "    environment:"
+  if [[ "$set_window_env" == "rd-window" ]]; then
+    echo "      ATTENDANCE_SCHEDULER_ENABLED: \"true\""
+    echo "      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: \"true\""
+  fi
+  if [[ "$tasks_window_enabled" == "true" ]]; then
+    echo "      TASKS_ENABLED: \"true\""
+  fi
+}

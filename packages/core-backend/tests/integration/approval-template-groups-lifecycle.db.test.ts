@@ -52,9 +52,17 @@ import {
  * checked-in suite (which also runs against CI's SHARED `metasheet_test` database).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
-const EXPECT_DB = process.env.EXPECT_DB === '1'
-const itIfExpectDb = EXPECT_DB ? it : it.skip
 const TS = Date.now()
+
+// Sentinel deliberately lives OUTSIDE describeIfDatabase (top-level `it`, gated only on
+// EXPECT_DB): nested inside `describeIfDatabase` it would itself be skipped whenever
+// DATABASE_URL is absent, so a DB-expected lane (EXPECT_DB=1) with a missing DATABASE_URL would
+// report this whole file as skipped-green instead of red. Same shape as
+// approval-org-writer-w4-s1.db.test.ts / approval-comments.db.test.ts.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 async function canListen(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -222,10 +230,6 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
   // interrupted before its own `afterAll` — pre-execution cleanup is what survives interruption,
   // post-execution cleanup only survives a completed run.
   const dbGrantedAdminUserIds: string[] = []
-
-  itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
-  })
 
   beforeAll(async () => {
     expect(await canListen()).toBe(true)
@@ -1861,6 +1865,58 @@ describeIfDatabase('approval template groups — lifecycle (lock v2.13 phase 1, 
     )
     expect(relinkRow.rows[0].group_id).toBe(gA.id)
     expect(relinkRow.rows[0].unlinked_at).toBeNull()
+  })
+
+  // ── P3-1 ───────────────────────────────────────────────────────────────────────────────────
+  // groups-daily-ops-real-browser-acceptance-20260920.md finding P3-1: `:id` on both the link and
+  // unlink endpoints is bound straight into a query against a `uuid` column
+  // (`approval_templates.id` / `approval_template_group_links.template_id` — both `uuid`, see
+  // `zzzz20260918090000_create_approval_template_groups.ts` and the base templates migration; a
+  // fresh `metasheet2_a5_20260920` census confirms 0 existing rows fail the canonical
+  // 8-4-4-4-12 form). A malformed id therefore never reaches `mapGroupConstraintError` — Postgres
+  // raises `22P02 invalid_text_representation` on the query itself, which lands in the generic
+  // `catch` and comes out as a bare 500 `*_FAILED` (measured pre-fix: `APPROVAL_TEMPLATE_GROUP_LINK_FAILED`
+  // / `APPROVAL_TEMPLATE_GROUP_UNLINK_FAILED`) — a client input error mis-filed as a server failure.
+  // Not UI-reachable (the front end only ever sends a real template id), but any direct API caller
+  // can trigger it and it pollutes 5xx error budgets/alerts. Fixed by validating the id's SHAPE
+  // before either query fires (same "validate before any DB access" discipline as
+  // `resolveApprovalTemplateGroupOrgId`), typed 400 `APPROVAL_TEMPLATE_ID_INVALID`.
+  it('P3-1: a malformed templateId on link/unlink is a typed 400, not a raw 500 from the uuid column', async () => {
+    const org = trackOrg(`atg-p31-${TS}`)
+    const admin = await tok(base, `p31-admin-${TS}`, { roles: 'admin', perms: '*:*', tenantId: org })
+    const group = (
+      await (
+        await httpReq(base, '/api/approval-template-groups', admin, { method: 'POST', body: { name: `P3-1 ${TS}` } })
+      ).json()
+    ).group
+
+    const linkRes = await httpReq(base, '/api/approval-templates/not-a-uuid/group', admin, {
+      method: 'POST',
+      body: { groupId: group.id },
+    })
+    expect(linkRes.status).toBe(400)
+    const linkBody = await linkRes.json()
+    expect(linkBody.error.code).toBe('APPROVAL_TEMPLATE_ID_INVALID')
+
+    const unlinkRes = await httpReq(base, '/api/approval-templates/not-a-uuid/group', admin, { method: 'DELETE' })
+    expect(unlinkRes.status).toBe(400)
+    const unlinkBody = await unlinkRes.json()
+    expect(unlinkBody.error.code).toBe('APPROVAL_TEMPLATE_ID_INVALID')
+
+    // Positive control — a real, well-formed (but nonexistent) uuid still reaches the pre-existing
+    // 404 path, proving the new check narrows only malformed shapes, not every unknown id.
+    const wellFormedButMissing = '00000000-0000-0000-0000-000000000000'
+    const linkMissing = await httpReq(base, `/api/approval-templates/${wellFormedButMissing}/group`, admin, {
+      method: 'POST',
+      body: { groupId: group.id },
+    })
+    expect(linkMissing.status).toBe(404)
+    expect((await linkMissing.json()).error.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+
+    const unlinkMissing = await httpReq(base, `/api/approval-templates/${wellFormedButMissing}/group`, admin, {
+      method: 'DELETE',
+    })
+    expect(unlinkMissing.status).toBe(204)
   })
 
   // ── I′ ─────────────────────────────────────────────────────────────────────────────────────

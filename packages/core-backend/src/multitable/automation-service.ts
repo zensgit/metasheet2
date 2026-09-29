@@ -60,6 +60,12 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromRows,
+  type FieldSchemaSnapshot,
+  type FieldSchemaSnapshotEntry,
+} from './field-schema-fence-recheck'
+import {
   AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
@@ -871,9 +877,10 @@ function actionTargetsTriggerRecord(actionType: string, config: Record<string, u
  * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
  * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
  * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
- * Deliberately NOT applied to a disable-only / name-only / conditions-only edit or to deleteRule: an
- * operator must always be able to turn such a rule off (setRuleEnabled routes through updateRule) — see
- * the updateRule gate for the exact input shapes that run this check.
+ * Deliberately NOT applied to an on/off switch (disable-only, and enable-only since #6155), a name-only or
+ * conditions-only edit, or to deleteRule: an operator must always be able to turn such a rule off and back
+ * on (setRuleEnabled routes through updateRule) — see the updateRule gate for the exact input shapes that
+ * run this check.
  */
 export function validateDeletedTriggerSelfMutation(
   triggerType: string,
@@ -2071,19 +2078,21 @@ export class AutomationService {
 
     // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
     // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
-    // type/config/list, execution mode — or RE-ENABLES the rule (F9c precedent: `enabled` is not a bypass
-    // for arming a rule that can only ever no-op). Deliberately NOT gated like the T1-2/T1-3 blocks above
-    // (every write shape): a DISABLE-only `{ enabled: false }`, a rename, a conditions-only or a
-    // triggerConfig-only edit of an EXISTING such rule must still succeed — `setRuleEnabled` routes through
-    // this method, and the customer's way out of the self-chain is exactly "turn it off" (or deleteRule,
-    // which validates nothing). Existing rules stay loadable; they cannot be saved forward with this shape.
+    // type/config/list, execution mode. Deliberately NOT gated like the T1-2/T1-3 blocks above (every write
+    // shape): a rename, a conditions-only or a triggerConfig-only edit, and a pure on/off switch of an EXISTING
+    // such rule must still succeed — `setRuleEnabled` routes through this method.
+    // #6155 (Ratified-by-default-2026-09-29, reverses one sentence of #6078): an enable-only PATCH
+    // (`{ enabled: true }` with none of the five shape fields) is NOT checked either. Switching a rule off and
+    // on again must bring back the state it had; the shape does not change; a rule of this shape that is on
+    // already runs and each run ends as skipped (#6078). `enabled: true` sent TOGETHER with a shape field is
+    // still checked — the shape field alone opens this gate. Existing rules stay loadable and switchable; they
+    // cannot be saved forward with this shape.
     if (
       input.triggerType !== undefined
       || input.actionType !== undefined
       || input.actionConfig !== undefined
       || input.actions !== undefined
       || input.executionMode !== undefined
-      || input.enabled === true
     ) {
       // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
       // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
@@ -2114,7 +2123,7 @@ export class AutomationService {
       if (deletedTriggerSelfMutationError) {
         throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
       }
-      // Final review F4 (same gate condition as above, so disable-only / rename / conditions-only edits still skip it).
+      // Final review F4 (same gate condition as above, so on/off switches / rename / conditions-only edits still skip it).
       const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
         sheetId,
         nextTriggerType,
@@ -2170,7 +2179,8 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule through the same resulting-shape validation as every other edit.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit — except the
+   * record-deleted self-mutation shape check, which a pure on/off switch does not run (#6155).
    */
   async setRuleEnabled(
     ruleId: string,
@@ -4170,7 +4180,8 @@ export class AutomationService {
     }
 
     // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
-    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4187,6 +4198,7 @@ export class AutomationService {
       automationDepth: this.backwriteAutomationDepth(bridge),
       lockedMessage: 'source record is locked',
       onMissing: 'skip',
+      schemaSnapshot,
     })
     // Final review F3: `false` here only ever means "the record is gone" (SELECT saw no row, or the UPDATE
     // affected 0 rows) — say so instead of the silent null that "no writeback configured" also returns.
@@ -4240,7 +4252,8 @@ export class AutomationService {
     if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
-    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4256,6 +4269,7 @@ export class AutomationService {
       lockedMessage: 'target record is locked',
       onMissing: 'throw',
       missingMessage: `cross-base resultWriteback target record not found: ${targetRecordId} ∉ ${targetSheetId}`,
+      schemaSnapshot,
     })
     if (!wrote) return null // unreachable with onMissing:'throw'; keeps the boolean contract total
     return { kind: 'cross-base', target: { targetBaseId, targetSheetId, targetRecordId } }
@@ -4358,6 +4372,11 @@ export class AutomationService {
       lockedMessage: string
       onMissing: 'skip' | 'throw'
       missingMessage?: string
+      /**
+       * Field retype slice 3a (ADR §3.11 row 7): the field rows `assertResultWritebackFields` validated the
+       * patch against — read through `this.queryFn` OUTSIDE the transaction below, i.e. before the fence.
+       */
+      schemaSnapshot?: FieldSchemaSnapshot | null
     },
   ): Promise<boolean> {
     // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
@@ -4370,6 +4389,10 @@ export class AutomationService {
       _automationDepth: opts.automationDepth,
     })
     const wrote = await this.withTransaction(sheetId, async (query) => {
+      // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
+      // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
+      // unless the convert flag is 'true'.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, opts.schemaSnapshot ?? null, Object.keys(patch))
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -4450,6 +4473,8 @@ export class AutomationService {
     sheetId: string,
     writeback: Record<string, unknown>,
     outcome: string,
+    /** Field retype slice 3a: filled with what this check validated against, for the post-fence re-check. */
+    schemaSnapshotOut?: Map<string, FieldSchemaSnapshotEntry>,
   ): Promise<void> {
     const mapped = RESULT_WRITEBACK_FIELDS
       .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
@@ -4477,6 +4502,8 @@ export class AutomationService {
       const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
       if (typeError) throw new Error(typeError)
     }
+    // Field retype slice 3a: what the check above validated against — re-compared after the fence.
+    if (schemaSnapshotOut) for (const [id, entry] of fieldSchemaSnapshotFromRows(res.rows)) schemaSnapshotOut.set(id, entry)
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
