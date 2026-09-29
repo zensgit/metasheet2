@@ -33,6 +33,9 @@ import { createRequire } from 'node:module'
 //   OP-10 目标表一致性 — installs 与 readiness 问同一个 objectId, and WHICH readiness route is used
 //         is decided by that id's namespace (canonical vs sandbox), never sent blind.
 //   OP-11 反查不带 workspaceId — the regression that made this lookup return zero rows forever.
+//   OP-12 源就绪预检's own refusals (no membership / another organisation / not the connection's
+//         owner / binding lookup unavailable) each say so, instead of 「需要对接读取权限」 for a 403 or
+//         「目标表配置不对」 for a 400; a real 403 FORBIDDEN keeps the permission sentence.
 
 const h = vi.hoisted(() => ({
   locale: 'zh-CN' as string,
@@ -615,6 +618,63 @@ describe('BOM备料 记录与排查面板 (P1-4/P1-5)', () => {
     await flush()
     expect(cell.textContent).toContain('未接入监控')
     expect(urlsMatching('scheduled').length).toBe(0)
+  })
+
+  // -------------------------------------------------------------------------
+  // OP-12 — 源就绪预检's own refusals are not "you need integration read" and not "misconfigured".
+  // -------------------------------------------------------------------------
+
+  it('OP-12: the source-readiness cell names the route`s own refusals, and keeps the permission sentence for a real 403 FORBIDDEN', async () => {
+    const cases: Array<[number, string, string, string]> = [
+      // [status, code, the sentence the note must carry, the cell status that stays as it was]
+      [403, 'OPERATOR_SCOPE_TENANT_REQUIRED', '还没有加入这家工厂的组织', 'forbidden'],
+      [403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', '还没有加入这家工厂的组织', 'forbidden'],
+      [403, 'OPERATOR_SCOPE_TENANT_MISMATCH', '不是您账号所属的那一家', 'forbidden'],
+      [403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', '不是您账号所属的那一家', 'forbidden'],
+      [400, 'CONNECTION_CANONICAL_UNAVAILABLE', '这个连接没有让您的账号读', 'misconfigured'],
+      [503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE', '暂时没有应答', 'unavailable'],
+    ]
+    const root = await mountPanel()
+    const cell = node(root, 'stock-prep-ops-cell-source-preflight')!
+    for (const [status, code, sentence, cellStatus] of cases) {
+      installRoutes({ sourcePreflight: () => refusal(status, code) })
+      node(root, 'stock-prep-ops-cell-source-preflight-check')!.dispatchEvent(new Event('click', { bubbles: true }))
+      await flush()
+      const label = `${status} ${code}`
+      expect(cell.getAttribute('data-cell-status'), label).toBe(cellStatus)
+      const note = text(root, 'stock-prep-ops-cell-source-preflight-note')
+      expect(note, label).toContain(sentence)
+      expect(note, `${label}: not the permission sentence`).not.toContain('需要对接读取权限')
+      expect(note, `${label}: not the target-table sentence`).not.toContain('目标表配置不对')
+      expect(note, `${label}: not the retry-later sentence`).not.toContain('请稍后再试')
+      expect(cell.textContent, `${label}: the server code is not painted`).not.toContain(code)
+    }
+
+    // A real missing permission keeps its sentence, and a stale refusal does not leak into it.
+    installRoutes({ sourcePreflight: () => refusal(403, 'FORBIDDEN') })
+    node(root, 'stock-prep-ops-cell-source-preflight-check')!.dispatchEvent(new Event('click', { bubbles: true }))
+    await flush()
+    expect(cell.getAttribute('data-cell-status')).toBe('forbidden')
+    expect(text(root, 'stock-prep-ops-cell-source-preflight-note')).toContain('需要对接读取权限')
+    expect(text(root, 'stock-prep-ops-cell-source-preflight-note')).not.toContain('组织')
+  })
+
+  it('OP-12: the refusal sentences read in English too', async () => {
+    h.locale = 'en'
+    const root = await mountPanel()
+    for (const [status, code, phrase] of [
+      [403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'add this account to the organisation, then sign out, sign back in'],
+      [403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'named a different organisation'],
+      [400, 'CONNECTION_CANONICAL_UNAVAILABLE', 'reads the source with your own identity'],
+      [503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE', 'did not answer just now'],
+    ] as Array<[number, string, string]>) {
+      installRoutes({ sourcePreflight: () => refusal(status, code) })
+      node(root, 'stock-prep-ops-cell-source-preflight-check')!.dispatchEvent(new Event('click', { bubbles: true }))
+      await flush()
+      const note = text(root, 'stock-prep-ops-cell-source-preflight-note')
+      expect(note, `${status} ${code}`).toContain(phrase)
+      expect(note, `${status} ${code}`).not.toMatch(/integration read/i)
+    }
   })
 
   // -------------------------------------------------------------------------

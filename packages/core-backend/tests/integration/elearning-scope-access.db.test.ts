@@ -751,7 +751,10 @@ describe('elearning L1 scope/access gate (real DB)', () => {
         limit: 1,
       })).rejects.toMatchObject({ code: 'unavailable' })
     })
-  }, 30_000)
+  // Timeout headroom: this test passes in ~1.5 s but CI runs still hit the old 30 s budget
+  // intermittently, stopping at exactly 30 000 ms (a wait, not slowness). 90 s gives a stalled
+  // wait room to clear; the scan-bound assertions above are unchanged.
+  }, 90_000)
 
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {
     await withRolledBackDb(async (client, db) => {
