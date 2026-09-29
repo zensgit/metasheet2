@@ -80,6 +80,7 @@ import {
 } from '../core/attendance-cancellation-execution-port'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { Logger } from '../core/logger'
+import { listUserPermissions } from '../rbac/service'
 
 const logger = new Logger('ApprovalCancelRoundEntryPort')
 
@@ -89,9 +90,13 @@ const logger = new Logger('ApprovalCancelRoundEntryPort')
  * (`publishApprovalCountsForUsers`: `approval:counts-updated` + `todo:counts-updated`, the latter
  * through the todo center's one shared pending query), so the attendance-side routes refresh the
  * same badges without a second copy of either. Optional: an unbound port simply does not push.
+ *
+ * `permissions` is the per-user permission context the count is computed on (the shared query's
+ * permission-queue arm). The approval-side routes do not pass it; this entry does (see
+ * `publishCancelRoundCounts`).
  */
 export type CancelRoundCountPublisherV1 = (
-  users: Array<{ userId: string; roles?: string[] }>,
+  users: Array<{ userId: string; roles?: string[]; permissions?: string[] }>,
   reason: string,
 ) => Promise<void>
 
@@ -126,20 +131,55 @@ function normalizeActorRoleClaims(roles: readonly unknown[] | undefined): string
 }
 
 /**
+ * The actor's permission claims as the plugin handed them over — read from the authenticated
+ * request the way `GET /api/todo/count` reads them (`resolveApprovalActorPermissions`). Trimmed,
+ * blanks dropped, duplicates folded, so the actor's pushed count covers the same permission-queue
+ * seats their own count read does.
+ */
+function normalizeActorPermissionClaims(permissions: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(permissions)) return []
+  return [
+    ...new Set(
+      permissions
+        .filter((permission): permission is string => typeof permission === 'string')
+        .map((permission) => permission.trim())
+        .filter((permission) => permission.length > 0),
+    ),
+  ]
+}
+
+/**
+ * The permission context of a user this entry's action touched but who did not act (a seat holder
+ * when the requester launches or withdraws; the requester and the other seats when an approver
+ * acts). There is no request of theirs to read, so it is resolved by `listUserPermissions` — the
+ * resolver the authentication layer builds `req.user.permissions` from when token claims are not
+ * trusted (the production setting), i.e. what their own `GET /api/todo/count` reads. A failed
+ * lookup narrows to no permissions (the count the approval side pushes), never fails the push.
+ */
+async function resolveAffectedUserPermissions(userId: string): Promise<string[]> {
+  try {
+    return normalizeActorPermissionClaims(await listUserPermissions(userId))
+  } catch {
+    return []
+  }
+}
+
+/**
  * Best effort by contract: the action has already committed, so a failed push is logged
  * (values-free: the reason token only) and never turns a done action into an error.
  *
- * The ACTOR's entry carries the actor's role claims — the same input the approval-side action
- * routes hand the shared publisher for their caller (`{ userId, roles: actor.roles }`), so the
- * actor's pushed count is computed on the same viewer the actor's own `GET /api/todo/count` uses.
- * It goes FIRST and the actor id is not repeated among the others: the publisher keeps the first
- * entry per user id, and the actor is often one of the seats too (an approver acting on their own
- * seat). Everyone else is pushed without role claims, exactly as the approval side pushes the other
- * users an action touches.
+ * The ACTOR's entry carries the actor's role AND permission claims — the viewer the actor's own
+ * `GET /api/todo/count` resolves from the same authenticated request — so the actor's pushed count
+ * matches that read, permission-queue seats included (the approval-side routes hand the shared
+ * publisher the caller's roles only). It goes FIRST and the actor id is not repeated among the
+ * others: the publisher keeps the first entry per user id, and the actor is often one of the seats
+ * too (an approver acting on their own seat). Everyone else is pushed with the permission context
+ * their own count read resolves (`resolveAffectedUserPermissions`) and without role claims, as the
+ * approval side pushes the other users an action touches.
  */
 async function publishCancelRoundCounts(
   publishCounts: CancelRoundCountPublisherV1 | undefined,
-  actor: { readonly userId: string; readonly roles?: readonly string[] },
+  actor: { readonly userId: string; readonly roles?: readonly string[]; readonly permissions?: readonly string[] },
   otherUserIds: Array<string | null | undefined>,
   reason: string,
 ): Promise<void> {
@@ -149,9 +189,18 @@ async function publishCancelRoundCounts(
     const others = [
       ...new Set(otherUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
     ].filter((id) => id !== actorId)
-    const users: Array<{ userId: string; roles?: string[] }> = [
-      ...(actorId ? [{ userId: actorId, roles: normalizeActorRoleClaims(actor.roles) }] : []),
-      ...others.map((userId) => ({ userId })),
+    const otherEntries = await Promise.all(
+      others.map(async (userId) => ({ userId, permissions: await resolveAffectedUserPermissions(userId) })),
+    )
+    const users: Array<{ userId: string; roles?: string[]; permissions?: string[] }> = [
+      ...(actorId
+        ? [{
+            userId: actorId,
+            roles: normalizeActorRoleClaims(actor.roles),
+            permissions: normalizeActorPermissionClaims(actor.permissions),
+          }]
+        : []),
+      ...otherEntries,
     ]
     if (users.length === 0) return
     await publishCounts(users, reason)
@@ -413,6 +462,8 @@ export interface CancelRoundEntryActorV1 {
   readonly userId: string
   readonly userName?: string
   readonly roles?: readonly string[]
+  /** The caller's permission claims — for the post-action count push only (see `publishCancelRoundCounts`). */
+  readonly permissions?: readonly string[]
   readonly ip?: string | null
   readonly userAgent?: string | null
 }
@@ -731,9 +782,10 @@ export const CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE =
  *
  * The pending-count refresh (增补 P-11) runs after the action when the host bound a publisher: the
  * caller plus the round's person seats as they were BEFORE and AFTER the action, through the same
- * publisher the approval-side action routes use. The caller's entry carries `actor.roles` (their
- * count covers every pending item they see, not only this round's seat — role-seated ones included),
- * as on the approval side. Best effort — the action has already committed.
+ * publisher the approval-side action routes use. The caller's entry carries `actor.roles` and
+ * `actor.permissions` (their count covers every pending item they see, not only this round's seat —
+ * role-seated and permission-queue ones included); the other users' entries carry their resolved
+ * permission context. Neither is handed to the action. Best effort — the action has already committed.
  */
 const CANCEL_ROUND_DISPATCH_ACTIONS: ReadonlySet<string> = new Set(['approve', 'reject', 'revoke'])
 

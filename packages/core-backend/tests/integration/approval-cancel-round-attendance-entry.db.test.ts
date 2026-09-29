@@ -2071,6 +2071,160 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
 
+      /**
+       * Phase D T6 (owner-accepted fix route (c), see the design MD §12): an unrelated pending item
+       * whose ONLY active seat is a permission-queue arm (`source_queue` on `attendance:approve`, the
+       * shape the attendance approval flow seats). It is in a viewer's count only when that viewer's
+       * permission context reaches the count. Returns the item id; the caller deactivates it.
+       */
+      async function seedPermissionQueueItem(label: string): Promise<string> {
+        const otherRequester = `g4dc-queue-${label}-${TS}`
+        await seedLoginUser(otherRequester, { roles: ['attendance_employee'] })
+        await grantApprovalWriteForIntegrationActor(otherRequester)
+        let other: { id: string }
+        try {
+          other = await service().createApproval(
+            { templateId, formData: { reason: `g4dc permission-queue item ${label}` } },
+            { userId: otherRequester, roles: [] },
+          )
+        } finally {
+          await pool().query(
+            `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+            [otherRequester],
+          )
+        }
+        createdApprovalIds.add(other.id)
+        const otherNode = (
+          await pool().query<{ current_node_key: string }>('SELECT current_node_key FROM approval_instances WHERE id = $1', [other.id])
+        ).rows[0].current_node_key
+        await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [other.id])
+        await pool().query(
+          `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+           VALUES ($1, 'source_queue', 'attendance:approve', $2, TRUE)`,
+          [other.id, otherNode],
+        )
+        return other.id
+      }
+
+      /**
+       * The approver reads the todo center (approvals:read, fixture) and holds attendance:approve
+       * (role), with the same extra preparation `seedScopedAttendanceUser` makes (see private record) so
+       * that code is part of their resolved permission context.
+       */
+      async function prepareQueueApprover(): Promise<string> {
+        await grantAttendanceApproverRole(approverId)
+        await pool().query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+          [approverId],
+        )
+        await pool().query(
+          `INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', TRUE)
+           ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = TRUE`,
+          [approverId],
+        )
+        invalidateUserPerms(approverId)
+        return loginToken(approverId)
+      }
+
+      async function releaseQueueApprover(queueItemId: string): Promise<void> {
+        await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [queueItemId])
+        await pool().query(
+          `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+          [approverId],
+        )
+        await pool().query(`DELETE FROM user_namespace_admissions WHERE user_id = $1 AND namespace = 'attendance'`, [approverId])
+        invalidateUserPerms(approverId)
+      }
+
+      it('T6 (actor): the attendance-side approver whose pending items include a permission-queue seat is pushed, after their own approve and reject, the same todo count their own GET /api/todo/count answers at that moment', async () => {
+        const queueItemId = await seedPermissionQueueItem('actor')
+        const approverToken = await prepareQueueApprover()
+        const recorder = recordPushes()
+        try {
+          const countOf = async (): Promise<number> => {
+            const response = await http('GET', '/api/todo/count', approverToken)
+            expect(response.status, response.text).toBe(200)
+            return response.json.count as number
+          }
+          // Precondition, so the legs cannot pass vacuously: the approver's own read includes the
+          // permission-queue item.
+          const items = await http('GET', '/api/todo/items', approverToken)
+          expect(items.status, items.text).toBe(200)
+          expect(items.json.items.some((entry: { id: string }) => entry.id === queueItemId)).toBe(true)
+
+          const toApprove = await launchedRound('t6-actor-approve')
+          const toReject = await launchedRound('t6-actor-reject')
+          const before = await countOf()
+
+          recorder.pushes.length = 0
+          const stub = bindCancellationPort(async () => cancelledResponse)
+          try {
+            const approved = await http('POST', actionsPath(toApprove.requestId), approverToken, { action: 'approve' })
+            expect(approved.status, approved.text).toBe(200)
+          } finally {
+            stub.stop()
+          }
+          const afterApprove = await countOf()
+          expect(afterApprove).toBe(before - 1)
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterApprove)
+
+          recorder.pushes.length = 0
+          const rejected = await http('POST', actionsPath(toReject.requestId), approverToken, {
+            action: 'reject',
+            comment: 'g4dc T6 reject',
+          })
+          expect(rejected.status, rejected.text).toBe(200)
+          const afterReject = await countOf()
+          expect(afterReject).toBe(before - 2)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterReject)
+        } finally {
+          recorder.stop()
+          await releaseQueueApprover(queueItemId)
+        }
+      })
+
+      it('T6 (affected user): the seat holder, pushed when the REQUESTER launches and withdraws, is counted with their own permission context — the pushed count equals their own GET /api/todo/count at that moment, the permission-queue item included', async () => {
+        const queueItemId = await seedPermissionQueueItem('affected')
+        const approverToken = await prepareQueueApprover()
+        const recorder = recordPushes()
+        try {
+          const countOf = async (): Promise<number> => {
+            const response = await http('GET', '/api/todo/count', approverToken)
+            expect(response.status, response.text).toBe(200)
+            return response.json.count as number
+          }
+          const items = await http('GET', '/api/todo/items', approverToken)
+          expect(items.status, items.text).toBe(200)
+          expect(items.json.items.some((entry: { id: string }) => entry.id === queueItemId)).toBe(true)
+          const before = await countOf()
+
+          const employee = `g4dc-t6-affected-${TS}`
+          await seedLoginUser(employee, { roles: ['attendance_employee'] })
+          const employeeToken = await loginToken(employee)
+          const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+
+          recorder.pushes.length = 0
+          const launch = await http('POST', entryPath(requestId), employeeToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          const afterLaunch = await countOf()
+          expect(afterLaunch).toBe(before + 1)
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterLaunch)
+
+          recorder.pushes.length = 0
+          const withdrawn = await http('POST', withdrawPath(requestId), employeeToken, {})
+          expect(withdrawn.status, withdrawn.text).toBe(200)
+          const afterWithdraw = await countOf()
+          expect(afterWithdraw).toBe(before)
+          expect(todoPushesFor(recorder.pushes, approverId)).toHaveLength(1)
+          expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count).toBe(afterWithdraw)
+        } finally {
+          recorder.stop()
+          await releaseQueueApprover(queueItemId)
+        }
+      })
+
       it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
         const fixture = await launchedRound('fence')
         const arms = await pool().query<{ assignment_type: string }>(

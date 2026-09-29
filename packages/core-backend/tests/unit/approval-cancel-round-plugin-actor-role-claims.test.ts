@@ -5,6 +5,7 @@ import type { Request } from 'express'
 import { describe, expect, it } from 'vitest'
 
 import { resolveApprovalActorRoles } from '../../src/services/approval-actor-roles'
+import { resolveApprovalActorPermissions } from '../../src/routes/approvals'
 
 /**
  * Cancel-round product entry (phase C gate r2, NIT) — the plugin's `getActorRoleClaims` against
@@ -19,20 +20,22 @@ import { resolveApprovalActorRoles } from '../../src/services/approval-actor-rol
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
 const pluginSource = readFileSync(join(repoRoot, 'plugins/plugin-attendance/index.cjs'), 'utf8')
-const HEAD = 'function getActorRoleClaims(req) {'
 
-function loadPluginGetActorRoleClaims(): (req: unknown) => string[] {
-  const start = pluginSource.indexOf(HEAD)
-  if (start < 0 || pluginSource.indexOf(HEAD, start + 1) >= 0) {
-    throw new Error('expected exactly one getActorRoleClaims definition in plugins/plugin-attendance/index.cjs')
+function loadPluginHelper(name: string): (req: unknown) => string[] {
+  const head = `function ${name}(req) {`
+  const start = pluginSource.indexOf(head)
+  if (start < 0 || pluginSource.indexOf(head, start + 1) >= 0) {
+    throw new Error(`expected exactly one ${name} definition in plugins/plugin-attendance/index.cjs`)
   }
   const end = pluginSource.indexOf('\n}\n', start)
   const body = pluginSource.slice(start, end + 2)
   // eslint-disable-next-line no-new-func
-  return new Function(`"use strict"; ${body}; return getActorRoleClaims;`)() as (req: unknown) => string[]
+  return new Function(`"use strict"; ${body}; return ${name};`)() as (req: unknown) => string[]
 }
 
-const pluginGetActorRoleClaims = loadPluginGetActorRoleClaims()
+const pluginGetActorRoleClaims = loadPluginHelper('getActorRoleClaims')
+// Phase D T6: the permission-claim copy the entry's count push carries for the actor.
+const pluginGetActorPermissionClaims = loadPluginHelper('getActorPermissionClaims')
 
 const cases: Array<{ name: string; user: unknown; expected: string[] }> = [
   { name: 'the role claim alone', user: { role: 'admin' }, expected: ['admin'] },
@@ -49,5 +52,22 @@ describe('plugin getActorRoleClaims matches core resolveApprovalActorRoles', () 
     const req = { user } as unknown as Request
     expect(resolveApprovalActorRoles(req)).toEqual(expected)
     expect(pluginGetActorRoleClaims(req)).toEqual(expected)
+  })
+})
+
+const permissionCases: Array<{ name: string; user: unknown; expected: string[] }> = [
+  { name: 'the permissions claim alone', user: { permissions: ['attendance:approve', 'approvals:read'] }, expected: ['attendance:approve', 'approvals:read'] },
+  { name: 'the perms claim alone', user: { perms: ['attendance:read'] }, expected: ['attendance:read'] },
+  { name: 'both, trimmed, deduplicated across the two', user: { permissions: [' attendance:approve '], perms: ['attendance:approve', 'x:y'] }, expected: ['attendance:approve', 'x:y'] },
+  { name: 'blank and non-string entries dropped', user: { permissions: ['', '  ', 7, null, 'a:b'] }, expected: ['a:b'] },
+  { name: 'non-array claims ignored', user: { permissions: 'attendance:approve', perms: { a: 1 } }, expected: [] },
+  { name: 'no user', user: undefined, expected: [] },
+]
+
+describe('plugin getActorPermissionClaims matches core resolveApprovalActorPermissions (phase D T6)', () => {
+  it.each(permissionCases)('$name', ({ user, expected }) => {
+    const req = { user } as unknown as Request
+    expect(resolveApprovalActorPermissions(req)).toEqual(expected)
+    expect(pluginGetActorPermissionClaims(req)).toEqual(expected)
   })
 })

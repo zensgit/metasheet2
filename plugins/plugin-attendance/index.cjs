@@ -6566,6 +6566,23 @@ function getActorRoleClaims(req) {
   return Array.from(new Set([...role, ...roles]))
 }
 
+// The authenticated caller's permission claims, read exactly as core's
+// `resolveApprovalActorPermissions` reads them (the string entries of `req.user.permissions` unioned
+// with those of `req.user.perms`, trimmed, blanks dropped, deduplicated). Used ONLY for the
+// cancel-round entry's post-action count push, so a caller whose pending items include a
+// permission-queue seat is pushed the same count their own count read resolves; it is not an
+// authorization input.
+function getActorPermissionClaims(req) {
+  const user = req.user
+  const permissions = Array.isArray(user?.permissions)
+    ? user.permissions.filter((entry) => typeof entry === 'string')
+    : []
+  const perms = Array.isArray(user?.perms)
+    ? user.perms.filter((entry) => typeof entry === 'string')
+    : []
+  return Array.from(new Set([...permissions, ...perms].map((entry) => entry.trim()).filter(Boolean)))
+}
+
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for']
   const header = Array.isArray(forwarded) ? forwarded[0] : forwarded
@@ -37257,6 +37274,7 @@ module.exports = {
                 userId: viewerId,
                 userName: getUserLabel(req, viewerId),
                 roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
               },
               { reason }
             )
@@ -37327,6 +37345,7 @@ module.exports = {
                 userId: viewerId,
                 userName: getUserLabel(req, viewerId),
                 roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },
@@ -37398,6 +37417,7 @@ module.exports = {
                 userId: viewerId,
                 userName: getUserLabel(req, viewerId),
                 roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
                 ip: req.ip ?? null,
                 userAgent: req.get('user-agent') ?? null,
               },

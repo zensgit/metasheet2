@@ -1190,24 +1190,33 @@ function sanitizeLegacyDecisionMetadata(
 // function's own body is the right anchor — it does not, by itself, prove any given call site
 // actually reaches this function; that half stays the grep/by-construction argument. Mirrors
 // `isPlmApprovalId`'s export.
+//
+// `permissions` (optional, additive): a caller that knows a user's permission context passes it and
+// both publishers compute that user's count with it. No approval-side call site passes it, so for them
+// nothing changes — the publishers are called exactly as before, with no `permissions` key. The
+// attendance-side cancel-round entry passes it (`approval-cancel-round-entry-port.ts`).
 export async function publishApprovalCountsForUsers(
   options: ApprovalRouterOptions | undefined,
-  users: Array<{ userId: string; roles?: string[] }>,
+  users: Array<{ userId: string; roles?: string[]; permissions?: string[] }>,
   reason: string,
 ): Promise<void> {
-  const uniqueUsers = new Map<string, string[]>()
+  const uniqueUsers = new Map<string, { roles: string[]; permissions?: string[] }>()
   for (const user of users) {
     const userId = user.userId.trim()
     if (!userId || uniqueUsers.has(userId)) continue
-    uniqueUsers.set(userId, user.roles ?? [])
+    uniqueUsers.set(userId, {
+      roles: user.roles ?? [],
+      ...(Array.isArray(user.permissions) ? { permissions: user.permissions } : {}),
+    })
   }
 
-  await Promise.all([...uniqueUsers.entries()].map(([userId, roles]) => Promise.all([
+  await Promise.all([...uniqueUsers.entries()].map(([userId, { roles, permissions }]) => Promise.all([
     publishApprovalCountsUpdate({
       injector: options?.injector,
       logger,
       userId,
       roles,
+      ...(permissions ? { permissions } : {}),
       reason,
     }),
     // todo-center-design-lock v2.14 §3/§4: reuses `pendingSourceRegistry.countPendingForUser` — the
@@ -1220,6 +1229,7 @@ export async function publishApprovalCountsForUsers(
       logger,
       userId,
       roles,
+      ...(permissions ? { permissions } : {}),
       reason,
     }),
   ])))
