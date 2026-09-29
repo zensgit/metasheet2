@@ -2891,7 +2891,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         expect((await listPending(a.token)).json).toEqual(EMPTY_LIST)
       })
 
-      it('D2 — expectedRoundId on the requester\'s withdraw: naming the pending round withdraws it (200, the minimal body); the field is optional — the routes without it behave as before', async () => {
+      it('D2 — expectedRoundId on the requester\'s withdraw: naming the pending round withdraws it (200, the minimal body)', async () => {
         const approver = `g4dc-d2w-apr-${TS}`
         const seated = await seedApprover(approver)
         const tpl = await publishTemplateFor('d2w', [approver], 'single')
