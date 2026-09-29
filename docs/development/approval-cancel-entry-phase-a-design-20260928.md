@@ -1025,13 +1025,17 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
   - 端口 `publishCancelRoundCounts`:
     - 执行者一项带角色 + 权限。
     - 其他被推送者(席位持有人、请求人)带 `listUserPermissions(userId)` 解析出的权限。令牌声明不受信时(生产设置),认证层也是用这个解析函数构造 `req.user.permissions`。
+    - 其他被推送者同时带角色(阶段 D 收口门审 r1 P3-1 的修复):`users.role` 列,`user_roles` 含 `admin` 时为 `'admin'`(同一个 `isAdmin` 查询)。这是认证层 `resolveRbacProfile` 在令牌声明不受信时构造 `req.user.role` 的口径,也就是其 `GET /api/todo/count` 读到的那一个角色。admin 查询失败时保留列值(与认证层同);读列失败时不带角色(即改前的推送)。
     - 解析失败时按空权限计数,推送仍是尽力而为。
+    - 范围:角色与权限都只在本入口的推送路径(端口)上解析;共享发布器本来就接受每个用户项的 `roles`,未改;审批侧各调用点零改动。
   - `publishApprovalCountsForUsers`:每个用户项增加可选的 `permissions`,转给两个发布器。审批侧各调用点都不传它,所以两个发布器收到的参数与改前完全相同(不带 `permissions` 键)。
-- **用例**:`approval-cancel-round-attendance-entry.db.test.ts`,P-11 块。两条用例共用一个夹具:一条无关待办,唯一在席臂是 `source_queue` / `attendance:approve`。审批人照 `seedScopedAttendanceUser` 的额外准备处理(见私有记录),并持 `approvals:read`(夹具)。
+- **用例**:`approval-cancel-round-attendance-entry.db.test.ts`,P-11 块。前三条用例共用一个夹具:一条无关待办,唯一在席臂是 `source_queue` / `attendance:approve`。审批人照 `seedScopedAttendanceUser` 的额外准备处理(见私有记录),并持 `approvals:read`(夹具)。
   - 「T6 (actor)」:审批人在考勤侧 approve、reject 后,推给自己的计数 == 同刻自己的 GET。
   - 「T6 (affected user)」:请求人发起与撤回后,推给席位持有人的计数 == 同刻其 GET。
+  - 「T6 (requester actor)」(门审 r1 P2-2):请求人本人也持 `attendance:approve`,且有一条只在 `source_queue` 臂在席的无关待办(前置:该项在其待办列表与计数内);其本人发起、撤回后,推给自己的推送恰 1 条,值 == 同刻自己的 GET。
+  - 「T6 (affected user, role arm)」(门审 r1 P3-1):席位持有人有一条只在角色臂在席的无关待办,两条腿——角色取自 `users.role` 列(夹具角色 id);`users.role` 为 `user`、`user_roles` 含 `admin`(角色臂 `admin`)。请求人发起、撤回后,推给席位持有人的推送恰 1 条,值 == 同刻其 GET。夹具在 `finally` 里还原列值、只删自己加的行、停用两条待办。
   - 单测:插件权限声明副本对 core 解析器逐形状钉住;发布器对带 / 不带 `permissions` 的两种调用逐一钉住。
-- **mutation**(各在新克隆库上跑 ENTRY 的 T6 两条,cp 还原,`cmp`,工作树 clean):
+- **mutation**(前四条各在新克隆库上跑 ENTRY 的 T6 两条;cp 还原,`cmp`,工作树 clean):
 
 | mutation | 红 |
 |---|---|
@@ -1039,10 +1043,17 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 | 被推送者的权限解析恒为空 | 恰「T6 (affected user)」 |
 | 插件办理路由不传权限声明 | 恰「T6 (actor)」 |
 | 发布器不把权限转给待办发布器 | 两条都红 |
+| 插件发起路由不传权限声明(门审 r1 MB7) | 恰「T6 (requester actor)」 |
+| 插件撤回路由不传权限声明(门审 r1 MB8) | 恰「T6 (requester actor)」 |
+| 被推送者的角色解析恒为空 | 恰「T6 (affected user, role arm)」 |
+| 去掉 admin 升级 | 恰「T6 (affected user, role arm)」(admin 腿) |
+| 不读 `users.role` 列 | 恰「T6 (affected user, role arm)」(列腿) |
+
+后五条是阶段 D 收口修复轮(门审 r1 之后)新增的,每条在一个新克隆库上跑整个 ENTRY 文件,各恰红所列用例;读数见阶段 D 最终验收报告的「r2 修复」节。
 
 - **残留**:
-  - 其他被推送者仍不带角色声明,与审批侧对被推送者的做法一致。
-  - 开发期令牌声明受信模式下(`RBAC_TOKEN_TRUST`,生产禁用),被推送者一侧的权限来自数据库、不来自令牌,可能与其 GET 不同。
+  - 其他被推送者的角色:门审 r1 P3-1 已在本入口修复(见上)。审批侧各路由对被推送者仍角色、权限都不带(main 既有,本入口不改)。
+  - 开发期令牌声明受信模式下(`RBAC_TOKEN_TRUST`,生产禁用),被推送者一侧的权限与角色来自数据库、不来自令牌,可能与其 GET 不同。
 
 ### 12.2 D2:办理 / 撤回可携带期望轮次
 
