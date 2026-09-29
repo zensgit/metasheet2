@@ -395,3 +395,35 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(attendanceCalls()).toHaveLength(0)
   })
 })
+
+describe('ApprovalDetailView — P-6 seat display on a cancel-round instance', () => {
+  // 撤销锁 §15.6 (P-6, ratified; lift conditions not met): the cancel round's progress names no
+  // current approver — one line with the V1 word, whatever the seat count.
+  const NAMED_SEATS = [
+    { id: 'as_1', type: 'user', assigneeId: 'approver_1', sourceStep: 1, nodeKey: 'cancel_approval', isActive: true, metadata: { assigneeName: '李四' } },
+    { id: 'as_2', type: 'user', assigneeId: 'approver_2', sourceStep: 1, nodeKey: 'cancel_approval', isActive: true, metadata: { assigneeName: '王五' } },
+  ]
+  const handlerItems = () => Array.from(container!.querySelectorAll<HTMLElement>('[data-testid="approval-current-handler-item"]'))
+
+  it('a pending cancel round renders one V1 line and no approver name', async () => {
+    mockActiveApproval.value = cancelRoundInstance({ assignments: NAMED_SEATS })
+    await mountView()
+    const items = handlerItems()
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('撤销申请审批中')
+    expect(items[0].textContent).toContain('已等待')
+    expect(items[0].textContent).not.toContain('当前处理人')
+    const section = q(container!, 'approval-timeline-upcoming-section')!
+    expect(section.textContent).not.toContain('李四')
+    expect(section.textContent).not.toContain('王五')
+  })
+
+  it('an ordinary pending instance still names each current handler', async () => {
+    mockActiveApproval.value = cancelRoundInstance({ workflowKey: 'attendance.request', assignments: NAMED_SEATS })
+    await mountView()
+    const texts = handlerItems().map((el) => el.textContent ?? '')
+    expect(texts).toHaveLength(2)
+    expect(texts[0]).toContain('当前处理人：李四')
+    expect(texts[1]).toContain('当前处理人：王五')
+  })
+})

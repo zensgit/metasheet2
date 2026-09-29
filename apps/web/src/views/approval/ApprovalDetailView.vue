@@ -507,7 +507,10 @@
               data-testid="approval-current-handler-item"
             >
               <span class="approval-detail__timeline-upcoming-dot" />
-              <span class="approval-detail__timeline-upcoming-text">
+              <span v-if="entry.seatNamesWithheld" class="approval-detail__timeline-upcoming-text">
+                {{ entry.label }} · 已等待 {{ entry.wait }}
+              </span>
+              <span v-else class="approval-detail__timeline-upcoming-text">
                 当前处理人：{{ entry.label }} · 已等待 {{ entry.wait }}
               </span>
             </div>
@@ -1801,6 +1804,8 @@ interface CurrentHandlerEntry {
   assignmentId: string
   label: string
   wait: string
+  /** 撤销轮: the entry carries the V1 word, not a person (撤销锁 §15.6 P-6). */
+  seatNamesWithheld?: boolean
 }
 
 // `assignment.metadata` carries no display name today — only `assigneeId` (see
@@ -1838,9 +1843,20 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
   const keys = new Set(currentActiveNodeKeys.value)
   if (keys.size === 0) return []
   const wait = formatRelativeWait(detail.updatedAt)
-  return detail.assignments
-    .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
-    .map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
+  const active = detail.assignments.filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
+  // 撤销轮 — ratified 撤销锁 §15.6 (P-6) seat display boundary, lift conditions not met: the
+  // round's progress names no current approver. One line with the V1 word stands in for the whole
+  // node, whatever its seat count.
+  if (isCancelRound.value) {
+    if (active.length === 0) return []
+    return [{
+      assignmentId: 'cancel-round-pending',
+      label: resolveStatusDisplay('cancelRound', 'cancellation_pending_approval', true).label,
+      wait,
+      seatNamesWithheld: true,
+    }]
+  }
+  return active.map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
 })
 
 // member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view

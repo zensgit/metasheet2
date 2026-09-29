@@ -38,7 +38,14 @@
         >
           第 {{ detail.currentStep ?? '-' }} / {{ detail.totalSteps ?? '-' }} 步
         </div>
-        <div v-if="pendingApproverLabels.length" class="approval-detail-pane__node-approvers">
+        <div
+          v-if="cancelRoundPendingWord"
+          class="approval-detail-pane__node-approvers"
+          data-testid="approval-detail-pane-cancel-round-pending"
+        >
+          {{ cancelRoundPendingWord }}
+        </div>
+        <div v-else-if="pendingApproverLabels.length" class="approval-detail-pane__node-approvers">
           待处理人：{{ pendingApproverLabels.join('、') }}
         </div>
       </template>
@@ -90,7 +97,8 @@ import { computed, watch } from 'vue'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
-import { approvalStatusTagProps, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
+import { approvalStatusTagProps, isCancelRoundWorkflow, needsCancelRoundCloseReason } from '../../approvals/cancelRound'
+import { resolveStatusDisplay } from '../../utils/statusDomains'
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — the desktop master-detail pane's
 // read-only content. Presentation only: every mutating action is EMITTED to the parent
@@ -162,6 +170,13 @@ const pendingApproverLabels = computed<string[]>(() => {
   return detail.assignments
     .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
     .map((a, index) => assigneeLabel(a, index + 1))
+})
+
+// 撤销轮 — ratified 撤销锁 §15.6 (P-6) seat display boundary, lift conditions not met: the pane
+// names no current approver for a cancel round; the V1 word stands in for the 待处理人 line.
+const cancelRoundPendingWord = computed<string>(() => {
+  if (!isCancelRoundWorkflow(props.detail) || pendingApproverLabels.value.length === 0) return ''
+  return resolveStatusDisplay('cancelRound', 'cancellation_pending_approval', true).label
 })
 
 // member-display-identity (2026-08-19): a `watch` side effect (never inside the `computed` above)

@@ -218,6 +218,32 @@ describe('ApprovalCenterDetailPane (P-2 preview surface)', () => {
     await flushUi()
     expect(paneTag(root).dataset).toMatchObject({ domain: 'approvalInstance', status: 'rejected' })
   })
+
+  // 撤销锁 §15.6 (P-6, ratified; lift conditions not met): a cancel round's progress names no
+  // current approver — the V1 word stands in for the 待处理人 line.
+  const NAMED_SEATS = [
+    { id: 'as_1', type: 'user', assigneeId: 'approver_1', sourceStep: 1, nodeKey: 'cancel_approval', isActive: true, metadata: { assigneeName: '李四' } },
+    { id: 'as_2', type: 'user', assigneeId: 'approver_2', sourceStep: 1, nodeKey: 'cancel_approval', isActive: true, metadata: { assigneeName: '王五' } },
+  ] as UnifiedApprovalDTO['assignments']
+
+  it('P-6: a pending cancel round shows the V1 word and no approver name', async () => {
+    const r = row({ id: 'p6', workflowKey: CANCEL, status: 'pending', currentNodeKey: 'cancel_approval', assignments: NAMED_SEATS })
+    const root = mount(ApprovalCenterDetailPane, { ...PANE, row: r, detail: r, detailError: '' })
+    await flushUi()
+    const node = root.querySelector<HTMLElement>('.approval-detail-pane__node')!
+    expect(root.querySelector('[data-testid="approval-detail-pane-cancel-round-pending"]')?.textContent?.trim()).toBe('撤销申请审批中')
+    expect(node.textContent).not.toContain('李四')
+    expect(node.textContent).not.toContain('王五')
+    expect(node.textContent).not.toContain('待处理人')
+  })
+
+  it('P-6: an ordinary pending instance still lists 待处理人 by name', async () => {
+    const r = row({ id: 'p7', status: 'pending', currentNodeKey: 'cancel_approval', assignments: NAMED_SEATS })
+    const root = mount(ApprovalCenterDetailPane, { ...PANE, row: r, detail: r, detailError: '' })
+    await flushUi()
+    expect(root.querySelector('[data-testid="approval-detail-pane-cancel-round-pending"]')).toBeNull()
+    expect(root.querySelector('.approval-detail-pane__node')!.textContent).toContain('待处理人：李四、王五')
+  })
 })
 
 describe('MetaRecordApprovalPanel (P-2 record surface)', () => {
