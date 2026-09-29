@@ -164,6 +164,11 @@ automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+cancelRoundEntryAttendancePanel
+cancelRoundEntryCenterRoute
+cancelRoundEntryCore
+cancelRoundEntryDetailView
+cancelRoundEntrySurfaces
 categoryCandidateInput
 comment-affordance-color-consistency
 conditional-formatting-dialog-i18n

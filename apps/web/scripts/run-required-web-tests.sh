@@ -1382,6 +1382,11 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # (see the two repo precedents cited in scripts/dev/atg-exec-line-post-rebase-check.sh's header)
 # and that script exists to catch it mechanically on future rebases; this paragraph corrects only
 # the narrative of how this specific occurrence resolved.
+# 请假撤销入口 阶段 B (2026-09-29, docs/development/approval-cancel-entry-phase-b-fe-design-20260929.md):
+# five `cancelRoundEntry*` tokens — core vocabulary / error copy / attendance client, the four approval
+# list / preview StatusTag surfaces, the detail view (P-2 + approver path), the approval-center approver
+# path, and the attendance self-service entry. Each token matches exactly its own file and no existing
+# token is a substring of any of them or vice versa (bidirectional scan in the design MD §7).
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1496,6 +1501,11 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  cancelRoundEntryAttendancePanel \
+  cancelRoundEntryCenterRoute \
+  cancelRoundEntryCore \
+  cancelRoundEntryDetailView \
+  cancelRoundEntrySurfaces \
   categoryCandidateInput \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
