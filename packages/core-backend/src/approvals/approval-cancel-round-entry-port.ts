@@ -106,6 +106,162 @@ export interface CancelRoundSummaryRoundV1 {
   readonly withdrawBlockedReason: CancelRoundWithdrawBlockedReasonV1 | null
   /** P-3 (iii): present once the round redeemed; `reversal: null` is EMITTED for the third token. */
   readonly cancellationOutcome: CancelRoundCancellationOutcomeV1 | null
+  /** P-5 (iii) values-free delivery status of THIS round's own notices — see `CancelRoundDeliveryV1`. */
+  readonly deliveries: readonly CancelRoundDeliveryV1[]
+}
+
+/**
+ * P-5 = (iii) Full delivery, fields per the owner's 「Full status, no raw ids/errors (Recommended)」:
+ * per delivery the status (delivered / pending / failed), the channel TYPE, the attempt count and
+ * timestamps — and nothing else. No external message / task id, no provider error text, no recipient
+ * (not the local user id, not the DingTalk id), no node key: the client renders a fixed category
+ * message per status. The lock invariant that rides with this read is that a failed delivery changes
+ * NOTHING about the round (`approval_rounds.outcome`, the engine instance's status, its seats) — no
+ * code path here or in either ledger writes those; the integration suite measures it.
+ *
+ * WHICH NOTICES A CANCEL ROUND PRODUCES. The round is an ordinary platform instance, so its seats emit
+ * the ordinary `approval.task_created` events, and exactly two consumers persist a per-recipient
+ * delivery row keyed by the instance id: the DingTalk approval-card action of an
+ * `approval.task_created` automation rule (`dingtalk_approval_card_deliveries`) and the DingTalk todo
+ * mirror (`dingtalk_todo_mirrors`, default OFF). The attendance notification ledger
+ * (`attendance_notification_deliveries`) has no cancel-round producer, and the generic person-message
+ * ledger is keyed by rule / record, not by an approval instance, so neither can be attributed to a
+ * round and neither is read.
+ */
+export type CancelRoundDeliveryChannelTypeV1 = 'dingtalk_approval_card' | 'dingtalk_todo'
+export type CancelRoundDeliveryStatusV1 = 'delivered' | 'pending' | 'failed'
+
+export interface CancelRoundDeliveryV1 {
+  readonly channelType: CancelRoundDeliveryChannelTypeV1
+  readonly status: CancelRoundDeliveryStatusV1
+  readonly attempts: number
+  readonly createdAt: string
+  readonly lastAttemptAt: string | null
+  readonly updatedAt: string
+}
+
+/** One ledger row as the delivery query below reads it (ids and error text are never selected). */
+export interface CancelRoundDeliveryLedgerRowV1 {
+  readonly channel_type: string
+  readonly ledger_status: string
+  readonly attempt_count: number | string | null
+  readonly created_at: Date | string
+  readonly last_attempt_at: Date | string | null
+  readonly updated_at: Date | string
+}
+
+/**
+ * Ledger state → the three ratified values. PROVISIONAL implementation choice (the ratified text
+ * names the three values, not the mapping); the design MD carries the full table for owner / gate
+ * review and a unit test pins every row of it.
+ *
+ * - Approval card (`send_status`): `sent` ⇒ delivered; `failed` ⇒ failed; `pending` ⇒ pending;
+ *   `outcome_unknown` ⇒ pending — the provider may well have delivered it and it is never re-sent,
+ *   so it is UNCONFIRMED, not failed. A card row is ONE send by construction (inserted immediately
+ *   before its single send call; a re-send is a new row), so `attempts` is 1 and the attempt time is
+ *   the row's creation time.
+ * - Todo mirror (`status`): `created` / `completing` / `completed` ⇒ delivered (the todo exists or
+ *   existed); `pending` / `sending` / `outcome_unknown` ⇒ pending; `failed` ⇒ failed; `superseded` /
+ *   `skipped` ⇒ failed when at least one send was attempted, and OMITTED when none was (the seat or
+ *   the instance moved on before any attempt: there was no delivery to report). `attempts` is the
+ *   ledger's own counter (after a todo is created the ledger reuses that counter for the completion
+ *   phase — recorded in the MD).
+ * - Anything else ⇒ `null` (not reported): an unknown ledger state is never guessed into a status.
+ */
+export function projectCancelRoundDeliveryRowV1(row: CancelRoundDeliveryLedgerRowV1): CancelRoundDeliveryV1 | null {
+  const attemptCount = Number.parseInt(String(row.attempt_count ?? '0'), 10)
+  const createdAt = toIso(row.created_at) ?? ''
+  const updatedAt = toIso(row.updated_at) ?? createdAt
+  if (row.channel_type === 'dingtalk_approval_card') {
+    const status: CancelRoundDeliveryStatusV1 | null =
+      row.ledger_status === 'sent'
+        ? 'delivered'
+        : row.ledger_status === 'failed'
+          ? 'failed'
+          : row.ledger_status === 'pending' || row.ledger_status === 'outcome_unknown'
+            ? 'pending'
+            : null
+    if (!status) return null
+    return { channelType: 'dingtalk_approval_card', status, attempts: 1, createdAt, lastAttemptAt: createdAt, updatedAt }
+  }
+  if (row.channel_type === 'dingtalk_todo') {
+    const attempts = Number.isFinite(attemptCount) && attemptCount > 0 ? attemptCount : 0
+    let status: CancelRoundDeliveryStatusV1 | null = null
+    switch (row.ledger_status) {
+      case 'created':
+      case 'completing':
+      case 'completed':
+        status = 'delivered'
+        break
+      case 'pending':
+      case 'sending':
+      case 'outcome_unknown':
+        status = 'pending'
+        break
+      case 'failed':
+        status = 'failed'
+        break
+      case 'superseded':
+      case 'skipped':
+        status = attempts > 0 ? 'failed' : null
+        break
+      default:
+        status = null
+    }
+    if (!status) return null
+    return {
+      channelType: 'dingtalk_todo',
+      status,
+      attempts,
+      createdAt,
+      lastAttemptAt: toIso(row.last_attempt_at),
+      updatedAt,
+    }
+  }
+  return null
+}
+
+/**
+ * The round's own delivery rows from the two ledgers, oldest first. The SELECT lists only what the
+ * projection needs: no id, task id, recipient, node key or error column is read at all.
+ */
+async function readCancelRoundDeliveries(
+  query: Queryable,
+  engineInstanceId: string | null,
+): Promise<CancelRoundDeliveryV1[]> {
+  if (!engineInstanceId) return []
+  const result = await query.query(
+    `SELECT channel_type, ledger_status, attempt_count, created_at, last_attempt_at, updated_at
+       FROM (
+         SELECT 'dingtalk_approval_card'::text AS channel_type,
+                c.send_status AS ledger_status,
+                NULL::int AS attempt_count,
+                c.created_at,
+                NULL::timestamptz AS last_attempt_at,
+                c.updated_at,
+                c.id::text AS row_key
+           FROM dingtalk_approval_card_deliveries c
+          WHERE c.instance_id = $1
+         UNION ALL
+         SELECT 'dingtalk_todo'::text,
+                t.status,
+                t.attempt_count,
+                t.created_at,
+                t.last_attempt_at,
+                t.updated_at,
+                t.id::text
+           FROM dingtalk_todo_mirrors t
+          WHERE t.instance_id = $1
+       ) d
+      ORDER BY created_at ASC, channel_type ASC, row_key ASC`,
+    [engineInstanceId],
+  )
+  const deliveries: CancelRoundDeliveryV1[] = []
+  for (const row of result.rows as unknown as CancelRoundDeliveryLedgerRowV1[]) {
+    const projected = projectCancelRoundDeliveryRowV1(row)
+    if (projected) deliveries.push(projected)
+  }
+  return deliveries
 }
 
 export interface CancelRoundSummaryV1 {
@@ -413,6 +569,7 @@ async function summarizeRoundRow(
       : null
   const closedBySystem = await resolveClosedBySystem(query, row.engine_instance_id)
   const withdraw = await resolveCanWithdraw(query, row, viewerId)
+  const deliveries = await readCancelRoundDeliveries(query, row.engine_instance_id)
 
   return {
     documentInstanceId,
@@ -429,6 +586,7 @@ async function summarizeRoundRow(
       canWithdraw: withdraw.canWithdraw,
       withdrawBlockedReason: withdraw.reason,
       cancellationOutcome: projection.cancellationOutcome ?? null,
+      deliveries,
     },
   }
 }

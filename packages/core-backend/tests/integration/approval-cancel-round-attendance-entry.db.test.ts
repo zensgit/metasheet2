@@ -20,6 +20,11 @@ import type {
 } from '../../src/attendance/w4c3b-request-operation-boundary'
 import { CANCEL_ROUND_TEMPLATE_ID } from '../../src/db/seeds/approval-cancel-round-published-definition'
 import { CANCEL_ROUND_SEAT_CLASS_NEUTRAL_MESSAGE } from '../../src/approvals/approval-cancel-round-entry-port'
+import {
+  insertDingTalkApprovalCardDelivery,
+  markDingTalkApprovalCardDeliverySendFailed,
+  markDingTalkApprovalCardDeliverySent,
+} from '../../src/integrations/dingtalk/approval-card-deliveries'
 
 /**
  * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
@@ -387,6 +392,9 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         await pool().query('DELETE FROM attendance_leave_types WHERE id = ANY($1::uuid[])', [leaveTypeIds])
       }
       if (approvalIds.length > 0) {
+        // Phase C delivery-ledger fixtures: the todo mirror ledger has no FK to the instance.
+        await pool().query('DELETE FROM dingtalk_todo_mirrors WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM dingtalk_approval_card_deliveries WHERE instance_id = ANY($1::text[])', [approvalIds])
         await pool().query(
           'DELETE FROM approval_rounds WHERE document_id = ANY($1::text[]) OR engine_instance_id = ANY($1::text[])',
           [approvalIds],
@@ -479,9 +487,11 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
     })
     // P-6: no seat / assignee data of any kind on this surface; P-4: no policy snapshot.
     expect(Object.keys(round).sort()).toEqual([
-      'canWithdraw', 'cancellationOutcome', 'closeReason', 'closedBySystem', 'blockCode',
+      'canWithdraw', 'cancellationOutcome', 'closeReason', 'closedBySystem', 'blockCode', 'deliveries',
       'endedAt', 'engineInstanceId', 'outcome', 'roundId', 'startedAt', 'status', 'withdrawBlockedReason',
     ].sort())
+    // P-5: no delivery ledger row exists for this round (no card rule, the todo mirror is off).
+    expect(round.deliveries).toEqual([])
     expect(launch.text.includes('policy_snapshot')).toBe(false)
 
     const rows = await roundsFor(documentId)
@@ -1590,6 +1600,127 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         [launch.json.data.round.engineInstanceId],
       )
       expect(created.rows).toEqual([{ actor_id: employee, actor_name: displayName }])
+    })
+
+    describe('phase C (backend): P-5 values-free delivery status on the summary', () => {
+      it('P-5 (iii): the summary lists THIS round\'s own deliveries with status / channel type / attempts / timestamps only — no id, recipient or error text — and a failed delivery changes nothing about the round: outcome, engine status and seats are untouched and the seat holder still approves', async () => {
+        await grantAttendanceApproverRole(approverId)
+        const approverToken = await loginToken(approverId)
+        const fixture = await launchedRound('p5')
+        const q = (text: string, values?: unknown[]) => pool().query(text, values)
+        const engineRow = await pool().query<{ current_node_key: string; org_id: string | null }>(
+          'SELECT current_node_key, org_id FROM approval_instances WHERE id = $1',
+          [fixture.roundInstanceId],
+        )
+        const nodeKey = engineRow.rows[0].current_node_key
+        const orgId = engineRow.rows[0].org_id ?? 'default'
+        const seatRows = async () =>
+          (
+            await pool().query<{ id: string; assignee_id: string; is_active: boolean; node_key: string }>(
+              'SELECT id::text AS id, assignee_id, is_active, node_key FROM approval_assignments WHERE instance_id = $1 ORDER BY id',
+              [fixture.roundInstanceId],
+            )
+          ).rows
+        const engineStatus = async () =>
+          (await pool().query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [fixture.roundInstanceId]))
+            .rows[0]?.status
+        const seatsBefore = await seatRows()
+        expect(seatsBefore.filter((row) => row.is_active).map((row) => row.assignee_id)).toEqual([approverId])
+
+        // Values that must never reach the summary.
+        const SECRET_DT_USER = `dt-recipient-${TS}`
+        const SECRET_ERROR = `provider refused: token=secret-${TS}`
+        const SECRET_TASK = `ext-task-${TS}`
+        const SECRET_TODO_ERROR = `todo provider refused: secret-${TS}`
+        const SECRET_TODO_TASK = `ext-todo-${TS}`
+
+        // Two approval-card rows through the card ledger's own writers: one failed, one sent.
+        const failedCard = await insertDingTalkApprovalCardDelivery(q, {
+          instanceId: fixture.roundInstanceId,
+          nodeKey,
+          recipientUserId: approverId,
+          recipientDingTalkUserId: SECRET_DT_USER,
+          deliveryKind: 'work_notice_action_card',
+        })
+        expect(await markDingTalkApprovalCardDeliverySendFailed(q, failedCard.id, SECRET_ERROR)).not.toBeNull()
+        const sentCard = await insertDingTalkApprovalCardDelivery(q, {
+          instanceId: fixture.roundInstanceId,
+          nodeKey,
+          recipientUserId: approverId,
+          recipientDingTalkUserId: SECRET_DT_USER,
+          deliveryKind: 'interactive_card',
+        })
+        expect(await markDingTalkApprovalCardDeliverySent(q, sentCard.id, SECRET_TASK)).not.toBeNull()
+        // Todo-mirror rows (ledger rows as its worker leaves them): failed after three attempts; and a
+        // row retired before any attempt, which is not a delivery and must not be listed.
+        const todoFailed = await pool().query<{ id: string }>(
+          `INSERT INTO dingtalk_todo_mirrors
+             (org_id, instance_id, node_key, recipient_user_id, recipient_union_id, source_key, dingtalk_task_id,
+              status, attempt_count, last_attempt_at, last_error, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'failed', 3, now() + interval '2 seconds', $8,
+                   now() + interval '1 second', now() + interval '2 seconds')
+           RETURNING id::text AS id`,
+          [orgId, fixture.roundInstanceId, nodeKey, approverId, SECRET_DT_USER, `g4c-todo-failed-${TS}`, SECRET_TODO_TASK, SECRET_TODO_ERROR],
+        )
+        await pool().query(
+          `INSERT INTO dingtalk_todo_mirrors
+             (org_id, instance_id, node_key, recipient_user_id, source_key, status, attempt_count, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'superseded', 0, now() + interval '3 seconds', now() + interval '3 seconds')`,
+          [orgId, fixture.roundInstanceId, nodeKey, approverId, `g4c-todo-retired-${TS}`],
+        )
+        // A delivery of the ORIGINAL document (not of the round) is not this round's and is not listed.
+        const originalCard = await insertDingTalkApprovalCardDelivery(q, {
+          instanceId: fixture.documentId,
+          nodeKey: 'approval_a',
+          recipientUserId: approverId,
+          recipientDingTalkUserId: SECRET_DT_USER,
+          deliveryKind: 'work_notice_action_card',
+        })
+        expect(await markDingTalkApprovalCardDeliverySendFailed(q, originalCard.id, SECRET_ERROR)).not.toBeNull()
+
+        const read = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+        expect(read.status, read.text).toBe(200)
+        const deliveries = read.json.data.round.deliveries as Array<Record<string, unknown>>
+        expect(deliveries.map((d) => ({ channelType: d.channelType, status: d.status, attempts: d.attempts }))).toEqual([
+          { channelType: 'dingtalk_approval_card', status: 'failed', attempts: 1 },
+          { channelType: 'dingtalk_approval_card', status: 'delivered', attempts: 1 },
+          { channelType: 'dingtalk_todo', status: 'failed', attempts: 3 },
+        ])
+        for (const delivery of deliveries) {
+          expect(Object.keys(delivery).sort()).toEqual(['attempts', 'channelType', 'createdAt', 'lastAttemptAt', 'status', 'updatedAt'])
+          expect(Number.isNaN(Date.parse(String(delivery.createdAt)))).toBe(false)
+          expect(Number.isNaN(Date.parse(String(delivery.updatedAt)))).toBe(false)
+          expect(Number.isNaN(Date.parse(String(delivery.lastAttemptAt)))).toBe(false)
+        }
+        for (const secret of [
+          SECRET_DT_USER, SECRET_ERROR, SECRET_TASK, SECRET_TODO_ERROR, SECRET_TODO_TASK,
+          failedCard.id, sentCard.id, originalCard.id, todoFailed.rows[0].id, approverId, nodeKey,
+        ]) {
+          expect(read.text.includes(secret), `summary leaks ${secret}`).toBe(false)
+        }
+        // Same I7-gated read for another reader of the original document: the same list.
+        const approverRead = await http('GET', entryPath(fixture.requestId), approverToken)
+        expect(approverRead.status, approverRead.text).toBe(200)
+        expect(approverRead.json.data.round.deliveries).toEqual(deliveries)
+
+        // The invariant: delivery failures moved nothing.
+        expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['pending'])
+        expect(await engineStatus()).toBe('pending')
+        expect(await seatRows()).toEqual(seatsBefore)
+        expect(read.json.data.round).toMatchObject({ outcome: 'pending', status: 'cancellation_pending_approval', canWithdraw: true })
+
+        const stub = bindCancellationPort(async () => cancelledResponse)
+        try {
+          const approved = await http('POST', actionsPath(fixture.requestId), approverToken, { action: 'approve' })
+          expect(approved.status, approved.text).toBe(200)
+          expect(approved.json.data).toMatchObject({ roundId: fixture.roundId, outcome: 'applied' })
+        } finally {
+          stub.stop()
+        }
+        const after = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+        expect(after.json.data.round.outcome).toBe('applied')
+        expect(after.json.data.round.deliveries.map((d: Record<string, unknown>) => d.status)).toEqual(['failed', 'delivered', 'failed'])
+      })
     })
   })
 })
