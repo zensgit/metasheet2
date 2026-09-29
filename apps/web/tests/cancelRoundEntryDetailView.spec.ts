@@ -11,6 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
+const elSuccessSpy = vi.fn()
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>('element-plus').catch(() => ({}))
+  return { ...actual, ElMessage: { success: elSuccessSpy, warning: vi.fn(), error: vi.fn(), info: vi.fn() } }
+})
+
 const mockRouteParams = reactive({ id: 'cr_1' })
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -321,6 +327,16 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
   const dialogErrors = () =>
     Array.from(container!.querySelectorAll('[data-testid="approval-action-dialog-error"]')).map((e) => e.textContent ?? '')
 
+  // The leave's latest round as the summary read reports it (the decision route acts on THAT round).
+  let summaryRound: Record<string, unknown> | null
+  let actionResponse: () => Response
+  const pendingRound = (overrides: Record<string, unknown> = {}) => ({
+    roundId: 'apr_1', engineInstanceId: 'cr_1', outcome: 'pending', status: 'cancellation_pending_approval',
+    startedAt: 's', endedAt: null, closeReason: null, blockCode: null, closedBySystem: false,
+    canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN', cancellationOutcome: null,
+    ...overrides,
+  })
+
   beforeEach(async () => {
     const { resetCancelRoundLeaveRequestIdCache } = await import('../src/approvals/cancelRound')
     resetCancelRoundLeaveRequestIdCache()
@@ -328,8 +344,16 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
       if (id === 'apv_orig') return { id, businessKey: 'attendance-request:req-77' }
       throw new Error('API error: 404')
     })
-    apiFetchMock.mockImplementation(async () =>
-      jsonResponse(200, { ok: true, data: { requestId: 'req-77', roundId: 'apr_1', outcome: 'applied', status: 'leave_cancelled' } }))
+    summaryRound = pendingRound()
+    actionResponse = () =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-77', roundId: 'apr_1', outcome: 'applied', status: 'leave_cancelled' } })
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/cancel-round/actions') && init?.method === 'POST') return actionResponse()
+      if (String(url).endsWith('/cancel-round') && !init?.method) {
+        return jsonResponse(200, { ok: true, data: { requestId: 'req-77', documentInstanceId: 'apv_orig', entryEnabled: false, round: summaryRound } })
+      }
+      throw new Error(`unexpected ${String(url)}`)
+    })
   })
 
   it('attendance:approve holder (no approvals:act) sees 通过/驳回 only, and 通过 goes to the attendance route', async () => {
@@ -348,6 +372,7 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-77/cancel-round/actions', { action: 'approve' }]])
     // minimal success body ⇒ nothing published from it; the detail is re-read instead
     expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
+    expect(elSuccessSpy).toHaveBeenCalledWith('审批已通过')
   })
 
   it('approvals:act alone does not show the decision buttons on a cancel round (the route checks attendance:approve)', async () => {
@@ -359,8 +384,7 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
 
   it('a retryable refusal shows the V7 copy in the dialog (non-terminal, not a failure)', async () => {
     mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
-    apiFetchMock.mockImplementation(async () =>
-      jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_WINDOW_ANCHOR_MISSING', message: 'raw' } }))
+    actionResponse = () => jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_WINDOW_ANCHOR_MISSING', message: 'raw' } })
     await mountView()
     q(container!, 'approval-approve-button')!.click()
     await flushUi()
@@ -381,6 +405,37 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(dialogErrors().join('|')).toContain('无法定位这条撤销申请对应的请假')
     expect(executeActionSpy).not.toHaveBeenCalled()
     expect(attendanceCalls()).toHaveLength(0)
+  })
+
+  it('stale page: the leave\'s pending round is a NEWER instance — nothing is sent, the dialog says so, the page re-reads', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    summaryRound = pendingRound({ roundId: 'apr_2', engineInstanceId: 'cr_2' })
+    await mountView()
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(0)
+    expect(executeActionSpy).not.toHaveBeenCalled()
+    expect(dialogErrors().join('|')).toContain('这条撤销申请已不在审批中,或已有更新的撤销申请;未执行任何操作')
+    expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
+    expect(loadHistorySpy).toHaveBeenCalledWith('cr_1')
+  })
+
+  it('a decision the server attributes to another round is not announced as 审批已通过', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    actionResponse = () =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-77', roundId: 'apr_other', outcome: 'applied', status: 'leave_cancelled' } })
+    await mountView()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(1)
+    expect(dialogErrors().join('|')).toContain('操作已提交,但无法确认它作用于页面上的这条撤销申请')
+    expect(elSuccessSpy).not.toHaveBeenCalled()
   })
 
   it('an ordinary instance still decides through store.executeAction', async () => {

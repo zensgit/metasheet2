@@ -206,6 +206,17 @@ async function mountView() {
 
 const ORIGINALS: Record<string, string> = { apv_orig_1: 'attendance-request:req-1', apv_orig_2: 'attendance-request:req-2' }
 
+// The leave's latest round per attendance request id, as the summary read reports it (the decision
+// route acts on THAT round, so the approval side confirms it is the row's own instance first).
+let latestRound: Record<string, Record<string, unknown> | null>
+let actionResponses: Array<() => Response>
+const pendingRound = (engineInstanceId: string, overrides: Record<string, unknown> = {}) => ({
+  roundId: `round-of-${engineInstanceId}`, engineInstanceId, outcome: 'pending', status: 'cancellation_pending_approval',
+  startedAt: 's', endedAt: null, closeReason: null, blockCode: null, closedBySystem: false,
+  canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN', cancellationOutcome: null,
+  ...overrides,
+})
+
 beforeEach(async () => {
   const { resetCancelRoundLeaveRequestIdCache } = await import('../src/approvals/cancelRound')
   resetCancelRoundLeaveRequestIdCache()
@@ -215,8 +226,20 @@ beforeEach(async () => {
     if (id in ORIGINALS) return { id, businessKey: ORIGINALS[id] }
     throw new Error('API error: 404')
   })
-  apiFetchMock.mockReset().mockImplementation(async () =>
-    jsonResponse(200, { ok: true, data: { requestId: 'x', roundId: 'apr_1', outcome: 'applied', status: 'leave_cancelled' } }))
+  latestRound = { 'req-1': pendingRound('cr_1'), 'req-2': pendingRound('cr_2') }
+  actionResponses = []
+  apiFetchMock.mockReset().mockImplementation(async (url: string, init?: RequestInit) => {
+    const match = /\/api\/attendance\/requests\/([^/]+)\/cancel-round(\/actions)?$/.exec(String(url))
+    if (!match) throw new Error(`unexpected ${String(url)}`)
+    const requestId = decodeURIComponent(match[1])
+    const round = latestRound[requestId] ?? null
+    if (match[2] && init?.method === 'POST') {
+      const queued = actionResponses.shift()
+      if (queued) return queued()
+      return jsonResponse(200, { ok: true, data: { requestId, roundId: round?.roundId ?? null, outcome: 'applied', status: 'leave_cancelled' } })
+    }
+    return jsonResponse(200, { ok: true, data: { requestId, documentInstanceId: 'apv_orig', entryEnabled: false, round } })
+  })
   elSuccessSpy.mockClear()
   elErrorSpy.mockClear()
   container = document.createElement('div')
@@ -265,7 +288,7 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
   })
 
   it('a no-seat 403 keeps the server message (same as the approval side); an unresolvable leave never falls back', async () => {
-    apiFetchMock.mockImplementationOnce(async () =>
+    actionResponses.push(() =>
       jsonResponse(403, { ok: false, error: { code: 'APPROVAL_ASSIGNMENT_REQUIRED', message: 'Approval assignment not found for actor' } }))
     mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1'), cancelRow('cr_9', 'apv_missing')]
     await mountView()
@@ -294,5 +317,42 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
     expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
     expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
     expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve' }]])
+  })
+})
+
+describe('ApprovalCenterView — a stale cancel-round row is never decided', () => {
+  it('inline 通过 on a row whose leave now has a newer round: nothing sent, no success toast', async () => {
+    latestRound['req-1'] = pendingRound('cr_newer')
+    mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-row-approve-cr_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(document.querySelector('[data-el-popconfirm-confirm^="确认通过"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(0)
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+    expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('未执行任何操作'))
+  })
+
+  it('batch: a decision attributed to another round lands in the manifest, and 重试失败项 is refused before sending', async () => {
+    actionResponses.push(() =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-1', roundId: 'round-of-cr_other', outcome: 'applied', status: 'leave_cancelled' } }))
+    mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    ;(container!.querySelector('[data-testid="test-select-all-rows"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-batch-approve"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(1)
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+    const manifest = container!.querySelector('[data-testid="approval-batch-result-dialog"]')
+    expect(manifest?.textContent).toContain('操作已提交,但无法确认它作用于页面上的这条撤销申请')
+    // the leave's round is now decided — a retry must not send a second decision
+    latestRound['req-1'] = pendingRound('cr_1', { outcome: 'applied', status: 'leave_cancelled' })
+    ;(container!.querySelector('[data-testid="approval-batch-retry"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(attendanceCalls()).toHaveLength(1)
+    expect(container!.querySelector('[data-testid="approval-batch-result-dialog"]')?.textContent).toContain('未执行任何操作')
   })
 })

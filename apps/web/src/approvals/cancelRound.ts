@@ -19,9 +19,10 @@
  *
  * Contract notes (the backend lane changes two response shapes in parallel with this slice):
  *  - the summary read carries `entryEnabled: boolean`; an ABSENT field is read as `false`;
- *  - approve / reject / withdraw success bodies are minimal (`{ requestId, roundId, outcome, status }`),
- *    so nothing here reads them — every caller re-reads the summary (or the approval detail) after a
- *    successful write.
+ *  - approve / reject / withdraw success bodies are minimal (`{ requestId, roundId, outcome, status }`).
+ *    The only field read from any of them is the approver decision's `roundId`, to confirm which round
+ *    was decided (see `decideCancelRoundFromApproval`); every caller re-reads the summary (or the
+ *    approval detail) after a successful write.
  */
 import { apiFetch } from '../utils/api'
 import type { StatusDomain } from '../utils/statusDomains'
@@ -481,17 +482,23 @@ export async function withdrawCancelRound(requestId: string, comment?: string | 
   await readCancelRoundResponse(response)
 }
 
-/** `POST /api/attendance/requests/:id/cancel-round/actions` (attendance:approve). */
+/**
+ * `POST /api/attendance/requests/:id/cancel-round/actions` (attendance:approve). Resolves to the
+ * `roundId` the minimal success body names — the round the server actually decided — or `null` when
+ * the body does not name one.
+ */
 export async function decideCancelRound(
   requestId: string,
   action: 'approve' | 'reject',
   comment?: string | null,
-): Promise<void> {
+): Promise<string | null> {
   const response = await apiFetch(cancelRoundPath(requestId, '/actions'), {
     method: 'POST',
     body: JSON.stringify({ action, ...withOptionalText('comment', comment) }),
   })
-  await readCancelRoundResponse(response)
+  const payload = await readCancelRoundResponse(response)
+  const data = payload?.data && typeof payload.data === 'object' ? (payload.data as Record<string, unknown>) : null
+  return typeof data?.roundId === 'string' && data.roundId.length > 0 ? data.roundId : null
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +511,46 @@ export const CANCEL_ROUND_LEAVE_UNRESOLVED_COPY = {
   zh: '无法定位这条撤销申请对应的请假,请到考勤页面办理或联系管理员',
   en: 'The leave behind this cancellation could not be located — please act on it from Attendance or contact an administrator',
 } as const
+
+/**
+ * The attendance decision route acts on the leave's LATEST cancel round; it does not name an
+ * instance. So the approval side confirms — before sending anything — that the round on screen IS
+ * that round and is still pending, and afterwards that the round the server decided is the one it
+ * confirmed. These three refusals are raised by the client (no server code exists for them):
+ *  - `ROUND_UNVERIFIED`: the pre-read failed (for example the viewer may not read the leave); nothing sent.
+ *  - `ROUND_NOT_CURRENT`: the round on screen is no longer the leave's pending round; nothing sent.
+ *  - `ACTED_ROUND_UNCONFIRMED`: the decision WAS accepted, but for a round other than the confirmed one
+ *    (or the body did not name it) — never announced as a success, never as 「失败，请重试」.
+ */
+export const CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED = 'CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED'
+export const CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT = 'CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT'
+export const CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED = 'CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED'
+
+export const CANCEL_ROUND_CLIENT_COPY: Readonly<Record<string, { zh: string; en: string }>> = Object.freeze({
+  [CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED]: {
+    zh: '暂时无法核对这条撤销申请的当前状态;未执行任何操作,请刷新后重试或联系管理员',
+    en: 'The current state of this cancellation could not be confirmed — nothing was done. Please refresh and try again, or contact an administrator',
+  },
+  [CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT]: {
+    zh: '这条撤销申请已不在审批中,或已有更新的撤销申请;未执行任何操作,请刷新后查看',
+    en: 'This cancellation is no longer pending, or a newer cancellation has replaced it — nothing was done. Please refresh',
+  },
+  [CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED]: {
+    zh: '操作已提交,但无法确认它作用于页面上的这条撤销申请,请刷新后核对结果',
+    en: 'The action was submitted, but it could not be confirmed that it applied to the cancellation shown here — please refresh and check the result',
+  },
+})
+
+function cancelRoundClientRefusal(code: string, isZh: boolean): ApprovalApiError {
+  const copy = CANCEL_ROUND_CLIENT_COPY[code]
+  return new ApprovalApiError(isZh ? copy.zh : copy.en, 0, code)
+}
+
+/** One of the three client refusals above: the page is showing a round that was not (or may not have been) the one decided. */
+export function isCancelRoundClientRefusal(error: unknown): boolean {
+  const code = errorCodeOf(error)
+  return code !== null && Object.prototype.hasOwnProperty.call(CANCEL_ROUND_CLIENT_COPY, code)
+}
 
 const leaveRequestIdCache = new Map<string, string>()
 
@@ -543,6 +590,12 @@ export async function resolveCancelRoundLeaveRequestId(
  * Approve / reject a cancel-round instance through the attendance route. The thrown error (an
  * `ApprovalApiError`) carries the mapped copy as its message, so existing dialog code that renders
  * `error.message` shows registered copy for registered codes and the server's own text otherwise.
+ *
+ * The route decides the leave's latest round, so the round on screen (`approval.id`) is first
+ * confirmed — by the summary read — to be that round and still pending; a failed or mismatching
+ * read sends nothing (fail closed; the same for a delegate who may not read the leave). After the
+ * decision, the `roundId` the server names must be the confirmed round, or the caller is told to
+ * re-check instead of being told it succeeded.
  */
 export async function decideCancelRoundFromApproval(
   approval: { id: string; businessKey: string | null },
@@ -551,12 +604,26 @@ export async function decideCancelRoundFromApproval(
   isZh = true,
 ): Promise<void> {
   const requestId = await resolveCancelRoundLeaveRequestId(approval, isZh)
+  let summary: CancelRoundSummary
   try {
-    await decideCancelRound(requestId, action, comment)
+    summary = await fetchCancelRoundSummary(requestId)
+  } catch {
+    throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED, isZh)
+  }
+  const confirmed = summary.round
+  if (!confirmed || confirmed.engineInstanceId !== approval.id || confirmed.outcome !== 'pending') {
+    throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT, isZh)
+  }
+  let actedRoundId: string | null
+  try {
+    actedRoundId = await decideCancelRound(requestId, action, comment)
   } catch (error) {
     const described = describeCancelRoundError(error, isZh, isZh ? '操作失败，请重试' : 'Action failed, please retry')
     const status = error instanceof ApprovalApiError ? error.status : 0
     throw new ApprovalApiError(described.message, status, described.code ?? undefined)
+  }
+  if (actedRoundId !== confirmed.roundId) {
+    throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED, isZh)
   }
 }
 

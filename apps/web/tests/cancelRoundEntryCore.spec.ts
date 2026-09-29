@@ -25,6 +25,10 @@ vi.mock('../src/utils/api', async (importOriginal) => {
 import { resolveStatusDisplay } from '../src/utils/statusDomains'
 import {
   CANCEL_ROUND_BLOCK_CATEGORY_COPY,
+  CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
+  CANCEL_ROUND_CLIENT_COPY,
+  CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT,
+  CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED,
   CANCEL_ROUND_ERROR_COPY,
   CANCEL_ROUND_SEAT_CLASS_COPY,
   CANCEL_ROUND_STATUS_KEYS,
@@ -36,6 +40,7 @@ import {
   describeCancelRoundBlock,
   describeCancelRoundError,
   fetchCancelRoundSummary,
+  isCancelRoundClientRefusal,
   launchCancelRound,
   needsCancelRoundCloseReason,
   normalizeCancelRoundSummary,
@@ -228,11 +233,12 @@ describe('attendance-side client', () => {
     expect(summary.round?.cancellationOutcome).toEqual({ status: 'cancelled_reversal_unreported', reversal: null })
   })
 
-  it('writes go to the attendance routes; failures surface the server code; success bodies are not read', async () => {
-    apiFetchMock.mockResolvedValue(jsonResponse(200, { ok: true, data: { requestId: 'r1', roundId: 'apr_1', outcome: 'withdrawn', status: 'cancellation_withdrawn' } }))
+  it('writes go to the attendance routes; failures surface the server code; only the decision roundId is read', async () => {
+    apiFetchMock.mockImplementation(async () =>
+      jsonResponse(200, { ok: true, data: { requestId: 'r1', roundId: 'apr_1', outcome: 'withdrawn', status: 'cancellation_withdrawn' } }))
     await launchCancelRound('r1', '  plans changed ')
     await withdrawCancelRound('r1', '')
-    await decideCancelRound('r1', 'reject', 'no')
+    await expect(decideCancelRound('r1', 'reject', 'no')).resolves.toBe('apr_1')
     expect(apiFetchMock.mock.calls.map((c) => [c[0], (c[1] as RequestInit).method, (c[1] as RequestInit).body])).toEqual([
       ['/api/attendance/requests/r1/cancel-round', 'POST', JSON.stringify({ reason: 'plans changed' })],
       ['/api/attendance/requests/r1/cancel-round/withdraw', 'POST', JSON.stringify({})],
@@ -260,12 +266,95 @@ describe('approver path: leave id resolution (fail closed)', () => {
 
   it('decide maps a 409 WINDOW_ANCHOR_MISSING to V7 copy and keeps status + code', async () => {
     apiGetMock.mockResolvedValueOnce({ id: 'apv_orig', businessKey: 'attendance-request:req-7' })
-    apiFetchMock.mockResolvedValueOnce(jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_WINDOW_ANCHOR_MISSING', message: 'raw' } }))
+    routeFetch({ round: pendingRound('cr5'), action: jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_WINDOW_ANCHOR_MISSING', message: 'raw' } }) })
     const failure = await decideCancelRoundFromApproval({ id: 'cr5', businessKey: 'apv_orig' }, 'approve').catch((e) => e)
     expect(failure).toBeInstanceOf(ApprovalApiError)
     expect(failure.status).toBe(409)
     expect(failure.code).toBe('CANCEL_ROUND_WINDOW_ANCHOR_MISSING')
     expect(failure.message).toBe(CANCEL_ROUND_ERROR_COPY.CANCEL_ROUND_WINDOW_ANCHOR_MISSING.zh)
     expect(apiFetchMock).toHaveBeenCalledWith('/api/attendance/requests/req-7/cancel-round/actions', expect.anything())
+  })
+})
+
+// The attendance decision route acts on the leave's LATEST round; the approval side confirms the round
+// on screen is that round (and pending) before sending, and checks the decided roundId afterwards.
+function pendingRound(engineInstanceId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    roundId: 'apr_1', engineInstanceId, outcome: 'pending', status: 'cancellation_pending_approval',
+    startedAt: 's', endedAt: null, closeReason: null, blockCode: null, closedBySystem: false,
+    canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN', cancellationOutcome: null,
+    ...overrides,
+  }
+}
+
+function routeFetch(opts: { round?: unknown; summary?: () => Response; action?: Response | (() => Response) }): void {
+  apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+    if (String(url).endsWith('/cancel-round/actions') && init?.method === 'POST') {
+      if (typeof opts.action === 'function') return opts.action()
+      return opts.action ?? jsonResponse(200, { ok: true, data: { requestId: 'req-7', roundId: 'apr_1', outcome: 'applied', status: 'leave_cancelled' } })
+    }
+    if (String(url).endsWith('/cancel-round') && !init?.method) {
+      if (opts.summary) return opts.summary()
+      return jsonResponse(200, { ok: true, data: { requestId: 'req-7', documentInstanceId: 'apv_orig', entryEnabled: false, round: opts.round ?? null } })
+    }
+    throw new Error(`unexpected call ${String(url)} ${init?.method ?? 'GET'}`)
+  })
+}
+
+describe('approver path: the round on screen is the round decided (stale-page guard)', () => {
+  const actionCalls = () => apiFetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/cancel-round/actions'))
+  const approval = { id: 'cr_shown', businessKey: 'apv_orig' }
+
+  beforeEach(() => {
+    apiGetMock.mockResolvedValue({ id: 'apv_orig', businessKey: 'attendance-request:req-7' })
+  })
+
+  it('reads the summary first, then decides; a matching decided roundId resolves', async () => {
+    routeFetch({ round: pendingRound('cr_shown') })
+    await expect(decideCancelRoundFromApproval(approval, 'approve')).resolves.toBeUndefined()
+    expect(apiFetchMock.mock.calls.map((c) => [c[0], (c[1] as RequestInit | undefined)?.method ?? 'GET'])).toEqual([
+      ['/api/attendance/requests/req-7/cancel-round', 'GET'],
+      ['/api/attendance/requests/req-7/cancel-round/actions', 'POST'],
+    ])
+  })
+
+  it('a newer round (withdrawn + relaunched since the page loaded) is refused before anything is sent', async () => {
+    routeFetch({ round: pendingRound('cr_newer', { roundId: 'apr_2' }) })
+    const failure = await decideCancelRoundFromApproval(approval, 'approve').catch((e) => e)
+    expect(failure).toBeInstanceOf(ApprovalApiError)
+    expect(failure.code).toBe(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT)
+    expect(failure.message).toBe(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT].zh)
+    expect(isCancelRoundClientRefusal(failure)).toBe(true)
+    expect(actionCalls()).toHaveLength(0)
+  })
+
+  it('the round on screen is no longer pending (withdrawn / decided): refused, nothing sent', async () => {
+    routeFetch({ round: pendingRound('cr_shown', { outcome: 'withdrawn', status: 'cancellation_withdrawn' }) })
+    await expect(decideCancelRoundFromApproval(approval, 'reject', 'no')).rejects.toMatchObject({ code: CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT })
+    routeFetch({ round: null })
+    await expect(decideCancelRoundFromApproval(approval, 'reject', 'no')).rejects.toMatchObject({ code: CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT })
+    expect(actionCalls()).toHaveLength(0)
+  })
+
+  it('a failed summary read fails closed (e.g. the viewer may not read the leave): nothing sent', async () => {
+    routeFetch({ summary: () => jsonResponse(404, { ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } }) })
+    const failure = await decideCancelRoundFromApproval(approval, 'approve', null, false).catch((e) => e)
+    expect(failure.code).toBe(CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED)
+    expect(failure.message).toBe(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ROUND_UNVERIFIED].en)
+    expect(actionCalls()).toHaveLength(0)
+  })
+
+  it('a decision the server attributes to another round (or to no named round) is never a plain success', async () => {
+    routeFetch({
+      round: pendingRound('cr_shown'),
+      action: () => jsonResponse(200, { ok: true, data: { requestId: 'req-7', roundId: 'apr_other', outcome: 'applied', status: 'leave_cancelled' } }),
+    })
+    const failure = await decideCancelRoundFromApproval(approval, 'approve').catch((e) => e)
+    expect(failure.code).toBe(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED)
+    expect(failure.message).toBe(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED].zh)
+    expect(failure.message).not.toContain('失败')
+    expect(actionCalls()).toHaveLength(1)
+    routeFetch({ round: pendingRound('cr_shown'), action: () => jsonResponse(200, { ok: true, data: { requestId: 'req-7' } }) })
+    await expect(decideCancelRoundFromApproval(approval, 'approve')).rejects.toMatchObject({ code: CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED })
   })
 })

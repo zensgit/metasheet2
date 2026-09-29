@@ -621,7 +621,7 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
-import { dispatchApprovalDecision } from '../../approvals/cancelRound'
+import { dispatchApprovalDecision, isCancelRoundClientRefusal } from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
@@ -1059,6 +1059,8 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
     loadCurrentTab()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+    // 撤销轮: the row was not (or could not be confirmed as) the leave's pending round — reload the list.
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     inlineApprovingId.value = null
   }
@@ -1101,6 +1103,7 @@ async function submitRowReject(): Promise<void> {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
     rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     rowRejectSubmitting.value = false
   }

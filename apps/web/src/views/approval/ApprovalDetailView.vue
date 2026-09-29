@@ -1143,6 +1143,7 @@ import {
   approvalStatusTagProps,
   cancelRoundStatusKeyFromApproval,
   decideCancelRoundFromApproval,
+  isCancelRoundClientRefusal,
   isCancelRoundSystemActor,
   isCancelRoundWorkflow,
 } from '../../approvals/cancelRound'
@@ -2623,7 +2624,16 @@ async function submitAction() {
       // Its success body is minimal (not a UnifiedApprovalDTO), so nothing is published into the
       // store from it — the detail is re-read instead. A leave-id resolution failure throws and is
       // shown in the dialog; it never falls back to the generic route.
-      await decideCancelRoundFromApproval(displayed, currentAction.value, actionComment.value || undefined)
+      try {
+        await decideCancelRoundFromApproval(displayed, currentAction.value, actionComment.value || undefined)
+      } catch (error) {
+        // The round on screen was not (or could not be confirmed as) the leave's pending round, or
+        // the decision landed on another round: re-read so the page stops showing the old one.
+        if (isCancelRoundClientRefusal(error) && id === routeInstanceId.value) {
+          await Promise.all([store.loadDetail(id), store.loadHistory(id)]).catch(() => undefined)
+        }
+        throw error
+      }
       if (id === routeInstanceId.value) await store.loadDetail(id)
     } else {
       await store.executeAction(id, {
