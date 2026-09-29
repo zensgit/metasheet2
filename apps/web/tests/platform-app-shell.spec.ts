@@ -59,6 +59,25 @@ vi.mock('../src/utils/api', () => ({
   apiPost: (...args: unknown[]) => apiPostMock(...args),
 }))
 
+// The session's product features, as the router guard has already loaded them before any view
+// renders (main.ts `loadProductFeatures`). Only `elearning` is steered; every other feature keeps the
+// real store's answer, and `elearning` defaults to the real store's own default (off).
+const productFeatures = vi.hoisted(() => ({ elearning: false }))
+vi.mock('../src/stores/featureFlags', async () => {
+  const actual = await vi.importActual<typeof import('../src/stores/featureFlags')>('../src/stores/featureFlags')
+  return {
+    ...actual,
+    useFeatureFlags: () => {
+      const real = actual.useFeatureFlags()
+      return {
+        ...real,
+        hasFeature: (feature: Parameters<typeof real.hasFeature>[0]) =>
+          feature === 'elearning' ? productFeatures.elearning : real.hasFeature(feature),
+      }
+    },
+  }
+})
+
 function createInstanceApp(overrides: Partial<PlatformAppSummary> = {}): PlatformAppSummary {
   return {
     id: 'after-sales',
@@ -404,4 +423,107 @@ describe('PlatformAppShellView', () => {
     expect(container.textContent).not.toContain('Platform app not found.')
   })
 
+})
+
+/**
+ * /apps/elearning while the 云课堂 master switch is off. The server no longer lists or details the
+ * app then (routes/platform-apps.ts), so a fresh visit already gets "not found"; this pins the
+ * browser's second line for the summary the server never re-checks -- one ALREADY in the shared
+ * `apps` ref (loaded before the switch changed, or served by an older backend). The app is gated on
+ * the manifest's own `featureFlags: ['elearning']`, the same key the server's catalog gate reads.
+ */
+describe('PlatformAppShellView and the elearning master switch', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  function elearningSummary(): PlatformAppSummary {
+    return createInstanceApp({
+      id: 'elearning',
+      pluginId: 'plugin-elearning',
+      pluginName: 'plugin-elearning',
+      displayName: '学习中心',
+      boundedContext: { code: 'elearning', owner: 'learning', description: 'Enterprise learning named-pilot skeleton.' },
+      runtimeBindings: undefined,
+      navigation: [
+        { id: 'elearning-learner', title: '学习中心', path: '/learn', location: 'main-nav' },
+        { id: 'elearning-admin', title: '云课堂管理', path: '/admin/elearning', location: 'admin' },
+      ],
+      permissions: ['elearning:read', 'elearning:write', 'elearning:grade', 'elearning:stats', 'elearning:admin'],
+      featureFlags: ['elearning'],
+      entryPath: '/learn',
+    })
+  }
+
+  async function mountAt(appId: string) {
+    currentAppId = appId
+    const component = (await import('../src/views/PlatformAppShellView.vue')).default
+    container = document.createElement('div')
+    app = createApp(component as Component)
+    app.mount(container)
+    await flushUi(8)
+    return container
+  }
+
+  beforeEach(() => {
+    appsRef.value = []
+    loadingRef.value = false
+    errorRef.value = null
+    fetchAppByIdMock.mockReset()
+    apiGetMock.mockReset()
+    apiPostMock.mockReset()
+    installationGetMock.mockReset()
+    localStorage.clear()
+    // A caller who may see the app on permissions alone, so only the switch decides.
+    localStorage.setItem('user_permissions', JSON.stringify(['elearning:admin']))
+    productFeatures.elearning = false
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    productFeatures.elearning = false
+  })
+
+  it('switch off: a cached elearning summary renders the ordinary "not found" state, with no installation section and no installation call', async () => {
+    const target = elearningSummary()
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    installationGetMock.mockResolvedValue({ status: 'active', notificationsEnabled: false, canManage: true })
+
+    const root = await mountAt('elearning')
+
+    expect(root.textContent).toContain('Platform app not found.')
+    expect(root.textContent).not.toContain('学习中心')
+    expect(root.querySelector('[aria-label="Cloud classroom installation"]')).toBeNull()
+    expect(installationGetMock).not.toHaveBeenCalled()
+    expect(apiPostMock).not.toHaveBeenCalled()
+  })
+
+  it('switch off: other apps in the same list are unaffected', async () => {
+    const afterSales = createInstanceApp({ runtimeBindings: undefined })
+    appsRef.value = [elearningSummary(), afterSales]
+    fetchAppByIdMock.mockResolvedValue(afterSales)
+
+    const root = await mountAt('after-sales')
+
+    expect(root.textContent).toContain('After Sales')
+    expect(root.textContent).not.toContain('Platform app not found.')
+  })
+
+  it('switch on (positive control): the same summary renders the shell and its installation section', async () => {
+    productFeatures.elearning = true
+    const target = elearningSummary()
+    appsRef.value = [target]
+    fetchAppByIdMock.mockResolvedValue(target)
+    installationGetMock.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: true })
+
+    const root = await mountAt('elearning')
+
+    expect(root.textContent).toContain('学习中心')
+    expect(root.textContent).not.toContain('Platform app not found.')
+    expect(root.querySelector('[aria-label="Cloud classroom installation"]')).not.toBeNull()
+    expect(installationGetMock).toHaveBeenCalledTimes(1)
+  })
 })

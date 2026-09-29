@@ -1,14 +1,22 @@
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
+import express, { type RequestHandler } from 'express'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
+import request from 'supertest'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { ensureCanonicalUserOrgsTable } from '../../src/db/migrations/_ensure-user-orgs'
 import { up as installRegistry } from '../../src/db/migrations/zzzz20260413130000_create_platform_app_instances'
 import { up as installJobs } from '../../src/db/migrations/zzzz20260826160000_create_elearning_jobs'
+import {
+  createElearningAppInstallationRouter,
+  requireElearningAppInstallation,
+  requireElearningEnabled,
+} from '../../src/routes/elearning-app-installation'
 import { changeElearningAppInstallation, readElearningAppInstallation } from '../../src/services/elearning-app-installation'
 import type { ElearningAdminAccessDb, ElearningAdminAccessQueryable } from '../../src/services/elearning-admin-access'
 import { dropScratchDatabase } from '../helpers/scratch-database'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) throw new Error('installation gate requires DATABASE_URL; refusing skip-shaped green')
@@ -132,4 +140,62 @@ test('membership revocation waits for admitted installation transaction (not mer
     expect(blocked).toBe(true)
   } finally { release(); await install; await update; revoke.release() }
   await expect(changeElearningAppInstallation(database(), input)).rejects.toMatchObject({ code: 'forbidden' })
+})
+
+const pinned = usePinnedServer()
+
+/** The production installation surface over the real table; only authentication is injected. */
+function installationSurface(env: NodeJS.ProcessEnv, orgId: string) {
+  const auth: RequestHandler = (req, res, next) => {
+    if (!req.headers.authorization) { res.status(401).json({ error: 'unauthenticated' }); return }
+    req.user = { id: 'admin', role: 'admin' } as typeof req.user
+    req.authenticatedTenantId = orgId
+    next()
+  }
+  const app = express()
+  app.use(createElearningAppInstallationRouter({ getDb: () => database(), authenticate: auth, featureGate: requireElearningEnabled({ env }) }))
+  const business: RequestHandler = (_req, res) => { res.json({ ok: true }) }
+  app.use('/api/elearning', auth, requireElearningAppInstallation({ getDb: () => database(), env }), business)
+  return app
+}
+
+async function snapshotRow(orgId: string) {
+  // xmin changes on ANY update of the row, even one that rewrites identical values.
+  return (await pool.query(`SELECT xmin::text AS xmin, status, config_json, metadata_json, updated_at
+    FROM platform_app_instances WHERE workspace_id = $1 ORDER BY id`, [orgId])).rows
+}
+
+test('switch off: an existing ACTIVE installation is neither rewritten nor reachable; switch on: it is active again without a write', async () => {
+  const input = await actor('switched-off')
+  const PATH = '/api/elearning-app/installation'
+  await changeElearningAppInstallation(database(), input)
+  await changeElearningAppInstallation(database(), input, { enabled: true, notificationsEnabled: true })
+  const before = await snapshotRow(input.orgId)
+  expect(before).toHaveLength(1)
+  expect(before[0]).toMatchObject({ status: 'active', config_json: { notificationsEnabled: true } })
+
+  pinned.setApp(installationSurface({}, input.orgId))
+  const refused = { error: 'feature_disabled' }
+  // Soft, so that the row comparison below is evaluated even when an answer is wrong.
+  const post = await request(pinned.url()).post(PATH).set('Authorization', 'admin').send({})
+  expect.soft([post.status, post.body]).toEqual([404, refused])
+  for (const body of [
+    { enabled: false, notificationsEnabled: false },
+    { enabled: true, notificationsEnabled: false },
+  ]) {
+    const put = await request(pinned.url()).put(PATH).set('Authorization', 'admin').send(body)
+    expect.soft([put.status, put.body]).toEqual([404, refused])
+  }
+  const get = await request(pinned.url()).get(PATH).set('Authorization', 'admin')
+  expect.soft([get.status, get.body]).toEqual([404, refused])
+  const business = await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')
+  expect.soft([business.status, business.body]).toEqual([404, refused])
+  expect(await snapshotRow(input.orgId)).toEqual(before)
+
+  pinned.setApp(installationSurface({ ELEARNING_ENABLED: 'true' }, input.orgId))
+  expect((await request(pinned.url()).get(PATH).set('Authorization', 'admin')).body)
+    .toEqual({ status: 'active', notificationsEnabled: true, canManage: true })
+  expect((await request(pinned.url()).get('/api/elearning/me/courses').set('Authorization', 'admin')).body)
+    .toEqual({ ok: true })
+  expect(await snapshotRow(input.orgId)).toEqual(before)
 })

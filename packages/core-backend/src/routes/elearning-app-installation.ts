@@ -1,4 +1,4 @@
-import { json, Router, type ErrorRequestHandler, type Request, type RequestHandler } from 'express'
+import { json, Router, type ErrorRequestHandler, type Request, type RequestHandler, type Response } from 'express'
 import { authenticate } from '../middleware/auth'
 import { isElearningEnabled } from '../elearning/feature-flags'
 import { rbacGuard } from '../rbac/rbac'
@@ -18,17 +18,44 @@ function identity(req: Request): { orgId: string; actorId: string } | null {
     && typeof actorId === 'string' && actorId.length > 0 ? { orgId, actorId } : null
 }
 
+/** The one switched-off answer of this file; both gates below send it, so they cannot drift apart. */
+function sendFeatureDisabled(res: Response): void {
+  res.status(404).json({ error: 'feature_disabled' })
+}
+
+/**
+ * Master switch for the installation surface (ELEARNING_ENABLED, exact literal 'true', read per
+ * request like `requireElearningAppInstallation` below). While it is off, every method on the
+ * installation path answers what the business gate answers for a switched-off feature and reaches
+ * neither the org-context check, the admin guard, the body parser nor the database: no install, no
+ * enable, and no read that could tell whether an installation row exists. Rows written earlier are
+ * left exactly as they are and take effect again once the switch is on.
+ */
+export function requireElearningEnabled(options: { env?: NodeJS.ProcessEnv } = {}): RequestHandler {
+  return (_req, res, next) => {
+    if (!isElearningEnabled(options.env ?? process.env)) { sendFeatureDisabled(res); return }
+    next()
+  }
+}
+
 export function createElearningAppInstallationRouter(options: {
   getDb(): ElearningAdminAccessDb
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
+  /**
+   * Runs right after authentication, before everything else on the installation path. index.ts
+   * passes `requireElearningEnabled()`; the real-assembly case in
+   * tests/unit/elearning-app-installation.test.ts reddens if that mount loses it.
+   */
+  featureGate?: RequestHandler
 }): Router {
   const router = Router()
   const context: RequestHandler = (req, res, next) => {
     if (!identity(req)) { res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' }); return }
     next()
   }
-  router.use(PATH, options.authenticate ?? authenticate, context)
+  const featureGate: RequestHandler = options.featureGate ?? ((_req, _res, next) => { next() })
+  router.use(PATH, options.authenticate ?? authenticate, featureGate, context)
   router.get(PATH, (req, res) => {
     const input = identity(req)!
     const db = options.getDb()
@@ -78,7 +105,7 @@ export function requireElearningAppInstallation(options: {
 }): RequestHandler {
   return (req, res, next) => {
     if (!isElearningEnabled(options.env ?? process.env)) {
-      res.status(404).json({ error: 'feature_disabled' }); return
+      sendFeatureDisabled(res); return
     }
     const input = identity(req)
     if (!input) { res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' }); return }

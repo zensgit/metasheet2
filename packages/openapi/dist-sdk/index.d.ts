@@ -8468,7 +8468,11 @@ export interface paths {
          * @description Organization and actor come only from the authenticated session. Missing
          *     instance means not-installed. canManage is server-derived from hydrated
          *     global elearning administrator authority and active organization membership.
-         *     Administrative setup is available independently of the deployment master flag.
+         *     Follows the deployment master flag: while it is not exact 'true', GET, POST
+         *     and PUT all answer 404 `{ error: feature_disabled }` right after
+         *     authentication, read and write nothing, and do not reveal whether an
+         *     installation exists. Existing installations are kept and apply again once
+         *     the flag is exact 'true'.
          */
         get: operations["getElearningAppInstallation"];
         /**
@@ -22488,6 +22492,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing read. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable; no fallback enablement. */
             503: {
                 headers: {
@@ -22543,6 +22549,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Application not installed. */
             409: {
                 headers: {
@@ -22602,6 +22610,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable. */
             503: {
                 headers: {

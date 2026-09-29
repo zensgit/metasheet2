@@ -662,3 +662,203 @@ describe('platform apps router permission filter', () => {
     expect(listedIds(allowed)).toEqual(['stock-preparation'])
   })
 })
+
+/**
+ * 云课堂 master switch, catalog side. With ELEARNING_ENABLED not exactly 'true' the card must not
+ * reach ANYBODY -- global administrators with a tenant claim included -- because nothing behind it
+ * answers (every /api/elearning/* is unmounted, index.ts `if (process.env.ELEARNING_ENABLED ===
+ * 'true')`). Two guards in routes/platform-apps.ts, each with its own red case below:
+ *   - the catalog feature predicate is passed through as injected (no global-admin override that
+ *     turned the switch's `false` into `true`);
+ *   - `visibleInstallation` answers false for the elearning app while the switch is off, whatever
+ *     predicate was (or was not) injected and whatever the manifest declares.
+ */
+describe('platform apps router: the elearning card while the master switch is off', () => {
+  const flagSnapshot: Record<string, string | undefined> = {}
+  const ORG = 'org-a'
+  const OFF_SPELLINGS = [
+    ['unset', undefined],
+    ['empty', ''],
+    ['TRUE', 'TRUE'],
+    ['1', '1'],
+    ['leading space', ' true'],
+    ['trailing space', 'true '],
+    ['false', 'false'],
+  ] as const
+
+  beforeEach(() => {
+    queryMock.mockReset()
+    queryForTenantMock.mockReset()
+    for (const name of ELEARNING_FLAG_NAMES) {
+      flagSnapshot[name] = Object.prototype.hasOwnProperty.call(process.env, name)
+        ? process.env[name]
+        : undefined
+      delete process.env[name]
+    }
+  })
+
+  afterEach(() => {
+    for (const name of ELEARNING_FLAG_NAMES) {
+      if (flagSnapshot[name] === undefined) delete process.env[name]
+      else process.env[name] = flagSnapshot[name]
+    }
+  })
+
+  function setMaster(value: string | undefined) {
+    if (value === undefined) delete process.env.ELEARNING_ENABLED
+    else process.env.ELEARNING_ENABLED = value
+  }
+
+  function manifest(pluginDirName: string): Record<string, unknown> {
+    return JSON.parse(fs.readFileSync(path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      `../../../../plugins/${pluginDirName}/app.manifest.json`,
+    ), 'utf8')) as Record<string, unknown>
+  }
+
+  /** The shipped manifests, and the predicate exactly as index.ts injects it (unless told not to). */
+  function router(options: { injectPredicate?: boolean } = {}) {
+    const elearning = createLoadedPlugin('plugin-elearning', manifest('plugin-elearning'))
+    const attendance = createLoadedPlugin('plugin-attendance', manifest('plugin-attendance'))
+    return createPlatformAppsRouter({
+      pluginLoader: {
+        getPlugins: () => new Map([
+          ['plugin-elearning', elearning],
+          ['plugin-attendance', attendance],
+        ]),
+      } as any,
+      pluginStatus: new Map([
+        ['plugin-elearning', { status: 'active' as const }],
+        ['plugin-attendance', { status: 'active' as const }],
+      ]),
+      ...(options.injectPredicate === false ? {} : { isCatalogFeatureEnabled: resolveElearningCatalogFeature }),
+    })
+  }
+
+  const globalAdmin = { id: 'admin-1', role: 'admin', tenantId: ORG }
+  const learner = { id: 'learner-1', role: 'user', tenantId: ORG, permissions: ['elearning:read', 'attendance:read'] }
+
+  async function call(r: Router, routePath: '/' | '/:appId', user: unknown, appId?: string) {
+    const response = createMockResponse()
+    await getRouteHandler(r, 'get', routePath)({
+      params: appId ? { appId } : {},
+      headers: {},
+      user,
+      authenticatedTenantId: ORG,
+    }, response)
+    return response
+  }
+
+  function listed(response: { body: unknown }): string[] {
+    return ((response.body as { list?: Array<{ id: string }> }).list ?? []).map((item) => item.id).sort()
+  }
+
+  /** An `active` elearning installation row for ORG, as the registry would return it. */
+  function activeElearningRow() {
+    return {
+      id: 'pai_elearning',
+      tenant_id: ORG,
+      workspace_id: ORG,
+      app_id: 'elearning',
+      plugin_id: 'plugin-elearning',
+      instance_key: 'primary',
+      project_id: ORG,
+      display_name: '学习中心',
+      status: 'active',
+      config_json: { notificationsEnabled: false },
+      metadata_json: { installedBy: 'admin-1' },
+      created_at: '2026-09-01T00:00:00.000Z',
+      updated_at: '2026-09-01T00:00:00.000Z',
+    }
+  }
+
+  it.each(OFF_SPELLINGS)('master %s: a global admin WITH a tenant claim gets no elearning card and a 404 detail', async (_label, value) => {
+    setMaster(value)
+    queryForTenantMock.mockResolvedValue({ rows: [], rowCount: 0 })
+
+    const list = await call(router(), '/', globalAdmin)
+    expect(list.statusCode).toBe(200)
+    expect(listed(list)).toEqual(['attendance'])
+    expect(JSON.stringify(list.body)).not.toContain('学习中心')
+    // A switched-off app does not even reach the tenant-scoped instance read as an id.
+    for (const [, sql, params] of queryForTenantMock.mock.calls) {
+      expect(String(sql)).toMatch(/^\s*SELECT/i)
+      expect(JSON.stringify(params)).not.toContain('elearning')
+    }
+
+    queryForTenantMock.mockClear()
+    const detail = await call(router(), '/:appId', globalAdmin, 'elearning')
+    expect(detail.statusCode).toBe(404)
+    expect(detail.body).toEqual({ error: 'Platform app not found' })
+    expect(queryForTenantMock).not.toHaveBeenCalled()
+  })
+
+  it('master exact true (positive control): the same global admin sees the card and its detail', async () => {
+    setMaster('true')
+    queryForTenantMock.mockResolvedValue({ rows: [], rowCount: 0 })
+
+    const list = await call(router(), '/', globalAdmin)
+    expect(listed(list)).toEqual(['attendance', 'elearning'])
+
+    const detail = await call(router(), '/:appId', globalAdmin, 'elearning')
+    expect(detail.statusCode).toBe(200)
+    expect(detail.body).toMatchObject({ id: 'elearning', displayName: '学习中心', entryPath: '/learn' })
+  })
+
+  it('an existing ACTIVE installation stays invisible to admin and learner while off, and shows again when on -- the catalog only ever reads', async () => {
+    queryForTenantMock.mockImplementation(async (_tenant: string, _sql: string, params: unknown[]) => {
+      const appIds = Array.isArray(params?.[1]) ? params[1] as string[] : [String(params?.[1] ?? '')]
+      return appIds.includes('elearning')
+        ? { rows: [activeElearningRow()], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    })
+
+    setMaster(undefined)
+    for (const user of [globalAdmin, learner]) {
+      expect(listed(await call(router(), '/', user))).toEqual(['attendance'])
+      const detail = await call(router(), '/:appId', user, 'elearning')
+      expect(detail.statusCode).toBe(404)
+      expect(detail.body).toEqual({ error: 'Platform app not found' })
+    }
+
+    setMaster('true')
+    for (const user of [globalAdmin, learner]) {
+      const list = await call(router(), '/', user)
+      expect(listed(list)).toEqual(['attendance', 'elearning'])
+      const card = (list.body as { list: Array<{ id: string; instance: { status: string } | null }> }).list
+        .find((item) => item.id === 'elearning')
+      expect(card?.instance?.status).toBe('active')
+      const detail = await call(router(), '/:appId', user, 'elearning')
+      expect(detail.statusCode).toBe(200)
+      expect((detail.body as { instance: { status: string } }).instance.status).toBe('active')
+    }
+
+    // Read-only throughout: turning the switch back on needed no write to make the row effective.
+    expect(queryForTenantMock.mock.calls.length).toBeGreaterThan(0)
+    for (const [, sql] of queryForTenantMock.mock.calls) {
+      expect(String(sql)).toMatch(/^\s*SELECT/i)
+      expect(String(sql)).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b/i)
+    }
+    expect(queryMock).not.toHaveBeenCalled()
+  })
+
+  it.each(OFF_SPELLINGS)('master %s: the router hides elearning by itself even when NO catalog predicate is injected', async (_label, value) => {
+    setMaster(value)
+    queryForTenantMock.mockResolvedValue({ rows: [activeElearningRow()], rowCount: 1 })
+    const bare = router({ injectPredicate: false })
+
+    expect(listed(await call(bare, '/', globalAdmin))).toEqual(['attendance'])
+    const detail = await call(bare, '/:appId', globalAdmin, 'elearning')
+    expect(detail.statusCode).toBe(404)
+    expect(detail.body).toEqual({ error: 'Platform app not found' })
+  })
+
+  it('no predicate injected, master exact true (positive control): the card is back', async () => {
+    setMaster('true')
+    queryForTenantMock.mockResolvedValue({ rows: [], rowCount: 0 })
+    const bare = router({ injectPredicate: false })
+
+    expect(listed(await call(bare, '/', globalAdmin))).toEqual(['attendance', 'elearning'])
+    expect((await call(bare, '/:appId', globalAdmin, 'elearning')).statusCode).toBe(200)
+  })
+})
