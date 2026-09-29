@@ -545,10 +545,10 @@
         class="stock-prep-install__hint"
         data-testid="stock-prep-source-preflight-error"
       >
-        {{ bi(readFailed.zh, readFailed.en) }}
+        {{ bi(sourcePreflightErrorText.zh, sourcePreflightErrorText.en) }}
         <code class="stock-prep-install__token">{{ sourcePreflightErrorStatus }}</code>
-        <span v-if="readFailed.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
-          {{ bi(readFailed.zhNext, readFailed.enNext ?? '') }}
+        <span v-if="sourcePreflightErrorText.zhNext" class="stock-prep-install__hint" data-testid="stock-prep-source-preflight-error-next">
+          {{ bi(sourcePreflightErrorText.zhNext, sourcePreflightErrorText.enNext ?? '') }}
         </span>
         <button type="button" data-testid="stock-prep-source-preflight-error-copy" @click="copyReadError(sourcePreflightErrorStatus)">
           {{ readErrorCopyLabel === 'copy' ? bi('复制这条报错', 'Copy this error') : bi('已复制', 'Copied') }}
@@ -1039,9 +1039,11 @@ import {
   stockPrepSourceBlockerPlain,
   stockPrepSourceBridgePlain,
   stockPrepSourceCheckPlain,
+  stockPrepSourcePreflightRefusalPlain,
   stockPrepSourceVerdictPlain,
   stockPrepSourceWarningPlain,
   stockPrepStepOutcomeText,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
 
@@ -1152,6 +1154,10 @@ onBeforeUnmount(() => {
 // ---------------------------------------------------------------------------
 const sourcePreflight = ref<StockPrepSourcePreflight | null>(null)
 const sourcePreflightErrorStatus = ref<number | null>(null)
+// WHICH OF 「检查这个源」's OWN REFUSALS this was, as a constant entry from plainLanguage.ts — never the
+// server's code or text. `null` keeps the generic read-failure sentence (an outage, a proxy error).
+const sourcePreflightRefusal = ref<StockPrepPlainEntry | null>(null)
+const sourcePreflightErrorText = computed<StockPrepPlainEntry>(() => sourcePreflightRefusal.value ?? readFailed)
 const sourcePreflightRoute = STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE
 const canCheckSource = computed(() => canRunStockPrepSourcePreflight((permission) => auth.hasPermission(permission)))
 
@@ -1256,9 +1262,13 @@ async function loadSourcePreflight(declaredBridge?: StockPrepDeclarableBridge): 
     // later check of a different source.
     sourcePreflight.value = await readStockPreparationSourcePreflight(props.scope, undefined, declaredBridge)
   } catch (error) {
-    // Only a status reaches state. A server message could carry a value, and this page's whole
-    // contract with the customer's data is that none of it lands here.
+    // Only a status reaches state, plus — when the status and code name one of the route's own
+    // refusals — a constant sentence chosen from plainLanguage.ts. A server message could carry a
+    // value, and this page's whole contract with the customer's data is that none of it lands here.
     sourcePreflightErrorStatus.value = error instanceof StockPrepSourcePreflightError ? error.status : 0
+    sourcePreflightRefusal.value = error instanceof StockPrepSourcePreflightError
+      ? stockPrepSourcePreflightRefusalPlain(error.status, error.code)
+      : null
   } finally {
     busy.value = false
   }
