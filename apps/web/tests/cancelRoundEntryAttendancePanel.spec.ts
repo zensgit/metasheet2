@@ -421,7 +421,7 @@ describe('P-6 on the self-service panel (§15.6): no approver / seat names, no a
     for (const name of NAMES) expect(html, `${where}: ${name}`).not.toContain(name)
   }
 
-  it('planted names never render (pending → withdraw → launch dialog → re-launch, and every outcome); only attendance routes are read', async () => {
+  it('planted names never render (pending → withdraw → launch dialog → re-launch, a withdraw closed by an approver, a launch refused for the seat, and every outcome); only attendance routes are read', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     try {
       summaries = [
@@ -451,6 +451,27 @@ describe('P-6 on the self-service panel (§15.6): no approver / seat names, no a
       await flushUi()
       expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请审批中')
       expectNoNames(root, 're-launched')
+
+      // A pending round an approver has already acted on: the withdraw reason is shown (phase D, S/B gate P3-1).
+      summaries = [() => jsonResponse(200, wire({ canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_WINDOW_CLOSED' }))]
+      const closed = await mountPanel(PLANTED_ROW)
+      expect($(closed, 'data-cancel-round-withdraw-reason')!.textContent).toContain('无法再撤回')
+      expectNoNames(closed, 'withdraw closed by an approver')
+
+      // A launch refused for the seat (P-6′): the dialog shows the weak copy, and nothing the refusal
+      // body carries besides its code and message reaches the page.
+      summaries = [() => jsonResponse(200, wire({ outcome: 'withdrawn', status: 'cancellation_withdrawn', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' }))]
+      writes = [() => jsonResponse(409, {
+        ok: false,
+        error: { code: 'CANCEL_ROUND_SEAT_INELIGIBLE', message: 'A cancellation cannot be started', approverName: NAMES[0], details: { approverId: NAMES[2], approver: NAMES[1] } },
+      })]
+      const refused = await mountPanel(PLANTED_ROW)
+      $(refused, 'data-cancel-round-launch')!.click()
+      await flushUi()
+      $(refused, 'data-cancel-round-confirm')!.click()
+      await flushUi()
+      expect($(refused, 'data-cancel-round-dialog-error')!.textContent).toContain(CANCEL_ROUND_SEAT_CLASS_COPY.zh)
+      expectNoNames(refused, 'launch refused for the seat')
 
       const outcomes: Array<[Round, string]> = [
         [{ outcome: 'applied', status: 'leave_cancelled', canWithdraw: false, cancellationOutcome: { status: 'cancelled', reversal: { reversed: 480, lots: 1, unrecoverableExpired: 0, alreadyReversed: false, approverName: NAMES[0] }, decidedBy: NAMES[1] } }, '请假已取消'],

@@ -15,13 +15,17 @@
  *  - every `CANCEL_ROUND_*` code the server can produce has client copy;
  *  - the todo item carries `workflowKey`, the cancel-round key is the same string on both sides, and the
  *    todo `href` is the attendance deep link the attendance page resolves (`section` + `requestId`).
- * The attendance-side pending list route is NOT on the server yet (backend lane, in parallel); its
- * contract is checked when the two branches are stacked (design MD §B2).
+ *  - the attendance-side pending list (owner 16:5x 「Attendance-side list」): the route string and its
+ *    `withPermission('attendance:approve')`, the nine keys of each `listed.push({ … })` item equal the
+ *    client's `PendingCancelRoundItem` fields, and the success envelope `data: { items, total }` — the
+ *    three anchors design MD §11.10 names for the stacked tree (B2 gate P3-2);
+ *  - the decision / withdraw bodies accept `expectedRoundId` and the client's decision sends it (phase D D2).
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  CANCEL_ROUND_PENDING_LIST_PATH,
   CANCEL_ROUND_DELIVERY_CHANNEL_COPY,
   CANCEL_ROUND_DELIVERY_STATUSES,
   CANCEL_ROUND_ERROR_COPY,
@@ -30,6 +34,7 @@ import {
   cancelRoundStatusKeyFromSummary,
   normalizeCancelRoundDeliveries,
   normalizeCancelRoundSummary,
+  normalizePendingCancelRoundList,
 } from '../src/approvals/cancelRound'
 import { ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID } from '../src/views/attendance/attendanceOverviewRequestReveal'
 
@@ -178,3 +183,51 @@ describe('todo center item (P-11 (a)(b), todo-center lock §3 PendingItem)', () 
     expect(experience).toContain(`'${ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID}'`)
   })
 })
+
+describe('attendance-side pending list (owner 16:5x 「Attendance-side list」; design MD §11.10 anchors)', () => {
+  const ROUTE = /'GET',\s*'\/api\/attendance\/cancel-rounds\/pending',/
+  const handler = () => blockAfter(PLUGIN, ROUTE)
+
+  it('the route string is the client\'s path, behind withPermission(\'attendance:approve\')', () => {
+    const start = PLUGIN.search(ROUTE)
+    expect(start, 'the pending-list route must be registered in the plugin').toBeGreaterThan(-1)
+    expect(PLUGIN.slice(start).match(/'(\/api\/attendance\/cancel-rounds\/pending)'/)?.[1]).toBe(CANCEL_ROUND_PENDING_LIST_PATH)
+    const head = PLUGIN.slice(start, PLUGIN.indexOf('{', start))
+    expect(head).toContain("withPermission('attendance:approve', async (req, res) =>")
+  })
+
+  it('each listed item carries exactly the nine keys the client reads', () => {
+    const pushed = stripLineComments(blockAfter(handler(), 'listed.push('))
+    // `key: value,` or the shorthand `key,` — one property per line
+    const serverKeys = [...pushed.matchAll(/^\s*(\w+)\s*(?::|,|$)/gm)].map((m) => m[1]).sort()
+    expect(serverKeys).toHaveLength(9)
+    const client = read('apps/web/src/approvals/cancelRound.ts')
+    expect(interfaceFields(client, 'PendingCancelRoundItem')).toEqual(serverKeys)
+    const wire = Object.fromEntries(serverKeys.map((k) => [k, `v-${k}`]))
+    const list = normalizePendingCancelRoundList({ ok: true, data: { items: [wire], total: 1 } })
+    expect(Object.keys(list.items[0]).sort()).toEqual(serverKeys)
+  })
+
+  it('the success envelope is data: { items, total }', () => {
+    expect(handler()).toMatch(/res\.json\(\{\s*ok: true,\s*data: \{\s*items: listed\.slice\([^)]*\),\s*total: listed\.length\s*\}\s*\}\)/)
+  })
+})
+
+describe('the listed round travels with the decision (phase D D2)', () => {
+  it('the decision and withdraw bodies accept expectedRoundId and hand it to the port; the client decision sends it', () => {
+    const decisionSchema = blockAfter(PLUGIN, 'const cancelRoundDecisionBodySchema = z.object(')
+    const withdrawSchema = blockAfter(PLUGIN, 'const cancelRoundWithdrawBodySchema = z.object(')
+    expect(decisionSchema).toContain('expectedRoundId: z.string()')
+    expect(withdrawSchema).toContain('expectedRoundId: z.string()')
+    const actions = blockAfter(PLUGIN, "'/api/attendance/requests/:id/cancel-round/actions',")
+    const withdraw = blockAfter(PLUGIN, "'/api/attendance/requests/:id/cancel-round/withdraw',")
+    expect(actions).toContain('expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId)')
+    expect(withdraw).toContain('expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId)')
+    const client = read('apps/web/src/approvals/cancelRound.ts')
+    expect(blockAfter(client, 'export async function decideCancelRound(')).toContain("withOptionalText('expectedRoundId', expectedRoundId)")
+    // the stale refusal the client maps is the one the port answers
+    expect(PORT).toMatch(/code: APPROVAL_ERROR_CODES\.INVALID_STATUS_TRANSITION/)
+    expect(blockAfter(client, 'export async function decideListedCancelRound(')).toContain("=== 'INVALID_STATUS_TRANSITION'")
+  })
+})
+
