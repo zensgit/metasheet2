@@ -81,7 +81,7 @@ import {
 } from '../core/attendance-cancellation-execution-port'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { Logger } from '../core/logger'
-import { listUserPermissions } from '../rbac/service'
+import { isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 
 const logger = new Logger('ApprovalCancelRoundEntryPort')
 
@@ -166,6 +166,33 @@ async function resolveAffectedUserPermissions(userId: string): Promise<string[]>
 }
 
 /**
+ * The role claim of the same touched-but-not-acting user. Their own `GET /api/todo/count` reads the
+ * one role the authentication layer puts on `req.user.role` when token claims are not trusted (the
+ * production setting): `AuthService.resolveRbacProfile` takes the `users.role` column and upgrades it
+ * to `'admin'` when `user_roles` holds `admin` (`isAdmin`, the same lookup). The same two reads here
+ * give the push that role, so a pending item seated on that role arm is counted in the push as it is
+ * in the read. A failed admin lookup keeps the column value (as `resolveRbacProfile` does); a failed
+ * column read gives no role claims (the count the approval side pushes); neither fails the push.
+ */
+async function resolveAffectedUserRoles(userId: string): Promise<string[]> {
+  let role = ''
+  try {
+    if (!pool) return []
+    const result = await pool.query('SELECT role FROM users WHERE id = $1', [userId])
+    const stored = (result.rows[0] as { role?: unknown } | undefined)?.role
+    role = typeof stored === 'string' ? stored.trim() : ''
+  } catch {
+    return []
+  }
+  try {
+    if (await isRbacAdmin(userId)) role = 'admin'
+  } catch {
+    // keep the column value, as the authentication layer does
+  }
+  return role ? [role] : []
+}
+
+/**
  * Best effort by contract: the action has already committed, so a failed push is logged
  * (values-free: the reason token only) and never turns a done action into an error.
  *
@@ -175,8 +202,9 @@ async function resolveAffectedUserPermissions(userId: string): Promise<string[]>
  * publisher the caller's roles only). It goes FIRST and the actor id is not repeated among the
  * others: the publisher keeps the first entry per user id, and the actor is often one of the seats
  * too (an approver acting on their own seat). Everyone else is pushed with the permission context
- * their own count read resolves (`resolveAffectedUserPermissions`) and without role claims, as the
- * approval side pushes the other users an action touches.
+ * their own count read resolves (`resolveAffectedUserPermissions`) and with the role claim that
+ * read resolves (`resolveAffectedUserRoles`); the approval-side routes push the other users an
+ * action touches with neither.
  */
 async function publishCancelRoundCounts(
   publishCounts: CancelRoundCountPublisherV1 | undefined,
@@ -191,7 +219,11 @@ async function publishCancelRoundCounts(
       ...new Set(otherUserIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
     ].filter((id) => id !== actorId)
     const otherEntries = await Promise.all(
-      others.map(async (userId) => ({ userId, permissions: await resolveAffectedUserPermissions(userId) })),
+      others.map(async (userId) => ({
+        userId,
+        roles: await resolveAffectedUserRoles(userId),
+        permissions: await resolveAffectedUserPermissions(userId),
+      })),
     )
     const users: Array<{ userId: string; roles?: string[]; permissions?: string[] }> = [
       ...(actorId

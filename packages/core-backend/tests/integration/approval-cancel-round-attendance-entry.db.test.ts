@@ -2290,6 +2290,124 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         }
       })
 
+      /**
+       * An unrelated pending item whose ONLY active seat is the role arm `role` / `roleId` (the shape
+       * the executor writes for a template approver configured by role). It is in a viewer's count
+       * only when that viewer's role claims reach the count. Returns the item id; the caller
+       * deactivates it.
+       */
+      async function seedRoleArmItem(label: string, roleId: string): Promise<string> {
+        const otherRequester = `g4dc-rolearm-${label}-${TS}`
+        await seedLoginUser(otherRequester, { roles: ['attendance_employee'] })
+        await grantApprovalWriteForIntegrationActor(otherRequester)
+        let other: { id: string }
+        try {
+          other = await service().createApproval(
+            { templateId, formData: { reason: `g4dc role-arm item ${label}` } },
+            { userId: otherRequester, roles: [] },
+          )
+        } finally {
+          await pool().query(
+            `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+            [otherRequester],
+          )
+        }
+        createdApprovalIds.add(other.id)
+        const otherNode = (
+          await pool().query<{ current_node_key: string }>('SELECT current_node_key FROM approval_instances WHERE id = $1', [other.id])
+        ).rows[0].current_node_key
+        await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = $1', [other.id])
+        await pool().query(
+          `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+           VALUES ($1, 'role', $2, $3, TRUE)`,
+          [other.id, roleId, otherNode],
+        )
+        return other.id
+      }
+
+      it('T6 (affected user, role arm): the seat holder, pushed when the REQUESTER launches and withdraws, carries the role their own GET /api/todo/count resolves — the users.role column, and admin when an admin role row upgrades it — so a pending item seated only on that role arm is in the pushed count as it is in the GET', async () => {
+        const originalRole = (
+          await pool().query<{ role: string }>('SELECT role FROM users WHERE id = $1', [approverId])
+        ).rows[0].role
+        const columnRole = `g4dc_t6_role_${TS}`
+        const columnItemId = await seedRoleArmItem('column', columnRole)
+        const adminItemId = await seedRoleArmItem('admin', 'admin')
+        const readGrant = await pool().query(
+          `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:read') ON CONFLICT DO NOTHING`,
+          [approverId],
+        )
+        let adminRowInserted = false
+        const recorder = recordPushes()
+        try {
+          /** One leg: the requester launches, then withdraws; the seat holder's push == their own GET each time. */
+          const leg = async (label: string, roleItemId: string): Promise<void> => {
+            invalidateUserPerms(approverId)
+            const approverToken = await loginToken(approverId)
+            const countOf = async (): Promise<number> => {
+              const response = await http('GET', '/api/todo/count', approverToken)
+              expect(response.status, response.text).toBe(200)
+              return response.json.count as number
+            }
+            // Precondition, so the leg cannot pass vacuously: the seat holder's own read includes the
+            // role-arm item.
+            const items = await http('GET', '/api/todo/items', approverToken)
+            expect(items.status, items.text).toBe(200)
+            expect(items.json.items.some((entry: { id: string }) => entry.id === roleItemId), label).toBe(true)
+            const before = await countOf()
+
+            const employee = `g4dc-t6-rolearm-${label}-${TS}`
+            await seedLoginUser(employee, { roles: ['attendance_employee'] })
+            const employeeToken = await loginToken(employee)
+            const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+
+            recorder.pushes.length = 0
+            const launch = await http('POST', entryPath(requestId), employeeToken, {})
+            expect(launch.status, launch.text).toBe(201)
+            const afterLaunch = await countOf()
+            expect(afterLaunch, label).toBe(before + 1)
+            expect(todoPushesFor(recorder.pushes, approverId), label).toHaveLength(1)
+            expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count, label).toBe(afterLaunch)
+
+            recorder.pushes.length = 0
+            const withdrawn = await http('POST', withdrawPath(requestId), employeeToken, {})
+            expect(withdrawn.status, withdrawn.text).toBe(200)
+            const afterWithdraw = await countOf()
+            expect(afterWithdraw, label).toBe(before)
+            expect(todoPushesFor(recorder.pushes, approverId), label).toHaveLength(1)
+            expect(todoPushesFor(recorder.pushes, approverId).at(-1)?.payload?.count, label).toBe(afterWithdraw)
+          }
+
+          // Leg 1 — the role is the users.role column.
+          await pool().query('UPDATE users SET role = $2 WHERE id = $1', [approverId, columnRole])
+          await leg('users.role column', columnItemId)
+
+          // Leg 2 — the column is back to its value; an admin role row upgrades the role to admin.
+          await pool().query('UPDATE users SET role = $2 WHERE id = $1', [approverId, originalRole])
+          const adminRow = await pool().query(
+            `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+            [approverId],
+          )
+          adminRowInserted = (adminRow.rowCount ?? 0) > 0
+          await leg('admin role row', adminItemId)
+        } finally {
+          recorder.stop()
+          await pool().query('UPDATE approval_assignments SET is_active = FALSE WHERE instance_id = ANY($1::text[])', [
+            [columnItemId, adminItemId],
+          ])
+          await pool().query('UPDATE users SET role = $2 WHERE id = $1', [approverId, originalRole])
+          if (adminRowInserted) {
+            await pool().query(`DELETE FROM user_roles WHERE user_id = $1 AND role_id = 'admin'`, [approverId])
+          }
+          if ((readGrant.rowCount ?? 0) > 0) {
+            await pool().query(
+              `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:read'`,
+              [approverId],
+            )
+          }
+          invalidateUserPerms(approverId)
+        }
+      })
+
       it('P-11 (c), lock §14.1 fence: every seat a launch writes is a person arm (user / role, never source_queue); a creation that would seat any other arm is refused with the registered code before ANY write', async () => {
         const fixture = await launchedRound('fence')
         const arms = await pool().query<{ assignment_type: string }>(
