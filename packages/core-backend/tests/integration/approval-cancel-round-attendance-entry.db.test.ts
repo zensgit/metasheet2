@@ -1,0 +1,926 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import net from 'net'
+import * as path from 'path'
+import { randomUUID } from 'node:crypto'
+import * as bcrypt from 'bcryptjs'
+import { MetaSheetServer } from '../../src/index'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ApprovalProductService } from '../../src/services/ApprovalProductService'
+import { type ApprovalActionRequest } from '../../src/types/approval-product'
+import {
+  getAttendanceCancellationExecutionPort,
+  registerAttendanceCancellationExecutionProvider,
+  unregisterAttendanceCancellationExecutionProvider,
+  type AttendanceCancellationExecutionPort,
+} from '../../src/core/attendance-cancellation-execution-port'
+import type {
+  AttendanceRequestOperationExternalTransactionInputV1,
+  AttendanceRequestOperationExternalTransactionResultV1,
+} from '../../src/attendance/w4c3b-request-operation-boundary'
+import { CANCEL_ROUND_TEMPLATE_ID } from '../../src/db/seeds/approval-cancel-round-published-definition'
+
+/**
+ * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
+ * 2026-09-28) — phase A acceptance, real DB + real HTTP, for the two attendance-side routes
+ * `GET` / `POST /api/attendance/requests/:id/cancel-round` (P-1 Q1′ = (i)).
+ *
+ * WHAT IS REAL HERE: the server process (core + plugin-attendance, loaded from the repo's own plugin
+ * directory), both authorization layers (`RBAC_BYPASS='false'` is set and asserted — the plugin's
+ * `withPermission` reads `user_roles` / `user_permissions` from THIS database, core's `rbacGuard`
+ * reads the token plus the same tables), the creation path, the engine's approve/reject/revoke
+ * branches, and the durable read projector. The employee-lane tokens are minted by the REAL
+ * `POST /api/auth/login` against bcrypt-hashed `users` rows (P-10: 「只持员工级权限、不持任何
+ * `approvals:*` 的真实令牌」). The ONLY double is the C-1 attendance cancellation PROVIDER, bound
+ * through the production registry (save/restore), so the three-token classification can be driven
+ * deterministically — the real W4 boundary's end-to-end run is the redemption suite's, not this one's.
+ *
+ * FIXTURE-ONLY privilege, named so it is never mistaken for the population under test: the template
+ * author and the approver use `GET /api/auth/dev-token?roles=admin` tokens to create/publish the
+ * fixture template and to approve/reject on `/api/approvals/:id/actions`. Those tokens are never sent
+ * to the two routes under test. Original documents are created IN-PROCESS for their requester; the
+ * service's own write boundary reads `approvals:write` from the DATABASE, so the fixture grants it
+ * for that one call and DELETES the grant before the requester touches any route — the P-10 case
+ * then proves the absence at test time (`GET /api/approvals/:id` ⇒ 403). An employee never holds an
+ * admin-claims token at all.
+ *
+ * RATIFIED CRITERIA THIS FILE PINS (owner option text is in the lock header, not restated here):
+ *   - P-10: employee real token → launch 201 → read 200 → read result 200; the same employee token is
+ *     403'd by `GET /api/approvals/:id` (so the pass is the attendance-side mount, not a stray
+ *     `approvals:*` grant); an admin real token is green on the same three steps (positive control).
+ *   - P-1 (a)/(b)/(c) with the P-8 registered codes; creation-path refusals pass through as
+ *     (status, code, message) with NO `details`.
+ *   - P-4: summary keyed by the original document; I7 on the original instance; `round: null` ⇒ 200;
+ *     a viewer who fails I7 gets the byte-identical 404 of a never-existing id.
+ *   - P-3 (iii): all three classification tokens, each read back twice (「刷新后仍可查」), each equal
+ *     to what `GET /api/approvals/:id` projects for the same round (one projector, three surfaces).
+ *   - P-2 / P-7: V1 / V3 / V4 / V5 / V6 status tokens; system closure vs approver reject told apart by
+ *     `closedBySystem`; `blockCode` without the adapter's free-text detail.
+ *   - P-9: the seed template through the PUBLIC create path — legs A (admin HTTP), B (employee HTTP),
+ *     C (normal actor, in-process service) — never yields a cancel round.
+ */
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+const TS = Date.now()
+
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
+async function canListenOnEphemeralPort(): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.listen(0, '127.0.0.1', () => server.close(() => resolve(true)))
+  })
+}
+
+type Raw = { status: number; text: string; json: any }
+
+const PLUGIN_FORBIDDEN_BODY = '{"ok":false,"error":{"code":"FORBIDDEN","message":"Insufficient permissions"}}'
+const CORE_RBAC_FORBIDDEN_BODY = '{"error":"Insufficient permissions"}'
+
+describeIfDatabase('cancel-round product entry phase A — attendance-side routes (real DB + real HTTP)', () => {
+  let server: MetaSheetServer | undefined
+  let baseUrl = ''
+  const previousRbacBypass = process.env.RBAC_BYPASS
+  const password = `G4a-entry-${TS}-Pw!`
+  let passwordHash = ''
+
+  const createdTemplateIds = new Set<string>()
+  const createdApprovalIds = new Set<string>()
+  const createdRequestIds = new Set<string>()
+  const seededUserIds = new Set<string>()
+  const devTokenUserIds = new Set<string>()
+  const createdRoleIds = new Set<string>()
+
+  const pool = () => poolManager.get()
+  const service = () => new ApprovalProductService()
+
+  // The one approver every fixture document routes to, and the fixture template author.
+  const approverId = `g4a-apr-${TS}`
+  const authorId = `g4a-author-${TS}`
+  let approverFixtureToken = ''
+  let templateId = ''
+
+  async function http(
+    method: string,
+    pathName: string,
+    token: string | null,
+    body?: unknown,
+  ): Promise<Raw> {
+    const response = await fetch(`${baseUrl}${pathName}`, {
+      method,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    })
+    const text = await response.text()
+    let json: any
+    try {
+      json = text ? JSON.parse(text) : undefined
+    } catch {
+      json = undefined
+    }
+    return { status: response.status, text, json }
+  }
+
+  /** A directory user that can log in. `roles` → `user_roles`, `perms` → `user_permissions`. */
+  async function seedLoginUser(
+    userId: string,
+    options: { roles?: string[]; perms?: string[]; admin?: boolean } = {},
+  ): Promise<void> {
+    seededUserIds.add(userId)
+    await pool().query(
+      `INSERT INTO users
+         (id, email, username, name, password_hash, role, permissions, is_active, is_admin,
+          activation_status, local_password_set, must_change_password, created_at, updated_at)
+       VALUES ($1, $2, $1, $1, $3, $4, '[]'::jsonb, TRUE, $5, 'activated', TRUE, FALSE, now(), now())
+       ON CONFLICT (id) DO NOTHING`,
+      [userId, `${userId}@example.test`, passwordHash, options.admin ? 'admin' : 'user', options.admin === true],
+    )
+    await pool().query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId],
+    )
+    for (const roleId of options.roles ?? []) {
+      await pool().query(
+        'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [userId, roleId],
+      )
+    }
+    for (const code of options.perms ?? []) {
+      await pool().query(
+        'INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [userId, code],
+      )
+    }
+  }
+
+  /**
+   * A principal holding `perms` in the attendance namespace: a fixture role of its own carrying
+   * `perms`, plus an enabled attendance namespace admission (see private record).
+   */
+  async function seedScopedAttendanceUser(userId: string, perms: string[]): Promise<void> {
+    const roleId = `g4a_scoped_${userId}`
+    createdRoleIds.add(roleId)
+    await pool().query('INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING', [roleId])
+    for (const code of perms) {
+      await pool().query(
+        'INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [roleId, code],
+      )
+    }
+    await seedLoginUser(userId, { roles: [roleId] })
+    await pool().query(
+      `INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES ($1, 'attendance', TRUE)
+       ON CONFLICT (user_id, namespace) DO UPDATE SET enabled = TRUE`,
+      [userId],
+    )
+  }
+
+  /** P-10 「真实令牌」: minted by the production login route, not by the dev-token route. */
+  async function loginToken(userId: string): Promise<string> {
+    const login = await http('POST', '/api/auth/login', null, {
+      identifier: `${userId}@example.test`,
+      password,
+    })
+    expect(login.status, login.text).toBe(200)
+    const token = login.json?.token ?? login.json?.data?.token
+    expect(typeof token).toBe('string')
+    return token as string
+  }
+
+  /** FIXTURE-ONLY admin-claims token (see file header); never sent to the routes under test. */
+  async function fixtureAdminToken(userId: string): Promise<string> {
+    devTokenUserIds.add(userId)
+    const response = await http(
+      'GET',
+      `/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
+      null,
+    )
+    expect(response.status).toBe(200)
+    return response.json.token as string
+  }
+
+  async function publishFixtureTemplate(authorToken: string): Promise<string> {
+    const create = await http('POST', '/api/approval-templates', authorToken, {
+      key: `g4a-entry-${TS}-${Math.floor(Math.random() * 1e6)}`,
+      name: 'G4-A cancel-round entry fixture',
+      description: 'approval-cancel-round-attendance-entry.db.test.ts',
+      formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_a',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: [approverId], approvalMode: 'single' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-a', source: 'start', target: 'approval_a' },
+          { key: 'e-a-end', source: 'approval_a', target: 'end' },
+        ],
+      },
+    })
+    expect(create.status, create.text).toBe(201)
+    const id = create.json.id as string
+    createdTemplateIds.add(id)
+    const publish = await http('POST', `/api/approval-templates/${id}/publish`, authorToken, {
+      policy: { allowRevoke: true },
+    })
+    expect(publish.status, publish.text).toBe(200)
+    return id
+  }
+
+  /**
+   * An APPROVED leave: original document created in-process for `documentRequesterId` (so its
+   * `requester_snapshot.id` is that person), approved by the fixture approver over HTTP, then
+   * re-keyed as an attendance document with an `attendance_requests` row owned by `leaveUserId`
+   * (composite FK order: instance re-key → request insert → business key), exactly the shape the
+   * redemption suite's `attachAttendanceRequest` builds.
+   */
+  async function seedApprovedLeave(options: {
+    documentRequesterId: string
+    leaveUserId?: string
+    requestStatus?: string
+  }): Promise<{ documentId: string; requestId: string }> {
+    // Fixture-only: the create boundary's DB-read approvals:write, granted for this call and removed.
+    await grantApprovalWriteForIntegrationActor(options.documentRequesterId)
+    let dto: { id: string }
+    try {
+      dto = await service().createApproval(
+        { templateId, formData: { reason: 'g4a leave' } },
+        { userId: options.documentRequesterId, roles: [] },
+      )
+    } finally {
+      await pool().query(
+        `DELETE FROM user_permissions WHERE user_id = $1 AND permission_code = 'approvals:write'`,
+        [options.documentRequesterId],
+      )
+    }
+    createdApprovalIds.add(dto.id)
+    const approve = await http('POST', `/api/approvals/${dto.id}/actions`, approverFixtureToken, { action: 'approve' })
+    expect(approve.status, approve.text).toBe(200)
+    const status = await pool().query<{ status: string }>('SELECT status FROM approval_instances WHERE id = $1', [dto.id])
+    expect(status.rows[0]?.status).toBe('approved')
+
+    const rekeyed = await pool().query(
+      `UPDATE approval_instances SET workflow_key = 'attendance.request' WHERE id = $1`,
+      [dto.id],
+    )
+    expect(rekeyed.rowCount).toBe(1)
+    const inserted = await pool().query<{ id: string }>(
+      `INSERT INTO attendance_requests
+         (user_id, work_date, request_type, status, approval_instance_id, approval_workflow_key)
+       VALUES ($1, CURRENT_DATE, 'leave', $3, $2, 'attendance.request')
+       RETURNING id::text AS id`,
+      [options.leaveUserId ?? options.documentRequesterId, dto.id, options.requestStatus ?? 'approved'],
+    )
+    const requestId = inserted.rows[0].id
+    createdRequestIds.add(requestId)
+    await pool().query(`UPDATE approval_instances SET business_key = $2 WHERE id = $1`, [
+      dto.id,
+      `attendance-request:${requestId}`,
+    ])
+    return { documentId: dto.id, requestId }
+  }
+
+  async function roundsFor(documentId: string): Promise<Array<{ id: string; outcome: string; engine_instance_id: string }>> {
+    const result = await pool().query<{ id: string; outcome: string; engine_instance_id: string }>(
+      'SELECT id, outcome, engine_instance_id FROM approval_rounds WHERE document_id = $1 ORDER BY started_at',
+      [documentId],
+    )
+    for (const row of result.rows) createdApprovalIds.add(row.engine_instance_id)
+    return result.rows
+  }
+
+  function bindCancellationPort(
+    respond: () => Promise<AttendanceRequestOperationExternalTransactionResultV1>,
+  ): { stop: () => void; calls: AttendanceRequestOperationExternalTransactionInputV1[] } {
+    const calls: AttendanceRequestOperationExternalTransactionInputV1[] = []
+    const port: AttendanceCancellationExecutionPort = {
+      execute: async () => {
+        throw new Error('the HTTP entry must not be reached from the approval side')
+      },
+      executeInExternalTransaction: async (input) => {
+        calls.push(input)
+        return respond()
+      },
+    }
+    const previous = getAttendanceCancellationExecutionPort()
+    registerAttendanceCancellationExecutionProvider(port)
+    return {
+      calls,
+      stop: () => {
+        if (previous) registerAttendanceCancellationExecutionProvider(previous)
+        else unregisterAttendanceCancellationExecutionProvider()
+      },
+    }
+  }
+
+  const entryPath = (requestId: string) => `/api/attendance/requests/${requestId}/cancel-round`
+
+  beforeAll(async () => {
+    expect(await canListenOnEphemeralPort()).toBe(true)
+    process.env.RBAC_BYPASS = 'false'
+    await ensureApprovalSchemaReady()
+    passwordHash = await bcrypt.hash(password, 4)
+    const repoRoot = path.resolve(__dirname, '../../../..')
+    server = new MetaSheetServer({
+      port: 0,
+      host: '127.0.0.1',
+      pluginDirs: [path.join(repoRoot, 'plugins', 'plugin-attendance')],
+    })
+    await server.start()
+    const address = server.getAddress()
+    const port = address && typeof address === 'object' ? address.port : undefined
+    expect(port).toBeTruthy()
+    baseUrl = `http://127.0.0.1:${port}`
+
+    await seedLoginUser(approverId, { roles: ['attendance_employee'] })
+    await seedLoginUser(authorId)
+    approverFixtureToken = await fixtureAdminToken(approverId)
+    templateId = await publishFixtureTemplate(await fixtureAdminToken(authorId))
+  })
+
+  afterAll(async () => {
+    try {
+      const requestIds = [...createdRequestIds]
+      if (createdApprovalIds.size > 0) {
+        // Every round's own engine instance, including rounds no case read back through `roundsFor`.
+        const engines = await pool().query<{ engine_instance_id: string }>(
+          `SELECT engine_instance_id FROM approval_rounds
+            WHERE document_id = ANY($1::text[]) AND engine_instance_id IS NOT NULL`,
+          [[...createdApprovalIds]],
+        )
+        for (const row of engines.rows) createdApprovalIds.add(row.engine_instance_id)
+      }
+      const approvalIds = [...createdApprovalIds]
+      if (requestIds.length > 0) {
+        await pool().query('DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])', [requestIds])
+      }
+      if (approvalIds.length > 0) {
+        await pool().query(
+          'DELETE FROM approval_rounds WHERE document_id = ANY($1::text[]) OR engine_instance_id = ANY($1::text[])',
+          [approvalIds],
+        )
+        await pool().query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_metrics WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [approvalIds])
+      }
+      const templateIds = [...createdTemplateIds]
+      if (templateIds.length > 0) {
+        await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      const userIds = [...new Set([...seededUserIds, ...devTokenUserIds])]
+      if (userIds.length > 0) {
+        await pool().query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [userIds])
+        await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds])
+        await pool().query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[])', [userIds])
+        await pool().query('DELETE FROM user_sessions WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...seededUserIds]])
+      }
+      const roleIds = [...createdRoleIds]
+      if (roleIds.length > 0) {
+        await pool().query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [roleIds])
+        await pool().query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [roleIds])
+        await pool().query('DELETE FROM roles WHERE id = ANY($1::text[])', [roleIds])
+      }
+    } finally {
+      await server?.stop()
+      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS
+      else process.env.RBAC_BYPASS = previousRbacBypass
+    }
+  })
+
+  it('harness: real authorization is ON and the routes are registered (404 on an unknown id, not an unrouted path)', async () => {
+    expect(process.env.RBAC_BYPASS).toBe('false')
+    const employee = `g4a-harness-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const unknown = await http('GET', entryPath(randomUUID()), token)
+    expect(unknown.status, unknown.text).toBe(404)
+    expect(unknown.json).toEqual({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+    const malformed = await http('GET', entryPath('not-a-uuid'), token)
+    expect(malformed.status).toBe(400)
+    expect(malformed.json?.error?.code).toBe('VALIDATION_ERROR')
+  })
+
+  it('P-10 + P-1: an employee REAL token (attendance_employee only, no approvals:*) — read 200 (none) → launch 201 → read 200; duplicate launch 409 ALREADY_PENDING', async () => {
+    const employee = `g4a-emp-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+
+    // Discriminator: this token really holds NO approvals:* — the approval-side detail route refuses it.
+    const approvalSide = await http('GET', `/api/approvals/${documentId}`, token)
+    expect(approvalSide.status).toBe(403)
+    expect(approvalSide.text).toBe(CORE_RBAC_FORBIDDEN_BODY)
+
+    const before = await http('GET', entryPath(requestId), token)
+    expect(before.status, before.text).toBe(200)
+    expect(before.json).toEqual({ ok: true, data: { requestId, documentInstanceId: documentId, round: null } })
+
+    const launch = await http('POST', entryPath(requestId), token, { reason: '行程取消' })
+    expect(launch.status, launch.text).toBe(201)
+    const round = launch.json.data.round
+    expect(launch.json.data.requestId).toBe(requestId)
+    expect(launch.json.data.documentInstanceId).toBe(documentId)
+    expect(round).toMatchObject({
+      outcome: 'pending',
+      status: 'cancellation_pending_approval',
+      endedAt: null,
+      closeReason: null,
+      blockCode: null,
+      closedBySystem: false,
+      canWithdraw: true,
+      withdrawBlockedReason: null,
+      cancellationOutcome: null,
+    })
+    // P-6: no seat / assignee data of any kind on this surface; P-4: no policy snapshot.
+    expect(Object.keys(round).sort()).toEqual([
+      'canWithdraw', 'cancellationOutcome', 'closeReason', 'closedBySystem', 'blockCode',
+      'endedAt', 'engineInstanceId', 'outcome', 'roundId', 'startedAt', 'status', 'withdrawBlockedReason',
+    ].sort())
+    expect(launch.text.includes('policy_snapshot')).toBe(false)
+
+    const rows = await roundsFor(documentId)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ id: round.roundId, outcome: 'pending', engine_instance_id: round.engineInstanceId })
+    const engine = await pool().query<{ workflow_key: string; requester_id: string }>(
+      `SELECT workflow_key, requester_snapshot->>'id' AS requester_id FROM approval_instances WHERE id = $1`,
+      [round.engineInstanceId],
+    )
+    expect(engine.rows[0]).toEqual({ workflow_key: 'approval.cancel-round', requester_id: employee })
+
+    const after = await http('GET', entryPath(requestId), token)
+    expect(after.status).toBe(200)
+    expect(after.json.data.round).toEqual(round)
+
+    const duplicate = await http('POST', entryPath(requestId), token, {})
+    expect(duplicate.status).toBe(409)
+    expect(duplicate.json).toEqual({
+      ok: false,
+      error: { code: 'CANCEL_ROUND_ALREADY_PENDING', message: 'This document already has a cancel round in progress' },
+    })
+    expect(await roundsFor(documentId)).toHaveLength(1)
+  })
+
+  describe('P-3 (iii): the three classification tokens, durable and identical to the approval-side projection', () => {
+    const cases: Array<{
+      label: string
+      response: AttendanceRequestOperationExternalTransactionResultV1
+      expected: unknown
+      expectedBytes: string
+    }> = [
+      {
+        label: 'cancelled',
+        response: {
+          kind: 'executed',
+          response: { ok: true, data: { reversal: { reversed: 480, lots: 1, unrecoverableExpired: 0, alreadyReversed: false } } },
+        } as AttendanceRequestOperationExternalTransactionResultV1,
+        expected: {
+          status: 'cancelled',
+          reversal: { reversed: 480, lots: 1, unrecoverableExpired: 0, alreadyReversed: false },
+        },
+        expectedBytes: '"cancellationOutcome":{"status":"cancelled","reversal":{"reversed":480,"lots":1,"unrecoverableExpired":0,"alreadyReversed":false}}',
+      },
+      {
+        label: 'cancelled_with_unrecoverable_expired',
+        response: {
+          kind: 'executed',
+          response: { ok: true, data: { reversal: { reversed: 360, lots: 2, unrecoverableExpired: 120, alreadyReversed: false } } },
+        } as AttendanceRequestOperationExternalTransactionResultV1,
+        expected: {
+          status: 'cancelled_with_unrecoverable_expired',
+          reversal: { reversed: 360, lots: 2, unrecoverableExpired: 120, alreadyReversed: false },
+        },
+        expectedBytes: '"cancellationOutcome":{"status":"cancelled_with_unrecoverable_expired","reversal":{"reversed":360,"lots":2,"unrecoverableExpired":120,"alreadyReversed":false}}',
+      },
+      {
+        label: 'cancelled_reversal_unreported',
+        response: { kind: 'executed', response: { ok: true, data: {} } } as AttendanceRequestOperationExternalTransactionResultV1,
+        expected: { status: 'cancelled_reversal_unreported', reversal: null },
+        expectedBytes: '"cancellationOutcome":{"status":"cancelled_reversal_unreported","reversal":null}',
+      },
+    ]
+
+    for (const testCase of cases) {
+      it(`${testCase.label}: launched by the employee, redeemed by the approver, read back twice by the employee`, async () => {
+        const employee = `g4a-p3-${testCase.label}-${TS}`
+        await seedLoginUser(employee, { roles: ['attendance_employee'] })
+        const token = await loginToken(employee)
+        const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+
+        const launch = await http('POST', entryPath(requestId), token, {})
+        expect(launch.status, launch.text).toBe(201)
+        const roundInstanceId = launch.json.data.round.engineInstanceId as string
+
+        const stub = bindCancellationPort(async () => testCase.response)
+        try {
+          const approve = await http('POST', `/api/approvals/${roundInstanceId}/actions`, approverFixtureToken, { action: 'approve' })
+          expect(approve.status, approve.text).toBe(200)
+          expect(stub.calls).toHaveLength(1)
+        } finally {
+          stub.stop()
+        }
+
+        const first = await http('GET', entryPath(requestId), token)
+        expect(first.status, first.text).toBe(200)
+        expect(first.json.data.round).toMatchObject({
+          outcome: 'applied',
+          status: 'leave_cancelled',
+          closedBySystem: false,
+          closeReason: null,
+          blockCode: null,
+          canWithdraw: false,
+          withdrawBlockedReason: 'INVALID_STATUS_TRANSITION',
+        })
+        expect(first.json.data.round.cancellationOutcome).toEqual(testCase.expected)
+        expect(first.text).toContain(testCase.expectedBytes)
+
+        // 「刷新后仍可查」: a second, independent read returns the same bytes.
+        const second = await http('GET', entryPath(requestId), token)
+        expect(second.status).toBe(200)
+        expect(second.text).toBe(first.text)
+
+        // One projector, three surfaces: the approval-side detail of the SAME round agrees.
+        const approvalSide = await http('GET', `/api/approvals/${roundInstanceId}`, approverFixtureToken)
+        expect(approvalSide.status, approvalSide.text).toBe(200)
+        expect(approvalSide.json.cancellationOutcome).toEqual(first.json.data.round.cancellationOutcome)
+        expect((await roundsFor(documentId))[0]?.outcome).toBe('applied')
+      })
+    }
+  })
+
+  it('P-2: V3 approver reject is NOT a system close; the document may be relaunched (撤销不限次)', async () => {
+    const employee = `g4a-v3-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const launch = await http('POST', entryPath(requestId), token, {})
+    expect(launch.status, launch.text).toBe(201)
+    const reject = await http('POST', `/api/approvals/${launch.json.data.round.engineInstanceId}/actions`, approverFixtureToken, {
+      action: 'reject',
+      comment: 'no',
+    })
+    expect(reject.status, reject.text).toBe(200)
+
+    const summary = await http('GET', entryPath(requestId), token)
+    expect(summary.json.data.round).toMatchObject({
+      outcome: 'rejected',
+      status: 'cancellation_rejected',
+      closedBySystem: false,
+      closeReason: null,
+      cancellationOutcome: null,
+      canWithdraw: false,
+    })
+    const relaunch = await http('POST', entryPath(requestId), token, {})
+    expect(relaunch.status, relaunch.text).toBe(201)
+    expect(relaunch.json.data.round.roundId).not.toBe(launch.json.data.round.roundId)
+    expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['rejected', 'pending'])
+  })
+
+  it('P-2: V5 window-closed system close is told apart from an approver reject (closedBySystem + round_expired)', async () => {
+    const employee = `g4a-v5-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    // §2-G2 anchor moved past the leave suite's 90-day ceiling — the anchor, not the clock.
+    const aged = await pool().query(
+      `UPDATE approval_records SET created_at = now() - make_interval(days => 200)
+        WHERE instance_id = $1 AND to_status = 'approved'`,
+      [documentId],
+    )
+    expect(aged.rowCount).toBe(1)
+    const launch = await http('POST', entryPath(requestId), token, {})
+    expect(launch.status, launch.text).toBe(201)
+    const approve = await http('POST', `/api/approvals/${launch.json.data.round.engineInstanceId}/actions`, approverFixtureToken, {
+      action: 'approve',
+    })
+    expect(approve.status, approve.text).toBe(200)
+
+    const summary = await http('GET', entryPath(requestId), token)
+    expect(summary.json.data.round).toMatchObject({
+      outcome: 'expired',
+      status: 'cancellation_window_closed',
+      closedBySystem: true,
+      closeReason: 'round_expired',
+      blockCode: null,
+      cancellationOutcome: null,
+    })
+    expect((await roundsFor(documentId))[0]?.outcome).toBe('expired')
+  })
+
+  it('P-2 / P-7: V6 business block carries the bare code, never the adapter detail', async () => {
+    const employee = `g4a-v6-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const launch = await http('POST', entryPath(requestId), token, {})
+    expect(launch.status, launch.text).toBe(201)
+    const stub = bindCancellationPort(async () => ({
+      kind: 'business_refused',
+      code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+      detail: 'g4a-free-text-detail-must-not-appear',
+    }) as AttendanceRequestOperationExternalTransactionResultV1)
+    try {
+      const approve = await http('POST', `/api/approvals/${launch.json.data.round.engineInstanceId}/actions`, approverFixtureToken, {
+        action: 'approve',
+      })
+      expect(approve.status, approve.text).toBe(200)
+    } finally {
+      stub.stop()
+    }
+    const summary = await http('GET', entryPath(requestId), token)
+    expect(summary.json.data.round).toMatchObject({
+      outcome: 'blocked',
+      status: 'cancellation_blocked',
+      closedBySystem: true,
+      closeReason: 'business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+      blockCode: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+    })
+    expect(summary.text.includes('g4a-free-text-detail-must-not-appear')).toBe(false)
+  })
+
+  it('P-4 canWithdraw agrees with the engine revoke branch in both directions (requester true ⇒ revoke succeeds; admin false ⇒ same code)', async () => {
+    const employee = `g4a-wd-${TS}`
+    const admin = `g4a-wd-admin-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    await seedLoginUser(admin, { roles: ['admin'], admin: true })
+    const employeeToken = await loginToken(employee)
+    const adminToken = await loginToken(admin)
+    const { requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const launch = await http('POST', entryPath(requestId), employeeToken, {})
+    expect(launch.status, launch.text).toBe(201)
+    const roundInstanceId = launch.json.data.round.engineInstanceId as string
+
+    const adminView = await http('GET', entryPath(requestId), adminToken)
+    expect(adminView.status, adminView.text).toBe(200)
+    expect(adminView.json.data.round).toMatchObject({ canWithdraw: false, withdrawBlockedReason: 'APPROVAL_REVOKE_FORBIDDEN' })
+    await expect(
+      service().dispatchAction(roundInstanceId, { action: 'revoke' } as ApprovalActionRequest, { userId: admin, roles: ['admin'] }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'APPROVAL_REVOKE_FORBIDDEN' })
+
+    expect(launch.json.data.round.canWithdraw).toBe(true)
+    await service().dispatchAction(roundInstanceId, { action: 'revoke' } as ApprovalActionRequest, { userId: employee, roles: [] })
+    const withdrawn = await http('GET', entryPath(requestId), employeeToken)
+    expect(withdrawn.json.data.round).toMatchObject({
+      outcome: 'withdrawn',
+      status: 'cancellation_withdrawn',
+      closedBySystem: false,
+      canWithdraw: false,
+      withdrawBlockedReason: 'INVALID_STATUS_TRANSITION',
+    })
+  })
+
+  it('P-4 / I7: an outsider, and a request with no approval instance, get the byte-identical 404 of a never-existing id (GET and POST)', async () => {
+    const employee = `g4a-own-${TS}`
+    const outsider = `g4a-out-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    await seedLoginUser(outsider, { roles: ['attendance_employee'] })
+    const employeeToken = await loginToken(employee)
+    const outsiderToken = await loginToken(outsider)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const neverExisting = randomUUID()
+
+    for (const method of ['GET', 'POST'] as const) {
+      const absent = await http(method, entryPath(neverExisting), outsiderToken, method === 'POST' ? {} : undefined)
+      const foreign = await http(method, entryPath(requestId), outsiderToken, method === 'POST' ? {} : undefined)
+      expect(absent.status).toBe(404)
+      expect(foreign.status).toBe(absent.status)
+      expect(foreign.text).toBe(absent.text)
+    }
+    expect(await roundsFor(documentId)).toHaveLength(0)
+
+    const bare = await pool().query<{ id: string }>(
+      `INSERT INTO attendance_requests (user_id, work_date, request_type, status)
+       VALUES ($1, CURRENT_DATE, 'leave', 'approved') RETURNING id::text AS id`,
+      [employee],
+    )
+    createdRequestIds.add(bare.rows[0].id)
+    const ownBareGet = await http('GET', entryPath(bare.rows[0].id), employeeToken)
+    const ownAbsentGet = await http('GET', entryPath(neverExisting), employeeToken)
+    expect(ownBareGet.status).toBe(404)
+    expect(ownBareGet.text).toBe(ownAbsentGet.text)
+  })
+
+  it('P-1 (b): a participant who may READ (the approver) sees the summary but cannot launch — 403 CANCEL_ROUND_REQUESTER_ONLY', async () => {
+    const employee = `g4a-part-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const approverToken = await loginToken(approverId)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee })
+    const read = await http('GET', entryPath(requestId), approverToken)
+    expect(read.status, read.text).toBe(200)
+    expect(read.json.data.round).toBeNull()
+    const launch = await http('POST', entryPath(requestId), approverToken, {})
+    expect(launch.status).toBe(403)
+    expect(launch.json).toEqual({
+      ok: false,
+      error: {
+        code: 'CANCEL_ROUND_REQUESTER_ONLY',
+        message: 'Only the original requester may start a cancel round for this document',
+      },
+    })
+    expect(await roundsFor(documentId)).toHaveLength(0)
+  })
+
+  it('P-1 (b) route-level witness: the proxy submitter of someone else\'s leave (snapshot requester ≠ leave owner) cannot launch', async () => {
+    // The ONE fixture where the route's own requester check is load-bearing: the creation path
+    // compares against `requester_snapshot.id` (= the proxy here) and would accept; the route
+    // compares against the leave's `user_id` (= the owner) and must refuse. lock:157 「委托人不可;
+    // 代理发起另案」.
+    const proxy = `g4a-proxy-${TS}`
+    const owner = `g4a-proxied-${TS}`
+    await seedLoginUser(proxy, { roles: ['attendance_employee'] })
+    await seedLoginUser(owner, { roles: ['attendance_employee'] })
+    const proxyToken = await loginToken(proxy)
+    const ownerToken = await loginToken(owner)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: proxy, leaveUserId: owner })
+
+    const launch = await http('POST', entryPath(requestId), proxyToken, {})
+    expect(launch.status, launch.text).toBe(403)
+    expect(launch.json?.error?.code).toBe('CANCEL_ROUND_REQUESTER_ONLY')
+    expect(await roundsFor(documentId)).toHaveLength(0)
+
+    // Documented consequence of I7 (no second predicate): the leave's owner is not a participant of
+    // a document someone else submitted, so the summary is 404 to them.
+    const ownerRead = await http('GET', entryPath(requestId), ownerToken)
+    expect(ownerRead.status).toBe(404)
+  })
+
+  it('P-1 (a): a leave whose attendance request is not approved — 409 CANCEL_ROUND_DOCUMENT_NOT_APPROVED, no round', async () => {
+    const employee = `g4a-na-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+    const { documentId, requestId } = await seedApprovedLeave({ documentRequesterId: employee, requestStatus: 'pending' })
+    const launch = await http('POST', entryPath(requestId), token, {})
+    expect(launch.status).toBe(409)
+    expect(launch.json).toEqual({
+      ok: false,
+      error: {
+        code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+        message: 'A cancel round can only be started for an approved document',
+      },
+    })
+    expect(await roundsFor(documentId)).toHaveLength(0)
+  })
+
+  it('P-8: creation-path refusals pass through as (status, code, message) only — SUITE_FORBIDDEN, and SEAT_INELIGIBLE without its per-seat details', async () => {
+    const employee = `g4a-p8-${TS}`
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const token = await loginToken(employee)
+
+    const forbidden = await seedApprovedLeave({ documentRequesterId: employee })
+    await pool().query(
+      `UPDATE approval_instances SET metadata = COALESCE(metadata, '{}'::jsonb) || '{"suite":"forbidden"}'::jsonb WHERE id = $1`,
+      [forbidden.documentId],
+    )
+    const suite = await http('POST', entryPath(forbidden.requestId), token, {})
+    expect(suite.status, suite.text).toBe(409)
+    expect(suite.json.error.code).toBe('CANCEL_ROUND_SUITE_FORBIDDEN')
+    expect(Object.keys(suite.json.error).sort()).toEqual(['code', 'message'])
+
+    const seat = await seedApprovedLeave({ documentRequesterId: employee })
+    await pool().query('UPDATE users SET is_active = FALSE WHERE id = $1', [approverId])
+    try {
+      const ineligible = await http('POST', entryPath(seat.requestId), token, {})
+      expect(ineligible.status, ineligible.text).toBe(409)
+      expect(ineligible.json.error.code).toBe('CANCEL_ROUND_SEAT_INELIGIBLE')
+      expect(Object.keys(ineligible.json.error).sort()).toEqual(['code', 'message'])
+      expect(ineligible.text.includes('details')).toBe(false)
+      expect(ineligible.text.includes(approverId)).toBe(false)
+    } finally {
+      await pool().query('UPDATE users SET is_active = TRUE WHERE id = $1', [approverId])
+    }
+    expect(await roundsFor(forbidden.documentId)).toHaveLength(0)
+    expect(await roundsFor(seat.documentId)).toHaveLength(0)
+  })
+
+  it('P-10 positive control: an ADMIN real token is green on the same three steps for their own leave, and reads (I7 admin arm) but cannot launch someone else\'s', async () => {
+    const admin = `g4a-admin-${TS}`
+    const employee = `g4a-adm-emp-${TS}`
+    await seedLoginUser(admin, { roles: ['admin'], admin: true })
+    await seedLoginUser(employee, { roles: ['attendance_employee'] })
+    const adminToken = await loginToken(admin)
+
+    const own = await seedApprovedLeave({ documentRequesterId: admin })
+    expect((await http('GET', entryPath(own.requestId), adminToken)).status).toBe(200)
+    const launch = await http('POST', entryPath(own.requestId), adminToken, {})
+    expect(launch.status, launch.text).toBe(201)
+    const read = await http('GET', entryPath(own.requestId), adminToken)
+    expect(read.status).toBe(200)
+    expect(read.json.data.round.roundId).toBe(launch.json.data.round.roundId)
+
+    const other = await seedApprovedLeave({ documentRequesterId: employee })
+    const otherRead = await http('GET', entryPath(other.requestId), adminToken)
+    expect(otherRead.status, otherRead.text).toBe(200)
+    const otherLaunch = await http('POST', entryPath(other.requestId), adminToken, {})
+    expect(otherLaunch.status).toBe(403)
+    expect(otherLaunch.json.error.code).toBe('CANCEL_ROUND_REQUESTER_ONLY')
+  })
+
+  it('P-10 (c): without attendance:write the launch is refused by the plugin guard (exact body); without attendance:read the read is too', async () => {
+    const readOnly = `g4a-ro-${TS}`
+    const noRead = `g4a-nr-${TS}`
+    await seedScopedAttendanceUser(readOnly, ['attendance:read'])
+    await seedScopedAttendanceUser(noRead, ['attendance:approve'])
+    const readOnlyToken = await loginToken(readOnly)
+    const noPermToken = await loginToken(noRead)
+    const own = await seedApprovedLeave({ documentRequesterId: readOnly })
+
+    const read = await http('GET', entryPath(own.requestId), readOnlyToken)
+    expect(read.status, read.text).toBe(200)
+    const launch = await http('POST', entryPath(own.requestId), readOnlyToken, {})
+    expect(launch.status).toBe(403)
+    expect(launch.text).toBe(PLUGIN_FORBIDDEN_BODY)
+    expect(await roundsFor(own.documentId)).toHaveLength(0)
+
+    const noPermOwn = await seedApprovedLeave({ documentRequesterId: noRead })
+    const noPermRead = await http('GET', entryPath(noPermOwn.requestId), noPermToken)
+    expect(noPermRead.status).toBe(403)
+    expect(noPermRead.text).toBe(PLUGIN_FORBIDDEN_BODY)
+  })
+
+  describe('P-9: the seed template through the PUBLIC create path never yields a cancel round', () => {
+    async function countRounds(): Promise<number> {
+      const result = await pool().query<{ count: string }>('SELECT COUNT(*)::text AS count FROM approval_rounds')
+      return Number(result.rows[0].count)
+    }
+    async function seedInstancesBy(userId: string): Promise<number> {
+      const result = await pool().query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM approval_instances WHERE template_id = $1 AND requester_snapshot->>'id' = $2`,
+        [CANCEL_ROUND_TEMPLATE_ID, userId],
+      )
+      return Number(result.rows[0].count)
+    }
+
+    it('leg A — admin HTTP (rbac bypassed by the admin claim): the exact refusal, zero instances, zero rounds', async () => {
+      const admin = `g4a-p9a-${TS}`
+      const token = await fixtureAdminToken(admin)
+      const roundsBefore = await countRounds()
+      const create = await http('POST', '/api/approvals', token, { templateId: CANCEL_ROUND_TEMPLATE_ID, formData: {} })
+      if (create.status >= 200 && create.status < 300) {
+        createdApprovalIds.add(create.json.id)
+        const row = await pool().query<{ workflow_key: string }>('SELECT workflow_key FROM approval_instances WHERE id = $1', [create.json.id])
+        expect(row.rows[0]?.workflow_key).not.toBe('approval.cancel-round')
+      }
+      // Measured answer: the admin claim passes rbac AND template visibility (template manager); the
+      // seed graph's single `requester_choice` node then refuses before any insert.
+      expect(create.status, create.text).toBe(422)
+      expect(create.json?.error?.code).toBe('APPROVAL_REQUESTER_CHOICE_REQUIRED')
+      expect(await seedInstancesBy(admin)).toBe(0)
+      expect(await countRounds()).toBe(roundsBefore)
+
+      // Driven one door further: WITH the requester choice supplied, the in-transaction create
+      // boundary (DB-only template visibility — the admin CLAIM does not reach it) refuses the seed
+      // exactly as it refuses a never-existing template. Measured, and pinned.
+      const withChoice = await http('POST', '/api/approvals', token, {
+        templateId: CANCEL_ROUND_TEMPLATE_ID,
+        formData: {},
+        requesterChoices: { cancel_approval: [approverId] },
+      })
+      if (withChoice.status >= 200 && withChoice.status < 300) createdApprovalIds.add(withChoice.json.id)
+      expect(withChoice.status, withChoice.text).toBe(404)
+      expect(withChoice.json?.error?.code).toBe('APPROVAL_TEMPLATE_NOT_FOUND')
+      expect(await seedInstancesBy(admin)).toBe(0)
+      expect(await countRounds()).toBe(roundsBefore)
+    })
+
+    it('leg B — employee HTTP (no approvals:*): 403 at rbacGuard(approvals, write), before any template lookup', async () => {
+      const employee = `g4a-p9b-${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      const token = await loginToken(employee)
+      const roundsBefore = await countRounds()
+      const create = await http('POST', '/api/approvals', token, { templateId: CANCEL_ROUND_TEMPLATE_ID, formData: {} })
+      expect(create.status).toBe(403)
+      expect(create.text).toBe(CORE_RBAC_FORBIDDEN_BODY)
+      expect(await seedInstancesBy(employee)).toBe(0)
+      expect(await countRounds()).toBe(roundsBefore)
+    })
+
+    it('leg C — normal actor, in-process service (no rbac in front): refused as a never-existing template, zero instances, zero rounds', async () => {
+      const employee = `g4a-p9c-${TS}`
+      await seedLoginUser(employee, { roles: ['attendance_employee'] })
+      const roundsBefore = await countRounds()
+      await expect(
+        service().createApproval({ templateId: CANCEL_ROUND_TEMPLATE_ID, formData: {} }, { userId: employee, roles: [] }),
+      ).rejects.toMatchObject({ statusCode: 404, code: 'APPROVAL_TEMPLATE_NOT_FOUND' })
+      await expect(
+        service().createApproval({ templateId: randomUUID(), formData: {} }, { userId: employee, roles: [] }),
+      ).rejects.toMatchObject({ statusCode: 404, code: 'APPROVAL_TEMPLATE_NOT_FOUND' })
+      expect(await seedInstancesBy(employee)).toBe(0)
+      expect(await countRounds()).toBe(roundsBefore)
+    })
+  })
+})
+
