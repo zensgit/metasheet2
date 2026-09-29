@@ -51,12 +51,101 @@
  * `requireName`, which delegates to `./approval-template-group-name-rule`, whose edge-trim set is
  * a strict superset of the DB set) — see `mapGroupConstraintError`'s own doc comment for why the
  * arm is being KEPT (not deleted) until the owner actually confirms.
+ *
+ * §3.0 `...WithClient` split (added for the A-3 backfill design proposal,
+ * `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §3.0 — the
+ * split itself shipped ahead of any A-3 handler code in this file's history because it is a hard
+ * prerequisite for A-3's execute/rollback to exist at all, not because A-3 landed in that same
+ * commit). A-3's preview/execute/rollback endpoints, batch tables, and CI wiring have since
+ * landed (`routes/approvals.ts`, the backfill batch DDL migration, this file's own
+ * `classifyBackfillCategory` / `rollbackApprovalTemplateGroupBackfillBatch`) and passed an
+ * independent gate review round (`impl-gate-A3-round1-20260918.md`, a private review record not
+ * tracked in this repository, 0 P1 / 1 P2 / 7 P3 —
+ * disposition tracked in the paired verification MD's §7 (the P2) and §8 (the P3s)):
+ *
+ * `createApprovalTemplateGroup` / `linkApprovalTemplateToGroup` / `archiveApprovalTemplateGroup`
+ * each open their OWN `transaction(...)` call, which — per `connection-pool.ts`'s
+ * `pool.connect()` — hands out a NEW connection every time. A future composed caller (backfill's
+ * execute/rollback) that itself opened a `transaction(...)` and then `await`ed one of these
+ * exported functions FROM INSIDE that callback would acquire a SECOND connection and attempt to
+ * re-take the SAME org's L0 advisory lock from it while the first connection still holds that lock
+ * open (waiting on the inner call to resolve) — a confirmed same-session cross-connection
+ * deadlock, not a theoretical one (same failure shape as memory note
+ * `feedback_lock_taking_port_needs_lock_order_census`, #4899). Each of the three functions above is
+ * therefore split into a `...WithClient(client, ...)` primitive carrying the body that used to live
+ * inside its `transaction(async (client) => { ... })` callback, plus the original exported name
+ * kept as a thin wrapper: `transaction(async (client) => { ...; return xWithClient(client, ...) })`.
+ * A composed caller opens exactly ONE `transaction(...)` and calls the `...WithClient` primitives
+ * directly on that single `client`/connection.
+ *
+ * **One statement is NOT byte-identical inside the split, by necessity, not oversight**:
+ * `createApprovalTemplateGroupWithClient` and `archiveApprovalTemplateGroupWithClient` do NOT
+ * themselves issue `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` — only their thin wrappers do,
+ * as the first statement inside the `transaction(...)` callback, exactly where it sat before this
+ * split. Reason: §2 requires that SET to be the very FIRST statement after `BEGIN` on the
+ * connection (a later SET aborts the whole transaction with `25001` under a REPEATABLE READ
+ * default pool). If the SET lived inside the `...WithClient` body instead, a composed caller
+ * chaining two such primitives on the same connection (e.g. a future create-then-link) would issue
+ * it a SECOND time after the first primitive's own queries had already run on that connection —
+ * exactly the failure this paragraph exists to prevent. `linkApprovalTemplateToGroupWithClient`
+ * needs no SET at all (link takes no L0 — see the lock-order table above — so no MAX()/uniqueness
+ * read on this path is isolation-sensitive). Re-acquiring the L0 advisory lock itself IS safe to
+ * repeat inside `...WithClient` bodies: `pg_advisory_xact_lock` is reentrant within one
+ * session/transaction and returns immediately once already held by it, so a composed caller that
+ * takes L0 once at the top of its own transaction and then calls a `...WithClient` primitive that
+ * re-takes the SAME key does not block on itself.
+ *
+ * `requireName`'s validation stays in the thin `createApprovalTemplateGroup` wrapper, BEFORE
+ * `transaction(...)` is even invoked — same as before this split — so an invalid name still fails
+ * synchronously with zero connections acquired, rather than opening and rolling back a transaction.
+ * `createApprovalTemplateGroupWithClient` therefore takes an already-validated/trimmed `name`.
  */
 
 import { randomUUID } from 'node:crypto'
+import type { QueryResult } from 'pg'
 import { query, transaction } from '../db/pg'
 import { ServiceError } from './ApprovalBridgeService'
 import { classifyGroupName } from './approval-template-group-name-rule'
+
+/** Matches `transaction()`'s handler-client shape (`db/pg.ts`) — the connection a `...WithClient` primitive runs its statements on. */
+type TxClient = { query: (sql: string, params?: unknown[]) => Promise<QueryResult> }
+
+/**
+ * §13.2 changesRequired #10 (design-gate-A3-phase2, ownerLevel=false, already decided): the SET
+ * obligation becomes a typecheck gate, not a runtime assertion. `AtgTxClient` is `TxClient`
+ * branded with a `unique symbol` phantom property that exists ONLY at the type level — no object
+ * literal or plain `TxClient` value structurally has it, so TypeScript rejects passing a raw
+ * `TxClient` (or any value not produced by `beginApprovalTemplateGroupTxn` below) anywhere an
+ * `AtgTxClient` is required, with a "property is missing" error at compile time. This is
+ * deliberately NOT a `SELECT current_setting('transaction_isolation')` runtime check — the gate
+ * report explicitly rejected that approach: on this repo's READ COMMITTED default server config
+ * the assertion is always true regardless of whether THIS transaction issued its own SET, so it
+ * would be silently vacuous on exactly the failure path it exists to catch (lock v2.6 P2-C is the
+ * same shape of vacuous check). A missing SET here is a REPEATABLE-READ-pool correctness bug
+ * (§2/§3.0), not a value comparison — only a compile-time gate that is impossible to satisfy
+ * without calling `beginApprovalTemplateGroupTxn` can be trusted to catch it.
+ */
+declare const ATG_TX_BRAND: unique symbol
+export type AtgTxClient = TxClient & { readonly [ATG_TX_BRAND]: true }
+
+/**
+ * The ONLY producer of `AtgTxClient`. Issues `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` —
+ * which §2/§3.0 require to be the FIRST statement after `BEGIN` on the connection — and returns
+ * the SAME client object, now carrying the brand. All three `...WithClient` primitives below
+ * accept ONLY `AtgTxClient`, per §13.2's verbatim gate output (not narrowed to two of the three —
+ * see the file-header note above `linkApprovalTemplateToGroupWithClient`'s thin wrapper for why
+ * `link` gaining a SET it did not previously issue is a deliberate, disclosed consequence of this,
+ * not an oversight). A future composed caller (W8 execute / W9 rollback) calls this exactly ONCE
+ * at the top of its own single `transaction(...)` callback and threads the returned `AtgTxClient`
+ * into every `...WithClient` call in that transaction — calling it a second time on the same
+ * client would re-issue the SET after other statements have already run on the connection, which
+ * §2 forbids; nothing in this file's current callers does that (each opens its own transaction and
+ * calls this once), and this note exists for whoever writes the composed caller next.
+ */
+export async function beginApprovalTemplateGroupTxn(client: TxClient): Promise<AtgTxClient> {
+  await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+  return client as AtgTxClient
+}
 
 export interface ApprovalTemplateGroupRow {
   id: string
@@ -156,8 +245,42 @@ function newGroupId(): string {
  * — see `mapGroupConstraintError`'s doc comment below for the current, accurate status of this
  * Set and the branch that consumes it). `atg_org_nonblank` / `atgl_org_nonblank` keep the
  * ratified `~ '[!-~]'` predicate and this Set still maps them.
+ *
+ * `atgbb_org_nonblank` (A-3 backfill batch header,
+ * `zzzz20260919090000_create_approval_template_group_backfill_batches.ts`) is the SAME shape of
+ * CHECK on the SAME kind of column as `atg_org_nonblank` / `atgl_org_nonblank` above — added here
+ * (gate `impl-gate-A3-round1-20260918.md` §6 P3-3) for the identical defense-in-depth reason: the
+ * batch-header INSERT inside `executeApprovalTemplateGroupBackfill{,WithClient}` is the FIRST
+ * write of that transaction, so an org id that is blank or contains a non-printable-ASCII
+ * character would otherwise surface as this constraint's raw, unmapped 23514 (generic 500)
+ * instead of the typed 400 every other CHECK in this set already gets. Reusing
+ * `GROUP_NAME_UNSUPPORTED` for it is imprecise (the violation is on `org_id`, not a group `name`;
+ * so is reusing it for the two pre-existing `*_org_nonblank` entries above — a pre-existing
+ * imprecision this change does not introduce or widen) but matches this file's own stated
+ * convention for org-column CHECKs: a typed, if generically-worded, 400 rather than a DB leak.
+ * Unreachable in production today for the SAME reason as the two org entries above, with one
+ * caveat this comment previously overstated (round-2 gate P3-6, `impl-gate-A3-round2-20260918.md`
+ * §7 item 6): `resolveApprovalTemplateGroupOrgId` (`routes/approvals.ts`) only GUARANTEES
+ * `authenticatedTenantId.trim().length > 0` (non-blank) before any call into this file — it does
+ * NOT guarantee ASCII. "Every org id already in the database is ASCII" is an OPERATIONAL
+ * OBSERVATION about today's data (org ids are provisioned as UUIDs/slugs, never free text), not a
+ * mechanically-checked invariant enforced anywhere in this code path — an org id composed
+ * ENTIRELY of non-printable-ASCII characters (e.g. all-CJK, all-Cyrillic) would fail `[!-~]` and
+ * hit this exact CHECK for real. The mapping this comment documents (23514 on
+ * `atgbb_org_nonblank` → typed 400, not a raw 500) is what makes that theoretical case safe
+ * regardless of whether the observation holds; `tests/unit/approval-template-group-backfill-batch-
+ * org-nonblank.test.ts` exercises the mapper directly against a synthetic `{code, constraint}`
+ * pair (it cannot exercise reachability itself — that needs an actual non-ASCII
+ * `authenticatedTenantId`, which nothing in this test suite injects) — this is depth-of-defense
+ * consistency across A-3's own table, not a live-path fix, and not a claim that the input is
+ * provably unreachable.
  */
-const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonblank', 'atgl_org_nonblank'])
+const NONBLANK_CHECK_CONSTRAINTS = new Set([
+  'atg_name_nonblank',
+  'atg_org_nonblank',
+  'atgl_org_nonblank',
+  'atgbb_org_nonblank',
+])
 
 /**
  * Maps raw PostgreSQL constraint violations onto the lock's typed `ServiceError`s:
@@ -196,7 +319,13 @@ const NONBLANK_CHECK_CONSTRAINTS = new Set(['atg_name_nonblank', 'atg_org_nonbla
  * Anything else (including an already-typed `ServiceError` thrown deeper in the same transaction,
  * e.g. GROUP_NOT_FOUND/GROUP_ARCHIVED) passes through unchanged.
  */
-function mapGroupConstraintError(error: unknown): unknown {
+// Exported (2026-09-18, W8 execute unit, design-gate-A3-phase2 changesRequired #11): the
+// composed backfill execute handler (`routes/approvals.ts`) wraps its ENTIRE `transaction(...)`
+// call in this SAME mapper — not a second, divergent copy — for the identical reason every
+// thin wrapper in this file already does: `atg_sort_unique` is DEFERRABLE INITIALLY DEFERRED, so
+// a real duplicate-sort-order collision only raises 23505 at COMMIT, which a try/catch INSIDE the
+// transaction callback cannot observe.
+export function mapGroupConstraintError(error: unknown): unknown {
   if (error instanceof ServiceError) return error
   const pgErr = error as { code?: unknown; constraint?: unknown } | null
   if (pgErr && typeof pgErr === 'object' && pgErr.code === '23505') {
@@ -314,7 +443,34 @@ export async function listApprovalTemplateGroups(orgId: string): Promise<Approva
   return result.rows.map(mapGroupRow)
 }
 
-/** L0 only. sort_order = COALESCE(MAX(sort_order), 0) + 1 within the org (archived rows are NULL, MAX ignores them). */
+/**
+ * L0 body only — no SET (see §3.0 file-header note: the wrapper below issues it). Caller must
+ * already hold (or be about to take) this connection's L0 for `orgId`; this function takes it
+ * itself (idempotently) so it is safe to call standalone via the wrapper below.
+ */
+export async function createApprovalTemplateGroupWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  name: string,
+  createdBy: string,
+): Promise<ApprovalTemplateGroupRow> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
+  const maxRow = await client.query(
+    `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM approval_template_groups WHERE org_id = $1`,
+    [orgId],
+  )
+  const nextSortOrder = Number((maxRow.rows[0] as { next: number | string })?.next ?? 1)
+  const id = newGroupId()
+  const inserted = await client.query(
+    `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${GROUP_COLUMNS}`,
+    [id, orgId, name, nextSortOrder, createdBy],
+  )
+  return mapGroupRow(inserted.rows[0] as RawGroupRow)
+}
+
+/** L0 only. sort_order = COALESCE(MAX(sort_order), 0) + 1 within the org (archived rows are NULL, MAX ignores them). Thin wrapper over `createApprovalTemplateGroupWithClient` — see §3.0 file-header note. */
 export async function createApprovalTemplateGroup(
   orgId: string,
   name: string,
@@ -323,21 +479,8 @@ export async function createApprovalTemplateGroup(
   const trimmedName = requireName(name)
   try {
     return await transaction(async (client) => {
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
-      const maxRow = await client.query(
-        `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next FROM approval_template_groups WHERE org_id = $1`,
-        [orgId],
-      )
-      const nextSortOrder = Number((maxRow.rows[0] as { next: number | string })?.next ?? 1)
-      const id = newGroupId()
-      const inserted = await client.query(
-        `INSERT INTO approval_template_groups (id, org_id, name, sort_order, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING ${GROUP_COLUMNS}`,
-        [id, orgId, trimmedName, nextSortOrder, createdBy],
-      )
-      return mapGroupRow(inserted.rows[0] as RawGroupRow)
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return createApprovalTemplateGroupWithClient(txClient, orgId, trimmedName, createdBy)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -376,44 +519,69 @@ export async function renameApprovalTemplateGroup(
 }
 
 /**
+ * Shared statement TEXT for "unlink every member of a group" / "archive a group row" — design doc
+ * §4.1's requirement, on top of §13 changesRequired #9's "the repo may keep only ONE copy of a
+ * reused statement's text": W9 rollback (`rollbackApprovalTemplateGroupBackfillWithClient` below)
+ * must NOT call this function (it is unconditional — see that function's own file-header note for
+ * why an unconditional archive would undo batch-external state), but it must also not paste a
+ * second copy of these two statements' SQL text. A shared plain FUNCTION (rather than these two
+ * exported strings) was rejected: the two call sites need the identical text run under DIFFERENT
+ * surrounding lock discipline — this function's caller takes `groupId`'s `FOR UPDATE` in the
+ * statement immediately below; rollback's caller has already taken that same row lock in its own
+ * §13.2 unified pre-lock step and must NOT re-issue a second `FOR UPDATE` here (doing so is the
+ * exact L2→L1 sequence design-gate M3 found deadlocking against a concurrent plain link/unlink
+ * request's L1→L2 order — see rollback's file-header note). A function wrapping both statements
+ * would need a "caller already holds the lock" flag threaded through both call sites just to skip
+ * its own lock acquisition; a plain exported SQL-text constant keeps each caller's own lock
+ * sequencing visible at its own call site instead of hidden behind a parameter.
+ */
+export const ATG_UNLINK_ALL_GROUP_MEMBERS_SQL =
+  'UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2'
+export const ATG_ARCHIVE_GROUP_ROW_SQL = `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
+   WHERE org_id = $1 AND id = $2
+   RETURNING ${GROUP_COLUMNS}`
+
+/**
  * L0→L1→L2 (batch). Transactional per I2: lock the group row, unlink every member (an UPDATE,
  * never a DELETE — I2′), THEN clear sort_order and set archived_at. Concurrent link/re-link
  * attempts block on the SAME group row's FOR UPDATE (their own L1 acquire in
  * `linkApprovalTemplateToGroup`) and re-check `archived_at` after this commits (acceptance B).
+ * Body only — no SET (see §3.0 file-header note: the wrapper below issues it).
  */
+export async function archiveApprovalTemplateGroupWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  groupId: string,
+): Promise<ApprovalTemplateGroupRow> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
+  const locked = await client.query(
+    `SELECT ${GROUP_COLUMNS} FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+    [orgId, groupId],
+  )
+  if (locked.rows.length === 0) {
+    throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
+  }
+  if ((locked.rows[0] as RawGroupRow).archived_at !== null) {
+    throw new ServiceError('Group is already archived', 409, 'GROUP_ARCHIVED')
+  }
+
+  // I2 / I2′: unlink (UPDATE, not DELETE) every member of this group before archiving it.
+  // org_id = $1 is carried here too (every other write/read in this file does — §2 "SELECT
+  // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
+  // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
+  // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
+  await client.query(ATG_UNLINK_ALL_GROUP_MEMBERS_SQL, [orgId, groupId])
+
+  const updated = await client.query(ATG_ARCHIVE_GROUP_ROW_SQL, [orgId, groupId])
+  return mapGroupRow(updated.rows[0] as RawGroupRow)
+}
+
+/** Thin wrapper over `archiveApprovalTemplateGroupWithClient` — see §3.0 file-header note. */
 export async function archiveApprovalTemplateGroup(orgId: string, groupId: string): Promise<ApprovalTemplateGroupRow> {
   try {
     return await transaction(async (client) => {
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`])
-      const locked = await client.query(
-        `SELECT ${GROUP_COLUMNS} FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
-        [orgId, groupId],
-      )
-      if (locked.rows.length === 0) {
-        throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
-      }
-      if ((locked.rows[0] as RawGroupRow).archived_at !== null) {
-        throw new ServiceError('Group is already archived', 409, 'GROUP_ARCHIVED')
-      }
-
-      // I2 / I2′: unlink (UPDATE, not DELETE) every member of this group before archiving it.
-      // org_id = $1 is carried here too (every other write/read in this file does — §2 "SELECT
-      // 必须带 org 谓词"), even though `atg_<uuid>` ids are already globally unique and the
-      // composite `atgl_group_fk` makes a cross-org link row for this exact groupId impossible
-      // today: correctness should rest on this predicate, not on an invariant enforced elsewhere.
-      await client.query(
-        `UPDATE approval_template_group_links SET group_id = NULL, unlinked_at = now() WHERE org_id = $1 AND group_id = $2`,
-        [orgId, groupId],
-      )
-
-      const updated = await client.query(
-        `UPDATE approval_template_groups SET archived_at = now(), sort_order = NULL, updated_at = now()
-           WHERE org_id = $1 AND id = $2
-           RETURNING ${GROUP_COLUMNS}`,
-        [orgId, groupId],
-      )
-      return mapGroupRow(updated.rows[0] as RawGroupRow)
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return archiveApprovalTemplateGroupWithClient(txClient, orgId, groupId)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -487,7 +655,64 @@ export async function unarchiveApprovalTemplateGroup(orgId: string, groupId: str
  * own read of a since-archived row (if it is the archiver reading a since-added link — not
  * possible here since archive runs its unlink UPDATE only after re-checking under its OWN lock)
  * observes the fresh state (acceptance B). No L0: this path neither writes `name` nor assigns
- * `sort_order` (§2 锁序表 invariant).
+ * `sort_order` (§2 锁序表 invariant). Body only (no SET either — link takes neither, see §3.0
+ * file-header note). The `client` parameter type is `AtgTxClient` (see the file-header note above
+ * `linkApprovalTemplateToGroup` below for why the thin wrapper now issues a SET this path never
+ * needed on its own).
+ */
+export async function linkApprovalTemplateToGroupWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  templateId: string,
+  groupId: string,
+  linkedBy: string,
+): Promise<ApprovalTemplateGroupLinkRow> {
+  const locked = await client.query(
+    `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+    [orgId, groupId],
+  )
+  if (locked.rows.length === 0) {
+    throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
+  }
+  if ((locked.rows[0] as { archived_at: string | Date | null }).archived_at !== null) {
+    throw new ServiceError('Group is archived', 409, 'GROUP_ARCHIVED')
+  }
+
+  const upserted = await client.query(
+    `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (org_id, template_id) DO UPDATE SET
+       group_id = EXCLUDED.group_id,
+       unlinked_at = NULL,
+       linked_by = EXCLUDED.linked_by,
+       linked_at = EXCLUDED.linked_at
+     RETURNING ${LINK_COLUMNS}`,
+    [orgId, templateId, groupId, linkedBy],
+  )
+  return mapLinkRow(upserted.rows[0] as RawLinkRow)
+}
+
+/**
+ * Thin wrapper over `linkApprovalTemplateToGroupWithClient` — see §3.0 file-header note.
+ *
+ * **Disclosed deviation from §3.0's "语句、顺序、错误映射逐字不变" promise (design-gate-A3-phase2
+ * §13.2 changesRequired #10, `AtgTxClient` retrofit, this step)**: `link` takes no L0 and, before
+ * this change, issued no `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` at all — nothing on its
+ * path reads a value (`MAX(sort_order)`, an existence check) that a REPEATABLE READ snapshot could
+ * make stale. §13.2 requires ALL THREE `...WithClient` primitives to accept only `AtgTxClient`,
+ * and the only way to produce that brand is `beginApprovalTemplateGroupTxn`, which unconditionally
+ * issues the SET. Narrowing "all three" to "the two that need it" would be treating the gate's own
+ * ownerLevel=false decision as implementer discretion (memory
+ * `feedback_second_narrower_artifact_is_contract_narrowing`), so this wrapper now issues a SET on
+ * every call, same as `create`/`archive` — a real, if inert, per-connection statement it did not
+ * emit before. Verified this does not change link's own behaviour: re-ran
+ * `approval-template-groups-lifecycle.db.test.ts` / `approval-template-groups-serialization.db.test.ts`
+ * against `metasheet2_lock_a3` after this change (results in this step's commit message) — link's
+ * assertions (upsert semantics, L1 ordering against archive, 23503/23514 mappings) are unaffected
+ * because none of them depend on isolation level; the SET's only observable effect is a slightly
+ * larger no-op on the wire. `rename`/`unarchive` are NOT part of this retrofit — they have no
+ * `...WithClient` split (§3.0 lists only create/archive/link) and keep issuing their own inline
+ * SET exactly as before this step.
  */
 export async function linkApprovalTemplateToGroup(
   orgId: string,
@@ -497,29 +722,8 @@ export async function linkApprovalTemplateToGroup(
 ): Promise<ApprovalTemplateGroupLinkRow> {
   try {
     return await transaction(async (client) => {
-      const locked = await client.query(
-        `SELECT archived_at FROM approval_template_groups WHERE org_id = $1 AND id = $2 FOR UPDATE`,
-        [orgId, groupId],
-      )
-      if (locked.rows.length === 0) {
-        throw new ServiceError('Group not found', 404, 'GROUP_NOT_FOUND')
-      }
-      if ((locked.rows[0] as { archived_at: string | Date | null }).archived_at !== null) {
-        throw new ServiceError('Group is archived', 409, 'GROUP_ARCHIVED')
-      }
-
-      const upserted = await client.query(
-        `INSERT INTO approval_template_group_links (org_id, template_id, group_id, linked_by, linked_at)
-         VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (org_id, template_id) DO UPDATE SET
-           group_id = EXCLUDED.group_id,
-           unlinked_at = NULL,
-           linked_by = EXCLUDED.linked_by,
-           linked_at = EXCLUDED.linked_at
-         RETURNING ${LINK_COLUMNS}`,
-        [orgId, templateId, groupId, linkedBy],
-      )
-      return mapLinkRow(upserted.rows[0] as RawLinkRow)
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return linkApprovalTemplateToGroupWithClient(txClient, orgId, templateId, groupId, linkedBy)
     })
   } catch (error) {
     throw mapGroupConstraintError(error)
@@ -541,4 +745,357 @@ export async function unlinkApprovalTemplateFromGroup(
     [orgId, templateId],
   )
   return { changed: (result.rowCount ?? 0) > 0 }
+}
+
+// ── A-3 backfill ("按现有 category 建组并挂接") — design-gate A3-phase2, W7 preview ─────────────
+//
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §5.2 / P3-3
+// (design-gate changesRequired, `design-gate-A3-phase2-20260918.md`, a private review record not
+// tracked in this repository): preview and (later)
+// execute MUST decide "create a new group for this category / attach to an existing one / skip
+// this category entirely" through the SAME function, or the two can silently diverge (preview
+// shows a plan execute would not actually carry out). `classifyBackfillCategory` below is that
+// function — pure, no DB access, so both callers can share it without composing another
+// transaction. It is intentionally the ONLY place this module decides "is `category` storable as
+// a group name" — the boolean is a straight port of the `btrim(category) ~ '[!-~]'` predicate the
+// design's `eligible` SQL query (§3.1) uses, so a caller building that SQL later has a second,
+// independent (JS) implementation to diff against rather than a copy of the same expression.
+
+export type BackfillCategorySkipReason = 'CATEGORY_BLANK_AFTER_TRIM' | 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME'
+
+export type BackfillCategoryClassification =
+  | { action: 'skip'; reason: BackfillCategorySkipReason; trimmedCategory: string }
+  | { action: 'create'; trimmedCategory: string }
+  | { action: 'attach'; trimmedCategory: string; existingGroupId: string }
+
+/**
+ * Mirrors PostgreSQL's ONE-ARGUMENT `btrim(text)`, which trims only the ASCII space character
+ * (0x20) from both ends — NOT `String.prototype.trim()`'s full Unicode-whitespace set (tabs,
+ * newlines, NBSP, … all survive). A category of `'\tHR\t'` therefore stays `'\tHR\t'` here, same
+ * as it would under the SQL `eligible` predicate — reimplementing this with `.trim()` would let a
+ * tab-padded legacy category disagree between the two, which is exactly the divergence this
+ * function exists to prevent (see the file-header block above this function).
+ */
+function pgBtrim(value: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && value.charCodeAt(start) === 0x20) start++
+  while (end > start && value.charCodeAt(end - 1) === 0x20) end--
+  return value.slice(start, end)
+}
+
+/**
+ * Mirrors the POSIX bracket expression `[!-~]` (ASCII 0x21–0x7E, "printable and not a space") that
+ * `atg_name_nonblank` / `atgbb_org_nonblank` (§2 DDL) and the execute `eligible` predicate (§3.1)
+ * all use for "storable as a group name". `test()` on a non-empty match anywhere in the string is
+ * the same semantics as SQL's `~` operator against this pattern (a containment match, not a
+ * full-string anchor).
+ *
+ * **Collation caveat (unverified axis, `finding_prod_pg15_never_tested`)**: this SQL/JS equivalence
+ * has only been measured against the CI/dev Postgres's glibc-based collation (`en_US.utf8`/`C`).
+ * POSIX bracket-expression range matching (`~` against a literal `!-~` range) is, per the SQL
+ * standard and Postgres's own regex docs, collation-dependent for locales that reorder the
+ * printable-ASCII code points — production's `15-alpine` image ships musl libc, has no
+ * `en_US.utf8` locale installed, and musl's collation ordering is not glibc's. This module's JS
+ * `RegExp` always uses a fixed, code-point-ordered `[!-~]` regardless of the process locale, so a
+ * musl-collation divergence (if one exists for this specific range) would only ever show up on the
+ * SQL side, not here — the cross-verification test in
+ * `approval-template-groups-backfill-execute.db.test.ts` ("SQL/JS cross-verification: …") has only
+ * ever run against glibc/`en_US.utf8`-collation Postgres, never against `musl`/`15-alpine`. Do not
+ * read that test's green as covering the musl axis.
+ */
+const STORABLE_GROUP_NAME_PATTERN = /[!-~]/
+
+/**
+ * §5.2 / P3-3: given one candidate template's raw `category` value and the org's current
+ * `{ trimmed name → active group id }` snapshot, decide skip / create / attach. `rawCategory` is
+ * the UNTRIMMED database value (including `null`, which is treated identically to `''` — a
+ * template with no category set at all is "blank after trim", not a fourth outcome). The skip
+ * branch (blank / not-storable) never consults `existingGroupIdByTrimmedName` — callers that only
+ * need to know whether a category is skip-eligible (e.g. to build the trimmed-name set to query
+ * existing groups for, BEFORE that map exists) may call this with an empty map and read only
+ * `.action === 'skip'` / `.trimmedCategory` off the result; the `existingGroupId` branch is only
+ * meaningful once the real map is supplied.
+ */
+export function classifyBackfillCategory(
+  rawCategory: string | null,
+  existingGroupIdByTrimmedName: ReadonlyMap<string, string>,
+): BackfillCategoryClassification {
+  const trimmedCategory = pgBtrim(rawCategory ?? '')
+  if (trimmedCategory === '') {
+    return { action: 'skip', reason: 'CATEGORY_BLANK_AFTER_TRIM', trimmedCategory }
+  }
+  if (!STORABLE_GROUP_NAME_PATTERN.test(trimmedCategory)) {
+    return { action: 'skip', reason: 'CATEGORY_NOT_STORABLE_AS_GROUP_NAME', trimmedCategory }
+  }
+  const existingGroupId = existingGroupIdByTrimmedName.get(trimmedCategory)
+  return existingGroupId
+    ? { action: 'attach', trimmedCategory, existingGroupId }
+    : { action: 'create', trimmedCategory }
+}
+
+// ── A-3 backfill — design-gate A3-phase2, W9 rollback (2026-09-18, 续做步骤 12) ─────────────────
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §4 / §13.1 changesRequired
+// #1/#2/#4/#7 (verbatim, folded into the proposal). Lives HERE, unlike preview/execute — rollback
+// needs no `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter` (it undoes exactly
+// what a batch recorded, regardless of the caller's template-visibility scope), so it has none of
+// the reason those two functions were pushed out to `routes/approvals.ts`.
+
+export interface ApprovalTemplateGroupBackfillRollbackResult {
+  rolledBackAt: string
+}
+
+/**
+ * §4.2's unlink statement, exported as SQL TEXT (the same convention `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL`
+ * above uses) so the rollback real-DB suite can execute it STANDALONE with a deliberately
+ * mismatched `(batchId, orgId)` pair — the only way the org predicate below is observable at all.
+ *
+ * Binds `$1 = batchId`, `$2 = orgId`. `AND b.org_id = $2` is REDUNDANT by construction; it was
+ * added on the Q3b ruling recorded in
+ * "approval-template-groups-phase2-backfill-ddl-declaration-20260920.md" §3.3 / R4 (a private
+ * review record, not tracked in this repository). Before it, org scoping of this statement rested
+ * on ONE load-bearing point: `atgbbl_batch_fk` (`(batch_id, org_id)` → `..._batches (id, org_id)`)
+ * pins every `b.org_id` under `b.batch_id = $1` to the batch head's org, and
+ * `rollbackApprovalTemplateGroupBackfillWithClient` has already proven that head belongs to `$2`
+ * via its `WHERE id = $1 AND org_id = $2 FOR UPDATE` pre-lock (404 otherwise). Through that
+ * caller this predicate therefore can never change the affected row set — it is defence in depth
+ * against a future edit loosening either the FK or the pre-lock, NOT an observable behaviour
+ * change, and the suite proves it the only way it can be proven: by running this text directly.
+ */
+export const ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL = `UPDATE approval_template_group_links l
+    SET group_id = NULL, unlinked_at = now()
+   FROM approval_template_group_backfill_batch_links b
+  WHERE b.batch_id = $1 AND b.org_id = $2 AND b.org_id = l.org_id AND b.template_id = l.template_id
+    AND l.group_id = b.group_id AND l.linked_at = b.linked_at`
+
+/**
+ * §4's transaction skeleton (§13 changesRequired #1 — the pseudocode's original two independent
+ * code blocks, §4.2 and §4.3, had no shared skeleton naming ONE lock order across both; that gap
+ * is exactly what design-gate M3 found deadlocking).
+ *
+ * Does NOT call `unlinkApprovalTemplateFromGroup` / `archiveApprovalTemplateGroupWithClient` (§4.1
+ * — both are UNCONDITIONAL: the former clears `group_id` on any row that currently has one, the
+ * latter unlinks every current member of a group; either would undo batch-EXTERNAL state a
+ * subsequent manual action produced after this batch's `execute` ran). Instead:
+ *  - §4.2: a single set-based `UPDATE … FROM` join against `..._batch_links`, whose join
+ *    predicate is the optimistic-concurrency token this batch itself recorded (`group_id` AND
+ *    `linked_at`, both still exactly what `execute` wrote) — a row that no longer matches BOTH is
+ *    SKIPPED (left exactly as some other, later action left it), not an error.
+ *  - §4.3: for each group THIS batch created (`created_new = true` in `..._batch_groups`), archive
+ *    it ONLY if, after the §4.2 unlink above has already run, it has zero remaining members — using
+ *    `ATG_UNLINK_ALL_GROUP_MEMBERS_SQL` / `ATG_ARCHIVE_GROUP_ROW_SQL` (the SAME statement text
+ *    `archiveApprovalTemplateGroupWithClient` runs, reused as text per §4.1, not called as a
+ *    function). A group attached to (`created_new = false`) is NEVER archived by rollback — it
+ *    predates this batch, so archiving it would be a batch-external write.
+ *
+ * §13.2 unified lock order, landed here exactly as execute lands it: L0 → ONE deterministic
+ * `ORDER BY id FOR UPDATE` pre-locking every EXISTING group this batch touches → every L2 write
+ * below. The §4.3 loop reads its `archived_at` snapshot from that SAME pre-lock result and never
+ * re-issues a second `FOR UPDATE` on a group row — re-locking there would be "unlink batch links
+ * (L2) THEN take a group's FOR UPDATE (L1)", the literal L2→L1 order design-gate M3 reproduced a
+ * deterministic deadlock against a concurrent plain link/unlink request's L1→L2 order.
+ */
+export async function rollbackApprovalTemplateGroupBackfillWithClient(
+  client: AtgTxClient,
+  orgId: string,
+  batchId: string,
+): Promise<ApprovalTemplateGroupBackfillRollbackResult> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`atg:${orgId}`]) // L0 — same key as create/archive/link/execute; rollback competes on the same org-wide lock.
+
+  const batchRow = await client.query(
+    `SELECT rolled_back_at FROM approval_template_group_backfill_batches WHERE id = $1 AND org_id = $2 FOR UPDATE`,
+    [batchId, orgId],
+  )
+  const batchRows = batchRow.rows as Array<{ rolled_back_at: string | Date | null }>
+  if (batchRows.length === 0) {
+    // org_id = $2 is part of the WHERE, not a separate check after a bare id lookup — a batchId
+    // that exists but belongs to a DIFFERENT org is indistinguishable from "does not exist" here,
+    // the same fail-closed shape every other org-scoped lookup in this file already uses.
+    throw new ServiceError('Backfill batch not found', 404, 'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_NOT_FOUND')
+  }
+  const existingRolledBackAt = batchRows[0].rolled_back_at
+  if (existingRolledBackAt !== null) {
+    // §13 changesRequired #7 (design-gate Q4, already ratified into the proposal): 409, NOT an
+    // idempotent 200. A second rollback call on an already-rolled-back batch cannot tell "nothing
+    // to undo because this batch was already undone" apart from "nothing to undo because every one
+    // of this batch's rows happens to have been mutated by something else since" — a 200 with an
+    // empty result would let those two render identically (the `finding_attendance_denied_renders_as_all_clear`
+    // shape). The 409's `details.rolledBackAt` lets a caller that retried after a timeout tell
+    // "already done" apart from "never happened" without a second ambiguous 200.
+    throw new ServiceError(
+      'Backfill batch was already rolled back',
+      409,
+      'APPROVAL_TEMPLATE_GROUP_BACKFILL_BATCH_ALREADY_ROLLED_BACK',
+      { rolledBackAt: toIso(existingRolledBackAt) },
+    )
+  }
+
+  // §13.2 unified lock order: read (not lock) every group id this batch touched — from EITHER
+  // detail table, a group could appear in `..._batch_groups` only (attach path, no links if the
+  // category had zero eligible templates — not reachable from execute today, but this query does
+  // not assume otherwise) or in `..._batch_links` only were that ever possible — then pre-lock all
+  // of them in ONE deterministic-order statement before any L2 write below.
+  const targetGroupIdsResult = await client.query(
+    `SELECT group_id FROM approval_template_group_backfill_batch_links WHERE batch_id = $1 AND org_id = $2
+     UNION
+     SELECT group_id FROM approval_template_group_backfill_batch_groups WHERE batch_id = $1 AND org_id = $2`,
+    [batchId, orgId],
+  )
+  const targetGroupIds = (targetGroupIdsResult.rows as Array<{ group_id: string }>).map((row) => row.group_id)
+
+  const archivedAtByGroupId = new Map<string, string | Date | null>()
+  if (targetGroupIds.length > 0) {
+    const lockedResult = await client.query(
+      `SELECT id, archived_at FROM approval_template_groups WHERE org_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`,
+      [orgId, targetGroupIds],
+    )
+    for (const row of lockedResult.rows as Array<{ id: string; archived_at: string | Date | null }>) {
+      archivedAtByGroupId.set(row.id, row.archived_at)
+    }
+  }
+
+  // §4.2 landed SQL (§13 changesRequired #2): set-based server-side join, the optimistic-
+  // concurrency token compared entirely inside Postgres — `linked_at` never round-trips through
+  // JS on either the write side (execute, already fixed) or here on the compare side. A batch-link
+  // row whose `(group_id, linked_at)` no longer BOTH match the live `approval_template_group_links`
+  // row has been touched by something else since `execute` ran and is left exactly as that other
+  // action left it. Text lives in `ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL` (with its Q3b redundant
+  // `AND b.org_id = $2` — see that constant's note for why it is unobservable from here).
+  await client.query(ATG_ROLLBACK_UNLINK_BATCH_LINKS_SQL, [batchId, orgId])
+
+  // §4.3: `remaining` is computed AFTER the §4.2 unlink above (so this batch's own now-undone
+  // members never count toward it), for every group this batch marked `created_new = true` only.
+  const batchGroupsResult = await client.query(
+    `SELECT group_id, created_new FROM approval_template_group_backfill_batch_groups WHERE batch_id = $1 AND org_id = $2`,
+    [batchId, orgId],
+  )
+  for (const row of batchGroupsResult.rows as Array<{ group_id: string; created_new: boolean }>) {
+    if (!row.created_new) continue // attached to an already-existing group — never rollback's to archive (§4.3)
+    if (!archivedAtByGroupId.has(row.group_id)) continue // no longer exists (impossible today — groups are never hard-deleted — kept fail-safe) — skip, not an error
+    if (archivedAtByGroupId.get(row.group_id) !== null) continue // already archived (e.g. by a manual archive after execute) — skip, not an error
+    const remaining = await client.query(
+      `SELECT count(*)::text AS n FROM approval_template_group_links WHERE org_id = $1 AND group_id = $2 AND unlinked_at IS NULL`,
+      [orgId, row.group_id],
+    )
+    if (Number((remaining.rows[0] as { n: string }).n) === 0) {
+      // The SAME two statements `archiveApprovalTemplateGroupWithClient` issues, reused as
+      // exported SQL text (§4.1) — NOT a second `FOR UPDATE` (already held by the pre-lock step
+      // above; see this function's file-header note for the M3 deadlock a re-lock here would
+      // reintroduce).
+      await client.query(ATG_UNLINK_ALL_GROUP_MEMBERS_SQL, [orgId, row.group_id])
+      await client.query(ATG_ARCHIVE_GROUP_ROW_SQL, [orgId, row.group_id])
+    }
+    // ELSE: remaining > 0 — a batch-external action added a member to this batch-created group
+    // after `execute` ran. Left active, untouched — this is the batch-external-state guarantee
+    // §4/§9 name, not a partial failure.
+  }
+
+  const rolledBack = await client.query(
+    `UPDATE approval_template_group_backfill_batches SET rolled_back_at = now() WHERE id = $1 AND org_id = $2 RETURNING rolled_back_at`,
+    [batchId, orgId],
+  )
+  return { rolledBackAt: toIso((rolledBack.rows[0] as { rolled_back_at: string | Date }).rolled_back_at) }
+}
+
+/**
+ * Thin wrapper — opens the ONE `transaction(...)` call this composed operation runs on, the same
+ * convention as every other composed operation in this file (§3.0 file-header note).
+ */
+export async function rollbackApprovalTemplateGroupBackfillBatch(
+  orgId: string,
+  batchId: string,
+): Promise<ApprovalTemplateGroupBackfillRollbackResult> {
+  try {
+    return await transaction(async (client) => {
+      const txClient = await beginApprovalTemplateGroupTxn(client)
+      return rollbackApprovalTemplateGroupBackfillWithClient(txClient, orgId, batchId)
+    })
+  } catch (error) {
+    throw mapGroupConstraintError(error)
+  }
+}
+
+// ── A-3 backfill — batch list (design-gate A3-phase2, P1-5 / changesRequired #5, 2026-09-18) ────
+// `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §2.1 index / §6.1 endpoint
+// row / §13.1 changesRequired #5 (real-DB M-series gate report `design-gate-A3-phase2-20260918.md`,
+// a private review record not tracked in this repository): a `batchId` appears in exactly one
+// other place today — execute's own response —
+// so an operator whose execute request timed out, or who simply wants to audit what has already
+// been rolled back, had no way to discover a `batchId` to pass to rollback at all. That is an
+// already-shipped reachability gap, not a missing test: §2.1's own comment concedes the batch head
+// table carries no "in progress" state column because a request that dies mid-flight is supposed
+// to be resolved by "list the batches and see", and this function is that list.
+//
+// Read-only, no lock (§2 锁序表: "只读路径不取 L0") — same convention as `listApprovalTemplateGroups`
+// above. Lives here, not `routes.ts`, for the SAME reason rollback does (this file's W9 section
+// header): a batch's own bookkeeping is fixed at `execute` time and carries no dependency on the
+// caller's current `ApprovalTemplateVisibilityActor` / `applyTemplateVisibilityFilter` scope, so
+// none of the reasons preview/execute were pushed out to `routes.ts` apply here.
+
+export interface ApprovalTemplateGroupBackfillBatchSummary {
+  batchId: string
+  createdBy: string
+  createdAt: string
+  rolledBackAt: string | null
+}
+
+export interface ApprovalTemplateGroupBackfillBatchListPage {
+  batches: ApprovalTemplateGroupBackfillBatchSummary[]
+  limit: number
+  offset: number
+  total: number
+}
+
+/**
+ * `limit`/`offset` are the caller's already-clamped values (the route layer owns clamping, same
+ * division of responsibility as every other paginated read in `routes.ts`) — this function trusts
+ * them as-is rather than re-validating, the same convention `listApprovalRecordLinkOptions`'s
+ * callers already use elsewhere in this router.
+ *
+ * `ORDER BY created_at DESC, id DESC` — the `..._backfill_batches_org_created_idx` index (§2.1)
+ * covers `(org_id, created_at DESC)`; `id DESC` is a deterministic tiebreaker for the (currently
+ * unreachable outside artificial clock skew, but not provably impossible) case of two batches in
+ * the same org sharing a `created_at` timestamptz value, so two calls over an UNCHANGED row set
+ * order and paginate deterministically. This does NOT cover a batch inserted between two calls —
+ * a concurrent `execute` shifts every later offset window by one, the same standard offset-based
+ * pagination drift every other `limit`/`offset` list in this router already has (§6.1: "不在本提案
+ * 新造分页协议" — a cursor-based scheme that survives concurrent inserts was deliberately not
+ * built here).
+ */
+export async function listApprovalTemplateGroupBackfillBatches(
+  orgId: string,
+  limit: number,
+  offset: number,
+): Promise<ApprovalTemplateGroupBackfillBatchListPage> {
+  const countResult = await query<{ n: string }>(
+    `SELECT count(*)::text AS n FROM approval_template_group_backfill_batches WHERE org_id = $1`,
+    [orgId],
+  )
+  const total = Number((countResult.rows[0] as { n: string } | undefined)?.n ?? '0')
+
+  const rowsResult = await query<{
+    id: string
+    created_by: string
+    created_at: string | Date
+    rolled_back_at: string | Date | null
+  }>(
+    `SELECT id, created_by, created_at, rolled_back_at
+       FROM approval_template_group_backfill_batches
+      WHERE org_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2 OFFSET $3`,
+    [orgId, limit, offset],
+  )
+
+  return {
+    batches: rowsResult.rows.map((row) => ({
+      batchId: row.id,
+      createdBy: row.created_by,
+      createdAt: toIso(row.created_at),
+      rolledBackAt: toIsoOrNull(row.rolled_back_at),
+    })),
+    limit,
+    offset,
+    total,
+  }
 }
