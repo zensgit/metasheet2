@@ -621,6 +621,7 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
+import { dispatchApprovalDecision } from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
@@ -943,7 +944,9 @@ async function dispatchBatchAndHandleResult(
   const result = await runApprovalBatchAction(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
-    (id, req) => dispatchAction(id, req),
+    // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
+    // at launch carries each row's workflowKey / businessKey for that decision.
+    (id, req) => dispatchApprovalDecision(batchRowSnapshot.get(id) ?? { id, workflowKey: null, businessKey: null }, req, dispatchAction),
   )
   if (result.failed.length === 0) {
     ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
@@ -1051,7 +1054,7 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
   if (inlineApprovingId.value) return
   inlineApprovingId.value = row.id
   try {
-    await dispatchAction(row.id, { action: 'approve' })
+    await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
     ElMessage.success('审批已通过')
     loadCurrentTab()
   } catch (error) {
@@ -1090,7 +1093,7 @@ async function submitRowReject(): Promise<void> {
   rowRejectSubmitting.value = true
   rowRejectError.value = null
   try {
-    await dispatchAction(target.id, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' })
+    await dispatchApprovalDecision(target, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' }, dispatchAction)
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()

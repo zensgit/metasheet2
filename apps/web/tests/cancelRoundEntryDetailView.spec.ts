@@ -2,6 +2,8 @@
  * 请假撤销入口(阶段 B)—— ApprovalDetailView 上的撤销轮:
  *   P-2:页头 StatusTag、审批记录表的「结束」行、复制摘要、时间线的系统收口行(哨兵 actor 显示为「系统」,
  *        动作词用 V5 / V6 而不是「驳回」)。
+ *   ④ 审批人办理:通过 / 驳回改走考勤侧 `POST /api/attendance/requests/:id/cancel-round/actions`,
+ *        按钮随该路由实际校验的 `attendance:approve` 显示;请假 id 解析失败不回落到通用动作路由。
  * Mount scaffold follows approval-detail-record-table.spec.ts (store / router / auth / permissions /
  * templateStore mocked; the real ApprovalDetailView.vue with a broad Element Plus stub set).
  */
@@ -168,11 +170,16 @@ const ElTableColumn = defineComponent({
   },
 })
 
+// `Response.json()` settles on a macrotask, so each cycle also yields one timer turn.
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
-    await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
     await nextTick()
   }
+}
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
 const SENTINEL = 'system:approval-cancel-round'
@@ -303,5 +310,88 @@ describe('ApprovalDetailView — P-2 on a cancel-round instance', () => {
     // synthetic 结束 row states the instance status through the same selector
     expect(rows[rows.length - 1].textContent).toContain('撤销窗口已过,申请自动关闭')
     expect(container!.textContent).not.toContain(SENTINEL)
+  })
+})
+
+describe('ApprovalDetailView — cancel-round approver path (attendance route)', () => {
+  const attendanceCalls = () =>
+    apiFetchMock.mock.calls
+      .filter((c) => String(c[0]).includes('/cancel-round/actions'))
+      .map((c) => [c[0], JSON.parse(String((c[1] as RequestInit).body))])
+  const dialogErrors = () =>
+    Array.from(container!.querySelectorAll('[data-testid="approval-action-dialog-error"]')).map((e) => e.textContent ?? '')
+
+  beforeEach(async () => {
+    const { resetCancelRoundLeaveRequestIdCache } = await import('../src/approvals/cancelRound')
+    resetCancelRoundLeaveRequestIdCache()
+    getApprovalMock.mockImplementation(async (id: string) => {
+      if (id === 'apv_orig') return { id, businessKey: 'attendance-request:req-77' }
+      throw new Error('API error: 404')
+    })
+    apiFetchMock.mockImplementation(async () =>
+      jsonResponse(200, { ok: true, data: { requestId: 'req-77', roundId: 'apr_1', outcome: 'applied', status: 'leave_cancelled' } }))
+  })
+
+  it('attendance:approve holder (no approvals:act) sees 通过/驳回 only, and 通过 goes to the attendance route', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    await mountView()
+    expect(q(container!, 'approval-approve-button')).not.toBeNull()
+    expect(q(container!, 'approval-reject-button')).not.toBeNull()
+    expect(q(container!, 'approval-transfer-button')).toBeNull()
+    expect(q(container!, 'approval-add-sign-button')).toBeNull()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(executeActionSpy).not.toHaveBeenCalled()
+    expect(getApprovalMock).toHaveBeenCalledWith('apv_orig')
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-77/cancel-round/actions', { action: 'approve' }]])
+    // minimal success body ⇒ nothing published from it; the detail is re-read instead
+    expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
+  })
+
+  it('approvals:act alone does not show the decision buttons on a cancel round (the route checks attendance:approve)', async () => {
+    mockCanAct.value = true
+    await mountView()
+    expect(q(container!, 'approval-approve-button')).toBeNull()
+    expect(q(container!, 'approval-reject-button')).toBeNull()
+  })
+
+  it('a retryable refusal shows the V7 copy in the dialog (non-terminal, not a failure)', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    apiFetchMock.mockImplementation(async () =>
+      jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_WINDOW_ANCHOR_MISSING', message: 'raw' } }))
+    await mountView()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(dialogErrors().join('|')).toContain('本次操作未完成,请稍后重试(撤销申请仍在审批中)')
+    expect(dialogErrors().join('|')).not.toContain('raw')
+  })
+
+  it('an unresolvable leave id is an error in the dialog — never a fallback to the generic route', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    mockActiveApproval.value = cancelRoundInstance({ businessKey: 'apv_unknown' })
+    await mountView()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(dialogErrors().join('|')).toContain('无法定位这条撤销申请对应的请假')
+    expect(executeActionSpy).not.toHaveBeenCalled()
+    expect(attendanceCalls()).toHaveLength(0)
+  })
+
+  it('an ordinary instance still decides through store.executeAction', async () => {
+    mockCanAct.value = true
+    mockActiveApproval.value = cancelRoundInstance({ workflowKey: 'expense' })
+    await mountView()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(executeActionSpy).toHaveBeenCalledWith('cr_1', { action: 'approve', comment: undefined })
+    expect(attendanceCalls()).toHaveLength(0)
   })
 })

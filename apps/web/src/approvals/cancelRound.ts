@@ -25,6 +25,7 @@
  */
 import { apiFetch } from '../utils/api'
 import type { StatusDomain } from '../utils/statusDomains'
+import type { ApprovalActionRequest } from '../types/approval'
 import { ApprovalApiError, getApproval } from './api'
 
 /** `approval_instances.workflow_key` of a cancel round (lock §9-8 Q1). */
@@ -557,4 +558,23 @@ export async function decideCancelRoundFromApproval(
     const status = error instanceof ApprovalApiError ? error.status : 0
     throw new ApprovalApiError(described.message, status, described.code ?? undefined)
   }
+}
+
+/**
+ * The approval center's single decision path (inline 通过 / row 驳回 / batch): a cancel-round row's
+ * approve / reject goes to the attendance route; every other row (and every other verb) keeps the
+ * caller's generic dispatcher. Fail closed: a cancel-round row whose leave cannot be resolved throws —
+ * it is never re-sent through the generic route.
+ */
+export async function dispatchApprovalDecision(
+  row: { id: string; workflowKey?: string | null; businessKey: string | null },
+  req: ApprovalActionRequest,
+  dispatchGeneric: (id: string, req: ApprovalActionRequest) => Promise<unknown>,
+  isZh = true,
+): Promise<void> {
+  if (isCancelRoundWorkflow(row) && (req.action === 'approve' || req.action === 'reject')) {
+    await decideCancelRoundFromApproval(row, req.action, req.comment, isZh)
+    return
+  }
+  await dispatchGeneric(row.id, req)
 }

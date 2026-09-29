@@ -570,7 +570,7 @@
                (and a detail/history refresh no longer spins the whole bar). -->
           <div class="approval-detail__actions-primary">
             <el-button
-              v-if="canDecide"
+              v-if="canDecidePrimary"
               type="success"
               :loading="inFlightAction === 'approve'"
               :disabled="!actionsEnabled"
@@ -580,7 +580,7 @@
               通过
             </el-button>
             <el-button
-              v-if="canDecide"
+              v-if="canDecidePrimary"
               type="danger"
               :loading="inFlightAction === 'reject'"
               :disabled="!actionsEnabled"
@@ -1139,7 +1139,9 @@ import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '..
 import {
   approvalStatusTagProps,
   cancelRoundStatusKeyFromApproval,
+  decideCancelRoundFromApproval,
   isCancelRoundSystemActor,
+  isCancelRoundWorkflow,
 } from '../../approvals/cancelRound'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
@@ -1188,7 +1190,7 @@ const route = useRoute()
 const router = useRouter()
 const store = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
-const { canAct } = useApprovalPermissions()
+const { canAct, permissions: approvalAccess } = useApprovalPermissions()
 const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
 const MEMBER_ACTION_DIALOG_WIDTH = 'min(480px, calc(100vw - 32px))'
 const MEMBER_ACTION_FOCUSABLE_SELECTOR = [
@@ -1686,7 +1688,21 @@ const allowRevoke = computed(() => approval.value?.policy?.allowRevoke === true)
 // This is a NARROWING of an affordance, never a permission: the 403 remains the authority, and the
 // separate instance-consistency gate (`actionsEnabled`) is untouched and still applies on top.
 const canDecideCurrentNode = computed(() => approval.value?.canDecideCurrentNode !== false)
-const canDecide = computed(() => canAct.value && canDecideCurrentNode.value)
+// 撤销轮(`workflowKey === 'approval.cancel-round'`)— owner 2026-09-29 11:0x 「Attendance-side + OFF
+// flag」: the approver decides through `POST /api/attendance/requests/:id/cancel-round/actions`, which
+// is mounted on `attendance:approve`, NOT through the generic route behind `approvals:act`. So for a
+// cancel round the approve / reject affordance follows the grant that route actually checks, and the
+// other member verbs stay hidden — the lock's §9-9 allowed set refuses transfer / add_sign /
+// reduce_sign / return on a cancel round. The server (seat check, §9-9, grant) remains the authority.
+const isCancelRound = computed(() => isCancelRoundWorkflow(approval.value))
+const canActOnCancelRound = computed(() => {
+  const access = approvalAccess?.value
+  return Boolean(access && (access.isAdmin || access.permissions.includes('attendance:approve')))
+})
+const canDecidePrimary = computed(() =>
+  (isCancelRound.value ? canActOnCancelRound.value : canAct.value) && canDecideCurrentNode.value,
+)
+const canDecide = computed(() => !isCancelRound.value && canAct.value && canDecideCurrentNode.value)
 
 const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
 const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
@@ -2579,11 +2595,26 @@ async function submitAction() {
   if (!id) return
   actionDialogError.value = null
   inFlightAction.value = currentAction.value
+  const displayed = approval.value
   try {
-    await store.executeAction(id, {
-      action: currentAction.value,
-      comment: actionComment.value || undefined,
-    })
+    if (
+      displayed
+      && displayed.id === id
+      && isCancelRoundWorkflow(displayed)
+      && (currentAction.value === 'approve' || currentAction.value === 'reject')
+    ) {
+      // 撤销轮: decide through the attendance route (never the generic `/api/approvals/:id/actions`).
+      // Its success body is minimal (not a UnifiedApprovalDTO), so nothing is published into the
+      // store from it — the detail is re-read instead. A leave-id resolution failure throws and is
+      // shown in the dialog; it never falls back to the generic route.
+      await decideCancelRoundFromApproval(displayed, currentAction.value, actionComment.value || undefined)
+      if (id === routeInstanceId.value) await store.loadDetail(id)
+    } else {
+      await store.executeAction(id, {
+        action: currentAction.value,
+        comment: actionComment.value || undefined,
+      })
+    }
     // Round 3 (B10/B13): everything the PAGE says or shows about this verb is scoped to the
     // instance it acted on. The two refresh helpers below stay OUTSIDE this block on purpose —
     // each keeps its own captured-id refusal so it remains independently observable.
