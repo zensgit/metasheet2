@@ -31,7 +31,7 @@
  * before parsing so a CRLF checkout cannot change a verdict.
  */
 import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { join, posix, relative, sep } from 'node:path'
 
 import ts from 'typescript'
 
@@ -54,9 +54,9 @@ export type HolderKind = 'direct' | 'seam-call' | 'sql-function-call' | 'sql-tri
 
 type Region = {
   source: ts.SourceFile
-  /** The function whose body is checked (the handler literal for a seam call, else the innermost function). */
+  /** The function whose body is checked: the caller's function after the fence call, or a handler literal. */
   fn: ts.Node
-  /** Only statements positioned after this offset count (the fence call's end; the handler start for seams). */
+  /** Only statements positioned after this offset count (the fence call's end; a handler literal's start). */
   after: number
   /** What the helper's first argument must be spelled as ('' = unknown). */
   queryBinding: string
@@ -69,16 +69,34 @@ export type FenceHolder = {
   scope: string
   callee: string
   kind: HolderKind
-  /** null ⇒ a seam call whose handler is not a literal (a variable / property): not mechanically checkable. */
-  region: Region | null
+  /**
+   * Where the fence is held and statements are checked:
+   *  - a call to an entry: the caller's own continuation after the call (the fence was taken on the caller's
+   *    connection) plus any function literal handed to the entry;
+   *  - a call to a seam that fences on the CALLER'S connection (e.g. recheckManualSource(query, …, authorize)):
+   *    the handler literal (if any) AND the caller's continuation;
+   *  - a call to a seam that opens its OWN transaction (withTransaction(sheetId, handler)): the handler literal
+   *    only — the caller's continuation runs after the seam released the fence. A non-literal handler there
+   *    leaves no region (not mechanically checkable; the ledger names it).
+   */
+  regions: Region[]
+  /**
+   * Callees (qualified names) called inside a region after the fence, resolved precisely (import binding,
+   * same-file declaration, `this.` method, namespace import), whose body — or, one level further down, whose own
+   * callees' bodies — contains a `meta_records.data` write statement.
+   */
+  writesVia: string[]
 }
 
 export type Census = {
   seedCount: number
+  /** Declaration labels `file#qualifiedName`. */
   firstOrderAcquirers: string[]
   probes: string[]
   entries: string[]
   seams: string[]
+  /** Seams that open their own transaction (a caller's continuation is NOT under the fence). */
+  ownTransactionSeams: string[]
   sqlAcquirers: string[]
   triggerTables: string[]
   holders: FenceHolder[]
@@ -360,11 +378,72 @@ function sqlFunctionsIn(text: string, rel: string): SqlFn[] {
 
 type Parsed = { rel: string; source: ts.SourceFile }
 
+/**
+ * A named function-like declaration. Entries, seams and acquirers are keyed by DECLARATION (file + qualified name
+ * + position), never by bare name: a host-API property called `ensureObject` in index.ts is not provisioning's
+ * `ensureObject`, and a private `lockSource` in one module is not a port of the same name in another (fix round
+ * C1-F1 / C1-F5).
+ */
+type Decl = {
+  id: string
+  label: string
+  rel: string
+  name: string
+  qualified: string
+  kind: 'function' | 'variable' | 'method' | 'property'
+  fn: FnNode
+  parsed: Parsed
+  /** The node whose range is the declaration's lexical scope (for same-file identifier resolution). */
+  scope: ts.Node
+  topLevel: boolean
+}
+
+function declKind(fn: FnNode): Decl['kind'] {
+  if (ts.isFunctionDeclaration(fn)) return 'function'
+  if (ts.isMethodDeclaration(fn) || ts.isGetAccessorDeclaration(fn) || ts.isSetAccessorDeclaration(fn) || ts.isConstructorDeclaration(fn)) {
+    return 'method'
+  }
+  const p = unwrapParent(fn)
+  if (p && ts.isVariableDeclaration(p)) return 'variable'
+  if (p && ts.isPropertyDeclaration(p)) return 'method'
+  return 'property'
+}
+
+function declScope(fn: FnNode, kind: Decl['kind']): ts.Node {
+  if (kind === 'function') return fn.parent
+  if (kind === 'variable') {
+    let n: ts.Node = unwrapParent(fn)
+    while (n && !ts.isVariableStatement(n) && !ts.isSourceFile(n)) n = n.parent
+    return n && ts.isVariableStatement(n) ? n.parent : fn.getSourceFile()
+  }
+  return fn.getSourceFile()
+}
+
+function isTopLevel(node: ts.Node): boolean {
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isSourceFile(p)) return true
+    if (isFn(p) || ts.isClassDeclaration(p) || ts.isClassExpression(p) || ts.isObjectLiteralExpression(p)) return false
+  }
+  return true
+}
+
+function resolveModule(fromRel: string, spec: string, known: ReadonlySet<string>): string | null {
+  if (!spec.startsWith('.')) return null
+  const base = posix.normalize(posix.join(posix.dirname(fromRel), spec))
+  const stripped = base.endsWith('.js') ? base.slice(0, -3) : base
+  for (const cand of [base, `${stripped}.ts`, `${stripped}/index.ts`]) if (known.has(cand)) return cand
+  return null
+}
+
+type Binding = { target: string; imported: string } | { target: string; namespace: true }
+
 export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
   const parsed: Parsed[] = sources.map(({ rel, text }) => ({
     rel,
     source: ts.createSourceFile(rel, text.replace(/\r\n/g, '\n'), ts.ScriptTarget.Latest, true),
   }))
+  const parsedByRel = new Map(parsed.map((p) => [p.rel, p]))
+  const knownRels = new Set(parsed.map((p) => p.rel))
 
   // ── SQL acquirers, trigger tables, SQL probes ──
   const sqlFns: SqlFn[] = []
@@ -408,18 +487,149 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
   const sqlBodyLiteral = (text: string): boolean =>
     sqlFunctionsIn(text, '').some((f) => f.body.includes(CANONICAL_KEY_LITERAL))
 
-  // ── TS seeds → first-order acquirers / probes ──
-  type FnEntry = { name: string; fn: FnNode; parsed: Parsed }
-  const namedFns: FnEntry[] = []
+  // ── declarations and the symbol tables that resolve a call to one ──
+  const decls: Decl[] = []
+  const declByNode = new Map<ts.Node, Decl>()
+  const localByName = new Map<string, Map<string, Decl[]>>() // rel → name → function / variable declarations
+  const topByName = new Map<string, Map<string, Decl>>() // rel → name → top-level function / variable
+  const methodByClassKey = new Map<string, Decl>() // `${rel}#Class.method`
+  const memberByName = new Map<string, Decl[]>() // bare name → methods and object-literal properties (any file)
   for (const p of parsed) {
+    const locals = new Map<string, Decl[]>()
+    const tops = new Map<string, Decl>()
     visitAll(p.source, (n) => {
-      if (isFn(n)) {
-        const name = fnName(n)
-        if (name) namedFns.push({ name, fn: n, parsed: p })
+      if (!isFn(n)) return
+      const qualified = fnName(n)
+      if (!qualified) return
+      const kind = declKind(n)
+      const line = p.source.getLineAndCharacterOfPosition(n.getStart(p.source)).line + 1
+      const d: Decl = {
+        id: `${p.rel}#${qualified}@${n.getStart(p.source)}`,
+        label: `${p.rel}#${qualified}`,
+        rel: p.rel,
+        name: bare(qualified),
+        qualified,
+        kind,
+        fn: n,
+        parsed: p,
+        scope: declScope(n, kind),
+        topLevel: (kind === 'function' || kind === 'variable') && isTopLevel(kind === 'function' ? n : unwrapParent(n)),
+      }
+      void line
+      decls.push(d)
+      declByNode.set(n, d)
+      if (kind === 'function' || kind === 'variable') {
+        locals.set(d.name, [...(locals.get(d.name) ?? []), d])
+        if (d.topLevel) tops.set(d.name, d)
+      } else {
+        memberByName.set(d.name, [...(memberByName.get(d.name) ?? []), d])
+        if (qualified.includes('.')) methodByClassKey.set(`${p.rel}#${qualified}`, d)
       }
     })
+    localByName.set(p.rel, locals)
+    topByName.set(p.rel, tops)
   }
 
+  const bindingsByFile = new Map<string, Map<string, Binding>>()
+  const reexportsByFile = new Map<string, { named: Map<string, { target: string; imported: string }>; star: string[] }>()
+  for (const p of parsed) {
+    const bindings = new Map<string, Binding>()
+    const named = new Map<string, { target: string; imported: string }>()
+    const star: string[] = []
+    for (const stmt of p.source.statements) {
+      if (ts.isImportDeclaration(stmt) && ts.isStringLiteral(stmt.moduleSpecifier)) {
+        const target = resolveModule(p.rel, stmt.moduleSpecifier.text, knownRels)
+        const clause = stmt.importClause
+        if (!target || !clause || clause.isTypeOnly) continue
+        if (clause.name) bindings.set(clause.name.text, { target, imported: 'default' })
+        const nb = clause.namedBindings
+        if (nb && ts.isNamespaceImport(nb)) bindings.set(nb.name.text, { target, namespace: true })
+        if (nb && ts.isNamedImports(nb)) {
+          for (const el of nb.elements) {
+            if (el.isTypeOnly) continue
+            bindings.set(el.name.text, { target, imported: el.propertyName ? propName(el.propertyName) : el.name.text })
+          }
+        }
+      } else if (ts.isExportDeclaration(stmt) && stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)) {
+        const target = resolveModule(p.rel, stmt.moduleSpecifier.text, knownRels)
+        if (!target) continue
+        if (!stmt.exportClause) star.push(target)
+        else if (ts.isNamedExports(stmt.exportClause)) {
+          for (const el of stmt.exportClause.elements) {
+            named.set(el.name.text, { target, imported: el.propertyName ? propName(el.propertyName) : el.name.text })
+          }
+        }
+      }
+    }
+    bindingsByFile.set(p.rel, bindings)
+    reexportsByFile.set(p.rel, { named, star })
+  }
+
+  const resolveExported = (rel: string, name: string, depth = 0): Decl | null => {
+    if (depth > 5) return null
+    const top = topByName.get(rel)?.get(name)
+    if (top) return top
+    const re = reexportsByFile.get(rel)
+    const hop = re?.named.get(name)
+    if (hop) return resolveExported(hop.target, hop.imported, depth + 1)
+    for (const t of re?.star ?? []) {
+      const d = resolveExported(t, name, depth + 1)
+      if (d) return d
+    }
+    return null
+  }
+
+  const within = (outer: ts.Node, inner: ts.Node) => inner.getStart() >= outer.getStart() && inner.getEnd() <= outer.getEnd()
+
+  const resolveIdentifier = (p: Parsed, name: string, at: ts.Node): Decl[] => {
+    const b = bindingsByFile.get(p.rel)?.get(name)
+    if (b) {
+      if ('namespace' in b) return []
+      const d = resolveExported(b.target, b.imported)
+      return d ? [d] : []
+    }
+    const locals = localByName.get(p.rel)?.get(name) ?? []
+    if (locals.length <= 1) return locals
+    const enclosing = locals.filter((d) => within(d.scope, at))
+    if (enclosing.length === 0) return locals
+    enclosing.sort((a, b) => (a.scope.getEnd() - a.scope.getStart()) - (b.scope.getEnd() - b.scope.getStart()))
+    return [enclosing[0]]
+  }
+
+  type Resolution = { decls: Decl[]; precise: boolean }
+  const resolutionCache = new Map<ts.CallExpression, Resolution>()
+  const resolveCall = (call: ts.CallExpression, p: Parsed): Resolution => {
+    const cached = resolutionCache.get(call)
+    if (cached) return cached
+    let out: Resolution = { decls: [], precise: true }
+    let expr: ts.Expression = call.expression
+    while (ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr)) expr = expr.expression
+    if (ts.isIdentifier(expr)) {
+      out = { decls: resolveIdentifier(p, expr.text, call), precise: true }
+    } else if (ts.isPropertyAccessExpression(expr)) {
+      const member = expr.name.text
+      const recv = expr.expression
+      if (recv.kind === ts.SyntaxKind.ThisKeyword) {
+        const d = methodByClassKey.get(`${p.rel}#${enclosingClassName(call)}.${member}`)
+        out = { decls: d ? [d] : [], precise: true }
+      } else {
+        const ns = ts.isIdentifier(recv) ? bindingsByFile.get(p.rel)?.get(recv.text) : undefined
+        if (ns && 'namespace' in ns) {
+          const d = resolveExported(ns.target, member)
+          out = { decls: d ? [d] : [], precise: true }
+        } else {
+          // Another receiver (`svc.patchRecords(…)`, `deps.transaction(…)`): statically unknown. Fall back to the
+          // methods / object-literal properties of that name — never to free functions — so a receiver call can
+          // still reach a method entry (fail-closed: at worst an extra holder to classify).
+          out = { decls: memberByName.get(member) ?? [], precise: false }
+        }
+      }
+    }
+    resolutionCache.set(call, out)
+    return out
+  }
+
+  // ── TS seeds → first-order acquirers / probes ──
   const primitiveConstsByFile = new Map<string, Set<string>>()
   for (const p of parsed) {
     const consts = new Set<string>()
@@ -444,17 +654,14 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
   }
 
   let seedCount = 0
-  const acquirers = new Set<string>()
+  const acquirers = new Set<string>() // decl ids
   for (const p of parsed) {
     const seeds: ts.Node[] = []
     visitAll(p.source, (n) => {
       if (ts.isIdentifier(n) && n.text === CANONICAL_KEY_CONSTRUCTOR) {
         const parent = n.parent
         if (ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) return
-        if (ts.isFunctionDeclaration(parent) && parent.name === n) {
-          // the constructor's own name is not a use; its body's literal is a seed (below)
-          return
-        }
+        if (ts.isFunctionDeclaration(parent) && parent.name === n) return // the constructor's own name
         seeds.push(n)
       }
     })
@@ -464,18 +671,20 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
     for (const seed of seeds) {
       seedCount += 1
       // Walk out from the seed through anonymous closures up to (and including) the first NAMED function: the
-      // key and the primitive must meet inside it. A named function without a primitive is a probe — never
-      // credit the seed to some unrelated outer function that happens to lock something else.
-      let acquired = ''
+      // key and the primitive must meet inside it. A named function without a primitive is a probe.
+      let acquired: Decl | null = null
+      let anonymous = false
       for (let f = enclosingFn(seed); f; f = enclosingFn(f)) {
         if (fnHasPrimitive(f, p)) {
           const named = fnName(f) ? f : nearestNamedFn(f)
-          acquired = named ? fnName(named) : `<anonymous@${p.rel}>`
+          acquired = named ? declByNode.get(named) ?? null : null
+          anonymous = !named
           break
         }
         if (fnName(f)) break
       }
-      if (acquired) acquirers.add(acquired)
+      if (acquired) acquirers.add(acquired.id)
+      else if (anonymous) probes.add(`${p.rel}#<anonymous acquirer>`) // fail-closed: surfaces in the probe ledger
       else {
         const named = nearestNamedFn(seed)
         probes.add(`${p.rel}#${named ? fnName(named) : '<module>'}`)
@@ -486,37 +695,18 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
   // ── closure: entries + seams ──
   const entries = new Set<string>(acquirers)
   const seams = new Set<string>()
+  const ownTxnSeams = new Set<string>()
   const allCalls: Array<{ call: ts.CallExpression; parsed: Parsed }> = []
   for (const p of parsed) visitAll(p.source, (n) => { if (ts.isCallExpression(n)) allCalls.push({ call: n, parsed: p }) })
+  const parsedOf = (n: ts.Node): Parsed => parsedByRel.get(n.getSourceFile().fileName)!
 
-  // `import { ensureView as ensureMultitableView }` — a call through the alias is a call to the original.
-  const aliasesByFile = new WeakMap<ts.SourceFile, Map<string, string>>()
-  for (const p of parsed) {
-    const aliases = new Map<string, string>()
-    visitAll(p.source, (n) => {
-      if (ts.isImportSpecifier(n) && n.propertyName) aliases.set(n.name.text, propName(n.propertyName))
-    })
-    aliasesByFile.set(p.source, aliases)
-  }
-
-  const resolve = (call: ts.CallExpression): string => {
-    const info = calleeInfo(call)
-    const { receiver } = info
-    const name = receiver === 'none' ? (aliasesByFile.get(call.getSourceFile())?.get(info.name) ?? info.name) : info.name
-    if (!name) return ''
-    if (receiver === 'none') return entries.has(name) ? name : ''
-    if (receiver === 'this') {
-      const q = `${enclosingClassName(call)}.${name}`
-      return entries.has(q) ? q : ''
-    }
-    for (const e of entries) if (bare(e) === name) return e
-    return ''
-  }
+  const entryTarget = (call: ts.CallExpression): Decl | null =>
+    resolveCall(call, parsedOf(call)).decls.find((d) => entries.has(d.id)) ?? null
+  const declOf = (fn: ts.Node | null | undefined): Decl | null => (fn ? declByNode.get(fn) ?? null : null)
 
   const isSeam = (f: FnNode, g: FnNode, fence: ts.CallExpression): boolean => {
     // ADR "回调缝规则": a seam's own closure writes nothing — it only fences and hands over. A function that
-    // also writes `meta_records` itself (RecordWriteService.patchRecords hands its fenced query to an optional
-    // `preWriteGuard`) is a holder in its own right and is checked where it writes.
+    // also writes `meta_records` itself is a holder in its own right and is checked where it writes.
     if (subtreeWritesRecords(f)) return false
     const params = paramNames(f)
     const fenceRoot = resolvedRoot(g, fence.arguments[0]) || resolvedRoot(f, fence.arguments[0])
@@ -542,62 +732,105 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
 
   for (let changed = true; changed;) {
     changed = false
-    for (const { name, fn } of namedFns) {
-      if (entries.has(name)) continue
+    for (const d of decls) {
+      if (entries.has(d.id)) continue
       let joinedVia: ts.CallExpression | null = null
-      visitOwn(fn, (n) => {
-        if (joinedVia || !ts.isCallExpression(n) || !resolve(n)) return
-        if (isParamDerived(fn, n.arguments[0]) && !subtreeWritesRecords(fn)) joinedVia = n
+      visitOwn(d.fn, (n) => {
+        if (joinedVia || !ts.isCallExpression(n) || !entryTarget(n)) return
+        if (isParamDerived(d.fn, n.arguments[0]) && !subtreeWritesRecords(d.fn)) joinedVia = n
       })
       if (joinedVia) {
-        entries.add(name)
-        // An entry that ALSO hands the fenced query to a callback it was given is a seam: its call sites are
-        // checked on the handler literal (e.g. the w4c0 attendance operation transaction and its `body`).
-        if (isSeam(fn, fn, joinedVia)) seams.add(name)
+        entries.add(d.id)
+        // An entry that ALSO hands the fenced query to a callback it was given is a seam on the CALLER'S connection.
+        if (isSeam(d.fn, d.fn, joinedVia)) seams.add(d.id)
         changed = true
       }
     }
     for (const { call } of allCalls) {
-      if (!resolve(call)) continue
+      if (!entryTarget(call)) continue
       const g = enclosingFn(call)
-      if (!g || entries.has(fnName(g))) continue
+      if (!g || entries.has(declOf(g)?.id ?? '')) continue
       const f = fnName(g) ? g : nearestNamedFn(g)
-      if (!f || entries.has(fnName(f))) continue
+      const fd = declOf(f)
+      if (!f || !fd || entries.has(fd.id)) continue
       if (isSeam(f, g, call)) {
-        entries.add(fnName(f))
-        seams.add(fnName(f))
+        entries.add(fd.id)
+        seams.add(fd.id)
+        ownTxnSeams.add(fd.id)
         changed = true
       }
     }
   }
 
+  // ── writes reachable through callees (C1-F4): precise resolution only, two levels ──
+  const writesMemo = new Map<string, boolean>()
+  const declWritesData = (d: Decl, depth: number): boolean => {
+    const memoKey = `${d.id}|${depth}`
+    const hit = writesMemo.get(memoKey)
+    if (hit !== undefined) return hit
+    writesMemo.set(memoKey, false) // cycle guard
+    let writes = literalsIn(d.fn).some(({ text }) => RECORDS_DATA_WRITE_RE.test(collapse(text)))
+    if (!writes && depth > 1) {
+      visitAll(d.fn, (n) => {
+        if (writes || !ts.isCallExpression(n)) return
+        const r = resolveCall(n, d.parsed)
+        if (r.precise && r.decls.some((x) => x !== d && declWritesData(x, depth - 1))) writes = true
+      })
+    }
+    writesMemo.set(memoKey, writes)
+    return writes
+  }
+  const writesViaOf = (regions: Region[]): string[] => {
+    const via = new Set<string>()
+    for (const region of regions) {
+      const p = parsedOf(region.fn)
+      visitAll(region.fn, (n) => {
+        if (!ts.isCallExpression(n) || n.getStart() < region.after) return
+        const r = resolveCall(n, p)
+        if (!r.precise) return
+        for (const d of r.decls) if (declWritesData(d, 2)) via.add(d.qualified)
+      })
+    }
+    return [...via].sort()
+  }
+
   // ── holders ──
   const holders: FenceHolder[] = []
   const lineOf = (s: ts.SourceFile, pos: number) => s.getLineAndCharacterOfPosition(pos).line + 1
+  const fnLiteralArgs = (call: ts.CallExpression, p: Parsed): Region[] =>
+    call.arguments
+      .filter((a): a is ts.ArrowFunction | ts.FunctionExpression => ts.isArrowFunction(a) || ts.isFunctionExpression(a))
+      .map((a) => ({ source: p.source, fn: a, after: a.getStart(p.source), queryBinding: handlerBinding(a) }))
   for (const { call, parsed: p } of allCalls) {
-    const target = resolve(call)
+    const target = entryTarget(call)
     if (!target) continue
     const g = enclosingFn(call)
-    if (g && entries.has(fnName(g))) continue // delegation inside an entry / seam
+    if (g && entries.has(declOf(g)?.id ?? '')) continue // delegation inside an entry / seam
     const named = nearestNamedFn(call)
-    if (named && entries.has(fnName(named))) continue // e.g. the fence inside a seam's own transaction callback
+    if (named && entries.has(declOf(named)?.id ?? '')) continue // e.g. the fence inside a seam's own transaction callback
     const scope = scopeLabel(call)
-    const callee = bare(target)
-    let region: Region | null = null
+    const continuation: Region[] = g ? [{ source: p.source, fn: g, after: call.getEnd(), queryBinding: argText(call, p.source) }] : []
     let kind: HolderKind = 'direct'
-    if (seams.has(target)) {
+    let regions: Region[]
+    if (ownTxnSeams.has(target.id)) {
       kind = 'seam-call'
-      const handler = [...call.arguments].reverse().find((a) => ts.isArrowFunction(a) || ts.isFunctionExpression(a)) as
-        | ts.ArrowFunction
-        | ts.FunctionExpression
-        | undefined
-      region = handler
-        ? { source: p.source, fn: handler, after: handler.getStart(p.source), queryBinding: handlerBinding(handler) }
-        : null
-    } else if (g) {
-      region = { source: p.source, fn: g, after: call.getEnd(), queryBinding: argText(call, p.source) }
+      regions = fnLiteralArgs(call, p)
+    } else if (seams.has(target.id)) {
+      kind = 'seam-call'
+      regions = [...fnLiteralArgs(call, p), ...continuation] // C1-F2: the caller's own statements are fenced too
+    } else {
+      regions = [...continuation, ...fnLiteralArgs(call, p)] // C1-F4(b): a handler handed to an entry runs fenced
     }
-    holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line: lineOf(p.source, call.getStart(p.source)), scope, callee, kind, region })
+    holders.push({
+      key: `${p.rel} :: ${scope} :: ${target.name}`,
+      rel: p.rel,
+      line: lineOf(p.source, call.getStart(p.source)),
+      scope,
+      callee: target.name,
+      kind,
+      regions,
+      writesVia: writesViaOf(regions),
+    })
   }
   if (sqlAcquirers.size > 0 || triggerTables.size > 0) {
     const fnRe = sqlAcquirers.size > 0 ? new RegExp(String.raw`\b(?:"?public"?\.)?(${[...sqlAcquirers].join('|')})\s*\(`, 'i') : null
@@ -609,47 +842,52 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
       for (const { node, text } of literalsIn(p.source)) {
         if (/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION/i.test(text)) continue
         const g = enclosingFn(node)
-        const region = g ? { source: p.source, fn: g, after: node.getEnd(), queryBinding: '' } : null
+        const regions: Region[] = g ? [{ source: p.source, fn: g, after: node.getEnd(), queryBinding: '' }] : []
         const scope = scopeLabel(node)
+        const line = lineOf(p.source, node.getStart(p.source))
         const fm = fnRe?.exec(text)
         if (fm) {
-          holders.push({ key: `${p.rel} :: ${scope} :: sql:${fm[1].toLowerCase()}`, rel: p.rel, line: lineOf(p.source, node.getStart(p.source)), scope, callee: `sql:${fm[1].toLowerCase()}`, kind: 'sql-function-call', region })
+          const callee = `sql:${fm[1].toLowerCase()}`
+          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-function-call', regions, writesVia: writesViaOf(regions) })
         }
         const tm = trigRe?.exec(text)
         if (tm) {
-          holders.push({ key: `${p.rel} :: ${scope} :: sql-dml:${tm[1].toLowerCase()}`, rel: p.rel, line: lineOf(p.source, node.getStart(p.source)), scope, callee: `sql-dml:${tm[1].toLowerCase()}`, kind: 'sql-trigger-dml', region })
+          const callee = `sql-dml:${tm[1].toLowerCase()}`
+          holders.push({ key: `${p.rel} :: ${scope} :: ${callee}`, rel: p.rel, line, scope, callee, kind: 'sql-trigger-dml', regions, writesVia: writesViaOf(regions) })
         }
       }
     }
   }
   // An entry nobody in this tree calls — a host port a PLUGIN calls with its own transaction (the attendance
-  // `cleanupProposal` port), or an exported primitive with no caller yet (ADR rows 30 / 31) — would otherwise
-  // drop out of the census entirely. Surface it as a holder of its own so it has to be classified.
+  // `cleanupProposal` / `lockSource` ports), or an exported primitive with no caller yet (ADR rows 30 / 31) — would
+  // otherwise drop out of the census entirely. Surface it as a holder of its own so it has to be classified.
   const called = new Set<string>()
-  for (const { call } of allCalls) {
-    const target = resolve(call)
-    if (target) called.add(target)
-  }
-  for (const { name, fn, parsed: p } of namedFns) {
-    if (!entries.has(name) || called.has(name)) continue
+  for (const { call } of allCalls) for (const d of resolveCall(call, parsedOf(call)).decls) called.add(d.id)
+  for (const d of decls) {
+    if (!entries.has(d.id) || called.has(d.id)) continue
+    const regions: Region[] = [{ source: d.parsed.source, fn: d.fn, after: d.fn.getStart(d.parsed.source), queryBinding: '' }]
     holders.push({
-      key: `${p.rel} :: ${name} :: <no in-tree call>`,
-      rel: p.rel,
-      line: lineOf(p.source, fn.getStart(p.source)),
-      scope: name,
+      key: `${d.rel} :: ${d.qualified} :: <no in-tree call>`,
+      rel: d.rel,
+      line: lineOf(d.parsed.source, d.fn.getStart(d.parsed.source)),
+      scope: d.qualified,
       callee: '<no in-tree call>',
       kind: 'entry-without-caller',
-      region: { source: p.source, fn, after: fn.getStart(p.source), queryBinding: '' },
+      regions,
+      writesVia: writesViaOf(regions),
     })
   }
   holders.sort((a, b) => a.key.localeCompare(b.key) || a.line - b.line)
 
+  const labels = (ids: Iterable<string>) =>
+    [...new Set([...ids].map((id) => decls.find((d) => d.id === id)!.label))].sort()
   return {
     seedCount,
-    firstOrderAcquirers: [...acquirers].sort(),
+    firstOrderAcquirers: labels(acquirers),
     probes: [...probes].sort(),
-    entries: [...entries].sort(),
-    seams: [...seams].sort(),
+    entries: labels(entries),
+    seams: labels(seams),
+    ownTransactionSeams: labels(ownTxnSeams),
     sqlAcquirers: [...sqlAcquirers].sort(),
     triggerTables: [...triggerTables].sort(),
     holders,
@@ -661,60 +899,60 @@ export function runFenceHolderCensus(sources: readonly CensusSource[]): Census {
 export type HelperCheck = { ok: true } | { ok: false; reason: string }
 
 /**
- * The 必接 rule: in the holder's region, AFTER the fence, a call to `helper` handed the SAME query the fence
- * was taken on, positioned before the first `meta_records` write or `FOR UPDATE` row lock that follows the
- * fence. The helper must sit at the region's own scope (a call buried in a nested callback might never run).
+ * The 必接 rule: in the holder's regions, AFTER the fence, a call to `helper` handed the SAME query the fence
+ * was taken on, positioned before the first `meta_records` write or `FOR UPDATE` row lock of that region. Every
+ * region with such a statement needs its own helper call before it; at least one region must call the helper.
+ * The helper must sit at the region's own scope (a call buried in a nested callback might never run).
  */
 export function checkHelperBeforeFirstWrite(holder: FenceHolder, helper: string): HelperCheck {
-  const region = holder.region
-  if (!region) return { ok: false, reason: 'the seam handler is not a literal — nothing to inspect' }
-  const fn = region.fn as FnNode
-  let helperAt = -1
-  const foreign: string[] = []
-  visitOwn(fn, (n) => {
-    if (!ts.isCallExpression(n) || calleeInfo(n).name !== helper) return
-    const at = n.getStart(region.source)
-    if (at < region.after) return
-    const arg = argText(n, region.source)
-    if (region.queryBinding !== '' && arg !== region.queryBinding) {
-      foreign.push(arg)
-      return
+  if (holder.regions.length === 0) return { ok: false, reason: 'the seam handler is not a literal — nothing to inspect' }
+  let anyHelper = false
+  for (const region of holder.regions) {
+    const fn = region.fn as FnNode
+    let helperAt = -1
+    const foreign: string[] = []
+    visitOwn(fn, (n) => {
+      if (!ts.isCallExpression(n) || calleeInfo(n).name !== helper) return
+      const at = n.getStart(region.source)
+      if (at < region.after) return
+      const arg = argText(n, region.source)
+      if (region.queryBinding !== '' && arg !== region.queryBinding) {
+        foreign.push(arg)
+        return
+      }
+      if (helperAt === -1 || at < helperAt) helperAt = at
+    })
+    let firstWriteAt = -1
+    for (const { node, text } of literalsIn(fn)) {
+      const at = node.getStart(region.source)
+      if (at < region.after) continue
+      const sql = collapse(text)
+      if (RECORDS_WRITE_RE.test(sql) || ROW_LOCK_RE.test(sql)) {
+        if (firstWriteAt === -1 || at < firstWriteAt) firstWriteAt = at
+      }
     }
-    if (helperAt === -1 || at < helperAt) helperAt = at
-  })
-  let firstWriteAt = -1
-  for (const { node, text } of literalsIn(fn)) {
-    const at = node.getStart(region.source)
-    if (at < region.after) continue
-    const sql = collapse(text)
-    if (RECORDS_WRITE_RE.test(sql) || ROW_LOCK_RE.test(sql)) {
-      if (firstWriteAt === -1 || at < firstWriteAt) firstWriteAt = at
+    if (helperAt !== -1) anyHelper = true
+    if (foreign.length > 0 && helperAt === -1) {
+      return { ok: false, reason: `${helper} is called with ${foreign.join(', ')} instead of the fenced query ${region.queryBinding}` }
+    }
+    if (firstWriteAt !== -1 && helperAt === -1) return { ok: false, reason: `${helper} is not called after the fence` }
+    if (firstWriteAt !== -1 && firstWriteAt < helperAt) {
+      return { ok: false, reason: `${helper} runs after the first meta_records write / row lock` }
     }
   }
-  if (helperAt === -1) {
-    return {
-      ok: false,
-      reason: foreign.length > 0
-        ? `${helper} is called with ${foreign.join(', ')} instead of the fenced query ${region.queryBinding}`
-        : `${helper} is not called after the fence`,
-    }
-  }
-  if (firstWriteAt !== -1 && firstWriteAt < helperAt) {
-    return { ok: false, reason: `${helper} runs after the first meta_records write / row lock` }
-  }
-  return { ok: true }
+  return anyHelper ? { ok: true } : { ok: false, reason: `${helper} is not called after the fence` }
 }
 
-/** Statements writing a value into `meta_records.data`, positioned after the fence in the holder's region —
- * the mechanical half of the 非数据写入者 verdict (writes a callee makes are the ledger's stated reason). */
+/** Statements writing a value into `meta_records.data`, positioned after the fence in the holder's regions —
+ * the mechanical half of the 非数据写入者 verdict; writes a callee makes are in `writesVia`. */
 export function directRecordDataWritesAfterFence(holder: FenceHolder): string[] {
-  const region = holder.region
-  if (!region) return []
   const out: string[] = []
-  for (const { node, text } of literalsIn(region.fn)) {
-    if (node.getStart(region.source) < region.after) continue
-    const sql = collapse(text)
-    if (RECORDS_DATA_WRITE_RE.test(sql)) out.push(sql.slice(0, 80))
+  for (const region of holder.regions) {
+    for (const { node, text } of literalsIn(region.fn)) {
+      if (node.getStart(region.source) < region.after) continue
+      const sql = collapse(text)
+      if (RECORDS_DATA_WRITE_RE.test(sql)) out.push(sql.slice(0, 80))
+    }
   }
   return out
 }

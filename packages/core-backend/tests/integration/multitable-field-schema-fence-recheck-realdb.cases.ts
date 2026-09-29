@@ -419,7 +419,7 @@ export function defineFieldSchemaFenceRecheckRealDbCases(): void {
         .then((value): Outcome => ({ ok: true, value }), (error): Outcome => ({ ok: false, error }))
       return { p, pDone }
     }
-    const sqlState = (o: Outcome) => (o.ok ? null : String((o.error as { code?: unknown }).code ?? 'unknown'))
+    const sqlState = (o: Outcome) => (o.ok ? null : String(((o as { error: unknown }).error as { code?: unknown }).code ?? 'unknown'))
 
     test('R-F1 CONTROL (the cycle exists): the re-check statement issued after the fence, with the fence flag off, deadlocks with a schema edit', async () => {
       const w = await poolManager.get().getInternalPool().connect()

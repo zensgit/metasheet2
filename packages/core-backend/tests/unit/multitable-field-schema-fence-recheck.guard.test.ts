@@ -33,6 +33,10 @@
  *    inside `backfillAutoNumberField`; provisioning (row 26) surfaces at its callers (plugin host / template
  *    install); the w4c0 attendance transaction (row 32) is a seam and every caller is a holder.
  *  - an entry with NO caller in this tree (a host port a plugin calls, ADR rows 30 / 31) is a holder of its own.
+ *  - fix round: entries are keyed by DECLARATION (file + qualified name), calls resolve through import bindings,
+ *    re-exports and `this.` methods (C1-F1); a seam that fences on the caller's connection checks the caller's
+ *    continuation too (C1-F2); writes made through callees, followed two levels, must be named in the ledger
+ *    (`writesVia`, C1-F4).
  */
 import { join } from 'node:path'
 
@@ -64,6 +68,12 @@ type LedgerEntry = {
   reason: string
   /** A non-data-writer whose region is not a transaction body (construction-time wiring) — reason required. */
   regionCheck?: false
+  /**
+   * C1-F4: the callees (qualified names) through which this site writes `meta_records.data`, as the census finds
+   * them (precise resolution, two levels). Checked for EQUALITY on every exempt / non-data-writer entry, so a new
+   * write reached through a helper function reds the guard until it is named here with a reason.
+   */
+  writesVia?: readonly string[]
 }
 
 const MUST = (key: string, row: string, reason: string, helper: LedgerEntry['helper'] = HELPER, count = 1): LedgerEntry =>
@@ -72,6 +82,7 @@ const EXEMPT = (key: string, row: string, reason: string, count = 1): LedgerEntr
   ({ key, count, row, verdict: 'exempt', reason })
 const NONWRITER = (key: string, row: string, reason: string, count = 1, regionCheck?: false): LedgerEntry =>
   ({ key, count, row, verdict: 'non-data-writer', reason, ...(regionCheck === false ? { regionCheck } : {}) })
+const VIA = (entry: LedgerEntry, writesVia: readonly string[]): LedgerEntry => ({ ...entry, writesVia })
 
 const W4C0 = 'runAttendanceResultOperationTransactionV1'
 const W4C0_REASON =
@@ -117,14 +128,13 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   EXEMPT('multitable/records.ts :: deleteRecordWithRecoverability :: fenceWriterEntry', '12', 'as above.'),
   EXEMPT('multitable/recovery-archive-derived-processor.ts :: runRecoveryArchiveDerivedTransaction :: withFencedDerivedTransaction', '13 (scoped)', 'scoped derived path: reads, computes and merges inside the same fenced transaction (the seam hands the fenced query to this literal handler).'),
   EXEMPT('multitable/auto-number-service.ts :: backfillAutoNumberField :: acquireCanonicalSheetFence', '14', 'writes only the autoNumber field it is creating / reconfiguring (ROW_NUMBER() integers); autoNumber is an excluded retype type; both callers read the field after their own fence.'),
-  EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: fenceWriterEntry', '15 / 16 / 27 / 28', 'four branches of one handler: lossy retype-revert cell rewrite (row 15, reads the field after the fence + preview baseline hash), un-create cascade (row 16, deletes a key), generic config revert (row 27, no data write), field undelete (row 28, the field provably does not exist under the fence); convert / undo revisions are refused 422 before these branches.', 4),
-  EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: enterFieldLinkDropFencePlan', '16', 'un-create of a link field: removes the key, writes no value.'),
-  EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: enterFieldLinkRestoreFencePlan', '28', 'undelete of a link field: the field row does not exist under the fence (409 ID_COLLISION otherwise), so no conversion can target it.'),
-  EXEMPT('routes/univer-meta.ts :: DELETE /fields/:fieldId :: enterFieldLinkDropFencePlan', '16', 'field delete cascade: `data - fieldId`, removes the key.'),
-  EXEMPT('routes/univer-meta.ts :: DELETE /fields/:fieldId :: fenceWriterEntry', '16', 'as above, non-link branch.'),
+  VIA(EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: fenceWriterEntry', '15 / 16 / 27 / 28', 'four branches of one handler: lossy retype-revert cell rewrite (row 15, reads the field after the fence + preview baseline hash), un-create cascade (row 16, deletes a key), generic config revert (row 27, no data write), field undelete (row 28, the field provably does not exist under the fence); convert / undo revisions are refused 422 before these branches.', 4), ['applyLossyRetypeCellRewrite','dropFieldCascade','recreateFieldFromConfig']),
+  VIA(EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: enterFieldLinkDropFencePlan', '16', 'un-create of a link field: removes the key, writes no value.'), ['dropFieldCascade']),
+  VIA(EXEMPT('routes/univer-meta.ts :: POST /sheets/:sheetId/config-restore-execute :: enterFieldLinkRestoreFencePlan', '28', 'undelete of a link field: the field row does not exist under the fence (409 ID_COLLISION otherwise), so no conversion can target it.'), ['recreateFieldFromConfig']),
+  VIA(EXEMPT('routes/univer-meta.ts :: DELETE /fields/:fieldId :: enterFieldLinkDropFencePlan', '16', 'field delete cascade: `data - fieldId`, removes the key.'), ['dropFieldCascade']),
+  VIA(EXEMPT('routes/univer-meta.ts :: DELETE /fields/:fieldId :: fenceWriterEntry', '16', 'as above, non-link branch.'), ['dropFieldCascade']),
   EXEMPT('routes/univer-meta.ts :: DELETE /attachments/:attachmentId :: fenceWriterEntry', '17', 'strips an attachment id from an attachment cell (FOR UPDATE, then only removes ids); attachment is an excluded retype type.'),
   EXEMPT('multitable/exact-anchor-recovery-execute.ts :: applyExactAnchorRecoveryAttempt :: acquireCanonicalSheetFencesInOrder', '18', 'exact-anchor recovery re-reads the whole sheet schema after the fence and refuses schema-drift against the token hash — stronger than the helper.'),
-  EXEMPT('multitable/exact-anchor-recovery-execute.ts :: applyExactAnchorRecoveryAttempt :: applyArchiveAttachmentBatch', '18', 'the attachment batch of the same recovery attempt, under the same schema-hash check.'),
   EXEMPT('multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk', '18 / 29', 'async archive restore chunk: the chunk seam hands a non-literal apply; writes go through applyExactAnchorRecoveryAttempt (row 18 schema hash).'),
   EXEMPT('multitable/recovery-archive-restore-jobs.ts :: runRecoveryArchiveRestoreChunkTestOnly :: <no in-tree call>', '29', 'test-only export of the chunk seam; same writes as executeChunk.'),
   EXEMPT('multitable/recovery-archive-restore-jobs.ts :: runRecoveryArchiveRestoreL8ChunkTestOnly :: <no in-tree call>', '29', 'test-only export of the chunk seam; same writes as executeChunk.'),
@@ -136,17 +146,24 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
 
   // ── 非数据写入者 ──────────────────────────────────────────────────────────────────────────────────────
   NONWRITER('index.ts :: refresh :: refreshAttendanceReportProjectionAnchor', '21', 'attendance cleaning authority: locks projection rows, writes attendance_report_projection_anchors only.'),
-  NONWRITER('index.ts :: cleanupProposal :: <no in-tree call>', '21', 'host port the attendance plugin calls with its own transaction; its data write (two keys) goes through the plugin SDK patchRecord — covered by row 2.'),
-  NONWRITER('index.ts :: runStockPreparationPersistUnitOfWork :: acquireStockPreparationPersistUnitOfWorkLocks', '22', 'stock-prep unit of work only locks; the writes go through the plugin SDK (rows 2 / 3) on plugin-registered sheets (convert refuses 422).'),
+  VIA(NONWRITER('index.ts :: cleanupProposal :: <no in-tree call>', '21', 'host port the attendance plugin calls with its own transaction; its data write (two keys) goes through the plugin SDK patchRecord — covered by row 2.'), ['cleanupAttendanceCleaningProposal']),
+  VIA(NONWRITER('index.ts :: runStockPreparationPersistUnitOfWork :: acquireStockPreparationPersistUnitOfWorkLocks', '22', 'stock-prep unit of work only locks; the writes go through the plugin SDK (rows 2 / 3) on plugin-registered sheets (convert refuses 422).'), ['createRecord','patchRecord']),
   NONWRITER('index.ts :: ensureObjectInScope :: ensureObject', '26', 'plugin provisioning: writes meta_sheets / meta_fields / meta_views.'),
+  NONWRITER('index.ts :: ensureObject :: ensureObject', '26', 'C1-F1: host-API provisioning port — opens its own transaction and calls provisioning ensureObject (meta_sheets / meta_fields / meta_views); no meta_records statement, nothing reached through callees.'),
+  NONWRITER('index.ts :: ensureMissingObjectFields :: ensureMissingObjectFields', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning ensureMissingObjectFields: meta_fields only.'),
+  NONWRITER('index.ts :: ensureObjectDefaultView :: ensureObjectDefaultView', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning ensureObjectDefaultView: meta_views only.'),
+  NONWRITER('index.ts :: ensureView :: ensureView', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning ensureView: meta_views only.'),
+  NONWRITER('index.ts :: patchObjectFieldProperty :: patchObjectFieldProperty', '26', 'C1-F1: host-API provisioning port (own transaction) → provisioning patchObjectFieldProperty: meta_fields.property only.'),
+  NONWRITER('index.ts :: lockSource :: <no in-tree call>', '21', 'C1-F1: attendance cleaning port the plugin calls inside its w4c3c transaction; lockAttendanceCleaningSource → lockAttendanceCleaningProjectionAccess → lockDailyProjectionGroup takes the fence and only locks / reads (FOR UPDATE / FOR SHARE); no data write reached.'),
+  NONWRITER('multitable/provisioning.ts :: ensureMissingObjectFields :: ensureMissingObjectFields', '26', 'C1-F1: the repair-transaction surface (buildObjectFieldsRepairSurface) forwards the caller\'s transaction query to ensureMissingObjectFields: meta_fields only.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimAttachmentBlobPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimOrphanAttachmentForPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-purge-claim.ts :: claimDirectAttachmentPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('routes/univer-meta.ts :: POST /sheets/:sheetId/trust-checkpoint-activate :: acquireCanonicalSheetFence', '24', 'writes checkpoint / baseline tables.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/row-level-read-deny :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/conditional-rules :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
-  NONWRITER('routes/univer-meta.ts :: POST /fields :: fenceWriterEntry', '27', 'CREATE FIELD; its only data write is the autoNumber backfill (row 14).'),
-  NONWRITER('routes/univer-meta.ts :: PATCH /fields/:fieldId :: fenceWriterEntry', '27', 'PATCH FIELD; its only data write is the autoNumber backfill (row 14).'),
+  VIA(NONWRITER('routes/univer-meta.ts :: POST /fields :: fenceWriterEntry', '27', 'CREATE FIELD; its only data write is the autoNumber backfill (row 14).'), ['backfillAutoNumberField']),
+  VIA(NONWRITER('routes/univer-meta.ts :: PATCH /fields/:fieldId :: fenceWriterEntry', '27', 'PATCH FIELD; its only data write is the autoNumber backfill (row 14).'), ['backfillAutoNumberField']),
   NONWRITER('routes/univer-meta.ts :: POST /views :: fenceWriterEntry', '27', 'view create.'),
   NONWRITER('routes/univer-meta.ts :: GET /views :: fenceWriterEntry', '27', 'lazily inserts the default meta_views row.'),
   NONWRITER('routes/univer-meta.ts :: PATCH /views/:viewId :: fenceWriterEntry', '27', 'view update.'),
@@ -156,13 +173,11 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('routes/univer-meta.ts :: DELETE /sheets/:sheetId :: enterSheetLinkDeleteFencePlan', '27', 'sheet soft delete.'),
   NONWRITER('routes/univer-meta.ts :: POST /sheets/:sheetId/restore :: fenceWriterEntry', '27', 'sheet restore.'),
   NONWRITER('routes/univer-meta.ts :: PATCH /sheets/:sheetId :: fenceWriterEntry', '27', 'sheet rename / update.'),
-  NONWRITER('routes/univer-meta.ts :: POST /sheets :: fenceWriterEntry', '27', 'sheet create.'),
+  VIA(NONWRITER('routes/univer-meta.ts :: POST /sheets :: fenceWriterEntry', '27 / 20', 'sheet create; with seed=true it calls createSeededSheet in the same transaction, which writes records of the sheet created in that transaction, keyed only by field ids minted in it (ADR row 20).'), ['createSeededSheet']),
   NONWRITER('routes/univer-meta.ts :: POST /records/:recordId/lock :: fenceWriterEntry', '27', 'record lock / unlock: writes only the locked* columns.', 2),
   NONWRITER('routes/univer-meta.ts :: POST /templates/:templateId/install :: runInstall', 'new (26-like)', 'template install: provisioning only (base / sheets / fields / views); template-library.ts has no meta_records statement.'),
   NONWRITER('routes/univer-meta.ts :: install :: runInstall', 'new (26-like)', 'the dedupe-replay leg of the same template install.'),
   NONWRITER('multitable/object-display-name-relabel.ts :: runRelabelObjectDisplayNamesWith :: relabelObjectDisplayNames', '35', 'relabel writes meta_fields.name / meta_sheets.name only (增补 A).'),
-  NONWRITER('multitable/recovery-archive-attachment-stage-ledger.ts :: reserve :: lockSource', '23', 'recovery archive attachment stage ledger.'),
-  NONWRITER('multitable/recovery-archive-attachment-stage-ledger.ts :: verified :: lockSource', '23', 'recovery archive attachment stage ledger.'),
   NONWRITER('multitable/recovery-archive-manual-admission.ts :: bindRecoveryArchiveManualAttachmentRead :: recheckManualSource', '23', 'manual admission re-check (non-literal handler); writes meta_recovery_archive_* only.', 3),
   NONWRITER('multitable/recovery-archive-manual-admission.ts :: bindRecoveryArchiveManualManifestBinding :: recheckManualSource', '23', 'as above.'),
   NONWRITER('multitable/recovery-archive-manual-admission.ts :: bindRecoveryArchiveManualNonceReservation :: recheckManualSource', '23', 'as above.'),
@@ -228,11 +243,11 @@ const TRIGGER_TABLES = ['meta_recovery_archive_legal_holds', 'meta_recovery_toke
 
 /** ADR "回调缝规则": the five seams it names must be derived as seams (the census may find more). */
 const ADR_SEAMS = [
-  'AutomationExecutor.withTransaction',
-  'AutomationService.withTransaction',
-  'withFencedDerivedTransaction',
-  'runRecoveryArchiveRestoreChunkCore',
-  'runAttendanceResultOperationTransactionV1',
+  'multitable/automation-executor.ts#AutomationExecutor.withTransaction',
+  'multitable/automation-service.ts#AutomationService.withTransaction',
+  'multitable/derived-write-fence.ts#withFencedDerivedTransaction',
+  'multitable/recovery-archive-restore-jobs.ts#runRecoveryArchiveRestoreChunkCore',
+  'attendance/w4c0-operation-registry.ts#runAttendanceResultOperationTransactionV1',
 ]
 
 /** Rows the ADR classifies 必接 — each must be carried by at least one must-wire ledger key. */
@@ -282,6 +297,17 @@ function nonWriterViolations(census: Census, ledger: readonly LedgerEntry[]): st
   return out
 }
 
+function writesViaMismatches(census: Census, ledger: readonly LedgerEntry[]): string[] {
+  const out: string[] = []
+  for (const e of ledger) {
+    if (e.verdict === 'must-wire' || e.regionCheck === false) continue
+    const found = [...new Set(census.holders.filter((h) => h.key === e.key).flatMap((h) => h.writesVia))].sort()
+    const named = [...(e.writesVia ?? [])].sort()
+    if (JSON.stringify(found) !== JSON.stringify(named)) out.push(`${e.key}: writes meta_records.data via [${found.join(', ')}], ledger names [${named.join(', ')}]`)
+  }
+  return out
+}
+
 // ── the real tree ─────────────────────────────────────────────────────────────────────────────────────
 
 const REAL_SOURCES = loadCensusSources(SRC)
@@ -290,12 +316,16 @@ const REAL = runFenceHolderCensus(REAL_SOURCES)
 describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () => {
   it('finds the fence at all (anti-vacuity): seeds, the core acquirer, its wrappers, and a floor of holders', () => {
     expect(REAL.seedCount).toBeGreaterThanOrEqual(5)
-    expect(REAL.firstOrderAcquirers).toEqual(expect.arrayContaining([
-      'acquireCanonicalSheetFence', 'acquireCleaningSessionFences', 'acquireFence', 'prepareTransaction',
-    ]))
+    expect(REAL.firstOrderAcquirers).toEqual([
+      'attendance/w4c0-operation-registry.ts#acquireCleaningSessionFences',
+      'multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFence',
+      'multitable/recovery-archive-legal-holds.ts#acquireFence',
+      'multitable/recovery-archive-writer-block.ts#prepareTransaction',
+    ])
     expect(REAL.entries).toEqual(expect.arrayContaining([
-      'fenceWriterEntry', 'fenceWriterEntriesInOrder', 'acquireCanonicalSheetFencesInOrder',
-      'acquireAutoNumberSheetWriteLock', 'enterLinkWriterFencePlan', 'prepareArchiveWriterBlockTransaction',
+      'multitable/canonical-sheet-fence.ts#fenceWriterEntry', 'multitable/canonical-sheet-fence.ts#fenceWriterEntriesInOrder',
+      'multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFencesInOrder', 'multitable/auto-number-service.ts#acquireAutoNumberSheetWriteLock',
+      'multitable/link-writer-fence.ts#enterLinkWriterFencePlan', 'multitable/recovery-archive-writer-block.ts#prepareArchiveWriterBlockTransaction',
     ]))
     expect(REAL.holders.length).toBeGreaterThanOrEqual(100)
   })
@@ -329,6 +359,14 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
 
   it('C. every 非数据写入者 holder writes no meta_records.data value after the fence in its own region', () => {
     expect(nonWriterViolations(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
+
+  it('C1-F4. writes reached through callees (two levels) are exactly the ledgered `writesVia` of every exempt / non-data-writer site', () => {
+    expect(writesViaMismatches(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
+
+  it('C1-F5. the attachment stage ledger\'s private lockSource (a FOR SHARE row lock, no fence) is not a holder', () => {
+    expect(REAL.holders.filter((h) => h.rel === 'multitable/recovery-archive-attachment-stage-ledger.ts')).toEqual([])
   })
 
   it('D. the probes (seed, no lock) are exactly the ledgered ones', () => {
@@ -373,8 +411,8 @@ const keysOf = (c: Census): string[] =>
 describe('field retype slice 3a — the census analyzer on synthetic sources', () => {
   it('derives the acquirer and the wrapper from the lock primitive; the key constructor is a probe', () => {
     const c = synthetic()
-    expect(c.firstOrderAcquirers).toEqual(['acquireCanonicalSheetFence'])
-    expect(c.entries).toEqual(expect.arrayContaining(['acquireCanonicalSheetFence', 'fenceWriterEntry']))
+    expect(c.firstOrderAcquirers).toEqual(['multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFence'])
+    expect(c.entries).toEqual(expect.arrayContaining(['multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFence', 'multitable/canonical-sheet-fence.ts#fenceWriterEntry']))
     expect(c.probes).toEqual(['multitable/canonical-sheet-fence.ts#canonicalSheetFenceKey'])
   })
 
@@ -417,7 +455,7 @@ describe('field retype slice 3a — the census analyzer on synthetic sources', (
       '  })',
       '}',
     ]))
-    expect(c.entries).toContain('lockIt')
+    expect(c.entries).toContain('multitable/wrapped.ts#lockIt')
     expect(keysOf(c)).toEqual(['multitable/wrapped.ts :: writer :: lockIt'])
   })
 
@@ -487,7 +525,8 @@ describe('field retype slice 3a — the census analyzer on synthetic sources', (
       '}',
     ])
     const c = synthetic(seamSrc)
-    expect(c.seams).toContain('Exec.withTx')
+    expect(c.seams).toContain('multitable/seamed.ts#Exec.withTx')
+    expect(c.ownTransactionSeams).toContain('multitable/seamed.ts#Exec.withTx')
     const keys = keysOf(c)
     expect(keys).toEqual(['multitable/seamed.ts :: Exec.write :: withTx', 'multitable/seamed.ts :: Exec.writeVia :: withTx'])
     expect(mustWireViolations(c, MUST_WIRE_LEDGER(keys[0]))).toEqual([`${keys[0]} (line 10): ${HELPER} is not called after the fence`])
@@ -532,7 +571,7 @@ describe('field retype slice 3a — the census analyzer on synthetic sources', (
     expect(c.probes).toContain('sql:synthetic_probe')
     expect(keysOf(c)).toEqual(['multitable/holds.ts :: placeHold :: sql-dml:synthetic_holds'])
     // the migration's own `up` is NOT a TS acquirer just because its SQL text holds both strings
-    expect(c.firstOrderAcquirers).toEqual(['acquireCanonicalSheetFence'])
+    expect(c.firstOrderAcquirers).toEqual(['multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFence'])
   })
 
   it('an entry with no caller in the tree is surfaced as a holder of its own', () => {
@@ -550,6 +589,105 @@ describe('field retype slice 3a — the census analyzer on synthetic sources', (
       'export const nothing = 1',
     ]))
     expect(keysOf(c)).toEqual([])
-    expect(c.firstOrderAcquirers).toEqual(['acquireCanonicalSheetFence'])
+    expect(c.firstOrderAcquirers).toEqual(['multitable/canonical-sheet-fence.ts#acquireCanonicalSheetFence'])
+  })
+})
+
+// ── fix round: the census attacks the verifier used, turned into standing tests ──────────────────────
+
+describe('fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5)', () => {
+  const withReal = (patch: (rel: string, text: string) => string, ...extra: CensusSource[]): Census =>
+    runFenceHolderCensus([...REAL_SOURCES.map((s) => ({ rel: s.rel, text: patch(s.rel, s.text.replace(/\r\n/g, '\n')) })), ...extra])
+
+  it('C1-F1: a NEW function named exactly like an entry (ensureView), taking the fence and writing data, is a holder — guard A reds', () => {
+    const collide = src('multitable/c1-collide.ts', [
+      "import { fenceWriterEntry } from './canonical-sheet-fence'",
+      'export async function ensureView(pool: P, sheetId: string) {',
+      '  await pool.transaction(async ({ query }) => {',
+      '    await fenceWriterEntry(query, sheetId)',
+      "    await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'r'])",
+      '  })',
+      '}',
+    ])
+    const c = withReal((_rel, text) => text, collide)
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual(['multitable/c1-collide.ts :: ensureView :: fenceWriterEntry'])
+  })
+
+  it('C1-F1: an object-literal port named like an entry, opening a transaction around a fence-taking call, is a holder', () => {
+    const port = src('multitable/c1-port.ts', [
+      "import { ensureObject } from './provisioning'",
+      'export const hostApi = {',
+      '  ensureObject: async (pool: P, input: I) => pool.transaction(async ({ query }) => ensureObject({ query, ...input })),',
+      '}',
+    ])
+    const c = withReal((_rel, text) => text, port)
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual(['multitable/c1-port.ts :: ensureObject :: ensureObject'])
+  })
+
+  it('C1-F1 / C1-F5: a private function sharing a port\'s name, taking only a row lock, is NOT a holder', () => {
+    const c = synthetic(
+      src('multitable/port-a.ts', [
+        "import { fenceWriterEntry } from './canonical-sheet-fence'",
+        'export const ports = { lockThing: async (trx: Q, sheetId: string) => { await fenceWriterEntry(trx, sheetId) } }',
+      ]),
+      src('multitable/private-b.ts', [
+        "async function lockThing(query: Q) { await query('SELECT id FROM meta_recovery_archives WHERE id = $1 FOR SHARE', ['a']) }",
+        'export async function reserve(query: Q) { await lockThing(query) }',
+      ]),
+    )
+    expect(keysOf(c)).toEqual(['multitable/port-a.ts :: lockThing :: <no in-tree call>'])
+  })
+
+  it('C1-F2: a data write in the CALLER right after a seam that fences on the caller\'s connection is caught (guard C)', () => {
+    const anchor = '    const entry = await recheckManualSource(query, source, authorize)\n'
+    const target = 'multitable/recovery-archive-manual-admission.ts'
+    expect(REAL_SOURCES.find((s) => s.rel === target)!.text.replace(/\r\n/g, '\n')).toContain(anchor)
+    const c = withReal((rel, text) => (rel === target
+      ? text.replace(anchor, `${anchor}    await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'r'])\n`)
+      : text))
+    expect(nonWriterViolations(c, FENCE_HOLDER_LEDGER).some((v) => v.startsWith(`${target} ::`))).toBe(true)
+    expect(nonWriterViolations(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
+
+  it('C1-F4(a): a data write reached through a NEW helper called from a non-data-writer (PATCH /fields) reds the writesVia check', () => {
+    const anchor = '          await backfillAutoNumberField(query, sheetId, fieldId, nextProperty, { overwrite: true })\n'
+    const target = 'routes/univer-meta.ts'
+    const helper = src('multitable/c1-rewrite.ts', [
+      'export async function c1RewriteCells(query: Q, sheetId: string, fieldId: string) {',
+      "  await query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{ [fieldId]: 'x' }, sheetId])",
+      '}',
+    ])
+    expect(REAL_SOURCES.find((s) => s.rel === target)!.text.replace(/\r\n/g, '\n')).toContain(anchor)
+    const c = withReal((rel, text) => (rel === target
+      ? `import { c1RewriteCells } from '../multitable/c1-rewrite'\n${text.replace(anchor, `${anchor}          await c1RewriteCells(query, sheetId, fieldId)\n`)}`
+      : text), helper)
+    expect(writesViaMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([
+      'routes/univer-meta.ts :: PATCH /fields/:fieldId :: fenceWriterEntry: writes meta_records.data via [backfillAutoNumberField, c1RewriteCells], ledger names [backfillAutoNumberField]',
+    ])
+  })
+
+  it('C1-F4(b): a handler literal handed to a convenience wrapper around a seam is checked (the write inside it is seen)', () => {
+    const c = synthetic(src('multitable/wrapper.ts', [
+      "import { fenceWriterEntry } from './canonical-sheet-fence'",
+      'export class Exec {',
+      '  private async withTx<T>(sheetId: string, handler: (q: Q) => Promise<T>): Promise<T> {',
+      '    return this.pool.transaction(async ({ query }) => {',
+      '      await fenceWriterEntry(query, sheetId)',
+      '      return handler(query)',
+      '    })',
+      '  }',
+      '  private inSheet<T>(sheetId: string, h: (q: Q) => Promise<T>): Promise<T> {',
+      '    return this.withTx(sheetId, (q) => h(q))',
+      '  }',
+      '  async executeSetField(): Promise<void> {',
+      "    await this.inSheet('s', async (q) => {",
+      "      await q('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'r'])",
+      '    })',
+      '  }',
+      '}',
+    ]))
+    const key = keysOf(c).find((k) => k.includes('executeSetField'))!
+    expect(key).toBe('multitable/wrapper.ts :: Exec.executeSetField :: inSheet')
+    expect(nonWriterViolations(c, [NONWRITER(key, '27', 'synthetic')])).toHaveLength(1)
   })
 })
