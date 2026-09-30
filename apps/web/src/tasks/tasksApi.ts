@@ -762,18 +762,35 @@ async function fetchCommentsPage(id: string, offset: number): Promise<ListCommen
 /** `GET /api/tasks/:id/comments`. The server pages this read (oldest first, 100 per page), so one
  *  request is only the OLDEST page: this reads page after page until it holds `total` comments.
  *  Any page failing fails the whole read — a partial thread is never returned as `ok` except at
- *  the `COMMENTS_MAX_PAGES` bound, where `items.length < total` says so. */
-export async function listComments(id: string): Promise<ListCommentsResult> {
+ *  the `COMMENTS_MAX_PAGES` bound, where `items.length < total` says so.
+ *
+ *  The offset advances by ROWS READ, not by distinct comments: a comment committed between two
+ *  page reads can sort ahead of rows already read and push one of them onto the next page, so a
+ *  row may arrive twice — it is kept once, by id. `isSuperseded` lets a caller whose result will be
+ *  discarded (a newer read started) stop the remaining page requests; the partial result it gets
+ *  back must not be rendered. */
+export async function listComments(
+  id: string,
+  options: { isSuperseded?: () => boolean } = {},
+): Promise<ListCommentsResult> {
   const items: Comment[] = []
+  const seen = new Set<string>()
+  let rowsRead = 0
   let total = 0
   for (let page = 0; page < COMMENTS_MAX_PAGES; page += 1) {
-    const result = await fetchCommentsPage(id, items.length)
+    const result = await fetchCommentsPage(id, rowsRead)
     if (result.kind !== 'ok') return result
-    items.push(...result.items)
+    rowsRead += result.items.length
+    for (const item of result.items) {
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      items.push(item)
+    }
     total = result.total
-    if (result.items.length === 0 || items.length >= total) break
+    if (result.items.length === 0 || rowsRead >= total) break
+    if (options.isSuperseded?.()) break
   }
-  return { kind: 'ok', items, total: Math.max(total, items.length) }
+  return { kind: 'ok', items, total: Math.max(total, rowsRead) }
 }
 
 export type CommentActionResult = { kind: 'ok'; comment: Comment } | WriteFailure

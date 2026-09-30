@@ -22,7 +22,7 @@
 | `setCompletionMode(id,mode)` | `PATCH /:id/completion-mode` | 同上 | 422 `INVALID_MODE` |
 | `addFollower`/`removeFollower` | `POST`/`DELETE /:id/followers[/:userId]` | `{id,followers}` | 422 `INVALID_ASSIGNEES`/`LIMIT` |
 | `leaveTask(id)` | `POST /:id/leave` | `{id,followers}` | 404（非 follower） |
-| `listComments(id)` | `GET /:id/comments` | `{items:[Comment]}` | 404/403（无 org_missing，同 `getTask`） |
+| `listComments(id)` | `GET /:id/comments?limit=100&offset=N`（逐页读到 `total`，上限 20 页；按 id 去重；被更新的读取取代后停止翻页） | `{items:[Comment],total}` | 404/403（无 org_missing，同 `getTask`） |
 | `createComment`/`editComment` | `POST`/`PATCH /:id/comments[/:cid]` | `Comment` | 422 `COMMENT_BLANK`/`COMMENT_TOO_LONG` |
 | `deleteComment` | `DELETE /:id/comments/:cid` | 墓碑形 `Comment` | 404 |
 | `deleteTask(id)` | `DELETE /:id` | `{id,deleted:true}` | 409 `HAS_CHILDREN` → conflict |

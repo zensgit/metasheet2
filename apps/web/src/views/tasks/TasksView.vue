@@ -214,7 +214,7 @@
                 v-if="commentsResult.kind === 'ok' && commentsTruncated"
                 class="tasks-view__message"
                 data-testid="tasks-detail-comments-truncated"
-              >评论较多，仅显示最早的 {{ commentsResult.items.length }} 条</p>
+              >评论较多，未全部显示；较新的评论可能不在下方列表中</p>
               <ul v-if="commentsResult.kind === 'ok'" data-testid="tasks-detail-comments-list">
                 <li v-for="comment in commentsResult.items" :key="comment.id" data-testid="tasks-detail-comment">
                   <template v-if="editingCommentId === comment.id">
@@ -703,7 +703,7 @@ async function loadComments(id: string): Promise<void> {
   const mine = commentsGeneration
   commentsResult.value = { kind: 'loading' }
   commentsTruncated.value = false
-  const result = await listComments(id)
+  const result = await listComments(id, { isSuperseded: () => mine !== commentsGeneration })
   if (mine !== commentsGeneration) return
   commentsResult.value = result.kind === 'ok' ? { kind: 'ok', items: result.items } : { kind: 'error' }
   commentsTruncated.value = result.kind === 'ok' && result.items.length < result.total

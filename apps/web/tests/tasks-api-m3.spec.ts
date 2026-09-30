@@ -369,6 +369,59 @@ describe('listComments', () => {
     expect(result.items.map((item) => item.id)).toEqual(page(0, 250).map((item) => item.id))
   })
 
+  it('a short page before total is reached advances the offset by rows read, not by page index', async () => {
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 60), total: 130 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(60, 70), total: 130 }))
+    const result = await listComments('t1')
+    expect(h.apiFetch.mock.calls.map((call) => call[0])).toEqual([
+      '/api/tasks/t1/comments?limit=100&offset=0',
+      '/api/tasks/t1/comments?limit=100&offset=60',
+    ])
+    expect(result).toMatchObject({ kind: 'ok', total: 130 })
+    if (result.kind === 'ok') expect(result.items).toHaveLength(130)
+  })
+
+  it('a row that arrives on two pages (a comment landed between the reads) is kept once', async () => {
+    // Page 1 ends with c99; a comment that sorts earlier commits before page 2 is read, so c99
+    // is pushed to offset 100 and arrives again.
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 100), total: 101 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(99, 1), total: 101 }))
+    const result = await listComments('t1')
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.items).toHaveLength(100)
+    expect(new Set(result.items.map((item) => item.id)).size).toBe(100)
+    expect(result.total).toBe(101)
+  })
+
+  it('after a repeated row the next offset still counts rows read, so no later row is re-read or skipped', async () => {
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 100), total: 200 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(99, 100), total: 201 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(199, 1), total: 201 }))
+    const result = await listComments('t1')
+    expect(h.apiFetch.mock.calls.map((call) => call[0])).toEqual([
+      '/api/tasks/t1/comments?limit=100&offset=0',
+      '/api/tasks/t1/comments?limit=100&offset=100',
+      '/api/tasks/t1/comments?limit=100&offset=200',
+    ])
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.items.map((item) => item.id)).toEqual(page(0, 200).map((item) => item.id))
+    expect(result.total).toBe(201)
+  })
+
+  it('stops requesting further pages once the caller says the read is superseded', async () => {
+    h.apiFetch.mockImplementation(async () => jsonResponse(200, { items: page(0, 100), total: 1000 }))
+    let superseded = false
+    const pending = listComments('t1', { isSuperseded: () => superseded })
+    superseded = true
+    await pending
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+  })
+
   it('exactly 100 comments is one request (no empty trailing page)', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(200, { items: page(0, 100), total: 100 }))
     const result = await listComments('t1')

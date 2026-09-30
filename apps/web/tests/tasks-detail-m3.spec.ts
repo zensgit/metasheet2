@@ -1059,7 +1059,18 @@ describe('TasksView detail — a comment thread longer than the client reads', (
     })
     const el = await mountAt('/tasks/t1')
     expect(shownAll(el, 'tasks-detail-comment')).toHaveLength(2)
-    expect(shown(el, 'tasks-detail-comments-truncated')?.textContent).toContain('2')
+    expect(shown(el, 'tasks-detail-comments-truncated')?.textContent).toBe('评论较多，未全部显示；较新的评论可能不在下方列表中')
+  })
+
+  it('passes a supersede probe that turns true once a newer comments read starts', async () => {
+    const el = await mountAt('/tasks/t1')
+    const firstProbe = h_.listComments.mock.calls.at(-1)?.[1]?.isSuperseded as (() => boolean) | undefined
+    expect(typeof firstProbe).toBe('function')
+    expect(firstProbe?.()).toBe(false)
+    await router!.push('/tasks/t2')
+    await flush()
+    expect(firstProbe?.()).toBe(true)
+    expect(shown(el, 'tasks-detail')).toBeTruthy()
   })
 
   it('shows no hint when the whole thread was loaded', async () => {
