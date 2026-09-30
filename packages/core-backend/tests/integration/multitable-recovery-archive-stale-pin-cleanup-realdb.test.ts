@@ -9,7 +9,7 @@ import { persistRecoveryArchivePreparedCapture } from '../../src/multitable/reco
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import { sealRecoveryArchiveSection, recoveryArchivePlaintextSha256 } from '../../src/multitable/recovery-archive-crypto'
 import { bindRecoveryArchiveManualObjectUpload } from '../../src/multitable/recovery-archive-manual-continuation'
-import { claimRecoveryArchiveAbandonedObjectCleanup, cleanupRecoveryArchiveAbandonedObjects } from '../../src/multitable/recovery-archive-abandoned-object-cleanup'
+import { claimRecoveryArchiveAbandonedObjectCleanup, cleanupRecoveryArchiveAbandonedObjects, registerRecoveryArchiveStagingObject, recoveryArchivePreparedStagingPlan } from '../../src/multitable/recovery-archive-abandoned-object-cleanup'
 import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../../src/multitable/recovery-archive-file-store'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
@@ -152,7 +152,7 @@ async function seedSealedOperation(): Promise<void> {
   }
 }
 
-async function insertArchive(leaseExpiresAt = FUTURE_LEASE): Promise<string> {
+async function insertArchive(leaseExpiresAt = FUTURE_LEASE, expiresAt = '2099-12-31T00:00:00.000Z'): Promise<string> {
   const generationId = randomUUID()
   await q(
     `INSERT INTO meta_recovery_archives (
@@ -164,7 +164,7 @@ async function insertArchive(leaseExpiresAt = FUTURE_LEASE): Promise<string> {
        $1::uuid, $2, $3, $4, $5::uuid, $6::bigint,
        $7, 1, 'building', 'active', 'incomplete',
        $8, $9, 'archive_builder', $10, 1,
-       $11::timestamptz, '2099-12-31T00:00:00.000Z'::timestamptz
+       $11::timestamptz, $12::timestamptz
      )`,
     [
       generationId,
@@ -178,6 +178,7 @@ async function insertArchive(leaseExpiresAt = FUTURE_LEASE): Promise<string> {
       KEY_ID,
       OWNER,
       leaseExpiresAt,
+      expiresAt,
     ],
   )
   return generationId
@@ -759,7 +760,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       try { return await work(client.query) } finally { depth-- }
     })
     try {
-      const generationId = await insertArchive(new Date(Date.now() + 1200).toISOString())
+      const generationId = await insertArchive(new Date(Date.now() + 1200).toISOString(), '2099-12-31T00:00:00.123456Z')
       const attachmentId = `${PREFIX}_discard_attachment`
       await insertAttachment(attachmentId, { recordId: null, deletedAt: null })
       await insertSourcePin(generationId, attachmentId)
@@ -781,6 +782,10 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       })
       dek.fill(0)
       await tx((query) => persistRecoveryArchivePreparedCapture(query, owner, payload))
+      // Provider timestamps are existing Date.toISOString milliseconds, even when PostgreSQL keeps microseconds.
+      const wrongExpiry = recoveryArchivePreparedStagingPlan(payload, '2099-12-31T00:00:00.124Z')[0]
+      await expect(tx((query) => registerRecoveryArchiveStagingObject(query, owner, wrongExpiry))).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+      expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid`, [generationId])).rows).toEqual([{ n: 0 }])
       const options = { basePath: root, storeId: randomUUID(), maxObjectBytes: 2048, transactionDepth: { currentTransactionDepth: () => depth } }
       await provisionRecoveryArchiveFileRoot(options)
       const provider = await createRecoveryArchiveFileStoreProvider(options)

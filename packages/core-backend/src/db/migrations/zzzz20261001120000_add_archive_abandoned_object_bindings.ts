@@ -22,7 +22,8 @@ BEGIN
     WHERE a.generation_id=NEW.generation_id AND s.staging_object_id=NEW.staging_object_id
       AND a.owner_kind=NEW.owner_kind AND a.owner_id=NEW.owner_id AND a.owner_fence=NEW.owner_fence
       AND a.state='building' AND a.build_status='active' AND a.coverage_status='incomplete'
-      AND a.lease_expires_at>clock_timestamp() AND a.expires_at=NEW.expires_at
+      AND a.lease_expires_at>clock_timestamp()
+      AND date_trunc('milliseconds',a.expires_at)=NEW.expires_at
       AND s.object_state='pending' AND s.key_id=a.key_id
     FOR UPDATE OF a;
   IF NOT FOUND THEN
