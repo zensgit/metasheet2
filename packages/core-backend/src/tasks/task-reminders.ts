@@ -281,8 +281,8 @@ function addCivilDays(dateStr: string, days: number): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
 }
 
-// ASSUMPTION(task-d): [R07] the ruling pack's formula is literally "逾期 ∪ 截止日 ≤ 用户时区的明天"
-// (overdue UNION due-date-at-or-before-tomorrow). Implemented here as a straight OR of `isOverdue`
+// ASSUMPTION(task-d): [R07] the digest set is the union of overdue tasks and tasks due on or before
+// tomorrow in the recipient's time zone. Implemented here as a straight OR of `isOverdue`
 // (reused from `task-dates.ts`, same rule 1/rule 3 the badge/pending path uses) with a "due at or
 // before tomorrow" check — even though, read literally, ANY overdue task's due date/instant is
 // ALSO at-or-before tomorrow (past ⊆ future-bounded-by-tomorrow), so the union is logically
