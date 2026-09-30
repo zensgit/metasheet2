@@ -148,3 +148,41 @@
 | 新浏览器 spec + eslint(`1a372065a9`) | 6 passed;eslint 0 error |
 | 日期格式改动后(`674abd5839`) | 门 ① 与中心页 / 我的委托相关 14 个 spec 文件全过(11 files / 295 tests、6 files / 97 tests 两批);新浏览器 spec 6 passed;`vue-tsc -b` 0 error |
 | 代码最终状态(`674abd5839` 的树,其后只有本说明的提交)重跑 | 必需 web 车道退出码 0,19 次调用 0 失败,末次 516 files / 8537 tests passed;Approval browser verify 整车道 `CI=1 --retries=0` 47 passed |
+
+## 8. 并入 main 与重跑(2026-10-01)
+
+§7 第一条所说的「须在推送前并入当前 main」已做,读数如下;本节之前的内容保持原样(是 `2b8ecc9ea8` 时点的记录)。
+
+**合并提交 `02a65651de`**:把 main `48ae5025a5`(含 #6189 的 squash `39891dc205`,即 F3-E1 加上其在途导出加固;以及 #6190 `ba8065517f`、#6191、#6192、#6193)并入本分支;本 PR 最终 squash 合并,合并提交只是中间态。六个文件冲突,逐个按「F8-1 的改动重放在 main 的行上」解:
+
+| 文件 | 取法 |
+|---|---|
+| `ApprovalCenterView.vue` | main 的 `loadCurrentTab`(只在列表实际变化时才换快照对象)与 `handleExportCsv`(`stillSameFeed` 守卫)原样保留;F8-1 的文案表在其外围不变。main 在此文件没有新增用户可见文案(只有注释与守卫),无需新的中英对。 |
+| `ApprovalDetailView.vue` | 过程附件上传口取 main 的门 `attachmentPipelineEnabled && canAttachProcessEvidence`(#6190),标签取 F8-1 的 `:label="t.attachments"`。 |
+| `approval-center.spec.ts` | main 的版本(在途导出五条用例 + 网络失败文案用例)加 F8-1 的 `beforeEach` 钉 zh-CN。 |
+| `approvalApiErrorSurfacing.spec.ts` | main 的导出 import 加 F8-1 的 `beforeEach` 与语言复位。 |
+| `verification/approval-member-action-dialog-harness.ts` | main 的 `?scenario=role-seat-evidence` 参数与 F8-1 的 zh-CN 钉都保留。 |
+| #6189 的说明 MD | 取 main 侧。 |
+
+合并结果的核法:合并后的树相对 main 的逐行差异(`-U0` 的 +/- 行)与 `51401fee50..2b8ecc9ea8` 的逐行差异**完全相等**(80 个文件,+4215 / -706);相对 `2b8ecc9ea8` 的逐行差异与 `51401fee50..main` 的逐行差异也完全相等。即合并树 = main + F8-1 的改动,冲突之外没有改任何东西。main 在成员面文件里新增的中文只出现在注释(HTML 注释、块注释、整行 `//`),门 ① 剥注释后不计,所以 `ApprovalCenterView.vue` 的结构计数保持 ternary 14 / ifZhBlock 2,守卫未改。
+
+**`9351ca7d0e`**:§7 提到的 `exportNotice` eslint 报错(`vue/return-in-computed-property`)在合并结果上核实属实,且在 main `48ae5025a5` 的同一文件上同样报(main 上是第 1416 行),不是本分支引入。修法一行:穷尽 `switch` 之后补 `return null`(运行时不可达,只是给 lint 规则一个返回)。修后这五个冲突文件 eslint 0 error(59 条 warning 与修前相同,均非本次引入)。
+
+**重跑读数**(同一台机器,Node 20.20.2 / vitest 1.6.1 / Playwright 1.57.0 Chromium;在 `9351ca7d0e` 上;lockfile 未变):
+
+| 项 | 结果 |
+|---|---|
+| 门 ① 源码守卫 `templateCenterI18n.spec.ts` | 1 file / 58 tests passed(计数未变) |
+| 门 ② 挂载渲染扫描(引用 `approvalLocaleScan` 的 9 个 spec) | 9 files / 161 tests passed |
+| `approval-center.spec.ts` + `approvalApiErrorSurfacing.spec.ts` | 2 files / 85 tests passed |
+| 引用两个 helper 的 6 个 spec | 6 files / 170 tests passed |
+| main 侧改过的 `approval-process-attachment-dialog.spec.ts` + `approval-detail-instance-consistency.spec.ts`(自动合并,文件级 zh-CN 钉覆盖其新用例) | 2 files / 70 tests passed |
+| `vue-tsc -b` | 退出码 0,0 error |
+| `vue-tsc --noEmit -p tsconfig.verification-approval.json` | 退出码 0 |
+| `required-web-lane-token-manifest.mjs --check` | MANIFEST MATCHES |
+| `approval-browser-ci-wiring.test.mjs` | 3/3 pass |
+| Approval browser verify 整车道 `CI=1 --retries=0` | 48 passed(原 47 + #6190 的角色席位用例 1,后者在 harness 的 zh-CN 钉下按中文无障碍名找对话框) |
+| 必需 web 车道 `run-required-web-tests.sh` | 第一次:19 次调用中末次 5 files / 9 tests 失败,9 条全是 `Test timed out in 5000ms`(1 条在 `approval-member-action-dialog-grammar.spec.ts`,8 条在与本片无关的 4 个 multitable spec),当时机器上另一条 lane 在并行跑整批,负载均值 35–54(10 核);这 5 个文件单独重跑 5 files / 319 tests passed;**整车道第二次:退出码 0,19 次调用 0 失败,末次 516 files / 8546 tests passed**(比 §7 多的 9 条是 main 侧新增用例)。 |
+| 变异(把 `stillSameFeed` 改恒真) | `approval-center.spec.ts` 恰红 3 条在途用例(切 tab / 筛选变化 / 提交搜索),还原后 47/47 —— 与 #6189 加固时的读数相同。 |
+
+**残留**:详情页评论对话框里过程附件上传口的英文标签(`t.attachments`)只有门 ① 与单元测试覆盖,没有挂载英文扫描(扫描夹具不开附件开关、不带 `canAttachProcessEvidence`);合并前如此,合并后亦然,记在这里不在本次改。
