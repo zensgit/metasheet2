@@ -170,7 +170,10 @@ test('the census includes the read-only preamble first, and the preamble holds e
 })
 
 test('preamble pin negative controls: added statements, side tables, mid-line meta-commands and reorders are all flagged', () => {
-  const pre = read(PREAMBLE_FILE)
+  // Built from the pinned list (plus a comment line), not from the file: the file's own
+  // drift is test 1's job, and these controls must keep biting whatever the file holds.
+  const pre = `-- comment lines are not executable\n${PREAMBLE_CODE_LINES.join('\n')}\n`
+  assert.deepEqual(preambleCodeLines(pre), PREAMBLE_CODE_LINES)
   const ro = 'SET default_transaction_read_only = on;'
   const mutate = (from, to) => {
     const out = pre.replace(from, to)
@@ -243,23 +246,18 @@ test('psql meta-commands only as whole allowlisted lines, in the census and in t
 test('census code off the meta lines carries no backslash, block comment or dollar quote (and the check itself bites)', () => {
   const src = read(CENSUS_FILE)
   assert.deepEqual(unmodelledSyntax(sqlCode(src)), [])
-  const mutated = (from, to) => {
-    const out = src.replace(from, to)
-    assert.notEqual(out, src, `mutation anchor not found: ${from}`)
-    return sqlCode(out)
-  }
+  // Negative controls are APPENDED to the real file, so they do not depend on its wording.
+  const withTail = (tail) => unmodelledSyntax(sqlCode(`${src}\n${tail}\n`))
   // A meta-command placed mid-line inside a statement, the statement closed on the next line.
-  assert.ok(
-    unmodelledSyntax(mutated('FROM approval_template_versions;', 'FROM approval_template_versions \\o a1census-probe.out\n;')).includes('backslash'),
-  )
+  assert.ok(withTail('SELECT count(*)\nFROM approval_templates \\o a1census-probe.out\n;').includes('backslash'))
   // An include placed mid-line.
-  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', 'GROUP BY i.status \\ir a1census-probe.sql\n')).includes('backslash'))
+  assert.ok(withTail('SELECT 1 \\ir a1census-probe.sql\n;').includes('backslash'))
   // Syntax that would let a quote character hide code from the quote tracker (quotes kept
   // balanced here, so the tracker's own unbalanced-quote assertion is not what fires).
-  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', "/* ' */ GROUP BY i.status /* ' */")).includes('block comment'))
-  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', "GROUP BY i.status, length($q$'$q$), length($q$'$q$)")).includes('dollar quote'))
+  assert.ok(withTail("/* ' */ SELECT 1; /* ' */").includes('block comment'))
+  assert.ok(withTail("SELECT length($q$'$q$), length($q$'$q$);").includes('dollar quote'))
   // A `--` trailing comment is stripped before the scan: a backslash inside it is inert and not flagged.
-  assert.deepEqual(unmodelledSyntax(mutated('GROUP BY i.status', 'GROUP BY i.status -- see \\ir note')), [])
+  assert.deepEqual(withTail('SELECT 1; -- see \\ir note'), [])
 })
 
 test('ONE pinned predicate definition, used by every jsonpath call, no inline jsonpath literal', () => {
