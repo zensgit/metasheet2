@@ -91,7 +91,11 @@
 ## 4. 未跑项与残留
 
 - **CI 未跑**:按约束未推 GitHub。`ops-sql-pack-verify.yml` 的两路矩阵只在本机等价命令上跑过。
-- **另两个 SQL 包的自检未重跑**:它们未改动,执行层需要能建角色的超级用户;接线测试已覆盖三个包的矩阵与路径。
+- **另两个 SQL 包的自检已在同一车道形状下重跑**:两个包本身未改动,但它们与本包共用被改的 workflow。
+  - 执行机与一次性库同 §3,被测提交 `57e5565a0b`。
+  - `readonly-inventory-20260916`:hermetic rc=0(11 / pass 10 / skip 1);执行层(`DATABASE_URL` + `METASHEET_REAL_DB_TEST_STEP=1`)rc=0(11 / pass 11)。
+  - `live-id-fk-validate-20260920`:hermetic rc=0(18 / pass 17 / skip 1);执行层 rc=0(18 / pass 18)。
+  - 跑完没有残留的 `inv_verify_ro_*` 角色,也没有残留的 `*fixture*` schema。
 - **UAT 未在任何环境跑过**。普查只在一次性库上跑过。任何真实环境的读数都不是本包产出,均属 owner / ops。
 - **detail (b) 定位段不在本包**(见 §2)。#5476 普查 (a) 段取 active 优先,与模板读取 latest 优先不一致;建议 owner 作为 #5476 的评审意见处置。
 - **owner 未裁**:
