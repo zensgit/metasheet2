@@ -372,7 +372,10 @@ for (const viewport of [
     await expect(page.getByTestId('approval-add-sign-after-hint')).toHaveCount(0)
     await expect(dialog).not.toContainText('前加签')
 
-    await afterArm.check()
+    // Element Plus paints the radio dot over the visually hidden native input, so a member (and
+    // this test) selects an arm by clicking its visible label — the `el-radio` root carrying the
+    // arm's testid — never the covered input itself.
+    await dialog.getByTestId('approval-add-sign-placement-after').click()
     await expect(afterArm).toBeChecked()
     const afterHint = page.getByTestId('approval-add-sign-after-hint')
     await expect(afterHint).toBeVisible()
@@ -408,7 +411,8 @@ for (const viewport of [
     ])
 
     // Mode-selected: the same dialog, same addee, 并加签 → submitted and closed.
-    await parallelArm.check()
+    await dialog.getByTestId('approval-add-sign-placement-parallel').click()
+    await expect(parallelArm).toBeChecked()
     await expect(page.getByTestId('approval-add-sign-mode-hint')).toBeVisible()
     await confirm.click()
     await expect(accessibleDialog).toBeHidden()
