@@ -12,6 +12,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { NETWORK_UNREACHABLE_COPY } from '../src/utils/networkErrors'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -1485,6 +1486,26 @@ describe('ApprovalCenterView', () => {
       // Failures use the inline line next to the button, not a toast.
       expect(elErrorSpy).not.toHaveBeenCalled()
       expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
+    })
+
+    it('a refused export with no response at all (network unreachable) shows the shared no-response copy, in the UI locale', async () => {
+      await mountView()
+
+      // Shape the API client throws when fetch gets no HTTP response (utils/networkErrors).
+      exportApprovalsCsvSpy.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'NETWORK_UNAVAILABLE', status: 0 }))
+      await clickExport()
+
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('failed')
+      expect(exportNotice()!.getAttribute('role')).toBe('alert')
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.en)
+      expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
+      expect(createObjectUrlSpy).not.toHaveBeenCalled()
+      expect(clickedAnchors).toEqual([])
+      expect(elErrorSpy).not.toHaveBeenCalled()
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.zh)
     })
 
     it('while an export is in flight the button is busy and a second click does not start another', async () => {
