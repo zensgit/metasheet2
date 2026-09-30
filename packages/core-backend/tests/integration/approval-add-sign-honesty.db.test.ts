@@ -359,9 +359,12 @@ describeIfDatabase("Lock-5 L5-B — add-sign modes: B-2 identity pin, B-1 doors,
     }))
   }
 
+  /** Every audit row AFTER the instance's own `created` row (which every instance carries). */
   async function auditRows(instanceId: string) {
     const result = await pool().query<{ action: string; actor_id: string; metadata: Record<string, unknown> | null }>(
-      'SELECT action, actor_id, metadata FROM approval_records WHERE instance_id = $1 ORDER BY occurred_at ASC, id ASC',
+      `SELECT action, actor_id, metadata FROM approval_records
+        WHERE instance_id = $1 AND action <> 'created'
+        ORDER BY occurred_at ASC, id ASC`,
       [instanceId],
     )
     return result.rows
