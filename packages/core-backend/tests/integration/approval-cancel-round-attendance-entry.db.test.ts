@@ -3028,6 +3028,36 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         return rows.rows
       }
 
+      /**
+       * The org's `comp_time` leave type id. `comp_time` is the leave code whose approval deducts a
+       * balance with no extra settings, and (org_id, code) is unique: an existing row is reused (and
+       * left in place), else one is created with `name` through the admin route (logging `admin` in
+       * only then) and registered for cleanup.
+       */
+      async function compTimeLeaveTypeId(admin: string, name: string): Promise<string> {
+        const existing = await pool().query<{ id: string; requires_approval: boolean; is_active: boolean }>(
+          `SELECT id::text AS id, requires_approval, is_active FROM attendance_leave_types
+            WHERE org_id = 'default' AND code = 'comp_time'`,
+        )
+        if (existing.rows[0]) {
+          expect(existing.rows[0], 'the existing comp_time leave type must require approval').toMatchObject({
+            requires_approval: true,
+            is_active: true,
+          })
+          return existing.rows[0].id
+        }
+        const created = await http('POST', '/api/attendance/leave-types', await loginToken(admin), {
+          code: 'comp_time',
+          name,
+          paid: true,
+          requiresApproval: true,
+        })
+        expect(created.status, created.text).toBe(201)
+        const id = created.json.data.id as string
+        createdLeaveTypeIds.add(id)
+        return id
+      }
+
       it('L4a — lock:157 「委托人不可」, first reading: a person holding the REQUESTER\'s delegation (active, its window covering now) is not the requester — GET and POST are the byte-identical 404 of a never-existing id, and no round is opened', async () => {
         const requester = `g4dh-l4a-e-${TS}`
         const delegatee = `g4dh-l4a-d-${TS}`
@@ -3333,29 +3363,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         const approver = `g4dh-a3-p-${TS}`
         const approverToken = await seedPerson(approver, 'attendance_approver')
 
-        // `comp_time` is the leave code whose approval deducts a balance with no extra settings, and
-        // (org_id, code) is unique: an existing row is reused (and left in place), else one is created.
-        const existingType = await pool().query<{ id: string; requires_approval: boolean; is_active: boolean }>(
-          `SELECT id::text AS id, requires_approval, is_active FROM attendance_leave_types
-            WHERE org_id = 'default' AND code = 'comp_time'`,
-        )
-        let leaveTypeId = existingType.rows[0]?.id
-        if (leaveTypeId) {
-          expect(existingType.rows[0], 'the existing comp_time leave type must require approval').toMatchObject({
-            requires_approval: true,
-            is_active: true,
-          })
-        } else {
-          const created = await http('POST', '/api/attendance/leave-types', await loginToken(admin), {
-            code: 'comp_time',
-            name: `G4-D comp time ${TS}`,
-            paid: true,
-            requiresApproval: true,
-          })
-          expect(created.status, created.text).toBe(201)
-          leaveTypeId = created.json.data.id as string
-          createdLeaveTypeIds.add(leaveTypeId)
-        }
+        const leaveTypeId = await compTimeLeaveTypeId(admin, `G4-D comp time ${TS}`)
 
         // Twins: the same two lots each (fixture-only balance rows): 60 minutes expiring first, 480 later.
         const twins = [`g4dh-a3-round-${TS}`, `g4dh-a3-direct-${TS}`]
@@ -3519,30 +3527,6 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         const CLOSE_REASON = `business_blocked:${BLOCK_CODE}`
         const SYSTEM_ACTOR = 'system:approval-cancel-round'
 
-        async function compTimeLeaveTypeId(adminToken: string): Promise<string> {
-          const existing = await pool().query<{ id: string; requires_approval: boolean; is_active: boolean }>(
-            `SELECT id::text AS id, requires_approval, is_active FROM attendance_leave_types
-              WHERE org_id = 'default' AND code = 'comp_time'`,
-          )
-          if (existing.rows[0]) {
-            expect(existing.rows[0], 'the existing comp_time leave type must require approval').toMatchObject({
-              requires_approval: true,
-              is_active: true,
-            })
-            return existing.rows[0].id
-          }
-          const created = await http('POST', '/api/attendance/leave-types', adminToken, {
-            code: 'comp_time',
-            name: `G4-P3A comp time ${TS}`,
-            paid: true,
-            requiresApproval: true,
-          })
-          expect(created.status, created.text).toBe(201)
-          const id = created.json.data.id as string
-          createdLeaveTypeIds.add(id)
-          return id
-        }
-
         type DirectlyCancelledRound = {
           employee: string
           employeeToken: string
@@ -3565,7 +3549,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         ): Promise<DirectlyCancelledRound> {
           const admin = `g4p3a-${label}-adm-${TS}`
           await seedLoginUser(admin, { roles: ['admin'], admin: true })
-          const leaveTypeId = await compTimeLeaveTypeId(await loginToken(admin))
+          const leaveTypeId = await compTimeLeaveTypeId(admin, `G4-P3A comp time ${TS}`)
           const employee = `g4p3a-${label}-emp-${TS}`
           const approver = `g4p3a-${label}-apr-${TS}`
           const employeeToken = await seedPerson(employee, 'attendance_employee')
