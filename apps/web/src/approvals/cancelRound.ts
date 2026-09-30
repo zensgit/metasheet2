@@ -397,9 +397,11 @@ export function describeCancelRoundError(error: unknown, isZh: boolean, fallback
 }
 
 // ---------------------------------------------------------------------------
-// Business-blocked codes (P-7). Known producers at this head: C-1's attendance refusal and the
-// in-lock policy evaluation's two configuration codes. Every other code is rendered at category
-// level with the raw code folded away as a copyable technical detail.
+// Business-blocked codes (P-7). Known producers at this head: C-1's attendance refusal, the
+// in-lock policy evaluation's two configuration codes, and the in-lock re-check that the original
+// leave is still approved (`CANCEL_ROUND_DOCUMENT_NOT_APPROVED`, the creation path's own code).
+// Every other code is rendered at category level with the raw code folded away as a copyable
+// technical detail.
 
 export const CANCEL_ROUND_BLOCK_CATEGORY_COPY = {
   zh: '该请假已不可撤销(业务原因)',
@@ -418,6 +420,12 @@ export const CANCEL_ROUND_BLOCK_CODE_COPY: Readonly<Record<string, { zh: string;
   CANCEL_ROUND_WINDOW_OUT_OF_RANGE: {
     zh: '该请假的撤销规则配置有误,已无法撤销',
     en: 'The cancellation rules for this leave are misconfigured, so it can no longer be cancelled',
+  },
+  // The server keys this code on the original leave's status, not on what changed it, so the copy
+  // gives the direct cancel as an example rather than as the cause.
+  CANCEL_ROUND_DOCUMENT_NOT_APPROVED: {
+    zh: '该请假已不再是已通过状态(例如已被取消),本次撤销未执行',
+    en: 'This leave is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
   },
 })
 

@@ -204,6 +204,26 @@ describe('error copy (P-7 / P-8 / P-6′)', () => {
     expect(unknown.message).not.toContain('未知')
     expect(describeCancelRoundBlock(null, false).message).toBe(CANCEL_ROUND_BLOCK_CATEGORY_COPY.en)
   })
+
+  it('business_blocked: CANCEL_ROUND_DOCUMENT_NOT_APPROVED (original leave no longer approved at decision time) has its own pinned copy — one example cause, never the category or the creation-time copy', () => {
+    const code = 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED'
+    expect(describeCancelRoundBlock(code, true)).toEqual({
+      message: '该请假已不再是已通过状态(例如已被取消),本次撤销未执行',
+      code,
+      known: true,
+    })
+    expect(describeCancelRoundBlock(code, false)).toEqual({
+      message: 'This leave is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
+      code,
+      known: true,
+    })
+    for (const isZh of [true, false]) {
+      const message = describeCancelRoundBlock(code, isZh).message
+      expect(message).not.toBe(isZh ? CANCEL_ROUND_BLOCK_CATEGORY_COPY.zh : CANCEL_ROUND_BLOCK_CATEGORY_COPY.en)
+      expect(message).not.toBe(isZh ? CANCEL_ROUND_ERROR_COPY[code].zh : CANCEL_ROUND_ERROR_COPY[code].en)
+      expect(message).not.toContain(code)
+    }
+  })
 })
 
 describe('attendance-side client', () => {
