@@ -309,8 +309,10 @@ function group(disposition: AllowlistEntry['disposition'], reason: string, entri
 
 const ALLOWLIST: AllowlistEntry[] = [
   // ---- VALUES-FREE-FIXED: the pattern IS the fix (an ordinal/resolver-backed fallback, not a leak) ----
+  // O-8 / F8-1 (approval member-surface locale): the ordinal is now locale-aware
+  // (`成员 N` / `Member N`) — same values-free fix, the entry follows the line.
   ...group('VALUES-FREE-FIXED', 'ApprovalUserPicker optionLabel -- values-free ordinal, the shipped fix itself', [
-    ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+    ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalNewView choiceOptionLabel -- values-free ordinal, this PR\'s fix (census 3rd missed site)', [
     ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
@@ -319,7 +321,8 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/MyDelegationView.vue', 'delegateeDisplay(row.delegateeUserId)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalDepartmentPicker tree heading -- directory-validated department name with a static root label fallback, never an id', [
-    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || '全部部门'"],
+    // O-8 / F8-1: the static root label is now locale-aware; same fallback, the entry follows the line.
+    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || (isZh ? '全部部门' : 'All departments')"],
   ]),
 
   // ---- OUT-OF-SCOPE: admin-only raw-id render, matches the pre-existing #5010/hand-list precedent ----
