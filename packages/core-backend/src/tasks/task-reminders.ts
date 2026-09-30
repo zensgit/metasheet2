@@ -175,8 +175,7 @@ export function isTaskReminderDue(remindAt: Date, now: Date, floor: Date): boole
 // over already-loaded task state, kept here (not invented as a throwaway inline check at the PR-3b
 // call site) because it is a named part of R06's recommended algorithm and is independently
 // testable/mutable.
-// ASSUMPTION(task-d): [R06, third skip condition — relayed by independent review, pack wording not
-// re-checked against the original ruling text] a queued delivery was created against a SPECIFIC
+// ASSUMPTION(task-d): [R06] third skip condition: a queued delivery was created against a SPECIFIC
 // `remind_at` value at enqueue time; by the time the scanner reaches it, the task's CURRENT
 // `remind_at` may have since changed (the due date/time was edited, recomputing a new `remind_at`)
 // or been cleared entirely (policy flipped to `{mode:'none'}`, or the due date/time removed). A

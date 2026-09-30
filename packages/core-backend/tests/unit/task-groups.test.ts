@@ -33,6 +33,15 @@ describe('task-groups', () => {
         reason: 'name_too_long',
       })
     })
+
+    it('boundary counts code points, not UTF-16 units (astral plane)', () => {
+      const emoji = '\u{1F600}'
+      expect(validateTaskGroupName(emoji.repeat(TASK_GROUP_NAME_MAX_CODEPOINTS)).ok).toBe(true)
+      expect(validateTaskGroupName(emoji.repeat(TASK_GROUP_NAME_MAX_CODEPOINTS + 1))).toEqual({
+        ok: false,
+        reason: 'name_too_long',
+      })
+    })
   })
 
   describe('applyCreateGroup', () => {
@@ -109,6 +118,12 @@ describe('task-groups', () => {
   })
 
   describe('applyDeleteGroup', () => {
+    it('a group row whose scope disagrees with the scope argument THROWS TypeError', () => {
+      expect(() =>
+        applyDeleteGroup({ group: group('g2', false), defaultGroupId: 'def', scope: 'user', actorId: ACTOR }),
+      ).toThrow(TypeError)
+    })
+
     it('group not found -> not_found', () => {
       const result = applyDeleteGroup({ group: undefined, defaultGroupId: 'def', scope: 'list', actorId: ACTOR })
       expect(result).toEqual({ ok: false, reason: 'not_found' })

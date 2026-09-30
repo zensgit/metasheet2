@@ -159,7 +159,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 - **commit `279c82002e`**(第三轮独立复核,协调方转述的 13 个编号项;编号与协调方原文一一对应):
   1. `task-lists.ts` `applyAddMember`/`applyChangeMemberRole`:`role` 参数只有编译期类型,没有运行时闭集校验——两处入口现在都先调用新导出的 `parseTaskListMemberRole(raw: unknown)`(同一函数,不是两套平行逻辑),`'owner'`/未知字符串/非字符串一律 422 `invalid_role`,且排在其它检查之前。
   2. `task-lists.ts` `toTaskListMemberships`:闭集外的 `role` 此前会落进三元表达式的 `else` 分支,静默变成 `'editor'`(过度授权)。改成显式三分支,闭集外 `throw TypeError`(同 `canListAction` 的 fail-closed-by-throwing 风格)。
-  3. `task-reminders.ts` `isReminderSkippedByTaskState`:新增 R06 第三条跳过判据(协调方转述,未回查原始裁决包文本——文件已按规定删除)——排队投递锁定的 `remind_at` 与任务当前 `remind_at` 不一致(含当前为 `null`)⇒ skipped。函数签名从 `(task)` 改为 `(task, deliveryRemindAt)`。
+  3. `task-reminders.ts` `isReminderSkippedByTaskState`:新增 R06 第三条跳过判据(第 4 轮复核已对照裁决包 v2 的 R06 建议值核对一致)——排队投递锁定的 `remind_at` 与任务当前 `remind_at` 不一致(含当前为 `null`)⇒ skipped。函数签名从 `(task)` 改为 `(task, deliveryRemindAt)`。
   4. `isInDailyDigest`:新增三个真正能区分"用对 `viewerTz`"和"用错成 `task.timeZone`"的判别用例——第一版的 `task.timeZone` 用例对两种实现给出同一结果,不具判别力,已发现并重做。
   5. `buildTaskDailyDigestCondition`:新增全文 SQL pin(同 `task-access.test.ts` 的风格),取代此前只有 `toContain` 子串断言的覆盖。
   6. `isTaskReminderDue`:原"remindAt 在 floor 之前"用例其实是被 2 小时扫描窗口挡住的(相差约 12 小时,远超窗口),floor 守卫本身从未被单独触发过——已替换成真正只有 floor 守卫会拒绝的用例。
@@ -172,3 +172,12 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
   13. 本文档 §2.2:订正了对门 20 harness 实际行为的过强描述(见上方 §2.2 的订正段落)。
 
 以上 13 项之外:19 处新守卫(表格第 10–28 行)全部脚本化 mutation 抽查确认;`tests/unit/task-*.test.ts` 从 643 增至 684;两条 `tsc` 命令、eslint 复核均重新跑过并确认干净(§2.3/§2.5)。
+
+- **第 4 轮独立复核(多视角,每条三票反驳)**:共 6 条,0 P1。处理如下:
+  - `TASK_PAGE_SORT_KEY` 原值 `(updated_at DESC, id DESC)` 拼进 `ORDER BY` 会在 PostgreSQL 报语法错误(行构造器里不允许 DESC),列名也未限定表名。改为 `tasks.updated_at DESC, tasks.id DESC`,新增拼接测试;本地 PostgreSQL 15 实测可执行。
+  - `isInDailyDigest` 的全天用例此前都把 `dueAt` 设为 `null`,测不出「按 `dueTime` 还是按 `dueAt` 分支」。新增用 `computeDueAt` 生成真实 `dueAt` 的全天用例(任务时区洛杉矶、查看者上海)。
+  - `validateTaskGroupName` 新增星芒平面(emoji)边界用例,码点计数有测试守住。
+  - `applyDeleteGroup`:组行的 `scope` 与参数 `scope` 不一致时抛 `TypeError`,新增测试。
+  - R06 第三条跳过判据:复核已对照裁决包 v2 的 R06 建议值,核对一致;删除「未回查」的限定语。
+  - 变异抽查 5 处(码点计数、scope 不一致、全天分支、排序键加括号、排序键去表名)全部变红,还原后工作区只剩本轮改动。
+  - `tests/unit/task-*.test.ts`:689/689;`tsc --noEmit` 0 错误。

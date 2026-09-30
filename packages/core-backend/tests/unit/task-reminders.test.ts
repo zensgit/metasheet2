@@ -14,6 +14,7 @@ import {
   shouldEnqueueReminder,
   type TaskDailyDigestShape,
 } from '../../src/tasks/task-reminders'
+import { computeDueAt } from '../../src/tasks/task-dates'
 
 describe('task-reminders', () => {
   describe('parseRemindPolicy', () => {
@@ -487,6 +488,30 @@ describe('task-reminders', () => {
         const task = digestTask({ dueDate: '2026-09-17', timeZone: 'Asia/Tokyo' })
         expect(isInDailyDigest(task, DISC_NOW, 'UTC')).toBe(false)
       })
+    })
+  })
+
+  describe('isInDailyDigest: all-day rows carry a real dueAt', () => {
+    // Real all-day rows store dueAt = 23:59:59.999 of dueDate in the TASK's zone (computeDueAt).
+    // The all-day branch must compare civil dates in the viewer's zone and ignore that instant.
+    const task: TaskDailyDigestShape = {
+      status: 'open',
+      completedByViewer: false,
+      dueDate: '2026-09-17',
+      dueTime: null,
+      timeZone: 'America/Los_Angeles',
+      dueAt: computeDueAt({ dueDate: '2026-09-17', timeZone: 'America/Los_Angeles' }),
+    }
+
+    it('LA task due 09-17, Shanghai viewer at 09-16 20:00 local -> due tomorrow -> true', () => {
+      // dueAt = 2026-09-18T06:59:59.999Z, which is after the Shanghai day-after-tomorrow boundary
+      // (2026-09-17T16:00Z); an implementation that branched on dueAt would wrongly say false.
+      expect(task.dueAt?.toISOString()).toBe('2026-09-18T06:59:59.999Z')
+      expect(isInDailyDigest(task, new Date('2026-09-16T12:00:00.000Z'), 'Asia/Shanghai')).toBe(true)
+    })
+
+    it('same row, Shanghai viewer two days earlier -> false', () => {
+      expect(isInDailyDigest(task, new Date('2026-09-14T12:00:00.000Z'), 'Asia/Shanghai')).toBe(false)
     })
   })
 

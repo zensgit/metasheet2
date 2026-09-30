@@ -153,6 +153,9 @@ export function applyDeleteGroup(input: {
   const { group, defaultGroupId, scope, actorId } = input
   assertValidTaskGroupScope(scope, 'applyDeleteGroup')
   if (!group) return { ok: false, reason: 'not_found' }
+  if (group.scope !== scope) {
+    throw new TypeError(`applyDeleteGroup: group.scope '${group.scope}' does not match scope '${scope}'`)
+  }
   if (group.isDefault) return { ok: false, reason: 'is_default' }
   const events: TaskGroupListEvent[] = scope === 'list' ? [{ type: 'group_deleted', userId: actorId }] : []
   return { ok: true, reassignToGroupId: defaultGroupId, events }

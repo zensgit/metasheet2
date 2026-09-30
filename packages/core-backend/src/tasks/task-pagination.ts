@@ -27,8 +27,11 @@ export const TASK_PAGE_OFFSET_DEFAULT = 0
 // today only orders by `updated_at DESC` (no tiebreaker) — D9: "offset 分页需要它,M2 现在只有
 // updated_at DESC" — so this is a required addition for the endpoints R15 has M4 retrofit, not a
 // new invention for greenfield ones only.
+// The value is a usable ORDER BY body (`... ORDER BY ${TASK_PAGE_SORT_KEY} LIMIT ...`): no
+// surrounding parentheses (a row constructor does not accept DESC) and table-qualified, so a query
+// that joins another table carrying `id`/`updated_at` is not ambiguous.
 /** See the ASSUMPTION note immediately above. */
-export const TASK_PAGE_SORT_KEY = '(updated_at DESC, id DESC)' as const
+export const TASK_PAGE_SORT_KEY = 'tasks.updated_at DESC, tasks.id DESC' as const
 
 export type TaskPageParamsReason = 'invalid_limit' | 'invalid_offset'
 

@@ -10,7 +10,17 @@ import {
 
 describe('task-pagination', () => {
   it('TASK_PAGE_SORT_KEY is the D9 stable tiebreak', () => {
-    expect(TASK_PAGE_SORT_KEY).toBe('(updated_at DESC, id DESC)')
+    expect(TASK_PAGE_SORT_KEY).toBe('tasks.updated_at DESC, tasks.id DESC')
+  })
+
+  it('TASK_PAGE_SORT_KEY interpolates into ORDER BY as a plain, qualified column list', () => {
+    const sql = `SELECT tasks.id FROM tasks ORDER BY ${TASK_PAGE_SORT_KEY} LIMIT $1 OFFSET $2`
+    expect(sql).toMatch(/ORDER BY tasks\.updated_at DESC, tasks\.id DESC LIMIT/)
+    // A parenthesised row constructor rejects DESC in PostgreSQL ("syntax error at or near DESC").
+    expect(TASK_PAGE_SORT_KEY).not.toMatch(/[()]/)
+    for (const term of TASK_PAGE_SORT_KEY.split(',').map((t) => t.trim())) {
+      expect(term).toMatch(/^tasks\.[a-z_]+ DESC$/)
+    }
   })
 
   describe('parsePageParams', () => {
