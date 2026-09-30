@@ -783,12 +783,17 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       dek.fill(0)
       await tx((query) => persistRecoveryArchivePreparedCapture(query, owner, payload))
       // Provider timestamps are existing Date.toISOString milliseconds, even when PostgreSQL keeps microseconds.
+      const storeId = randomUUID()
       const wrongExpiry = recoveryArchivePreparedStagingPlan(payload, '2099-12-31T00:00:00.124Z')[0]
-      await expect(tx((query) => registerRecoveryArchiveStagingObject(query, owner, wrongExpiry))).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+      await expect(tx((query) => registerRecoveryArchiveStagingObject(query, owner, wrongExpiry, storeId))).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid`, [generationId])).rows).toEqual([{ n: 0 }])
-      const options = { basePath: root, storeId: randomUUID(), maxObjectBytes: 2048, transactionDepth: { currentTransactionDepth: () => depth } }
+      const options = { basePath: root, storeId, maxObjectBytes: 2048, transactionDepth: { currentTransactionDepth: () => depth } }
       await provisionRecoveryArchiveFileRoot(options)
       const provider = await createRecoveryArchiveFileStoreProvider(options)
+      const foreignOptions = { ...options, basePath: path.join(root, 'foreign'), storeId: randomUUID() }
+      await fs.mkdir(foreignOptions.basePath, { mode: 0o700 })
+      await provisionRecoveryArchiveFileRoot(foreignOptions)
+      const foreignProvider = await createRecoveryArchiveFileStoreProvider(foreignOptions)
       let puts = 0
       const upload = bindRecoveryArchiveManualObjectUpload(tx, async () => true, { identity, owner,
         transactionDepth: options.transactionDepth, provider: { ...provider, put: async (request) => {
@@ -802,6 +807,20 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       const envelope = decodeRecoveryArchivePreparedEnvelope(payload)
       await expect(upload(envelope, envelope.sections[0])).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_RECEIPT_COMPILER_PROVIDER_FAILED')
       expect(puts).toBe(1)
+      expect((await q(`SELECT DISTINCT store_id FROM meta_recovery_archive_abandoned_bindings WHERE generation_id=$1::uuid`, [generationId])).rows)
+        .toEqual([{ store_id: storeId }])
+      let foreignCalls = 0
+      const foreignUpload = bindRecoveryArchiveManualObjectUpload(tx, async () => true, { identity, owner,
+        transactionDepth: options.transactionDepth, provider: { ...foreignProvider, put: async (request) => {
+          foreignCalls++; return foreignProvider.put(request)
+        } } })
+      await expect(foreignUpload(envelope, envelope.sections[0])).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+      expect(foreignCalls).toBe(0)
+      const { storeId: _storeId, ...legacyProvider } = provider
+      const legacyUpload = bindRecoveryArchiveManualObjectUpload(tx, async () => true, {
+        identity, owner, transactionDepth: options.transactionDepth, provider: legacyProvider,
+      })
+      await expect(legacyUpload(envelope, envelope.sections[0])).rejects.toThrow(/^RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE$/)
       await expect(q(`UPDATE meta_recovery_archive_abandoned_bindings SET provider_version='SENSITIVE_WRONG_VERSION' WHERE generation_id=$1::uuid`, [generationId])).rejects.toThrow(/^archive_abandoned_binding_immutable$/)
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid`, [generationId])).rows).toEqual([{ n: 0 }])
       await expect(q('TRUNCATE meta_recovery_archive_abandoned_bindings')).rejects.toThrow(/^archive_abandoned_binding_immutable$/)
@@ -811,11 +830,42 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       await expect(claimRecoveryArchiveAbandonedObjectCleanup(tx, async () => true,
         { identity, owner: { ...owner, ownerFence: '9' }, cleanupOwnerId: CLEANER_ID, leaseExpiresAt: FUTURE_LEASE })).rejects.toThrow('RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED')
       let cleaner = await claimRecoveryArchiveAbandonedObjectCleanup(tx, async () => true,
-        { identity, owner, cleanupOwnerId: CLEANER_ID, leaseExpiresAt: new Date(Date.now() + 300).toISOString() })
+        { identity, owner, cleanupOwnerId: CLEANER_ID, leaseExpiresAt: new Date(Date.now() + 1000).toISOString() })
+      await expect(cleanupRecoveryArchiveAbandonedObjects(tx, async () => true, { identity, owner: cleaner,
+        transactionDepth: options.transactionDepth, provider: { ...foreignProvider,
+          status: async (request) => { foreignCalls++; return foreignProvider.status(request) },
+          discard: async (request) => { foreignCalls++; return foreignProvider.discard(request) },
+        } })).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+      await expect(cleanupRecoveryArchiveAbandonedObjects(tx, async () => true, {
+        identity, owner: cleaner, transactionDepth: options.transactionDepth, provider: legacyProvider,
+      })).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+      expect(foreignCalls).toBe(0)
+      // Synthetic corruption control: a later foreign mapping must refuse the WHOLE inventory
+      // before an earlier same-store object can reach status/discard or receive a terminal row.
+      const lastMapping = (await q(`SELECT staging_object_id FROM meta_recovery_archive_abandoned_bindings
+        WHERE generation_id=$1::uuid ORDER BY staging_object_id DESC LIMIT 1`, [generationId])).rows[0].staging_object_id
+      const setMappingStore = (value: string) => tx(async (query) => {
+        await query('SET LOCAL session_replication_role = replica')
+        await query(`UPDATE meta_recovery_archive_abandoned_bindings SET store_id=$3::uuid
+          WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid`, [generationId, lastMapping, value])
+      })
+      await setMappingStore(foreignOptions.storeId)
+      let mixedCalls = 0
+      try {
+        await expect(cleanupRecoveryArchiveAbandonedObjects(tx, async () => true, { identity, owner: cleaner,
+          transactionDepth: options.transactionDepth, provider: { ...provider,
+            status: async (request) => { mixedCalls++; return provider.status(request) },
+            discard: async (request) => { mixedCalls++; return provider.discard(request) },
+          } })).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
+        expect(mixedCalls).toBe(0)
+      } finally { await setMappingStore(storeId) }
+      expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid AND terminal_receipt_sha256 IS NOT NULL`, [generationId])).rows).toEqual([{ n: 0 }])
+      expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs WHERE generation_id=$1::uuid AND reference_class='source'`, [generationId])).rows).toEqual([{ n: 1 }])
+      expect((await fs.readdir(foreignOptions.basePath)).sort()).toEqual(['.metasheet-archive-root'])
       await expect(upload(envelope, envelope.sections[0])).rejects.toThrow('RECOVERY_ARCHIVE_PREPARED_CAPTURE_OWNER_UNAVAILABLE')
       expect(puts).toBe(1)
       const displaced = cleaner
-      const takeover = { status: provider.status, discard: async (request: Parameters<typeof provider.discard>[0]) => {
+      const takeover = { storeId, status: provider.status, discard: async (request: Parameters<typeof provider.discard>[0]) => {
         const result = await provider.discard(request)
         await waitForArchiveLeaseExpiry(generationId)
         cleaner = await claimRecoveryArchiveAbandonedObjectCleanup(tx, async () => true,
@@ -827,7 +877,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid AND object_state='absent'`, [generationId])).rows).toEqual([{ n: 0 }])
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs WHERE generation_id=$1::uuid AND reference_class='source'`, [generationId])).rows).toEqual([{ n: 1 }])
       let discards = 0
-      const lost = { status: provider.status, discard: async (request: Parameters<typeof provider.discard>[0]) => {
+      const lost = { storeId, status: provider.status, discard: async (request: Parameters<typeof provider.discard>[0]) => {
         expect(depth).toBe(0)
         discards++
         await provider.discard(request)
@@ -839,7 +889,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_attachment_refs WHERE generation_id=$1::uuid AND reference_class='source'`, [generationId])).rows).toEqual([{ n: 1 }])
       expect((await q(`SELECT count(*)::int AS n FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid AND object_state='absent'`, [generationId])).rows).toEqual([{ n: 1 }])
       let staleStatusCalls = 0
-      const stale = { status: async () => { staleStatusCalls++; throw new Error('STALE_PROVIDER_CALLED') }, discard: lost.discard }
+      const stale = { storeId, status: async () => { staleStatusCalls++; throw new Error('STALE_PROVIDER_CALLED') }, discard: lost.discard }
       await expect(cleanupRecoveryArchiveAbandonedObjects(tx, async () => true,
         { identity, owner, provider: stale, transactionDepth: options.transactionDepth })).rejects.toThrow(/^RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED$/)
       expect(discards).toBe(1)

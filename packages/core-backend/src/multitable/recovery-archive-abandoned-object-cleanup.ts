@@ -7,7 +7,7 @@ import { decodeRecoveryArchivePreparedEnvelope, type RecoveryArchivePreparedUplo
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
 import { createGuardedRecoveryArchiveAbandonedObjectStore, refuseRecoveryArchiveDiscard, type RecoveryArchiveAbandonedObjectStore,
   type RecoveryArchiveDiscardRequest } from './recovery-archive-abandoned-object-store'
-import { validateRecoveryArchiveObjectExpectedBinding, type RecoveryArchiveObjectExpectedBinding } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveObjectStoreId, validateRecoveryArchiveObjectExpectedBinding, type RecoveryArchiveObjectExpectedBinding } from './recovery-archive-object-store'
 
 type Transaction = RecoveryArchivePreparedUploadInput['transaction']
 type Authorize = (query: SealQuery, identity: RecoveryArchiveScopeIdentity) => Promise<boolean>
@@ -59,19 +59,20 @@ export function recoveryArchivePreparedStagingPlan(payload: Buffer, expiresAt: s
 
 /** Caller already holds the exact live builder lock and has compared durable prepared bytes. */
 export async function registerRecoveryArchiveStagingObject(
-  query: SealQuery, owner: Owner, registration: RecoveryArchiveStagingRegistration,
+  query: SealQuery, owner: Owner, registration: RecoveryArchiveStagingRegistration, storeId: string,
 ): Promise<void> {
   try {
+    if (!storeId || snapshotRecoveryArchiveObjectStoreId({ storeId }) !== storeId) refuseRecoveryArchiveDiscard()
     const expected = validateRecoveryArchiveObjectExpectedBinding(registration.binding)
     if (expected.generationId !== owner.generationId) refuseRecoveryArchiveDiscard()
-    const prior = await query(`SELECT b.provider_version,b.ciphertext_sha256,b.size_bytes::text,b.expires_at,
+    const prior = await query(`SELECT b.store_id,b.provider_version,b.ciphertext_sha256,b.size_bytes::text,b.expires_at,
         b.owner_kind,b.owner_id,b.owner_fence::text,s.object_class,s.attachment_id,s.key_id,s.object_state
       FROM public.meta_recovery_archive_abandoned_bindings b
       JOIN public.meta_recovery_archive_staging_objects s USING(generation_id,staging_object_id)
       WHERE b.generation_id=$1::uuid AND b.object_id=$2`, [owner.generationId, expected.objectId])
     if (prior.rows.length) {
       const row = prior.rows[0] as Record<string, unknown>
-      if (row.provider_version !== expected.expectedVersion || row.ciphertext_sha256 !== expected.expectedSha256
+      if (row.store_id !== storeId || row.provider_version !== expected.expectedVersion || row.ciphertext_sha256 !== expected.expectedSha256
         || row.size_bytes !== expected.expectedSize || !(row.expires_at instanceof Date) || row.expires_at.toISOString() !== expected.expectedExpiresAt
         || row.owner_kind !== owner.ownerKind || row.owner_id !== owner.ownerId || row.owner_fence !== owner.ownerFence
         || row.object_class !== registration.objectClass || row.attachment_id !== registration.attachmentId
@@ -85,10 +86,10 @@ export async function registerRecoveryArchiveStagingObject(
     [owner.generationId, stagingId, registration.objectClass, registration.attachmentId, registration.keyId])
     await query(`INSERT INTO public.meta_recovery_archive_abandoned_bindings
       (generation_id,staging_object_id,object_id,provider_version,ciphertext_sha256,size_bytes,expires_at,
-        operation_id,owner_kind,owner_id,owner_fence)
-      VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6::bigint,$7::timestamptz,$8::uuid,$9,$10,$11::bigint)`,
+        operation_id,owner_kind,owner_id,owner_fence,store_id)
+      VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6::bigint,$7::timestamptz,$8::uuid,$9,$10,$11::bigint,$12::uuid)`,
     [owner.generationId, stagingId, expected.objectId, expected.expectedVersion, expected.expectedSha256,
-      expected.expectedSize, expected.expectedExpiresAt, randomUUID(), owner.ownerKind, owner.ownerId, owner.ownerFence])
+      expected.expectedSize, expected.expectedExpiresAt, randomUUID(), owner.ownerKind, owner.ownerId, owner.ownerFence, storeId])
     // The bytes have already been durably sealed; this commits before the first provider PUT.
     await query(`UPDATE public.meta_recovery_archive_staging_objects SET object_state='sealed'
       WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid AND object_state='pending'`, [owner.generationId, stagingId])
@@ -100,7 +101,7 @@ interface CleanupInput {
   owner: Owner
 }
 
-async function admit(query: SealQuery, authorize: Authorize, input: CleanupInput, expired: boolean): Promise<void> {
+async function admit(query: SealQuery, authorize: Authorize, input: CleanupInput, expired: boolean, storeId?: string): Promise<void> {
   await lockRecoveryArchiveObjectScope(query, input.identity, input.owner.generationId, false)
   if (!(await authorize(query, input.identity))) refuseRecoveryArchiveDiscard()
   const owner = input.owner
@@ -131,14 +132,14 @@ async function admit(query: SealQuery, authorize: Authorize, input: CleanupInput
     || envelope.binding.workspaceId !== input.identity.workspaceId || envelope.binding.baseId !== input.identity.baseId
     || envelope.binding.sheetId !== input.identity.sheetId || capture.source_vector_hash !== owner.sourceVectorHash) refuseRecoveryArchiveDiscard()
   const plan = recoveryArchivePreparedStagingPlan(capture.payload, archive.expires_at.toISOString())
-  const mappings = (await query(`SELECT b.object_id,b.provider_version,b.ciphertext_sha256,b.size_bytes::text,b.expires_at,
+  const mappings = (await query(`SELECT b.store_id,b.object_id,b.provider_version,b.ciphertext_sha256,b.size_bytes::text,b.expires_at,
       s.object_class,s.attachment_id,s.key_id FROM public.meta_recovery_archive_abandoned_bindings b
       JOIN public.meta_recovery_archive_staging_objects s USING(generation_id,staging_object_id)
       WHERE b.generation_id=$1::uuid`, [owner.generationId])).rows as Record<string, unknown>[]
   if (mappings.length !== plan.length) refuseRecoveryArchiveDiscard()
   for (const entry of plan) {
     const row = mappings.find((candidate) => candidate.object_id === entry.binding.objectId)
-    if (!row || row.provider_version !== entry.binding.expectedVersion || row.ciphertext_sha256 !== entry.binding.expectedSha256
+    if (!row || (storeId !== undefined && row.store_id !== storeId) || row.provider_version !== entry.binding.expectedVersion || row.ciphertext_sha256 !== entry.binding.expectedSha256
       || row.size_bytes !== entry.binding.expectedSize || !(row.expires_at instanceof Date)
       || row.expires_at.toISOString() !== entry.binding.expectedExpiresAt || row.object_class !== entry.objectClass
       || row.attachment_id !== entry.attachmentId || row.key_id !== entry.keyId) refuseRecoveryArchiveDiscard()
@@ -172,10 +173,12 @@ export async function cleanupRecoveryArchiveAbandonedObjects(
 ): Promise<{ outcome: 'complete' | 'retained'; confirmed: number }> {
   const frozen = { identity: { ...input.identity }, owner: { ...input.owner } }
   const store = createGuardedRecoveryArchiveAbandonedObjectStore(input.provider, input.transactionDepth)
+  const storeId = snapshotRecoveryArchiveObjectStoreId(store)
   try {
+    if (!storeId) refuseRecoveryArchiveDiscard()
     const rows = await transaction(async (query) => {
-      await admit(query, authorize, frozen, false)
-      return (await query(`SELECT b.staging_object_id,b.operation_id,b.object_id,b.provider_version,b.ciphertext_sha256,
+      await admit(query, authorize, frozen, false, storeId)
+      return (await query(`SELECT b.store_id,b.staging_object_id,b.operation_id,b.object_id,b.provider_version,b.ciphertext_sha256,
         b.size_bytes::text,b.expires_at,s.object_state FROM public.meta_recovery_archive_abandoned_bindings b
         JOIN public.meta_recovery_archive_staging_objects s USING(generation_id,staging_object_id)
         WHERE b.generation_id=$1::uuid ORDER BY b.staging_object_id`, [frozen.owner.generationId])).rows as Record<string, unknown>[]
@@ -184,20 +187,20 @@ export async function cleanupRecoveryArchiveAbandonedObjects(
     for (const row of rows) {
       if (!(row.expires_at instanceof Date)) refuseRecoveryArchiveDiscard()
       const request: RecoveryArchiveDiscardRequest = {
-        generationId: frozen.owner.generationId, operationId: String(row.operation_id), objectId: String(row.object_id),
+        storeId: String(row.store_id), generationId: frozen.owner.generationId, operationId: String(row.operation_id), objectId: String(row.object_id),
         expectedVersion: String(row.provider_version), expectedSha256: String(row.ciphertext_sha256),
         expectedSize: String(row.size_bytes), expectedExpiresAt: row.expires_at.toISOString(),
       }
-      await transaction((query) => admit(query, authorize, frozen, false))
+      await transaction((query) => admit(query, authorize, frozen, false, storeId))
       let result = await store.status(request)
       if (result.outcome === 'unknown') {
-        await transaction((query) => admit(query, authorize, frozen, false))
+        await transaction((query) => admit(query, authorize, frozen, false, storeId))
         result = await store.discard(request)
       }
       if (result.outcome !== 'absent') return { outcome: 'retained', confirmed }
       const receipt = result.receiptSha256
       await transaction(async (query) => {
-        await admit(query, authorize, frozen, false)
+        await admit(query, authorize, frozen, false, storeId)
         const state = (await query(`SELECT object_state,terminal_receipt_sha256
           FROM public.meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid FOR UPDATE`,
         [frozen.owner.generationId, row.staging_object_id])).rows[0] as Record<string, unknown> | undefined
@@ -215,7 +218,7 @@ export async function cleanupRecoveryArchiveAbandonedObjects(
       confirmed++
     }
     await transaction(async (query) => {
-      await admit(query, authorize, frozen, false)
+      await admit(query, authorize, frozen, false, storeId)
       const outstanding = await query(`SELECT 1 FROM public.meta_recovery_archive_staging_objects
         WHERE generation_id=$1::uuid AND object_state NOT IN ('absent','deleted') LIMIT 1`, [frozen.owner.generationId])
       if (outstanding.rows.length) refuseRecoveryArchiveDiscard()

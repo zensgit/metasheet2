@@ -104,6 +104,7 @@ export type RecoveryArchiveObjectDeleteExpiredResult =
  * transaction-depth check before it can reach its provider.
  */
 export interface RecoveryArchiveObjectStore {
+  readonly storeId?: string
   put(request: RecoveryArchiveObjectPutRequest): Promise<RecoveryArchiveObjectPutResult>
   get(request: RecoveryArchiveObjectReadRequest): Promise<RecoveryArchiveObjectReadResult>
   head(request: RecoveryArchiveObjectHeadRequest): Promise<RecoveryArchiveObjectDescriptor | null>
@@ -119,6 +120,8 @@ export interface RecoveryArchiveObjectStore {
  * authority for a multi-process store.
  */
 export interface RecoveryArchiveObjectStoreProvider {
+  /** Opaque original storage namespace; required only by abandoned-builder registration/cleanup. */
+  readonly storeId?: string
   put(request: RecoveryArchiveObjectPutRequest): Promise<RecoveryArchiveObjectPutResult>
   get(request: RecoveryArchiveObjectReadRequest): Promise<RecoveryArchiveObjectReadResult>
   head(request: RecoveryArchiveObjectHeadRequest): Promise<RecoveryArchiveObjectDescriptor | null>
@@ -414,12 +417,22 @@ function copyDescriptor(object: RecoveryArchiveObjectDescriptor): RecoveryArchiv
   }
 }
 
+/** Snapshot only admitted own data metadata; legacy ordinary operations need no namespace. */
+export function snapshotRecoveryArchiveObjectStoreId(provider: { readonly storeId?: string }): string | undefined {
+  try {
+    const field = Object.getOwnPropertyDescriptor(provider, 'storeId')
+    const value: unknown = field && 'value' in field ? field.value : undefined
+    return typeof value === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(value) ? value : undefined
+  } catch { return undefined }
+}
+
 /** Harden a provider with closed-shape/result checks and a depth assertion before every verb. */
 export function createTransactionGuardedRecoveryArchiveObjectStore(
   provider: RecoveryArchiveObjectStoreProvider,
   transactionDepth: RecoveryArchiveTransactionDepthProbe,
 ): RecoveryArchiveObjectStore {
-  return {
+  const storeId = snapshotRecoveryArchiveObjectStoreId(provider)
+  const store: RecoveryArchiveObjectStore = {
     async put(request) {
       assertOutsideTransaction(transactionDepth)
       const expected = parsePutRequest(request)
@@ -514,6 +527,8 @@ export function createTransactionGuardedRecoveryArchiveObjectStore(
       return copyDescriptor(object)
     },
   }
+  if (storeId !== undefined) Object.defineProperty(store, 'storeId', { value: storeId, enumerable: true })
+  return store
 }
 
 /** Test-only local implementation. Its process-local metadata is not staging or D3 authority. */

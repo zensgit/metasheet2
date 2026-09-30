@@ -20,7 +20,7 @@ try {
   process.send!({ ready: true, pid: process.pid })
   await start
   if (input.action === 'pin') {
-    const { operationId: _operationId, ...binding } = input.request
+    const { operationId: _operationId, storeId: _storeId, ...binding } = input.request
     try {
       process.send!({ pin: 'succeeded', object: await provider.pin(binding) })
     } catch (error) {

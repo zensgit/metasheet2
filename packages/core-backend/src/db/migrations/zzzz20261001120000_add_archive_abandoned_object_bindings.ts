@@ -3,7 +3,7 @@ import { sql, type Kysely } from 'kysely'
 const columns = `generation_id uuid NOT NULL, staging_object_id uuid NOT NULL,
   object_id text NOT NULL, provider_version text NOT NULL, ciphertext_sha256 text NOT NULL,
   size_bytes bigint NOT NULL, expires_at timestamptz NOT NULL, operation_id uuid NOT NULL,
-  owner_kind text NOT NULL, owner_id text NOT NULL, owner_fence bigint NOT NULL,
+  store_id uuid NOT NULL, owner_kind text NOT NULL, owner_id text NOT NULL, owner_fence bigint NOT NULL,
   PRIMARY KEY(generation_id,staging_object_id), UNIQUE(generation_id,object_id), UNIQUE(operation_id),
   CHECK (object_id ~ '^[0-9a-f]{64}$' AND ciphertext_sha256 ~ '^[0-9a-f]{64}$'
     AND provider_version<>'' AND provider_version=btrim(provider_version)

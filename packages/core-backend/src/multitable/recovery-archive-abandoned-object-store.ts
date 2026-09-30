@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
-import { validateRecoveryArchiveObjectExpectedBinding, type RecoveryArchiveObjectExpectedBinding } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveObjectStoreId, validateRecoveryArchiveObjectExpectedBinding, type RecoveryArchiveObjectExpectedBinding } from './recovery-archive-object-store'
 
 export interface RecoveryArchiveDiscardRequest extends RecoveryArchiveObjectExpectedBinding {
   operationId: string
+  storeId: string
 }
 
 export type RecoveryArchiveDiscardResult =
@@ -12,6 +13,7 @@ export type RecoveryArchiveDiscardResult =
 
 /** Separate from expiry deletion. Absence means permanent provider unavailability, not erasure. */
 export interface RecoveryArchiveAbandonedObjectStore {
+  readonly storeId?: string
   discard(request: RecoveryArchiveDiscardRequest): Promise<RecoveryArchiveDiscardResult>
   status(request: RecoveryArchiveDiscardRequest): Promise<RecoveryArchiveDiscardResult>
 }
@@ -23,11 +25,13 @@ export function refuseRecoveryArchiveDiscard(): never {
 export function validateRecoveryArchiveDiscardRequest(value: RecoveryArchiveDiscardRequest): RecoveryArchiveDiscardRequest {
   try {
     const descriptors = Object.getOwnPropertyDescriptors(value)
-    const keys = ['expectedExpiresAt', 'expectedSha256', 'expectedSize', 'expectedVersion', 'generationId', 'objectId', 'operationId']
+    const keys = ['expectedExpiresAt', 'expectedSha256', 'expectedSize', 'expectedVersion', 'generationId', 'objectId', 'operationId', 'storeId']
     if (Object.keys(descriptors).sort().join(',') !== keys.join(',') || keys.some((key) => !('value' in descriptors[key]))) refuseRecoveryArchiveDiscard()
-    const { operationId, ...binding } = value
+    const snapshot = Object.fromEntries(keys.map((key) => [key, descriptors[key].value]))
+    const { operationId, storeId, ...binding } = snapshot
     if (typeof operationId !== 'string' || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(operationId)) refuseRecoveryArchiveDiscard()
-    return { ...validateRecoveryArchiveObjectExpectedBinding(binding), operationId }
+    if (snapshotRecoveryArchiveObjectStoreId({ storeId }) !== storeId || typeof storeId !== 'string') refuseRecoveryArchiveDiscard()
+    return { ...validateRecoveryArchiveObjectExpectedBinding(binding as RecoveryArchiveObjectExpectedBinding), operationId, storeId }
   } catch { return refuseRecoveryArchiveDiscard() }
 }
 
@@ -35,7 +39,7 @@ export function validateRecoveryArchiveDiscardRequest(value: RecoveryArchiveDisc
 export function recoveryArchiveDiscardReceipt(request: RecoveryArchiveDiscardRequest): string {
   const value = validateRecoveryArchiveDiscardRequest(request)
   return createHash('sha256').update(JSON.stringify([
-    'metasheet.archive-abandoned-discard/v1', value.operationId, value.generationId, value.objectId,
+    'metasheet.archive-abandoned-discard/v2', value.storeId, value.operationId, value.generationId, value.objectId,
     value.expectedVersion, value.expectedSha256, value.expectedSize, value.expectedExpiresAt, 'absent',
   ])).digest('hex')
 }
@@ -43,10 +47,12 @@ export function recoveryArchiveDiscardReceipt(request: RecoveryArchiveDiscardReq
 export function createGuardedRecoveryArchiveAbandonedObjectStore(
   provider: RecoveryArchiveAbandonedObjectStore, probe: RecoveryArchiveTransactionDepthProbe,
 ): RecoveryArchiveAbandonedObjectStore {
+  const storeId = snapshotRecoveryArchiveObjectStoreId(provider)
   const call = async (verb: 'discard' | 'status', input: RecoveryArchiveDiscardRequest): Promise<RecoveryArchiveDiscardResult> => {
     // Copy the complete binding synchronously; caller mutation cannot retarget a suspended operation.
     const request = validateRecoveryArchiveDiscardRequest(input)
     try {
+      if (!storeId || request.storeId !== storeId) refuseRecoveryArchiveDiscard()
       if (probe.currentTransactionDepth() !== 0) refuseRecoveryArchiveDiscard()
       const result = await provider[verb]({ ...request })
       const fields = Object.getOwnPropertyDescriptors(result)
@@ -63,5 +69,7 @@ export function createGuardedRecoveryArchiveAbandonedObjectStore(
       return { outcome: 'absent', receiptSha256 }
     } catch { return refuseRecoveryArchiveDiscard() }
   }
-  return { discard: (request) => call('discard', request), status: (request) => call('status', request) }
+  const store: RecoveryArchiveAbandonedObjectStore = { discard: (request) => call('discard', request), status: (request) => call('status', request) }
+  if (storeId !== undefined) Object.defineProperty(store, 'storeId', { value: storeId, enumerable: true })
+  return store
 }

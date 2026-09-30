@@ -15,7 +15,7 @@ import { canonicalizeRecoveryArchiveSectionRows } from './recovery-archive-manif
 import { readRecoveryArchivePreparedCapture } from './recovery-archive-prepared-capture'
 import { compileRecoveryArchiveObjectReceipt } from './recovery-archive-object-receipt-compiler'
 import { recordRecoveryArchiveObjectUploaded } from './recovery-archive-object-receipts'
-import type { RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import { snapshotRecoveryArchiveObjectStoreId, type RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
 import { bindRecoveryArchiveManualManifestBinding } from './recovery-archive-manual-admission'
 import { buildRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-sealed-snapshot-manifest'
 import { authenticateRecoveryArchiveSealedSnapshotManifest } from './recovery-archive-authenticated-manifest'
@@ -64,6 +64,7 @@ function bindManualObjectUpload(
   const identity = Object.freeze({ ...input.identity })
   const owner = Object.freeze({ ...input.owner })
   const provider = input.provider
+  const storeId = snapshotRecoveryArchiveObjectStoreId(provider)
   const transactionDepth = input.transactionDepth
   const authorizedPayload = async (query: SealQuery) => {
     const keyId = await lockRecoveryArchiveObjectScope(query, identity, owner.generationId, true).catch(() => { throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE') })
@@ -80,6 +81,7 @@ function bindManualObjectUpload(
     return { payload, envelope }
   }
   return async (name) => {
+    if (!storeId) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
     const admitted = await transaction(async (query) => {
       const original = await authorizedPayload(query)
       const result = await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid', [owner.generationId])
@@ -109,7 +111,7 @@ function bindManualObjectUpload(
       const current = await authorizedPayload(query)
       if (!current.payload.equals(admitted.payload)) throw new Error('RECOVERY_ARCHIVE_PREPARED_CAPTURE_CONFLICT')
       for (const registration of recoveryArchivePreparedStagingPlan(current.payload, admitted.expiresAt)) {
-        await registerRecoveryArchiveStagingObject(query, owner, registration)
+        await registerRecoveryArchiveStagingObject(query, owner, registration, storeId)
       }
     })
     const evidence = await compileRecoveryArchiveObjectReceipt({ provider, transactionDepth,

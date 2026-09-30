@@ -241,6 +241,7 @@ export async function createRecoveryArchiveFileStoreProvider(options: RecoveryAr
     }
     // Operation files bind one UUID permanently, independently of the object retention winner.
     const discard = async (request: RecoveryArchiveDiscardRequest, start: boolean): Promise<RecoveryArchiveDiscardResult> => {
+      if (request.storeId !== options.storeId) refuse()
       await checkRoot()
       const operationName = `${request.operationId}.discard`
       const encoded = Buffer.from(JSON.stringify(request))
@@ -327,7 +328,7 @@ export async function createRecoveryArchiveFileStoreProvider(options: RecoveryAr
       if (options.transactionDepth.currentTransactionDepth() !== 0) refuse()
       return work()
     })
-    return {
+    return Object.defineProperty({
       discard: (request) => { const frozen = validateRecoveryArchiveDiscardRequest(request); return run(() => discard(frozen, true)) },
       status: (request) => { const frozen = validateRecoveryArchiveDiscardRequest(request); return run(() => discard(frozen, false)) },
       put: (request) => run(() => provider.put(validateRecoveryArchiveObjectPutRequest(request))),
@@ -335,6 +336,6 @@ export async function createRecoveryArchiveFileStoreProvider(options: RecoveryAr
       head: (request) => run(() => provider.head(validateRecoveryArchiveObjectExpectedBinding(request))),
       pin: (request) => run(() => provider.pin(validateRecoveryArchiveObjectExpectedBinding(request))),
       deleteExpired: (request) => run(() => provider.deleteExpired(validateRecoveryArchiveObjectDeleteExpiredRequest(request))),
-    }
+    }, 'storeId', { value: options.storeId, enumerable: true })
   })
 }

@@ -623,7 +623,7 @@ try {
     assert.equal(binaryDelivered.length, 2)
     const continuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
     const binaryStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const binaryProvider = binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') })
+    const binaryProvider = { storeId: randomUUID(), ...binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') }) }
     let binaryAllowed = true
     let revokeAfterHead = false
     let binaryPuts = 0
@@ -1096,7 +1096,7 @@ try {
     assert.equal(repeatedUploads, 10)
     assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
     const stores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const provider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') })
+    const provider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') }) }
     const objectUpload = createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...repeated, provider })
     const objectExpiry = (await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid',
       [repeated.owner.generationId])).rows[0].expires_at.toISOString()
@@ -1236,7 +1236,7 @@ try {
       await query('INSERT INTO meta_recovery_archive_keys(key_id) VALUES ($1)', [capability.keyId])
       const localInput = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
         { ...admissionPolicy, keyId: capability.keyId }))
-      const localProvider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath })
+      const localProvider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath }) }
       await manual({ ...localInput, capture: async (snapshot) => ({ ...await capture(snapshot),
         binding: localInput.binding, keyCustody: capability }),
       upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
@@ -1837,7 +1837,7 @@ try {
   }
   const attachmentContinuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
   const attachmentStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-  const attachmentProvider = attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') })
+  const attachmentProvider = { storeId: randomUUID(), ...attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') }) }
   const attachmentShared = { ...attachmentCapture, provider: attachmentProvider }
   let captureSourceReads = 0
   const withAttachments = attachmentContinuationBindings.bindRecoveryArchiveManualContinuation(uploadInput.transaction,
