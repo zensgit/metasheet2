@@ -61,6 +61,8 @@ CI 实际跑的类型检查链:根 `package.json` 的 `type-check` 脚本是 `pn
 
 结果:**1239 个文件,1065 通过 / 1 失败 / 173 跳过;19623 个用例,17957 通过 / 1 失败 / 1665 跳过**。耗时约 219 秒。
 
+本次全量跑是在 `bad1a95a7e`(实现 commit)上做的,晚两轮 fixup(`e0966600b0`/`25df44d066`)只改了 `src/tasks/task-notifications.ts`/`task-settings.ts` 内部的常量接线与注释、以及对应测试和文档,不改对外签名/行为。`grep -rlE "task-(notifications|settings|lists|groups|reminders|pagination|realtime)" packages/core-backend/src | grep -v '/src/tasks/'` 零命中——仓库里没有任何 `src/tasks/` 之外的文件导入这七个新模块,所以没有必要在 fixup 之后重新跑一遍全量单测;fixup 之后重新跑的是 §2.1(`task-*.test.ts` 643/643)、§2.3(两条 tsc 命令)与 §2.5(eslint),三者均在本文档定稿时的 head(`25df44d066`)上确认过绿。
+
 唯一失败:`tests/integration/field-validation-flow.test.ts > Field validation — form submit > enum validation rejects unlisted value`,报 `ECONNRESET`/`socket hang up`。与本次改动无关(该测试文件不在 `src/tasks/` 依赖图内,任务 D 没有改过 `field-validation` 相关任何文件)——单独重跑该文件:
 
 ```
@@ -81,7 +83,9 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
   src/tasks/task-realtime.ts src/tasks/task-ids.ts src/tasks/task-dates.ts
 ```
 
-结果:1 条 `no-misleading-character-class` 错误,位置在 `task-ids.ts` 的 `ZERO_WIDTH_CHARS`/`EDGE_TRIM_RE`(任务 B 的既有代码,`git diff origin/main -- .../task-ids.ts` 证实本次 diff 完全没有碰到那几行)——**与本次改动无关的既有问题**,不是任务 D 引入的。本次新增的七个模块本身零 lint 问题。这次独立复核也正是它抓出了 §1 提到的「`RECIPIENT_ROLE_PRIORITY` 死代码」问题的另一佐证方向(`no-unused-vars` 类规则本应能抓到,但该常量确实被读取——只是读取结果此前从未真正驱动分支逻辑;这一层"看似用了、实则不影响行为"的死代码,lint 的静态未使用检测本身也看不出来,是靠独立复核读代码发现的,§6 已修复)。
+结果:1 条 `no-misleading-character-class` 错误,位置在 `task-ids.ts` 的 `ZERO_WIDTH_CHARS`/`EDGE_TRIM_RE`(任务 B 的既有代码,`git diff origin/main -- .../task-ids.ts` 证实本次 diff 完全没有碰到那几行)——**与本次改动无关的既有问题**,不是任务 D 引入的。本次新增的七个模块本身零 lint 问题。
+
+**核对时序说明**(避免与 §1/§6 的叙述冲突):本节这次 eslint 核对是在 §6 的死代码修复(commit `25df44d066`)**之后**跑的,不是发现问题的手段。修复**之前**,`RECIPIENT_ROLE_PRIORITY` 在模块内从未被任何代码引用过——`core-backend/.eslintrc.json` 里确实配了 `@typescript-eslint/no-unused-vars`(warn 级),按理说能抓到这种未引用的模块级常量,但 CI 从不对 `packages/core-backend` 跑 eslint(§2.5 上文已确认该包没有 `"lint"` 脚本),所以没有任何自动检查真正抓到它,是靠独立复核逐行读代码发现的。
 
 ## 3. Mutation 抽查(9 处关键守卫;备份 → 改 → 跑 → 还原 → 比对,不用 `git checkout --`)
 
@@ -121,7 +125,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 第一轮提交(`bad1a95a7e`)之后的两轮独立复核分别发现并修复了以下问题,均已在后续 commit 里改正,改正后重新跑过 §2/§3 的全部命令:
 
 - **commit `e0966600b0`**:多处 `ASSUMPTION(task-d)` 只在散文里点了裁决编号、没有用字面可 `grep` 的 `ASSUMPTION(task-d)` token(`task-groups.ts` 的 R11、`task-lists.ts` 的 R12(b)/(c)、`task-notifications.ts` 的 D13 若干处、`task-settings.ts` 的 D5/D7、`task-pagination.ts` 的 D9);`task-reminders.ts` 里一条 D6 标记因为括号内多了个逗号,写成了 `ASSUMPTION(task-d, gate default D6…` 而不是标准形状 `ASSUMPTION(task-d): [D6]`,同样不可 grep。全部改正为统一的 `ASSUMPTION(task-d): [R<nn>/D<nn>]` 形状。
-- **commit(本次,见下方 SHA)**:
+- **commit `25df44d066`**:
   - `task-notifications.ts` 的 `RECIPIENT_ROLE_PRIORITY` 声明了但从未被 `resolveNotificationRecipients` 读取——真正的优先级是硬编码在四次 `consider(...)` 调用的书写顺序里;改后 owner 就算裁定不同优先级、把这个常量改一下,行为也不会跟着变。已改成显式 `for (const role of RECIPIENT_ROLE_PRIORITY)` 驱动,常量现在是唯一真相(mutation #9 证实)。
   - `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` 这个"开关"常量改成 `true` 不会让 `assignee_added` 真的进入 `TASK_NOTIFIABLE_EVENTS`(该数组是独立的字面量,不读这个布尔值)——是纯装饰性的死代码。已删除该常量与对应测试断言,`[R05-opt]` 标记直接移到 `TASK_NOTIFIABLE_EVENTS` 数组本身上,数组字面量就是唯一真相。
   - `task-settings.ts` 里 `timeZone` 字段与 `daily_reminder_requires_time_zone` 校验被错标成 R02③/R02④——M4 裁决包 v2 §0.1 已把这一列明确从 R02 移到 R07("原④『加 time_zone 列』移到 R07")。改标为 `[R07]`,`[R02]` 只留给 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 三个字段。设计文档 §2.5/§5 与对应测试标题同步改正。
