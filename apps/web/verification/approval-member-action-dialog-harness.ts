@@ -2,6 +2,11 @@
 // production Router, Pinia stores, Element Plus dialogs, focus trap, and responsive composable.
 // The harness changes only deterministic fixture state after the dev API has populated the store;
 // dialog rendering and interaction remain production code.
+//
+// `?scenario=role-seat-evidence` swaps the fixture for a ROLE-seated approver with the attachment
+// pipeline ON: no assignment names the viewer (so the client-side `isMyTurn` mirror is false) and
+// the detail carries the server-resolved `canAttachProcessEvidence` — `true`, or `false` with
+// `&evidence=denied`. Without the parameter the fixture is exactly the P5-C one.
 import { createApp, defineComponent, h, nextTick } from 'vue'
 import { createPinia } from 'pinia'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
@@ -29,9 +34,13 @@ async function waitForLoadedApproval(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const params = new URLSearchParams(window.location.search)
+  const roleSeatEvidence = params.get('scenario') === 'role-seat-evidence'
+  const evidenceAllowed = params.get('evidence') !== 'denied'
+
   localStorage.setItem('metasheet_features', JSON.stringify({
     approvalMobile: true,
-    approvalAttachments: false,
+    approvalAttachments: roleSeatEvidence,
   }))
   localStorage.setItem('user_roles', JSON.stringify(['admin']))
   localStorage.setItem('user_permissions', JSON.stringify(['approvals:read', 'approvals:act']))
@@ -88,26 +97,41 @@ async function main(): Promise<void> {
       allowReturn: true,
       commentRequired: 'reject_only',
     },
-    assignments: [
-      {
-        id: 'asgn_current',
-        type: 'user',
-        assigneeId: 'user_current',
-        sourceStep: 1,
-        nodeKey: 'approval_1',
-        isActive: true,
-        metadata: { assigneeName: '当前审批人' },
-      },
-      {
-        id: 'asgn_added',
-        type: 'user',
-        assigneeId: 'user_added',
-        sourceStep: 1,
-        nodeKey: 'approval_1',
-        isActive: true,
-        metadata: { addSign: true, assigneeName: '加签审批人' },
-      },
-    ],
+    assignments: roleSeatEvidence
+      ? [
+          {
+            id: 'asgn_role',
+            type: 'role',
+            assigneeId: 'admin',
+            sourceStep: 1,
+            nodeKey: 'approval_1',
+            isActive: true,
+            metadata: {},
+          },
+        ]
+      : [
+          {
+            id: 'asgn_current',
+            type: 'user',
+            assigneeId: 'user_current',
+            sourceStep: 1,
+            nodeKey: 'approval_1',
+            isActive: true,
+            metadata: { assigneeName: '当前审批人' },
+          },
+          {
+            id: 'asgn_added',
+            type: 'user',
+            assigneeId: 'user_added',
+            sourceStep: 1,
+            nodeKey: 'approval_1',
+            isActive: true,
+            metadata: { addSign: true, assigneeName: '加签审批人' },
+          },
+        ],
+    ...(roleSeatEvidence
+      ? { canDecideCurrentNode: true, canAttachProcessEvidence: evidenceAllowed }
+      : {}),
   }
 
   await nextTick()

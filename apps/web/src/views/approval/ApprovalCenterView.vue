@@ -68,7 +68,41 @@
               {{ advancedFilterCount }}
             </span>
           </el-button>
+          <!-- F3-E1: server-side CSV export of the list on screen (current tab + applied filters).
+               Desktop chrome only, like the batch toolbar below: the mobile action set (ballot Q8)
+               is approve/reject/comment/initiate. Disabled for the PLM source, which the server
+               refuses for CSV; the reason is the visible hint line right under this row, not a
+               hover-only tooltip (a disabled button does not fire one). -->
+          <el-button
+            v-if="!isMobileLayout"
+            class="approval-center__export-button"
+            :disabled="exportDisabled"
+            :loading="exporting"
+            aria-describedby="approval-center-export-hint"
+            data-testid="approval-export-csv"
+            @click="handleExportCsv"
+          >
+            {{ exportCopy.button }}
+          </el-button>
       </div>
+      <p
+        v-if="!isMobileLayout"
+        id="approval-center-export-hint"
+        class="approval-center__export-hint"
+        data-testid="approval-export-hint"
+      >
+        {{ exportPlmBlocked ? exportCopy.plmBlocked : exportCopy.scopeHint }}
+      </p>
+      <p
+        v-if="!isMobileLayout && exportNotice"
+        class="approval-center__export-notice"
+        :class="`approval-center__export-notice--${exportNotice.tone}`"
+        :role="exportNotice.tone === 'error' ? 'alert' : 'status'"
+        :data-export-outcome="exportNotice.kind"
+        data-testid="approval-export-notice"
+      >
+        {{ exportNotice.text }}
+      </p>
 
       <div v-show="filtersExpanded" class="approval-center__filters-advanced">
           <el-select
@@ -625,7 +659,20 @@ import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
+import {
+  APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+  ApprovalApiError,
+  dispatchAction,
+  exportApprovalsCsv,
+  getApproval,
+  getPendingCount,
+  markAllApprovalsRead,
+  remindApproval,
+  listTemplates,
+  type ApprovalCsvExportResult,
+  type ApprovalExportQuery,
+} from '../../approvals/api'
+import { isNetworkUnavailableError, networkUnavailableMessage } from '../../utils/networkErrors'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
 import {
@@ -1297,6 +1344,155 @@ const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRan
 const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
 
 // ---------------------------------------------------------------------------
+// F3-E1: 导出 CSV
+// ---------------------------------------------------------------------------
+// What the list on screen was LAST LOADED with: the tab plus its filters, no paging. Written only
+// by `loadCurrentTab()` — the one place every list reload passes through — so an export always asks
+// the server for the feed the user is looking at. Reading the filter refs live would not: the
+// search box, for one, reaches the list only on Enter / clear, so a half-typed term would narrow
+// the export to something the list is not showing.
+const appliedListFilters = ref<ApprovalExportQuery | null>(null)
+
+// The server refuses `format=csv` for the PLM source (400); the button is disabled up front so the
+// user gets the reason before clicking rather than an error after.
+const exportPlmBlocked = computed(() => appliedListFilters.value?.sourceSystem === 'plm')
+const exportDisabled = computed(() => exportPlmBlocked.value || appliedListFilters.value === null)
+const exporting = ref(false)
+
+// The outcome is stored as DATA (kind + the numbers the server reported), never as finished text,
+// so the notice follows a runtime locale switch like every other string in `exportCopy`.
+type ApprovalExportOutcome =
+  | { kind: 'complete'; rowCount: number }
+  | { kind: 'capped'; rowCount: number | null; rowLimit: number | null }
+  // The export headers could not be read. NOT the same as "complete": the file may be cut short
+  // and this page has no way to tell, so it says exactly that.
+  | { kind: 'unknown' }
+  | { kind: 'failed'; reason: 'plm' | 'unexpected' | 'forbidden' | 'network' | 'status' | 'other'; status?: number }
+const exportOutcome = ref<ApprovalExportOutcome | null>(null)
+
+// Same construct as `tabEmptyText` above (an `isZh` branch returning a table) — the only copy this
+// slice adds; the rest of this view's hardcoded chrome is converted separately.
+const exportCopy = computed(() => {
+  if (isZh.value) {
+    return {
+      button: '导出 CSV',
+      scopeHint: '导出当前标签页与已应用筛选下、你可以打开详情的审批；PLM 来源的审批不在导出范围内。单次导出有行数上限，导出行数可能少于列表显示的总数。',
+      plmBlocked: 'PLM 来源的审批不支持导出 CSV。请把来源筛选切换为全部来源或平台审批后再导出。',
+      complete: (rows: number) => (rows === 0
+        ? '没有可导出的审批，已下载的文件只包含表头。'
+        : `已导出 ${rows} 行。`),
+      capped: (rows: number | null, limit: number | null) => [
+        rows === null ? '文件已下载，但不完整：' : `已导出 ${rows} 行，但文件不完整：`,
+        limit === null ? '符合条件的审批超过了单次导出的行数上限。' : `符合条件的审批超过了单次导出上限（${limit} 行）。`,
+        '请缩小筛选范围后分批导出。',
+      ].join(''),
+      unknown: '文件已下载，但未能读取服务器返回的行数与截断标记，无法确认文件是否完整。',
+      failedForbidden: '导出失败：当前账号没有导出审批的权限。',
+      failedUnexpected: '导出失败：服务器没有返回 CSV 文件，未保存任何内容。',
+      failedStatus: (status: number) => `导出失败（HTTP ${status}），未保存任何内容，请稍后重试。`,
+      failedOther: '导出失败，未保存任何内容，请稍后重试。',
+    }
+  }
+  return {
+    button: 'Export CSV',
+    scopeHint: 'Exports the approvals in the current tab and applied filters that you can open; PLM-sourced approvals are not included. Each export has a row limit, so the file may hold fewer rows than the total the list shows.',
+    plmBlocked: 'PLM-sourced approvals cannot be exported to CSV. Switch the source filter to all sources or platform approvals to export.',
+    complete: (rows: number) => (rows === 0
+      ? 'Nothing to export: the downloaded file contains the header row only.'
+      : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}.`),
+    capped: (rows: number | null, limit: number | null) => [
+      rows === null ? 'The file was downloaded but is incomplete: ' : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}, but the file is incomplete: `,
+      limit === null ? 'the matching approvals exceed the per-export row limit. ' : `the matching approvals exceed the per-export limit of ${limit} rows. `,
+      'Narrow the filters and export in batches.',
+    ].join(''),
+    unknown: 'The file was downloaded, but the row count and truncation flag returned by the server could not be read, so it cannot be confirmed that the file is complete.',
+    failedForbidden: 'Export failed: this account is not allowed to export approvals.',
+    failedUnexpected: 'Export failed: the server did not return a CSV file. Nothing was saved.',
+    failedStatus: (status: number) => `Export failed (HTTP ${status}). Nothing was saved; please try again later.`,
+    failedOther: 'Export failed. Nothing was saved; please try again later.',
+  }
+})
+
+const exportNotice = computed<{ kind: ApprovalExportOutcome['kind']; tone: 'success' | 'warning' | 'error'; text: string } | null>(() => {
+  const outcome = exportOutcome.value
+  if (!outcome) return null
+  const copy = exportCopy.value
+  switch (outcome.kind) {
+    case 'complete':
+      return { kind: outcome.kind, tone: 'success', text: copy.complete(outcome.rowCount) }
+    case 'capped':
+      return { kind: outcome.kind, tone: 'warning', text: copy.capped(outcome.rowCount, outcome.rowLimit) }
+    case 'unknown':
+      return { kind: outcome.kind, tone: 'warning', text: copy.unknown }
+    case 'failed': {
+      const text = outcome.reason === 'plm' ? copy.plmBlocked
+        : outcome.reason === 'unexpected' ? copy.failedUnexpected
+        : outcome.reason === 'forbidden' ? copy.failedForbidden
+        : outcome.reason === 'network' ? networkUnavailableMessage(isZh.value)
+        : outcome.reason === 'status' && outcome.status !== undefined ? copy.failedStatus(outcome.status)
+        : copy.failedOther
+      return { kind: outcome.kind, tone: 'error', text }
+    }
+  }
+})
+
+function exportOutcomeOf(result: ApprovalCsvExportResult): ApprovalExportOutcome {
+  if (result.capped === true) {
+    return { kind: 'capped', rowCount: result.rowCount, rowLimit: result.rowLimit ?? result.rowCap }
+  }
+  if (result.capped === false && result.rowCount !== null) {
+    return { kind: 'complete', rowCount: result.rowCount }
+  }
+  return { kind: 'unknown' }
+}
+
+function exportFailureOf(error: unknown): ApprovalExportOutcome {
+  if (isNetworkUnavailableError(error)) return { kind: 'failed', reason: 'network' }
+  if (error instanceof ApprovalApiError) {
+    if (error.code === APPROVAL_EXPORT_UNEXPECTED_RESPONSE) return { kind: 'failed', reason: 'unexpected' }
+    if (error.code === 'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED') return { kind: 'failed', reason: 'plm' }
+    if (error.status === 403) return { kind: 'failed', reason: 'forbidden' }
+    return { kind: 'failed', reason: 'status', status: error.status }
+  }
+  return { kind: 'failed', reason: 'other' }
+}
+
+// Hands the browser the server's bytes under the server's file name. The Blob is the one
+// `exportApprovalsCsv` returned — this view never builds, filters or re-encodes CSV itself.
+function saveExportFile(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = fileName
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+}
+
+async function handleExportCsv(): Promise<void> {
+  const filters = appliedListFilters.value
+  if (exporting.value || !filters || filters.sourceSystem === 'plm') return
+  exporting.value = true
+  exportOutcome.value = null
+  // The result line describes the feed this click exported. If the list moved to another feed
+  // while the request was in flight, `loadCurrentTab()` has already dropped the line and replaced
+  // the snapshot object, so the late result is not posted under a list it does not describe. The
+  // file itself is still saved: it is exactly what was asked for at click time.
+  const stillSameFeed = () => appliedListFilters.value === filters
+  try {
+    const result = await exportApprovalsCsv(filters)
+    saveExportFile(result.blob, result.fileName)
+    if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
+  } catch (error) {
+    if (stillSameFeed()) exportOutcome.value = exportFailureOf(error)
+  } finally {
+    exporting.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 // UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
@@ -1318,15 +1514,29 @@ const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange
 let isInitialTabLoad = true
 
 function loadCurrentTab() {
-  const query = {
+  const filters = {
     search: searchText.value || undefined,
     status: (statusFilter.value || undefined) as ApprovalStatus | undefined,
-    page: currentPage.value,
-    pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
     templateId: templateFilter.value || undefined,
     createdFrom: createdFromQuery.value,
     createdTo: createdToQuery.value,
+  }
+  const query = {
+    ...filters,
+    page: currentPage.value,
+    pageSize: pageSize.value,
+  }
+  // F3-E1: the export button reads this snapshot, so it exports what THIS load asked for. A result
+  // notice describes one export of one feed; once the feed on screen is a different one (another
+  // tab or filter set — a page change is not), the notice would describe a file the list no longer
+  // matches, so it is dropped. The snapshot object is replaced only in that case, so its identity
+  // changes exactly when the feed does — `handleExportCsv` relies on that to tell whether a late
+  // result still belongs to the list on screen (a page change or same-feed reload keeps it).
+  const nextAppliedFilters: ApprovalExportQuery = { ...filters, tab: activeTab.value }
+  if (JSON.stringify(nextAppliedFilters) !== JSON.stringify(appliedListFilters.value)) {
+    exportOutcome.value = null
+    appliedListFilters.value = nextAppliedFilters
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
@@ -1653,6 +1863,32 @@ onBeforeUnmount(() => {
   width: 260px;
 }
 
+/* F3-E1: the export hint / result lines are rows of the filter card's own grid (`gap` above), so
+   they need no margin of their own. */
+.approval-center__export-hint,
+.approval-center__export-notice {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.approval-center__export-notice {
+  font-size: 13px;
+}
+
+.approval-center__export-notice--success {
+  color: var(--ms-color-success);
+}
+
+.approval-center__export-notice--warning {
+  color: var(--ms-color-warning);
+}
+
+.approval-center__export-notice--error {
+  color: var(--ms-color-danger);
+}
+
 .approval-center__error {
   margin-bottom: var(--ms-space-4);
 }
@@ -1881,6 +2117,7 @@ onBeforeUnmount(() => {
   .approval-center__toolbar-daterange,
   .approval-center__filter-toggle,
   .approval-center__clear-filters,
+  .approval-center__export-button,
   .approval-center__create-button {
     width: 100%;
   }
