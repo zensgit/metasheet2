@@ -1410,8 +1410,8 @@ export default defineConfig({
       // DELETE path and the TTL-sweep function. Real DB. Excluded here so describeIfDatabase cannot
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-form-drafts.yml lane, which arms EXPECT_DB=1. NOT
-      // promoted into plugin-tests.yml's required run-list (unlike approval-comments post-#5095) —
-      // that promotion is an explicit OWNER DECISION, flagged in the PR body, not made here.
+      // promoted into plugin-tests.yml's required run-list (unlike approval-comments post-#5095):
+      // owner ruling Q9 ⑤ (2026-10-01) keeps this suite reference-only, not a required check.
       'tests/integration/approval-form-drafts.db.test.ts',
       // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
       // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-

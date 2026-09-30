@@ -28,9 +28,10 @@ name: Approval real-DB acceptance (P3-3 form drafts)
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: mirrors approval-realdb-comments.yml
 # (cloned from it) — plugin-tests.yml is an s6a sha256-pinned provenance input
 # (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so every edit forces an s6a re-pin and
-# a merge-serialisation race. plugin-tests.yml is left byte-identical by this PR. Whether this suite
-# should ALSO be promoted into plugin-tests.yml's required run-list (as #5095 later did for
-# approval-comments) is an OWNER DECISION, flagged in the PR body — not made here.
+# a merge-serialisation race. plugin-tests.yml is left byte-identical by this PR. Owner ruling Q9 ⑤
+# (2026-10-01): this suite is reference-only for now — it is NOT promoted into plugin-tests.yml's
+# required run-list (as #5095 later did for approval-comments), and this workflow is not a required
+# status check.
 #
 # TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
 # (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
