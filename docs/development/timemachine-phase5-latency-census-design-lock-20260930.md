@@ -9,6 +9,7 @@ Success means one validation run distinguishes, for each required histogram, an 
 ## Contract
 
 - Reuse the validator's existing raw metrics response as the percentile input. Do not make an additional metrics request for the census.
+- Recognize histogram TYPE declarations with the horizontal whitespace allowed by the [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/#line-format). A declared family with no samples remains `declared_empty`, including tab-separated or indented declarations.
 - Add only bounded counts and booleans under `latency_source_census` in the validation JSON, keyed by fixed metric identifiers from the Phase 5 threshold contract. Do not include raw metric lines, label values, hosts, URLs, credentials, or customer values in the new field.
 - Keep existing percentile thresholds, missing-sample failure behavior, feature flags, and report verdict unchanged.
 - Do not synthesize activity or samples. This is a local diagnostic and CI slice, not a staging dispatch, flag enablement, merge, or production-readiness claim.
@@ -18,4 +19,4 @@ Success means one validation run distinguishes, for each required histogram, an 
 1. Focused synthetic loopback test verifies one metrics request and all missing-sample distinctions.
 2. Existing Phase 5 required-samples contract test still passes, including missing-sample failure and positive-sample success.
 3. The test is wired into a PR-running CI lane and the exact PR head is green.
-4. Independent durable object storage, staging KMS/test key, candidate SHA, owner staging authorization, and the D7 same-archive backup/restore gate remain separate prerequisites for staging execution.
+4. Staging acceptance follows the owner-selected storage/custody assurance profile and a separately authorized exact-SHA window. D1 allows local object storage for staging; the existing D7 runbook's independent-store/KMS profile and the approved non-KMS local synthetic profile remain distinct. This diagnostic slice supplies neither runtime/provider selection nor staging execution.

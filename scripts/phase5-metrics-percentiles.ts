@@ -277,7 +277,7 @@ function buildLatencySourceCensus(
   thresholds: Array<{ metric: string; kind: string; prometheus_metric?: string; label_selector?: Record<string, string> }>,
 ): MetricsOutput['latency_source_census'] {
   const declared = new Set(
-    Array.from(metricsText.matchAll(/^# TYPE ([a-zA-Z_][a-zA-Z0-9_]*) histogram\s*$/gm), match => match[1]),
+    Array.from(metricsText.matchAll(/^[ \t]*#[ \t]*TYPE[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)[ \t]+histogram[ \t]*\r?$/gm), match => match[1]),
   );
   const census: MetricsOutput['latency_source_census'] = {};
 

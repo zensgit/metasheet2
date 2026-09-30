@@ -152,6 +152,37 @@ metasheet_snapshot_operation_duration_seconds_count{operation="create"} 0
   });
 });
 
+test('recognizes histogram TYPE declarations with valid horizontal whitespace', async () => {
+  const result = await runPhase5Validation(`${passingCounters}
+#\tTYPE\tmetasheet_plugin_reload_duration_seconds\thistogram\t
+ \t#  TYPE  metasheet_snapshot_operation_duration_seconds   histogram \t
+`);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.requestCount, 1);
+  assert.deepEqual(result.json.summary, {
+    total_checks: 11,
+    passed: 5,
+    failed: 0,
+    na: 6,
+    overall_status: 'fail',
+  });
+  assert.deepEqual(result.json.latency_source_census, Object.fromEntries([
+    'plugin_reload_latency_p95',
+    'plugin_reload_latency_p99',
+    'snapshot_create_latency_p95',
+    'snapshot_create_latency_p99',
+    'snapshot_restore_latency_p95',
+    'snapshot_restore_latency_p99',
+  ].map(metric => [metric, {
+    declared: true,
+    family_series: 0,
+    selector_series: 0,
+    selector_samples: 0,
+    reason: 'declared_empty',
+  }])));
+});
+
 test('keeps overall status pass when required latency samples satisfy thresholds', async () => {
   const result = await runPhase5Validation(`${passingCounters}\n${passingLatencySamples}`);
 
