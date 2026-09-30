@@ -1047,6 +1047,16 @@ async function onSetCompletionMode(mode: CompletionMode): Promise<void> {
   }
 }
 
+/** After a follower write the detail's abilities (`canLeave` in particular) are stale, so re-read
+ *  it. Leaving can end the viewer's access altogether: a follower-only viewer's re-read is a 404,
+ *  and the page then returns to the list instead of showing "task not found". */
+async function refreshAfterFollowerWrite(id: string, options: { leaving?: boolean } = {}): Promise<void> {
+  await loadDetail(id)
+  if (options.leaving && taskId.value === id && detailResult.value.kind === 'not_found') {
+    await router.push('/tasks')
+  }
+}
+
 async function onAddFollower(): Promise<void> {
   const id = taskId.value
   const userId = newFollowerId.value.trim()
@@ -1066,6 +1076,7 @@ async function onAddFollower(): Promise<void> {
       newFollowerId.value = ''
       followersState.value = result.task.followers
       notifyTasksChanged()
+      await refreshAfterFollowerWrite(id)
       return
     }
     applyDetailFailure(result, (code) => { followerError.value = codeMessage(code) })
@@ -1091,6 +1102,7 @@ async function onRemoveFollower(userId: string): Promise<void> {
       orgMissingFromAction.value = false
       followersState.value = result.task.followers
       notifyTasksChanged()
+      await refreshAfterFollowerWrite(id)
       return
     }
     applyDetailFailure(result, (code) => { followerError.value = codeMessage(code) })
@@ -1116,6 +1128,7 @@ async function onLeave(): Promise<void> {
       orgMissingFromAction.value = false
       followersState.value = result.task.followers
       notifyTasksChanged()
+      await refreshAfterFollowerWrite(id, { leaving: true })
       return
     }
     applyDetailFailure(result, (code) => { followerError.value = codeMessage(code) })

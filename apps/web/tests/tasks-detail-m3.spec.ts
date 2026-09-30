@@ -514,9 +514,9 @@ describe('TasksView detail — followers and leave', () => {
     expect(shown(el, 'tasks-detail-followers-unknown')).toBeNull()
     expect(shownAll(el, 'tasks-detail-follower')).toHaveLength(1)
     expect(shown(el, 'tasks-detail-followers')?.textContent).toContain('u5')
-    // A membership mutation reuses the SAME shared refresh path as parent/assignee actions —
-    // notifyTasksChanged still fires even though followers has no `loadDetail` refresh.
+    // A follower write notifies once and re-reads the detail so its abilities are current.
     expect(h_.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
   })
 
   it('shows the Leave button once the viewer\'s own id is confirmed IN the followers response', async () => {
@@ -604,6 +604,73 @@ describe('TasksView detail — followers and leave', () => {
 
     expect(h_.leaveTask).toHaveBeenCalledWith('t1')
     expect(shown(el, 'tasks-detail-leave')).toBeNull()
+  })
+
+  it('after Leave, a detail body that still says canLeave: true is re-read and the button follows it', async () => {
+    h_.getCurrentUserId.mockResolvedValue('viewer1')
+    h_.getTask
+      .mockResolvedValueOnce({ kind: 'ok', task: { ...taskDetail(), followers: ['viewer1'], canLeave: true } })
+      .mockResolvedValueOnce({ kind: 'ok', task: { ...taskDetail(), followers: [], canLeave: false } })
+    h_.leaveTask.mockResolvedValue({ kind: 'ok', task: { id: 't1', followers: [] } })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-leave')).toBeTruthy()
+
+    clickOn(el, 'tasks-detail-leave')
+    await flush(20)
+
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-detail-leave')).toBeNull()
+    expect(router!.currentRoute.value.path).toBe('/tasks/t1')
+  })
+
+  it('after Leave, a re-read that is a 404 (the viewer was only a follower) returns to the list', async () => {
+    h_.getCurrentUserId.mockResolvedValue('viewer1')
+    h_.getTask
+      .mockResolvedValueOnce({ kind: 'ok', task: { ...taskDetail(), followers: ['viewer1'], canLeave: true } })
+      .mockResolvedValue({ kind: 'not_found' })
+    h_.leaveTask.mockResolvedValue({ kind: 'ok', task: { id: 't1', followers: [] } })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-leave')).toBeTruthy()
+
+    clickOn(el, 'tasks-detail-leave')
+    await flush(20)
+
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-detail-leave')).toBeNull()
+    expect(router!.currentRoute.value.path).toBe('/tasks')
+  })
+
+  it('removing a follower re-reads the detail, so the viewer\'s own Leave follows the server', async () => {
+    h_.getCurrentUserId.mockResolvedValue('viewer1')
+    h_.getTask
+      .mockResolvedValueOnce({ kind: 'ok', task: { ...taskDetail(), followers: ['viewer1', 'u2'], canLeave: true } })
+      .mockResolvedValueOnce({ kind: 'ok', task: { ...taskDetail(), followers: ['u2'], canLeave: false } })
+    h_.removeFollower.mockResolvedValue({ kind: 'ok', task: { id: 't1', followers: ['u2'] } })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-leave')).toBeTruthy()
+
+    const viewerRow = shownAll(el, 'tasks-detail-follower').find((row) => row.textContent?.includes('viewer1'))!
+    ;(viewerRow.querySelector('[data-testid="tasks-detail-follower-remove"]') as HTMLButtonElement).click()
+    await flush(20)
+
+    expect(h_.removeFollower).toHaveBeenCalledWith('t1', 'viewer1')
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(shown(el, 'tasks-detail-leave')).toBeNull()
+  })
+
+  it('a 404 re-read after ADDING a follower does not navigate away (only leaving ends access)', async () => {
+    h_.getTask
+      .mockResolvedValueOnce({ kind: 'ok', task: taskDetail() })
+      .mockResolvedValue({ kind: 'not_found' })
+    h_.addFollower.mockResolvedValue({ kind: 'ok', task: { id: 't1', followers: ['u5'] } })
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-add-follower-input', 'u5')
+    await flush()
+    clickOn(el, 'tasks-detail-add-follower-submit')
+    await flush(20)
+
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
+    expect(router!.currentRoute.value.path).toBe('/tasks/t1')
   })
 })
 
