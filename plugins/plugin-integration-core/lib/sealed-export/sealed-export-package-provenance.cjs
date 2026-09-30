@@ -301,7 +301,9 @@ const PINNED_EVIDENCE_FILES = Object.freeze([
   // most PRs stops testifying about the bytes that moved. The job now lives byte-for-byte in its
   // own workflow file. The unit stays the WHOLE file, never a section of it: YAML keys may follow
   // `jobs:` and still apply to every job (permissions, env, defaults), so a partial pin would miss
-  // them. `plugin-tests.yml` executes no pinned file and is deliberately not a provenance input.
+  // them. `plugin-tests.yml` runs no pinned test body (its core-backend vitest step does collect the
+  // two pinned `.db.test.ts` files, but no DATABASE_URL is set at that point, so both register as
+  // skipped) and is deliberately not a provenance input.
   Object.freeze({
     id: 's6aPowershell51Workflow',
     relativePath:
