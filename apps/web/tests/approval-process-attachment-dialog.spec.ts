@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
 /**
@@ -243,6 +244,12 @@ const MY_TURN_ASSIGNMENTS = [{ id: 'asn_1', isActive: true, type: 'user', assign
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () => {
   let app: VueApp<Element> | null = null

@@ -20,6 +20,7 @@
  * alone to collect this picker spec.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import {
   createApp,
   defineComponent,
@@ -186,6 +187,12 @@ afterEach(() => {
 
 beforeEach(() => {
   listMock.mockReset()
+})
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
 })
 
 describe('ApprovalRecordLinkPicker — dedicated sheet contract', () => {

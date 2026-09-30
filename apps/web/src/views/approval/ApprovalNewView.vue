@@ -122,7 +122,7 @@
                   data-testid="approval-route-preview-node"
                 >
                   {{ node.nodeLabel }}
-                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node) }}</span>
+                  <span class="approval-new__flow-preview-chip-summary">{{ routePreviewAssigneeSummary(node, isZh) }}</span>
                 </span>
               </template>
               <span
@@ -644,6 +644,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useLocale } from '../../composables/useLocale'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -718,6 +719,8 @@ import { ensureUserNamesResolved, resolvedUserNames } from '../../approvals/dire
 
 const route = useRoute()
 const router = useRouter()
+// O-8 / F8-1: this view follows the shell locale (module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
 const approvalStore = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canWrite } = useApprovalPermissions()
@@ -1253,7 +1256,7 @@ const routePreviewController = createRoutePreviewController(previewApprovalRoute
   if ('preview' in patch) routePreview.value = patch.preview ?? null
   if (patch.loading !== undefined) routePreviewLoading.value = patch.loading
   if (patch.error !== undefined) routePreviewError.value = patch.error
-})
+}, () => isZh.value)
 
 async function loadRoutePreview() {
   if (!template.value) return
@@ -1374,7 +1377,7 @@ function recordLinkDisplay(fieldId: string): string {
   if (!parsed.ok) return ''
   // Human label for THIS field when the picker supplied one; otherwise a generic selected-record
   // label. NEVER fall back to the raw recordId (review: id oracle surface).
-  return formatRecordLinkDisplay(recordLinkLabels[fieldId])
+  return formatRecordLinkDisplay(recordLinkLabels[fieldId], isZh.value)
 }
 
 function clearRecordLink(fieldId: string): void {
@@ -1459,7 +1462,7 @@ function setDateRangeEnd(fieldId: string, value: string | null): void {
 
 function dateRangeDurationDisplay(field: FormField): string {
   const dateType = field.props?.dateType
-  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id))
+  const text = computeDateRangeDurationText(dateType, dateRangeStart(field.id), dateRangeEnd(field.id), isZh.value)
   return text ?? '-'
 }
 
@@ -1572,7 +1575,7 @@ async function handleSubmit() {
   // otherwise only surface as an unreadable backend 400. Checked AFTER the top-level validate()
   // above succeeds, so both validation layers must pass before anything is submitted.
   if (template.value) {
-    const detailViolations = validateDetailRows(template.value.formSchema, formData)
+    const detailViolations = validateDetailRows(template.value.formSchema, formData, isZh.value)
     if (detailViolations.length > 0) {
       ElMessage.warning(detailViolations[0])
       return

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 /**
  * P5-C-1 — member-action dialog grammar (chrome-only unification).
@@ -250,6 +251,9 @@ describe('P5-C-1 — member-action dialog grammar', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // O-8 / F8-1: ApprovalDetailView now follows the shell locale; this suite's selectors are the
+    // shipped zh-CN copy (C1), so pin zh-CN explicitly rather than relying on jsdom's default.
+    useLocale().setLocale('zh-CN')
     mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
     mockCanAct.value = true
     mockCurrentUserId.value = 'user_1'
@@ -475,5 +479,31 @@ describe('memberActionDialogGrammar (pure module)', () => {
       confirmLabel: '提交评论',
     })
     expect(ACTION_DIALOG_TEST_ID).toBe('approval-action-dialog')
+  })
+})
+
+// O-8 / F8-1: the English table — same verbs, same keys, identical testids and row counts (defined
+// once in the module), every copy field present, translated and CJK-free.
+describe('memberActionDialogGrammar — locale tables (O-8 / F8-1)', () => {
+  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
+  it('EN table mirrors the zh-CN table: same testids/rows, translated copy, no CJK', async () => {
+    const mod = await import('../src/approvals/memberActionDialogGrammar')
+    const zh = mod.MEMBER_ACTION_DIALOG_GRAMMAR
+    const en = mod.MEMBER_ACTION_DIALOG_GRAMMAR_EN
+    const verbs = Object.keys(zh).sort()
+    expect(verbs).toEqual(['add_sign', 'comment', 'reduce_sign', 'return', 'transfer'])
+    expect(Object.keys(en).sort()).toEqual(verbs)
+    for (const verb of verbs as Array<keyof typeof zh>) {
+      expect(en[verb].dialogTestId, verb).toBe(zh[verb].dialogTestId)
+      expect(en[verb].commentRows, verb).toBe(zh[verb].commentRows)
+      for (const key of ['dialogTitle', 'commentLabel', 'commentPlaceholder', 'confirmLabel'] as const) {
+        expect(en[verb][key].trim(), `${verb}.${key} empty`).not.toBe('')
+        expect(en[verb][key], `${verb}.${key} untranslated`).not.toBe(zh[verb][key])
+        expect(en[verb][key], `${verb}.${key} has CJK`).not.toMatch(CJK)
+        expect(zh[verb][key], `${verb}.${key} zh has no CJK`).toMatch(CJK)
+      }
+    }
+    expect(mod.memberActionDialogGrammar(true)).toBe(zh)
+    expect(mod.memberActionDialogGrammar(false)).toBe(en)
   })
 })

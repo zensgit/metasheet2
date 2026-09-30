@@ -387,7 +387,7 @@
                motivates the requester to actually click 催办. -->
           <template #actions="{ row }">
             <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
-              已等待 {{ formatRelativeWait(row.createdAt) }}
+              {{ waitingPhrase(formatRelativeWait(row.createdAt, isZh), isZh) }}
             </span>
             <el-button
               v-if="row.status === 'pending'"
@@ -689,7 +689,7 @@ import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import ApprovalCenterTable from './ApprovalCenterTable.vue'
 import ApprovalCenterDetailPane from './ApprovalCenterDetailPane.vue'
@@ -787,7 +787,7 @@ const paneController = createDetailPaneController((id: string) => getApproval(id
   if ('approval' in patch) paneApproval.value = patch.approval ?? null
   if (patch.loading !== undefined) paneLoading.value = patch.loading
   if (patch.error !== undefined) paneError.value = patch.error
-})
+}, () => isZh.value)
 
 // Prefers the already-known list row (zero cost, immediate paint); falls back to the fetched
 // detail once available so the pane still renders after the id has paged/filtered off-screen or
@@ -920,7 +920,7 @@ const remindingIds = ref<Set<string>>(new Set())
 const remindedIds = ref<Set<string>>(new Set())
 
 function urgeState(rowId: string) {
-  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value, isZh.value)
 }
 
 // B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
 // ---------------------------------------------------------------------------
@@ -154,6 +155,12 @@ function baseInstance(overrides: Record<string, unknown> = {}): any {
 function resubmitButton(container: HTMLElement): HTMLElement | null {
   return container.querySelector('[data-testid="approval-resubmit-button"]')
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — UX B2-13 再次提交', () => {
   let app: VueApp<Element> | null = null

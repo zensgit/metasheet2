@@ -104,7 +104,8 @@ import {
   listApprovalRecordLinkOptions,
   type ApprovalRecordLinkOption,
 } from '../api'
-import { RECORD_LINK_SELECTED_GENERIC } from '../recordLinkField'
+import { recordLinkSelectedGeneric } from '../recordLinkField'
+import { useLocale } from '../../composables/useLocale'
 
 const props = defineProps<{
   visible: boolean
@@ -117,6 +118,9 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'confirm', payload: { recordId: string; display: string }): void
 }>()
+
+// O-8 / F8-1: picker chrome follows the shell locale (module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
 
 const search = ref('')
 const records = ref<ApprovalRecordLinkOption[]>([])
@@ -313,7 +317,7 @@ function onConfirm() {
   // Never emit a raw id as display.
   const display = match.display && match.display !== id
     ? match.display
-    : RECORD_LINK_SELECTED_GENERIC
+    : recordLinkSelectedGeneric(isZh.value)
   emit('confirm', { recordId: id, display })
 }
 </script>

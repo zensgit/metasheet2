@@ -10,6 +10,9 @@
  * `reminded` is deliberately session-scoped (not persisted): the authoritative "you already nudged
  * this" lives server-side as an hourly window. A localStorage copy would keep claiming 已催办 long
  * after that window expired — a stale claim is worse than no claim.
+ *
+ * O-8 / F8-1: the label/title follow the shell locale via the caller's `isZh` (required — the only
+ * caller, ApprovalCenterView.vue, reads it from `useLocale()`).
  */
 export interface UrgeButtonState {
   disabled: boolean
@@ -23,6 +26,7 @@ export function urgeButtonState(
   rowId: string,
   remindingIds: ReadonlySet<string>,
   remindedIds: ReadonlySet<string>,
+  isZh: boolean,
 ): UrgeButtonState {
   const loading = remindingIds.has(rowId)
   // While this row's own request is in flight, it renders as loading — not as 已催办 — even though
@@ -31,7 +35,7 @@ export function urgeButtonState(
   return {
     loading,
     disabled: loading || reminded,
-    label: reminded ? '已催办' : '催办',
-    title: reminded ? '本次已催办（服务端每小时限一次）' : '',
+    label: reminded ? (isZh ? '已催办' : 'Reminded') : (isZh ? '催办' : 'Remind'),
+    title: reminded ? (isZh ? '本次已催办（服务端每小时限一次）' : 'Reminder sent (the server allows one per hour)') : '',
   }
 }

@@ -87,6 +87,10 @@ import { delegationDisplayStatus } from '../../approvals/delegationStatus'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
+import { useLocale } from '../../composables/useLocale'
+
+// O-8 / F8-1: this view follows the shell locale (module-scope `useLocale()` singleton).
+const { isZh } = useLocale()
 
 const delegations = ref<DelegationRecord[]>([])
 const loading = ref(false)
@@ -137,7 +141,7 @@ function openCreate() {
 }
 
 async function submit() {
-  const error = validateOwnDelegationForm(form)
+  const error = validateOwnDelegationForm(form, isZh.value)
   if (error) {
     ElMessage.warning(error)
     return

@@ -63,7 +63,7 @@
          only. The 第 X/Y 步 sub-line only renders when both numbers are present. -->
     <el-table-column v-if="showWaitColumn" label="已等待" width="140">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
-        <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt) }}</span>
+        <span :class="waitClass(row.createdAt)">{{ formatRelativeWait(row.createdAt, isZh) }}</span>
         <div
           v-if="row.currentStep != null && row.totalSteps != null"
           class="approval-center__wait-progress"
@@ -90,6 +90,7 @@
 import { ref, watch } from 'vue'
 import type { UnifiedApprovalDTO } from '../../types/approval'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { useLocale } from '../../composables/useLocale'
 import { useCancelRoundCloseReasons } from '../../approvals/useCancelRoundCloseReasons'
 import StatusTag from '../../components/status/StatusTag.vue'
 
@@ -105,6 +106,9 @@ import StatusTag from '../../components/status/StatusTag.vue'
 //     column at all on those two tabs)
 // Presentation-only: every data-testid, handler, and event lives in the parent's slot content /
 // prop wiring, unchanged.
+// O-8 / F8-1: table chrome follows the shell locale (same singleton the parent view reads).
+const { isZh } = useLocale()
+
 const props = withDefaults(
   defineProps<{
     rows: UnifiedApprovalDTO[]

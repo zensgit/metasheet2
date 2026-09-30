@@ -2,6 +2,7 @@
  * A-3 decision page (one-tap lock #3594 §5) — view behavior + the no-raw-/actions tripwire.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, type App as VueApp } from 'vue'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -88,6 +89,12 @@ const stub = (name: string, tag = 'div') => defineComponent({
 })
 
 const UI_WAIT_OPTIONS = { timeout: 5_000, interval: 10 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalCardDecisionView (A-3)', () => {
   let app: VueApp<Element> | null = null

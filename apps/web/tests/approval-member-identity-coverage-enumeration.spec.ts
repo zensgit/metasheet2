@@ -360,6 +360,14 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/assigneeSource.ts', "source.roleIds.join('、')"],
     ['src/approvals/assigneeSource.ts', "source.groupIds.join('、')"],
   ]),
+  // O-8 / F8-1 (approval member-surface locale): the English arm of the same summary
+  // (`assigneeSourceSummaryEn`) — identical posture, only the separator and wording differ. Same
+  // audience split: the viewer-facing path still intercepts static_user/static_role to counts.
+  ...group('OUT-OF-SCOPE', 'assigneeSource.ts English arm (assigneeSourceSummaryEn) of the three entries directly above -- same authoring-only raw-id join for static_user/static_role (intercepted to count-only for viewers by requesterFacingSourceSummary), same template-authored group references for user_group', [
+    ['src/approvals/assigneeSource.ts', "Users: ${source.userIds.join(', ')"],
+    ['src/approvals/assigneeSource.ts', "Roles: ${source.roleIds.join(', ')"],
+    ['src/approvals/assigneeSource.ts', "User groups: ${source.groupIds.join(', ')"],
+  ]),
   ...group('OUT-OF-SCOPE', 'authoring formula text under construction by the template author, not a viewer render', [
     ['src/views/approval/TemplateAuthoringView.vue', 'requester.role in [${JSON.stringify(roleId)}]'],
   ]),
@@ -386,6 +394,8 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/detailField.ts', 'errors.push(`明细字段 ${label} 的子字段 ${column.id.trim()'],
     ['src/approvals/detailField.ts', 'const fieldLabel = field.label || field.id'],
     ['src/approvals/detailField.ts', 'violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)'],
+    // O-8 / F8-1: the English arm of the same detail-row violation (same structural column id).
+    ['src/approvals/detailField.ts', 'violations.push(`"${fieldLabel}" row ${index + 1} is missing "${column.label || column.id}"`)'],
     ['src/approvals/detailField.ts', 'label: column.label || column.id,'],
     ['src/approvals/detailField.ts', 'result.push({ key: field.id, label: field.label || field.id, value: text })'],
     ['src/approvals/detailField.ts', 'label: field.label || field.id,'],

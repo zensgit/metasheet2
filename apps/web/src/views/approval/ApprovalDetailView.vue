@@ -51,7 +51,7 @@
           effect="plain"
           data-testid="approval-wait-chip"
         >
-          已等待 {{ waitChipLabel }}
+          {{ waitingPhrase(waitChipLabel, isZh) }}
         </el-tag>
         <el-tag
           v-if="isInParallelRegion"
@@ -508,10 +508,10 @@
             >
               <span class="approval-detail__timeline-upcoming-dot" />
               <span v-if="entry.seatNamesWithheld" class="approval-detail__timeline-upcoming-text">
-                {{ entry.label }} · 已等待 {{ entry.wait }}
+                {{ entry.label }} · {{ waitingPhrase(entry.wait, isZh) }}
               </span>
               <span v-else class="approval-detail__timeline-upcoming-text">
-                当前处理人：{{ entry.label }} · 已等待 {{ entry.wait }}
+                当前处理人：{{ entry.label }} · {{ waitingPhrase(entry.wait, isZh) }}
               </span>
             </div>
             <div
@@ -780,9 +780,9 @@
     <!-- Transfer dialog -->
     <el-dialog
       v-model="transferDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTitle"
+      :title="grammar.transfer.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTestId"
+      :data-testid="grammar.transfer.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above — the
@@ -806,13 +806,13 @@
             @update:model-value="transferUserId = $event ?? ''"
           />
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel">
+        <el-form-item :label="grammar.transfer.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel"
+            :rows="grammar.transfer.commentRows"
+            :placeholder="grammar.transfer.commentPlaceholder"
+            :aria-label="grammar.transfer.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -825,7 +825,7 @@
           data-testid="approval-transfer-submit"
           @click="submitTransfer"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.transfer.confirmLabel }}
+          {{ grammar.transfer.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -833,9 +833,9 @@
     <!-- P1-B 加签 dialog -->
     <el-dialog
       v-model="addSignDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTitle"
+      :title="grammar.add_sign.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTestId"
+      :data-testid="grammar.add_sign.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -881,15 +881,15 @@
              does. The wire contract is unchanged: this client sends `'parallel'`, and the server
              still accepts `'before'` from any other client. -->
         <el-form-item label="加签方式">
-          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
+          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ addSignModeHint(isZh) }}</span>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel">
+        <el-form-item :label="grammar.add_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel"
+            :rows="grammar.add_sign.commentRows"
+            :placeholder="grammar.add_sign.commentPlaceholder"
+            :aria-label="grammar.add_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -902,7 +902,7 @@
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.confirmLabel }}
+          {{ grammar.add_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -910,9 +910,9 @@
     <!-- P1-B 减签 dialog -->
     <el-dialog
       v-model="reduceSignDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTitle"
+      :title="grammar.reduce_sign.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTestId"
+      :data-testid="grammar.reduce_sign.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -944,13 +944,13 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel">
+        <el-form-item :label="grammar.reduce_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel"
+            :rows="grammar.reduce_sign.commentRows"
+            :placeholder="grammar.reduce_sign.commentPlaceholder"
+            :aria-label="grammar.reduce_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -963,7 +963,7 @@
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.confirmLabel }}
+          {{ grammar.reduce_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -971,9 +971,9 @@
     <!-- Comment dialog -->
     <el-dialog
       v-model="commentDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTitle"
+      :title="grammar.comment.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTestId"
+      :data-testid="grammar.comment.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- B1-04: same dialog-scoped failure message as the 通过/驳回 dialog above. -->
@@ -987,7 +987,7 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel">
+        <el-form-item :label="grammar.comment.commentLabel">
           <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
           <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
             <el-tag
@@ -1004,9 +1004,9 @@
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel"
+            :rows="grammar.comment.commentRows"
+            :placeholder="grammar.comment.commentPlaceholder"
+            :aria-label="grammar.comment.commentLabel"
           />
         </el-form-item>
         <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND
@@ -1053,7 +1053,7 @@
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.comment.confirmLabel }}
+          {{ grammar.comment.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -1061,9 +1061,9 @@
     <!-- Return dialog -->
     <el-dialog
       v-model="returnDialogVisible"
-      :title="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTitle"
+      :title="grammar.return.dialogTitle"
       :width="MEMBER_ACTION_DIALOG_WIDTH"
-      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTestId"
+      :data-testid="grammar.return.dialogTestId"
       @keydown.tab="trapMemberActionDialogFocus"
     >
       <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
@@ -1092,13 +1092,13 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel">
+        <el-form-item :label="grammar.return.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentRows"
-            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentPlaceholder"
-            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel"
+            :rows="grammar.return.commentRows"
+            :placeholder="grammar.return.commentPlaceholder"
+            :aria-label="grammar.return.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -1111,7 +1111,7 @@
           data-testid="approval-return-submit"
           @click="submitReturn"
         >
-          {{ MEMBER_ACTION_DIALOG_GRAMMAR.return.confirmLabel }}
+          {{ grammar.return.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -1153,6 +1153,7 @@ import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vu
 import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
+import { useLocale } from '../../composables/useLocale'
 import {
   buildDetailRowsForDisplay,
   buildDisplayFields,
@@ -1178,11 +1179,11 @@ import {
 } from '../../approvals/attachmentUpload'
 import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
-import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
+import { addSignModeHint, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
 import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
-import { MEMBER_ACTION_DIALOG_GRAMMAR, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
+import { memberActionDialogGrammar, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
 // S3b: the 全文评论 tab wrapper. This file itself does not import shared/comments directly —
@@ -1194,6 +1195,11 @@ import { resolveStatusDisplay } from '../../utils/statusDomains'
 const route = useRoute()
 const router = useRouter()
 const store = useApprovalStore()
+// O-8 / F8-1: this view follows the shell locale (the module-scope `useLocale()` singleton App.vue
+// and the template center already read).
+const { isZh } = useLocale()
+// The five member-action dialogs' copy for the current locale (testids / row counts are shared).
+const grammar = computed(() => memberActionDialogGrammar(isZh.value))
 const templateStore = useApprovalTemplateStore()
 const { canAct, permissions: approvalAccess } = useApprovalPermissions()
 const actionCommentInputRef = ref<{ focus: () => void } | null>(null)
@@ -1489,7 +1495,7 @@ const recordTableRows = computed<RecordTableRow[]>(() => {
 // B1-03: 已等待 chip — a glanceable "how long has this been sitting" cue next to the status tag,
 // only meaningful while the instance is still pending (once resolved, `updatedAt`/the history
 // timeline already tell that story). Severity mirrors the list view's warn/urgent bands.
-const waitChipLabel = computed(() => (approval.value ? formatRelativeWait(approval.value.createdAt) : ''))
+const waitChipLabel = computed(() => (approval.value ? formatRelativeWait(approval.value.createdAt, isZh.value) : ''))
 const waitChipType = computed(() => {
   const severity = approval.value ? waitSeverity(approval.value.createdAt) : 'normal'
   if (severity === 'urgent') return 'danger'
@@ -1522,6 +1528,7 @@ const detailTables = computed<Record<string, DetailDisplayTable>>(() => {
 const displayFields = computed<DisplayField[]>(() =>
   buildDisplayFields(approval.value?.formSchema ?? null, approval.value?.formSnapshot ?? null, {
     attachmentPipelineEnabled: attachmentPipelineEnabled.value,
+    isZh: isZh.value,
   }),
 )
 
@@ -1841,7 +1848,7 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
   if (!detail || detail.status !== 'pending') return []
   const keys = new Set(currentActiveNodeKeys.value)
   if (keys.size === 0) return []
-  const wait = formatRelativeWait(detail.updatedAt)
+  const wait = formatRelativeWait(detail.updatedAt, isZh.value)
   const active = detail.assignments.filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
   // 撤销轮 — ratified 撤销锁 §15.6 (P-6) seat display boundary, lift conditions not met: the
   // round's progress names no current approver. One line with the V1 word stands in for the whole
@@ -1902,7 +1909,7 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
   if (!currentNodeKey) return []
   const graph = pinnedGraph.value
   if (!graph) return []
-  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null)
+  return buildUpcomingNodes(graph, currentNodeKey, approval.value?.formSchema ?? null, isZh.value)
 })
 
 const actionDialogVisible = ref(false)
@@ -2688,7 +2695,7 @@ function handleMemberActionFailure(
   dialogVisible: Ref<boolean>,
   dialogError: Ref<string | null>,
 ): void {
-  const failure = memberActionFailure(error, fallback)
+  const failure = memberActionFailure(error, fallback, isZh.value)
   if (failure.isPolicyDenial) {
     ElMessage.error(failure.message)
     dialogVisible.value = false

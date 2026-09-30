@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 
 // Gate finding P2-R1 on PR #4983: this file's first mounted test needs ~9.8s wall inside the
 // 26-file canary block (dynamic `import()` of ApprovalDetailView.vue + a full mount), against
@@ -282,6 +283,12 @@ function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
 }
 
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
+
 describe('Lock-5 A-2 (FE door) — the member bar mirrors the per-node operation policy', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -479,13 +486,13 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
   // called nor that `*DialogVisible.value = false` runs. The MOUNTED tests that follow close that —
   // they drive the real handler through a rejected `executeAction` carrying the policy code.
   it('a policy 409 produces honest copy with NO retry invitation, and flags the dialog to close', async () => {
-    const { memberActionFailure, NODE_OPERATION_DISABLED_MESSAGE } =
+    const { memberActionFailure, NODE_OPERATION_DISABLED_MESSAGE, NODE_OPERATION_DISABLED_MESSAGE_EN } =
       await import('../src/approvals/memberActionErrorCopy')
     const denial = Object.assign(new Error('Operation transfer is disabled at this node'), {
       status: 409,
       code: 'APPROVAL_NODE_OPERATION_DISABLED',
     })
-    const result = memberActionFailure(denial, '转交失败，请重试')
+    const result = memberActionFailure(denial, '转交失败，请重试', true)
     expect(result.isPolicyDenial).toBe(true)
     expect(result.message).toBe(NODE_OPERATION_DISABLED_MESSAGE)
     // The whole point: no retry invitation on a permanently-refused operation.
@@ -493,6 +500,13 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
     // §2.4 values-free: the fixed string interpolates nothing from the server payload.
     expect(result.message).not.toContain('transfer')
     expect(result.message).not.toContain('approval_')
+    // O-8 / F8-1: the English copy keeps the same rule — honest, values-free, no retry invitation.
+    const en = memberActionFailure(denial, 'Transfer failed. Please try again.', false)
+    expect(en.isPolicyDenial).toBe(true)
+    expect(en.message).toBe(NODE_OPERATION_DISABLED_MESSAGE_EN)
+    expect(en.message.toLowerCase()).not.toContain('try again')
+    expect(en.message.toLowerCase()).not.toContain('retry')
+    expect(en.message).not.toContain('approval_')
   })
 
   it('WIRING (mounted): a policy 409 through the REAL transfer handler surfaces the honest copy AND closes the dialog', async () => {
@@ -642,18 +656,18 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
     // caller's `fallback` is used ONLY for a message-less / non-`Error` throw. Title and assertions
     // corrected to match the code.
     const other = Object.assign(new Error('目标用户不存在'), { status: 400, code: 'VALIDATION_ERROR' })
-    const typed = memberActionFailure(other, '转交失败，请重试')
+    const typed = memberActionFailure(other, '转交失败，请重试', true)
     expect(typed.isPolicyDenial).toBe(false)
     expect(typed.message).toBe('目标用户不存在')
 
     // A non-Error throw → the caller's generic copy, never a blank toast.
-    const bare = memberActionFailure({}, '转交失败，请重试')
+    const bare = memberActionFailure({}, '转交失败，请重试', true)
     expect(bare.isPolicyDenial).toBe(false)
     expect(bare.message).toBe('转交失败，请重试')
 
     // A 409 that is NOT the policy code must not be misclassified as a denial.
     const otherConflict = Object.assign(new Error('nope'), { status: 409, code: 'APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED' })
-    expect(memberActionFailure(otherConflict, 'x').isPolicyDenial).toBe(false)
+    expect(memberActionFailure(otherConflict, 'x', true).isPolicyDenial).toBe(false)
   })
 })
 
