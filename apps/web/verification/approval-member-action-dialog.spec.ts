@@ -345,3 +345,76 @@ test('a role-seated approver sees the process-evidence uploader in the 评论 di
   await expect(page.getByTestId('approval-comment-submit')).toBeVisible()
   await expect(page.getByTestId('approval-comment-attachment-upload')).toHaveCount(0)
 })
+
+// F4-S1 (Lock-5 L5-B, OD-L5-4(b) + owner disposition (1)) — the 加签 dialog's 后加签 arm in a real
+// browser: the default stays 并加签, the 后加签 arm states the same-node-new-round shape (never the
+// corpus 「当前节点自动通过并流转到新增节点」), the payload carries `addSignMode:'after'`, and the
+// server's round-incomplete 409 renders INLINE while the dialog stays open (not a policy denial).
+// The refusal is mode-selected: switching back to 并加签 in the same dialog submits and closes it.
+for (const viewport of [
+  { label: 'desktop', width: 1440, height: 960 },
+  { label: 'tablet', width: 1024, height: 768 },
+] as const) {
+  test(`F4-S1 后加签 in the add-sign dialog: honest copy, after-mode payload, inline round-incomplete refusal at ${viewport.label}`, async ({ page }) => {
+    await openHarness(page, viewport.width, viewport.height, '?scenario=add-sign-after')
+
+    const trigger = page.getByTestId('approval-add-sign-button')
+    await trigger.click()
+    const accessibleDialog = page.getByRole('dialog', { name: '加签' })
+    await expect(accessibleDialog).toBeVisible()
+    const dialog = page.getByTestId('approval-add-sign-dialog')
+
+    const parallelArm = dialog.getByRole('radio', { name: '并加签' })
+    const afterArm = dialog.getByRole('radio', { name: '后加签' })
+    await expect(parallelArm).toBeChecked()
+    await expect(afterArm).not.toBeChecked()
+    await expect(page.getByTestId('approval-add-sign-mode-hint')).toBeVisible()
+    await expect(page.getByTestId('approval-add-sign-after-hint')).toHaveCount(0)
+    await expect(dialog).not.toContainText('前加签')
+
+    await afterArm.check()
+    await expect(afterArm).toBeChecked()
+    const afterHint = page.getByTestId('approval-add-sign-after-hint')
+    await expect(afterHint).toBeVisible()
+    await expect(afterHint).toContainText('同一节点上开始新一轮审批')
+    await expect(afterHint).toContainText('不会插入新的审批节点')
+    await expect(afterHint).toContainText('也不是「当前节点自动通过并流转到新增节点」')
+    await expect(page.getByTestId('approval-add-sign-mode-hint')).toHaveCount(0)
+
+    await selectFirstEnabledOption(page, dialog, '搜索并添加加签人')
+    // One addee: the appended round needs no aggregation choice (OD-L5-5(a)).
+    await expect(page.getByTestId('approval-add-sign-aggregation')).toHaveCount(0)
+    await expectDialogPaintedWithinViewport(page, 'approval-add-sign-dialog')
+
+    const confirm = page.getByTestId('approval-add-sign-submit')
+    await expect(confirm).toBeEnabled()
+    await confirm.click()
+
+    const inlineError = dialog.getByTestId('approval-action-dialog-error')
+    await expect(inlineError).toBeVisible()
+    await expect(inlineError).toContainText('本节点还有其他审批人尚未表态，你的同意还不能完成本轮，暂不能后加签')
+    await expect(inlineError).not.toContainText('请重试')
+    await expect(accessibleDialog).toBeVisible()
+    await expect(page.locator('.el-message--error')).toHaveCount(0)
+    await expectNoHorizontalOverflow(page)
+    await page.screenshot({
+      path: `verification-output/f4s1-add-sign-after-refused-${viewport.width}.png`,
+      fullPage: false,
+    })
+
+    const afterRequests = await page.evaluate(() => window.__P5C_ACTION_REQUESTS__ ?? [])
+    expect(afterRequests).toEqual([
+      { id: 'apv_5', req: { action: 'add_sign', targetUserIds: ['user_target'], addSignMode: 'after' } },
+    ])
+
+    // Mode-selected: the same dialog, same addee, 并加签 → submitted and closed.
+    await parallelArm.check()
+    await expect(page.getByTestId('approval-add-sign-mode-hint')).toBeVisible()
+    await confirm.click()
+    await expect(accessibleDialog).toBeHidden()
+    const allRequests = await page.evaluate(() => window.__P5C_ACTION_REQUESTS__ ?? [])
+    expect(allRequests.at(-1)).toEqual(
+      { id: 'apv_5', req: { action: 'add_sign', targetUserIds: ['user_target'], addSignMode: 'parallel' } },
+    )
+  })
+}
