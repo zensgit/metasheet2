@@ -6,12 +6,12 @@
 
 | 项 | 值 |
 |---|---|
-| 演示机运行版本 | **r59** = main `05461c7399d9fcc2f0e9c455c1148ac7a0e31ce5`（含 #6039） |
+| 演示机运行版本 | **r61** = `bf648922a`（tag `onprem-r61`，2026-09-29 18:04 上机；记录见 `r61-deploy-record-20260929.md`）。r60 = `583dfdf1a`、r59 = `05461c739` 已被替换 |
 | 打包 | CI run `35956537159`，包 `metasheet-multitable-onprem-v2.5.0-r59.zip` |
 | 迁移 | r58 之后新增 9 条全部执行（`kysely_migration` 计数 = 9） |
 | 上机前备份 | `pre-r59-20260924-124617.dump`（演示机 `output\backups\`）+ 升级脚本自己的 `upgrade-backup-20260924-124620` |
 | 验证 | 后端 health、经 nginx `/api/health` 200、前端 smoke PASS、#5953/#6039 标记 True、维护标志已撤、进程 online |
-| 之后合入 main、**未上机**的 | 从 `b7e1cbbeb` 起（#6040/#6041 等）——下次 R60 一并上 |
+| 之后合入 main、**未上机**的 | `bf648922a` 之后（#5972 起）；#6151 / #6153 / #6157 / 云课堂 / #6163 / #6164 均留下一版 |
 
 已知且非本次引入：备料定时试拉报 `CONNECTION_CANONICAL_UNAVAILABLE`（r58 日志末尾已出现）；上机脚本里 6 条旧标记恒为 False（r58 同样，标记写法过时，不是回退）。
 
@@ -75,7 +75,7 @@
 - 在飞、待条件：#6098（连接拒绝原因诊断日志，draft，含时序旁路需重做）。#6076（外部系统删除×并发写锁协议）已于 2026-09-28 合入（`e535702e6`），在 R60 包 `583dfdf1a` 内。
 - 待 owner：#5933 授权（R60 普查后；合并即演示机 migrate 执行）；#6099 DDL 方案 A 审；#6121 handoffAdvance 无租户放行策略；SHEET-LIVENESS-GAP-1（lockRestoreJobBlock）；#5864 字段类型转换五项；PR #5609 考勤守卫选路。
 
-**待上机（R60）**：main `b7e1cbbeb` 及之后合入的全部（清单与预检统一追加在 #6079）。另需手工：演示机现网 nginx.conf 同步 #6097 的 index.html no-cache 段；#6109 导出租户墙上线前跑预检看 `checks.carryTargetBinding.ownershipState`。
+**R60 已上机（2026-09-28）**：包 `583dfdf1a`，迁移 6/6，nginx #6097 no-cache 段已加，只读复核见 #6079；记录与教训见 `r60-deploy-record-20260928.md`。**待上机（R61）**：main `0185b00a5` 及之后（复制数据表 S1，多 2 条迁移，先迁移再切代码）。仍待办：属主重存 PLM 凭据后手动试拉；#6109 预检 `ownershipState` 由 owner 在界面读或签只读探针令牌。
 
 - R60 上机时顺带跑定时试拉 `CONNECTION_CANONICAL_UNAVAILABLE` 的只读判定（Q0–Q6 与日志检查），见 `stock-prep-connection-canonical-unavailable-diagnosis-20260925.md` §4。只判 R60 重启之后那次试拉的结果，重启前 r58/r59 日志里的报错不能拿当前库判（同文 §4 执行约定、§4.6 的 S6）。结论之一：#5933 不会消除这个错误（同文 §3）。
 
