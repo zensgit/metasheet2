@@ -105,6 +105,31 @@ export const APPROVAL_ACTION_TYPES = [
   'handle',
 ] as const
 export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
+/**
+ * Lock-5 L5-B (gate B-1) — the three EXPLICIT add-sign modes. `parallel` (并加签, the default when
+ * the key is absent) and `before` seat co-signers into the current node's CURRENT round (outside a
+ * parallel region the two are byte-identical — gate B-2's pin; `before` is refused inside one).
+ * `after` (后加签) is OD-L5-4(b)'s deferred same-node round: the actor's seat is consumed as an
+ * approval and, when that approval completes the node's current round, the addees activate as a
+ * FRESH `nodeEntryEpoch` round at the SAME node. No node is inserted and the current node is not
+ * skipped. Any other value is a values-free 400 `APPROVAL_ADD_SIGN_MODE_INVALID` at BOTH doors
+ * (route and service) — never silently flattened to the default.
+ */
+export const APPROVAL_ADD_SIGN_MODES = ['before', 'parallel', 'after'] as const
+export type ApprovalAddSignMode = typeof APPROVAL_ADD_SIGN_MODES[number]
+export function isApprovalAddSignMode(value: unknown): value is ApprovalAddSignMode {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_MODES as readonly string[]).includes(value)
+}
+/**
+ * Lock-5 OD-L5-5(a) — the appended round's aggregation for `after` with two or more addees:
+ * `all` (会签) needs every addee, `any` (或签) the first. Supplied at action time, REQUIRED there,
+ * and ignored for `before`/`parallel` (which inherit the node's own mode — today's behaviour).
+ */
+export const APPROVAL_ADD_SIGN_AGGREGATIONS = ['all', 'any'] as const
+export type ApprovalAddSignAggregation = typeof APPROVAL_ADD_SIGN_AGGREGATIONS[number]
+export function isApprovalAddSignAggregation(value: unknown): value is ApprovalAddSignAggregation {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_AGGREGATIONS as readonly string[]).includes(value)
+}
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
@@ -988,8 +1013,21 @@ export interface ApprovalActionRequest {
    * P1-B add_sign — `parallel` (并加签, default) adds co-signers at the current
    * node; `before` (前加签) is rejected inside a parallel region in v1
    * (no node-internal ordered queue yet — see design §7).
+   *
+   * Lock-5 L5-B (gates B-1/B-3/B-4): `after` (后加签) consumes the actor's seat as an approval
+   * and opens a fresh same-node round for the addees once that approval completes the current
+   * round; it is refused inside a parallel region (same 409 as `before`) and refused when the
+   * approval cannot complete the current round (409 `APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE`,
+   * nothing persisted). An unknown value is a 400 `APPROVAL_ADD_SIGN_MODE_INVALID` (see
+   * `APPROVAL_ADD_SIGN_MODES`).
    */
-  addSignMode?: 'before' | 'parallel'
+  addSignMode?: ApprovalAddSignMode
+  /**
+   * Lock-5 OD-L5-5(a) / gate B-5 — REQUIRED with `addSignMode: 'after'` and two or more
+   * `targetUserIds`; governs the appended round (`all` = every addee, `any` = the first). Optional
+   * with one addee (a single seat completes either way). Ignored for `before`/`parallel`.
+   */
+  addSignAggregation?: ApprovalAddSignAggregation
   /**
    * P1-B reduce_sign — assignee_id of the previously add-signed row to remove.
    * Only rows stamped `metadata.addSign === true` are removable.

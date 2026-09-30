@@ -117,6 +117,8 @@ import {
   APPROVAL_ACTION_TYPES,
   type ApprovalActionType,
   type FormSchema,
+  isApprovalAddSignAggregation,
+  isApprovalAddSignMode,
 } from '../types/approval-product'
 
 const logger = new Logger('ApprovalsRouter')
@@ -3875,12 +3877,31 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
             .map((value: string) => value.trim())
             .filter(Boolean)
         : undefined
-      // INV-9 (no silent flatten): unknown addSignMode is normalized to the
-      // explicit default 'parallel' (the service applies that default), not
-      // accepted as an arbitrary string.
-      const addSignMode = req.body?.addSignMode === 'before' || req.body?.addSignMode === 'parallel'
-        ? req.body.addSignMode
-        : undefined
+      // Lock-5 gate B-1 (ROUTE door): the add-sign mode is EXPLICIT. `before` / `parallel` / `after`
+      // reach the service exactly as sent; an ABSENT key stays absent (the service applies its
+      // `parallel` default, unchanged); anything else on an `add_sign` is a values-free 400. The
+      // previous filter flattened an unknown value to the default — the placebo shape gate B-2
+      // retired — and turned `'after'` into `'parallel'` before it ever reached the service. The
+      // service door re-validates independently (`APPROVAL_ADD_SIGN_MODE_INVALID` there too), so
+      // reverting either door alone is caught by its own named test. Non-add_sign actions are
+      // untouched: a stray key on them is still dropped, as before.
+      const rawAddSignMode: unknown = req.body?.addSignMode
+      if (action === 'add_sign' && rawAddSignMode !== undefined && !isApprovalAddSignMode(rawAddSignMode)) {
+        return res.status(400).json(
+          approvalErrorResponse('APPROVAL_ADD_SIGN_MODE_INVALID', 'addSignMode must be before, parallel, or after'),
+        )
+      }
+      const addSignMode = isApprovalAddSignMode(rawAddSignMode) ? rawAddSignMode : undefined
+      // Lock-5 OD-L5-5(a) / gate B-5: the appended round's aggregation, forwarded only when it is one
+      // of the two ratified values; any other present value on an `add_sign` is a 400. Whether it is
+      // REQUIRED (after-mode, two or more addees) is the service's call, which sees the resolved mode.
+      const rawAddSignAggregation: unknown = req.body?.addSignAggregation
+      if (action === 'add_sign' && rawAddSignAggregation !== undefined && !isApprovalAddSignAggregation(rawAddSignAggregation)) {
+        return res.status(400).json({
+          error: { code: 'VALIDATION_ERROR', message: 'addSignAggregation must be all or any' },
+        })
+      }
+      const addSignAggregation = isApprovalAddSignAggregation(rawAddSignAggregation) ? rawAddSignAggregation : undefined
       // P1-B reduce_sign: assignee_id of the add-signed row to remove.
       const targetAssignmentUserId = typeof req.body?.targetAssignmentUserId === 'string'
         ? req.body.targetAssignmentUserId.trim()
@@ -3939,6 +3960,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               targetNodeKey,
               targetUserIds,
               addSignMode,
+              addSignAggregation,
               targetAssignmentUserId,
               // Lock-3 §3 / Lock-7 L7-C: present ONLY when the client sent the key, so the service
               // applies the masked write (or refuses a malformed payload) by key presence.
