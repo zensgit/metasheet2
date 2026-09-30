@@ -49,17 +49,23 @@ export function pendingScopeForBadge(scope: TaskBadgeScope): TaskPendingScope | 
   throw new TypeError(`pendingScopeForBadge: unknown scope "${String(scope)}"`)
 }
 
-// ASSUMPTION(task-d): [R02] the whole `task_user_settings` row shape (all four fields below, and
-// therefore the table itself) is R02's recommended value — R02 is unratified (锁 `:750`: "表本身是
-// 建议"). `timeZone` specifically is R02④: `daily_reminder_enabled=false OR time_zone IS NOT NULL`
-// is the DDL CHECK `parseSettingsPatch` below enforces at the application layer.
-// ── Whole-settings-row patch (R02) ────────────────────────────────────────────────────────────
+// ASSUMPTION(task-d): [R02] `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` (and the
+// `task_user_settings` table itself) are R02's recommended value — R02 is unratified (锁 `:750`:
+// "表本身是建议").
+// ASSUMPTION(task-d): [R07] `timeZone` is a SEPARATE ruling from the other three fields — M4 ruling
+// pack v2 §0.1 explicitly MOVED it out of R02 ("原④「加 time_zone 列」移到 R07,因为只有每日汇总用
+// 它"): it exists only because `task-reminders.ts`'s daily digest needs the recipient's own zone,
+// not because of anything in R02's `default_remind_policy`/`badge_scope` shape. The DDL CHECK
+// `daily_reminder_enabled=false OR time_zone IS NOT NULL` is R07's, enforced here at the
+// application layer (`daily_reminder_requires_time_zone` below).
+// ── Whole-settings-row patch (R02 + R07) ──────────────────────────────────────────────────────
 
 export interface TaskUserSettings {
   badgeScope: TaskBadgeScope
   dailyReminderEnabled: boolean
   defaultRemindPolicy: TaskRemindPolicy
-  /** Regular (canonical) IANA name, or `null`. */
+  /** R07 (not R02 — see the ASSUMPTION note above the interface). Regular (canonical) IANA name,
+   * or `null`. */
   timeZone: string | null
 }
 
@@ -81,7 +87,7 @@ export type ParseSettingsPatchResult =
   | { ok: true; settings: TaskUserSettings }
   | { ok: false; reason: TaskUserSettingsPatchReason }
 
-// ASSUMPTION(task-d): [R02③] the CHECK constraint `daily_reminder_enabled = false OR time_zone IS
+// ASSUMPTION(task-d): [R07] the CHECK constraint `daily_reminder_enabled = false OR time_zone IS
 // NOT NULL` is enforced here at the application layer as `daily_reminder_requires_time_zone` — this
 // is checked against the MERGED result (current row + this patch applied), not just the fields the
 // caller happened to touch, so e.g. flipping `dailyReminderEnabled` to `true` on a row whose

@@ -19,17 +19,15 @@
 // `deleted`/`commented` — `attachment_added` is explicitly deferred to P2 (D13: "P2 附件上线时再加
 // attachment_added"). `self_completed`/`self_reopened` NEVER notify (a solo actor completing/
 // reopening their own row in an `all`-mode task where others remain unaffected does not fan out).
-// `assignee_added` is likewise NOT in this set by default — see `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN`
-// below (R05-opt).
+// ASSUMPTION(task-d): [R05-opt] `assignee_added` is deliberately ABSENT from this literal array —
+// it is NOT a notifiable event by default ("被加负责人收通知" is the pack's own invented design, no
+// corpus source page — defaults to OFF). Adopting R05-opt means adding the literal string
+// `'assignee_added'` to this array (there is no separate on/off flag to flip: a closed TS union
+// this small has no clean way to be "widened" by a boolean without also touching every switch that
+// exhaustively matches `TaskNotifiableEvent`, so the array literal itself IS the single point of
+// truth — editing it is the whole change).
 export const TASK_NOTIFIABLE_EVENTS = ['completed', 'completed_by_any', 'reopened', 'deleted', 'commented'] as const
 export type TaskNotifiableEvent = (typeof TASK_NOTIFIABLE_EVENTS)[number]
-
-// ASSUMPTION(task-d): [R05-opt] `true` ⇒ `assignee_added` is NOT a notifiable event by default
-// ("被加负责人收通知" is the pack's own invented design — no corpus source page — and defaults to
-// OFF; owner must name it explicitly to turn it on).
-/** This constant exists so a future flip is a one-line, greppable change rather than a silent
- * removal of a line from `TASK_NOTIFIABLE_EVENTS`. */
-export const TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN = false
 
 // ── recipient_role closed set (D13 priority: creator > assignee > follower > list_member) ────────
 
@@ -69,17 +67,22 @@ export function resolveNotificationRecipients(input: ResolveNotificationRecipien
   if (!(TASK_NOTIFIABLE_EVENTS as readonly string[]).includes(input.event)) {
     throw new TypeError(`resolveNotificationRecipients: unknown event "${String(input.event)}"`)
   }
+  // Driven BY `RECIPIENT_ROLE_PRIORITY` (not a parallel hard-coded call order) so that editing the
+  // constant is the whole change if D13's priority is ever re-ruled — see the ASSUMPTION on that
+  // constant above.
+  const sourcesByRole: Record<TaskNotificationRecipientRole, string[]> = {
+    creator: [input.creatorId],
+    assignee: input.assigneeIds,
+    follower: input.followerIds,
+    list_member: input.listMemberIds,
+  }
   const roleByUser = new Map<string, TaskNotificationRecipientRole>()
-  const consider = (ids: string[], role: TaskNotificationRecipientRole) => {
-    for (const id of ids) {
+  for (const role of RECIPIENT_ROLE_PRIORITY) {
+    for (const id of sourcesByRole[role]) {
       if (id === input.actorId) continue
       if (!roleByUser.has(id)) roleByUser.set(id, role)
     }
   }
-  consider([input.creatorId], 'creator')
-  consider(input.assigneeIds, 'assignee')
-  consider(input.followerIds, 'follower')
-  consider(input.listMemberIds, 'list_member')
   return [...roleByUser.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([userId, recipientRole]) => ({ userId, recipientRole }))

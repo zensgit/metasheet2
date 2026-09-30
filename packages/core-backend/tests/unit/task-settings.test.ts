@@ -92,7 +92,7 @@ describe('task-settings', () => {
       })
     })
 
-    it('R02③: dailyReminderEnabled true with no timeZone anywhere (current nor patch) -> 422', () => {
+    it('R07: dailyReminderEnabled true with no timeZone anywhere (current nor patch) -> 422', () => {
       const result = parseSettingsPatch({ dailyReminderEnabled: true }, settings({ timeZone: null }))
       expect(result).toEqual({ ok: false, reason: 'daily_reminder_requires_time_zone' })
     })

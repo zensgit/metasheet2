@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   TASK_NOTIFIABLE_EVENTS,
-  TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN,
   reminderRecipientRole,
   resolveListArchiveNotificationRecipients,
   resolveNotificationRecipients,
@@ -24,13 +23,12 @@ function baseInput(overrides: Partial<ResolveNotificationRecipientsInput> = {}):
 }
 
 describe('task-notifications', () => {
-  describe('TASK_NOTIFIABLE_EVENTS / opt-in flag', () => {
+  describe('TASK_NOTIFIABLE_EVENTS', () => {
     it('is the D13 closed set (attachment_added deferred to P2)', () => {
       expect(TASK_NOTIFIABLE_EVENTS).toEqual(['completed', 'completed_by_any', 'reopened', 'deleted', 'commented'])
     })
 
-    it('assignee_added is NOT notifiable by default (R05-opt)', () => {
-      expect(TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN).toBe(false)
+    it('assignee_added is NOT notifiable by default (R05-opt) — absent from the array itself', () => {
       expect((TASK_NOTIFIABLE_EVENTS as readonly string[]).includes('assignee_added')).toBe(false)
     })
 

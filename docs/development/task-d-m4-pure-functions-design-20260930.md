@@ -58,11 +58,11 @@ D2 的「个人分组的移动不写事件」被本模块推广到**全部** `ta
 
 ### 2.4 `task-notifications.ts`
 
-D13 的触发闭集(`completed`/`completed_by_any`/`reopened`/`deleted`/`commented`;`attachment_added` 留 P2)与 `recipient_role` 闭集(`creator`/`assignee`/`follower`/`list_member`)。`resolveNotificationRecipients` 按优先级去重并排除 actor。`resolveReminderRecipients`/`reminderRecipientRole` 实现 R06 的提醒收件人规则。`resolveListArchiveNotificationRecipients` 实现 R05(e) 的清单归档通知(通知清单创建人,`recipientRole` 仍记 `'list_member'`)。`TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN = false` 是 R05-opt 的默认关闭开关。
+D13 的触发闭集(`completed`/`completed_by_any`/`reopened`/`deleted`/`commented`;`attachment_added` 留 P2)与 `recipient_role` 闭集(`creator`/`assignee`/`follower`/`list_member`)。`resolveNotificationRecipients` 按 `RECIPIENT_ROLE_PRIORITY` **驱动**(不是与该常量并行的一段硬编码调用顺序——改这个常量就会改变行为)去重并排除 actor。`resolveReminderRecipients`/`reminderRecipientRole` 实现 R06 的提醒收件人规则。`resolveListArchiveNotificationRecipients` 实现 R05(e) 的清单归档通知(通知清单创建人,`recipientRole` 仍记 `'list_member'`)。R05-opt(`assignee_added` 默认不在通知闭集里)直接标在 `TASK_NOTIFIABLE_EVENTS` 这个字面量数组上——没有另设一个「开关」常量:闭合的 TS 联合类型没有干净的「布尔位拓宽」写法,数组字面量本身就是唯一真相。
 
 ### 2.5 `task-settings.ts`
 
-`parseBadgeScope`/`pendingScopeForBadge` 实现锁 §13-4(已定方向)+ D5(`'off'` 时调用方短路,不查库)。`parseSettingsPatch` 是整行 `task_user_settings` 的合并校验器:对合并后的结果强制 R02③ 的 CHECK(`daily_reminder_enabled=false OR time_zone IS NOT NULL`),`timeZone` 的写入复用 `task-dates.ts` 的 `validateViewerTimeZoneHeader` 做规范化(D7:写入时只落规范名)。
+`parseBadgeScope`/`pendingScopeForBadge` 实现锁 §13-4(已定方向)+ D5(`'off'` 时调用方短路,不查库)。`parseSettingsPatch` 是整行 `task_user_settings` 的合并校验器。**`timeZone` 是独立于 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 的另一条裁决**:M4 裁决包 v2 §0.1 把它从 R02④ 明确移到了 R07(「原④『加 time_zone 列』移到 R07,因为只有每日汇总用它」)——对合并后的结果强制的是 **R07** 的 CHECK(`daily_reminder_enabled=false OR time_zone IS NOT NULL`),不是 R02 的。`timeZone` 的写入复用 `task-dates.ts` 的 `validateViewerTimeZoneHeader` 做规范化(D7:写入时只落规范名)。
 
 ### 2.6 `task-pagination.ts`
 
@@ -108,11 +108,11 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 | R05/R06/R07(推广) | `task-reminders.ts` 四个 `source_key` 构造器 | `<prefix>:<id>:recipient:<uid>:channel:<ch>` | 裁决包只给了每族的前缀;内部形状取自仓库里唯一的现成先例(`UnscheduledReminderService.ts`) |
 | R07 | `task-reminders.ts` `isInDailyDigest`/`buildTaskDailyDigestCondition` | 逾期 ∪ (今天或明天截止);今天/明天用查看者(收件人)时区 | 源码注释记录了"逾期"这一支在逻辑上被第二支吸收的事实 |
 | D13 | `task-notifications.ts` | 触发闭集 5 值,`recipient_role` 优先级 creator>assignee>follower>list_member | `attachment_added` 留 P2 |
-| R05-opt | `task-notifications.ts` `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` | `false`(默认不含) | 裁决包自称"语料无原页的自有设计" |
+| R05-opt | `task-notifications.ts` `TASK_NOTIFIABLE_EVENTS` | `assignee_added` 不在数组里(默认不含) | 裁决包自称"语料无原页的自有设计";没有单独的开关常量,数组字面量本身是唯一真相 |
 | R06 | `task-notifications.ts` `resolveReminderRecipients` | 零行 ⇒ `[creatorId]`;非零行但全部已完成 ⇒ 空数组(不回退到 creator) | 对"零负责人"的字面读法 |
 | R05(e) | `task-notifications.ts` `resolveListArchiveNotificationRecipients` | 通知清单创建人,`recipientRole:'list_member'` | |
 | D5 | `task-settings.ts` `pendingScopeForBadge` | `'off'` → `null`,调用方短路 | |
-| R02③ | `task-settings.ts` `parseSettingsPatch` | 对**合并后**结果强制 daily-reminder-需要-time_zone | 不是只查 patch 里出现的字段 |
+| R07(**不是** R02③) | `task-settings.ts` `parseSettingsPatch` | 对**合并后**结果强制 daily-reminder-需要-time_zone | `time_zone` 列本身也是 R07(v2 §0.1 把它从 R02④ 移出);不是只查 patch 里出现的字段 |
 | D7 | `task-settings.ts` `parseSettingsPatch` | 写入 `timeZone` 复用 `validateViewerTimeZoneHeader` 规范化 | |
 | R15(v2) | `task-pagination.ts` | `limit` 默认 **100**(v2 把 v1 的 50 改正) | v1 的 50 会让第 51–100 行静默消失 |
 | D9 | `task-pagination.ts` `TASK_PAGE_SORT_KEY` | `(updated_at DESC, id DESC)` | |
