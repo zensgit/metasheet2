@@ -59,9 +59,11 @@ vi.mock('../src/approvals/components/ApprovalUserPicker.vue', () => ({
     name: 'ApprovalUserPicker',
     props: ['modelValue', 'placeholder'],
     emits: ['update:modelValue', 'select'],
-    setup(_props: unknown, { emit }: { emit: (e: string, v: unknown) => void }) {
+    setup(props: { placeholder?: string }, { emit }: { emit: (e: string, v: unknown) => void }) {
       return () => h('button', {
         'data-testid': 'stub-user-picker',
+        // O-8 / F8-1: surface the host's placeholder so the English render scan below sees it.
+        'data-placeholder': props.placeholder,
         onClick: () => { emit('update:modelValue', 'user_target'); emit('select', { id: 'user_target', name: 'T' }) },
       }, 'pick')
     },
@@ -506,4 +508,126 @@ describe('memberActionDialogGrammar — locale tables (O-8 / F8-1)', () => {
     expect(mod.memberActionDialogGrammar(true)).toBe(zh)
     expect(mod.memberActionDialogGrammar(false)).toBe(en)
   })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalDetailView with each of the
+// five member-action dialogs OPEN. Uses the prop-surfacing element stubs (dialog title/body only
+// while open, form-item labels as text) and ASCII fixtures, so every CJK hit is chrome. Per verb:
+// the dialog is open and shows every copy field of its grammar in English — title, comment label,
+// placeholder, confirm label, and the user-picker placeholder where the dialog has one (positive
+// control: a field a stub failed to surface would fail here, not pass the scan by being absent);
+// nothing else on the page is CJK apart from the named exceptions; and an en -> zh -> en flip
+// restores both. The comments tab is not opened here (its panel is scanned in
+// approval-comments-panel.spec.ts).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five member-action dialogs open', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountForScan() {
+    const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
+    for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
+    app.component('ElButton', ElButton)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Rendered CJK this slice does not convert, by verb (source file:line). The quick-phrase chips
+  // are inserted into the comment text as-is, so localising them would change the language of
+  // stored comments — left to the owner, not decided in this slice.
+  const EXCEPTIONS_BY_VERB: Record<string, Array<{ text: string; count: number; source: string }>> = {
+    transfer: [],
+    add_sign: [],
+    reduce_sign: [],
+    return: [],
+    comment: [
+      { text: '已阅', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[0])' },
+      { text: '请尽快处理', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[1])' },
+    ],
+  }
+  // `picker`: the DETAIL_EN / DETAIL_ZH key of the placeholder the view passes to the user picker
+  // inside that dialog (the picker stub above surfaces it as `data-placeholder`).
+  const VERBS = [
+    { verb: 'transfer', open: 'approval-transfer-button', picker: 'transferPickerPlaceholder' },
+    { verb: 'add_sign', open: 'approval-add-sign-button', picker: 'addSignPickerPlaceholder' },
+    { verb: 'reduce_sign', open: 'approval-reduce-sign-button', picker: null },
+    { verb: 'return', open: 'approval-return-button', picker: null },
+    { verb: 'comment', open: 'approval-comment-button', picker: null },
+  ] as const
+
+  // Every copy field of the verb's grammar that the dialog renders, plus the picker placeholder.
+  function expectDialogCopy(text: string, copy: { dialogTitle: string; commentLabel: string; commentPlaceholder: string; confirmLabel: string }, picker: string | null) {
+    expect(text).toContain(copy.dialogTitle)
+    expect(text).toContain(copy.commentLabel)
+    expect(text).toContain(copy.commentPlaceholder)
+    expect(text).toContain(copy.confirmLabel)
+    if (picker) expect(text).toContain(picker)
+  }
+
+  for (const { verb, open, picker } of VERBS) {
+    it(`${verb}: dialog open, English chrome only; en -> zh -> en restores`, async () => {
+      const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+      const grammar = await import('../src/approvals/memberActionDialogGrammar')
+      const labels = await import('../src/views/approval/approvalDetailLabels')
+      const en = grammar.MEMBER_ACTION_DIALOG_GRAMMAR_EN[verb]
+      const zh = grammar.MEMBER_ACTION_DIALOG_GRAMMAR[verb]
+      const enPicker = picker ? labels.DETAIL_EN[picker] : null
+      const zhPicker = picker ? labels.DETAIL_ZH[picker] : null
+      mockActiveApproval.value = baseInstance({
+        title: 'Travel claim',
+        requester: { id: 'user_99', name: 'Requester Nine' },
+        nodeOperations: { ...ALL_ALLOWED },
+        assignments: [
+          { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+          { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: 'Approver Seven' } },
+        ],
+      })
+      await mountForScan()
+      expect(q(container!, en.dialogTestId), 'closed dialogs are not rendered by this stub').toBeNull()
+      ;(q(container!, open) as HTMLButtonElement).click()
+      await flushUi()
+
+      const dialog = q(container!, en.dialogTestId)
+      expect(dialog, `${verb} dialog must be open`).toBeTruthy()
+      expectDialogCopy(renderedTextAndAttributes(dialog!), en, enPicker)
+      expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS_BY_VERB[verb]!, `detail+${verb} (en)`)
+
+      useLocale().setLocale('zh-CN')
+      await flushUi()
+      expectDialogCopy(renderedTextAndAttributes(q(container!, zh.dialogTestId)!), zh, zhPicker)
+      expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+      useLocale().setLocale('en')
+      await flushUi()
+      expectDialogCopy(renderedTextAndAttributes(q(container!, en.dialogTestId)!), en, enPicker)
+      expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS_BY_VERB[verb]!, `detail+${verb} (en again)`)
+    })
+  }
 })
