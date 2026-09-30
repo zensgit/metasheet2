@@ -10,11 +10,12 @@
 |---|---|
 | 做了什么 | 把 `plugin-tests.yml` 的 `stock-prep-powershell51` job **逐字节原样**搬到新文件 `.github/workflows/stock-prep-powershell51.yml`;证据清单 `PINNED_EVIDENCE_FILES` 用 `s6aPowershell51Workflow`(新文件,**整文件** sha256)替换 `pluginTestsWorkflow`(`plugin-tests.yml`);清单仍是 10 条 |
 | 证明力 | 对被证明对象(S6-A PS 5.1 证据执行器)**不削弱**:每一类篡改在新文件上仍令 live 比对红(§2.2,11 类用例 + 删除)。留在 `plugin-tests.yml` 里的内容所对应的篡改,**原本就不在证明范围内**(§2.3,附代码证据与演练读数) |
-| 钉的移动 | C1 只动 4 个叶子(§5 V3);其后 C2 / C4 两次改 `plugin-tests.yml`、C3 改测试,钉都是 0 移动 |
+| 必需检查里的触发 | `plugin-tests.yml` 是必需检查 `integration-guard` 的守护路径;新文件自 C6 起同样列入守护名册(`scripts/ops/integration-guard-guarded-paths.mjs` 与 `integration-guard.yml` 的 `on.push.paths`),改它照旧在该必需检查里跑含 live 比对的 plugin-integration-core 链;provenance 测试断言这一条(§2.2、§5 V8)。同类既有残留:见私有记录 |
+| 钉的移动 | C1 只动 4 个叶子(§5 V3);其后 C2 / C4 两次改 `plugin-tests.yml`、C3 / C6 改测试与守护名册,钉都是 0 移动;C7 纯注释只动 `modules.s5["sealed-export-package-provenance.cjs"]` 1 个叶子 |
 | 需改已 ratify 锁 | 否(§4) |
 | 未决 | V6(必需检查 `stock-prep PowerShell 5.1 acceptance` 由新 workflow 满足)只能在 Draft PR 上实测;若不绑定,补救是 owner 改分支保护,**不是**锁改动 |
 
-## 1. 改动(4 个提交 + 本文)
+## 1. 改动(C1–C4、C6–C7 六个代码提交 + C5 / C8 两个文档提交)
 
 | 提交 | 内容 | 钉 |
 |---|---|---|
@@ -22,6 +23,10 @@
 | C2 | `plugin-tests.yml` 删除 `:127-173`(job 块 + 其后空行);两条契约测试改读新文件 | 0 |
 | C3 | provenance 测试:执行器逐类篡改负例、`plugin-tests.yml` 解耦正例、清单断言 | 0 |
 | C4 | `plugin-tests.yml` 两处纯注释更新 | 0 |
+| C5 | 本文 | 0 |
+| C6 | 门审 P2:新文件加入 Integration Guard 守护名册与 `on.push.paths`(契约要求二者集合相等);provenance 测试新增 `s6aPowershell51ExecutorIsIntegrationGuarded`(路径取自清单条目 `s6aPowershell51Workflow`,不抄写) | 0 |
+| C7 | 门审 NIT:清单理由注释与解耦用例头注释改为精确表述(`plugin-tests.yml` 不跑任何被钉测试体;其 core-backend vitest 步会收集两个被钉的 `.db.test.ts`,但该处无 `DATABASE_URL`,二者注册为 skipped);重算钉 | 1 个叶子 |
+| C8 | 本文按门审意见更新(§0–§3、§5–§8) | 0 |
 
 ## 2. 证明范围:前后对照
 
@@ -48,6 +53,7 @@
 - 每个用例:锚点必须恰好出现一次;篡改后 `verifySealedExportPackageProvenance` 抛 `SEALED_EXPORT_INTERNAL_ERROR`,**且** `computePackageProvenancePinSet(root).evidenceFiles.s6aPowershell51Workflow` 与冻结值不同(即 live 比对红);还原后再校验为绿(正控,证明红来自该篡改)。
 - 证明单元是整文件而不是文件内的 job 区段:YAML 映射键序自由,`jobs:` 之后的顶层 `permissions` / `env` / `defaults` 仍作用于每个 job(T3 用例专测这一点)。
 - 清单断言(`positivePackagePin`):`s6aPowershell51Workflow` 指向新文件,且新文件确实调用被钉的 `s6aAcceptancePs51Test` 并紧跟退出码检查。
+- 在哪个必需检查里被发现(C6,门审 P2):之前,`plugin-tests.yml` 在 Integration Guard 守护名册里,改它令必需的 `integration-guard` 跑 plugin-integration-core 链(含本 live 比对)。之后,新文件自 C6 起同样在名册与 `on.push.paths` 里(与之前持平);`s6aPowershell51ExecutorIsIntegrationGuarded` 以清单条目的路径调用 `classify()` 断言为 `true`,所以把该条从名册删掉、或把清单条目改指别的路径而不补名册,都会令 provenance 测试红(§5 V8 演练)。同类既有残留:见私有记录。
 - 测试自身的效力(对**模块**做变异,每次都重算钉,确保红是本测试的):去掉证据字节校验、清单改回钉 `plugin-tests.yml`、清单额外再钉 `plugin-tests.yml`,三者都令 provenance 测试红。
 
 ### 2.3 留在 `plugin-tests.yml` 里的内容(不再被钉)
@@ -59,7 +65,7 @@
 | sealed-export S3 / S4 真库证明步(`test` job,id `sealed-export-s3-real-db` / `sealed-export-s4-real-db`) | 两个被测文件 `tests/integration/sealed-export-s3-private-ingestion-realdb.test.ts`、`…-s4-generation-kernel-realdb.test.ts` **不在任何清单**里:直接改被测文件就能让这两步失去证明作用,且不动钉 | 清单代码只含 `s5SignerLifecycleRealDbTest`、`s6aRuntimeAuthorityRealDbTest` 两个真库测试;V4-c 实测:给 S3 被测文件追加一行,重算钉 0 移动 |
 | (同上)步骤接线 | 另有结构守卫 `isSuiteWiredInRealDbStep`(`sealed-export-s3-private-ingestion-migration.test.cjs`、`-s4-generation-migration.test.cjs`,在必需的 `integration-guard` 里跑),与钉无关、本改动不碰 | 演练读数见 §2.3.1 |
 | T9 pwsh 步(静态跑 ACL 测试) | 该测试文件不在清单;真 icacls 覆盖在随 job 搬走的 PS 5.1 job 里 | 清单代码 |
-| 其余全部步骤(钉钉 / 考勤 / 审批 / 多维表 / elearning / K3 …)上的 T1–T5 | 在仓内任意未被钉的 workflow(或新建一个)里做同样的事都不动钉 | 被钉的 workflow 只有 2 个(之前:143 个中的 `sealed-export-s5-sqlserver.yml` + `plugin-tests.yml`;之后:144 个中的 `sealed-export-s5-sqlserver.yml` + 新文件)。在每张 PR 上跑 provenance 测试的 `integration-guard.yml` 本身也未被钉。V4-d 实测:新建一个任意 workflow,重算钉 0 移动 |
+| 其余全部步骤(钉钉 / 考勤 / 审批 / 多维表 / elearning / K3 …)上的 T1–T5 | 在仓内任意未被钉的 workflow(或新建一个)里做同样的事都不动钉 | 被钉的 workflow 只有 2 个(之前:143 个中的 `sealed-export-s5-sqlserver.yml` + `plugin-tests.yml`;之后:144 个中的 `sealed-export-s5-sqlserver.yml` + 新文件)。必需的 `integration-guard.yml`(PR 触及其守护名册时跑含 provenance 测试的链)本身也未被钉。V4-d 实测:新建一个任意 workflow,重算钉 0 移动 |
 | 跨 job 干扰 | job 在各自 runner 上跑;PS 5.1 job 没有 `needs:`、没有缓存步,也没有 job `needs` 它;现在它连文件都不共享 | `plugin-tests.yml` 唯一的 `needs:` 是 `coverage` → `test` |
 
 #### 2.3.1 S3 / S4 步的篡改演练(在工作树上改 `plugin-tests.yml`,跑对应结构守卫,`cp` 还原并核 sha)
@@ -73,12 +79,12 @@
 | 被钉文件 | 被钉的执行器(之前) | 被钉的执行器(之后) |
 |---|---|---|
 | `s6aAcceptancePs51Test` | `plugin-tests.yml`(`sealed-export-s5-sqlserver.yml` 只在 `paths:` 里列它) | **新文件**(逐字节同一 job) |
-| `s5SignerLifecycleRealDbTest`、`s6aRuntimeAuthorityRealDbTest` | `sealed-export-s5-sqlserver.yml`(执行行) | 不变 |
+| `s5SignerLifecycleRealDbTest`、`s6aRuntimeAuthorityRealDbTest` | `sealed-export-s5-sqlserver.yml`(执行行)。`plugin-tests.yml` 的 core-backend vitest 步(`vitest.config.ts` 未排除)会收集这两个文件,但该步的 workflow / job / 步骤 env 都没有 `DATABASE_URL`,此前也没有步骤把它写进 `GITHUB_ENV`(真库步都在 `Start Postgres` 之后,各自在步骤 env 里设),二者经 `describeIfDatabase` 注册为 skipped,不跑测试体 | 不变 |
 | S5 runner / verifier、memory-db、provisioning CLI、`pluginPackageJson` / `pnpmLock` 等 | `sealed-export-s5-sqlserver.yml`(`pnpm --filter plugin-integration-core …` 经被钉的 `package.json`) | 不变 |
 | `multitableOnpremPackageBuild`、`multitableOnpremPackageVerify` | `plugin-tests.yml` 里只在**注释**中出现;执行器是未被钉的 `multitable-onprem-package-build.yml` 等 | 不变 |
 | `s6aProductRuntimeTest`、`testChainRunner` | 无 workflow 按文件名引用(经被钉的 `package.json` / `test-chain.cjs` 执行) | 不变 |
 
-⇒ `plugin-tests.yml` 在清单里唯一的证据作用是执行 `s6aAcceptancePs51Test`;该作用由新文件原样承接。之前有被钉执行器的每个被钉测试,之后仍有。
+⇒ `plugin-tests.yml` 在清单里唯一的证据作用是执行 `s6aAcceptancePs51Test`(上表的「收集但 skipped」不产生证据);该作用由新文件原样承接。之前有被钉执行器的每个被钉测试,之后仍有。
 
 ### 2.5 不受影响的
 - 已发布冻结包(`stock-prep-s6a-postgres17-validation.yml` 的 `PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN`):该 workflow 用**包内**的 provenance 模块与包内 pins 校验,与仓内清单变更无关。
@@ -93,6 +99,10 @@
 4. **PS 5.1 本身未在本地跑**(只有 Windows runner 能跑);本地跑了读该 job 的两条契约测试(node 与 pwsh 7)。
 5. **本 PR 不治的**:`pluginHttpRoutes`(pins.json 最热的键)是随包出货的运行时文件,钉它是证明核心,不能照搬本方案;`plugin-tests.yml` 自身的文本冲突仍在。
 6. 新文件未加 `permissions: contents: read`,为保持与原 job 头部逐字节可比;可另提。
+7. **Integration Guard 触发**(门审 P2):C1–C5 之间新文件不在守护名册;C6 起与基线持平(§2.2、§5 V8)。同类既有残留:见私有记录,本 PR 不做。
+8. **部署就绪脚本不再汇总 PS 5.1 结果**(门审 P3,只记录不改):`scripts/ops/integration-erp-plm-deploy-readiness.mjs` 的 `REQUIRED_MAIN_WORKFLOWS` 按 workflow 名字取 `Plugin System Tests` 在所选 main 提交上的结论;拆分后 PS 5.1 job 失败不再令该 run 失败。该条目的 `purpose` 文本从未列出 PS 5.1,原覆盖是附带的。不改的理由:该脚本属部署 / 发布线(由 `docker-publish-guard.yml` 与其测试夹具守着),加一条必需 workflow 要连带改夹具,超出本 PR 范围。现状:新 workflow 的 `on:` 与 `plugin-tests.yml` 逐字节相同,在同一批 main 提交上运行;`stock-prep PowerShell 5.1 acceptance` 仍是 main 分支保护的必需 context(2026-09-30 只读 `gh api` 核对,13 个必需 context 之一,app 15368)。把 `Stock-prep PowerShell 5.1 acceptance` 加入 `REQUIRED_MAIN_WORKFLOWS` 作为后续单独一张。
+9. **过时注释**(门审 NIT,只记录不改):约 35 个 `approval-realdb-*.yml` 头注释、`packages/core-backend/vitest.config.ts`、`approval-ci-coverage-enumeration.test.ts`、`approval-cancel-round-ci-wiring.test.ts` 里仍写着「`plugin-tests.yml` 是 s6a sha256 钉的 provenance 输入」。错在保守方向(照做只会多一次 0 差异的重算)。不在本 PR 扫:一次改几十个 workflow 会扩大本 PR 要缩小的冲突面;留作单独的纯文档清扫。
+10. **提交尾注**(门审 NIT):C1–C5 缺 `Claude-Session` 尾注(身份均为 noreply,合规)。本轮约束「新提交、不 amend」,故不改;C6 起的提交带该尾注。squash 合并时可在合并信息里统一。
 
 ## 4. 与已 ratify 锁的关系
 - 检索:`docs/development` 下同时含 `pluginTestsWorkflow` / `PINNED_EVIDENCE_FILES` 与 ratify 字样的文件,以及私有 reviews 目录下的锁文。
@@ -105,12 +115,13 @@
 | # | 内容 | 读数 |
 |---|---|---|
 | V1 | job 块逐字节 | `diff <(plugin-tests.yml@base :127-172) <(新文件 job 块)` 为空;头部 `:2-27` 逐字节相同;C2 删除的块 == 该 job 块 + 1 空行;契约测试的新正则抽出的块 == 基线 `:127-172` |
-| V2 | sealed-export 全部 `.test.cjs`(33 个) | 基线 33/33;C1 / C2 / C3 之后各 33/33 |
-| V3 | 钉的叶子级差异(66 个叶子) | C1:恰好 4 个 —— `evidenceFiles.pluginTestsWorkflow`(删)、`evidenceFiles.s6aPowershell51Workflow`(增)、`evidenceFiles.s5EvidenceWorkflow`、`modules.s5["sealed-export-package-provenance.cjs"]`;C2 / C3 / C4:0 |
+| V2 | sealed-export 全部 `.test.cjs`(33 个) | 基线 33/33;C1 / C2 / C3 之后各 33/33;C6、C7 之后各 33/33 |
+| V3 | 钉的叶子级差异(66 个叶子) | C1:恰好 4 个 —— `evidenceFiles.pluginTestsWorkflow`(删)、`evidenceFiles.s6aPowershell51Workflow`(增)、`evidenceFiles.s5EvidenceWorkflow`、`modules.s5["sealed-export-package-provenance.cjs"]`;C2 / C3 / C4 / C6:0;C7:恰好 1 个 —— `modules.s5["sealed-export-package-provenance.cjs"]`(纯注释;冻结清单摘要 `4f2681e6…` → `b6a2270c…`) |
 | V4 | 解耦演练(工作树上改、跑、`cp` 还原、核 sha) | 见下 |
 | V5 | 读该 job 的契约测试 | `multitable-onprem-package-upgrade-inplace.test.mjs` 两条 CI wiring 用例 2/2(完整套件 79/79);`stock-preparation-rca-window.tests.ps1`(pwsh 7)38/38 |
 | V6 | 必需 context 由新 workflow 满足 | **未测**(须 Draft PR);不绑定则停,补救是 owner 改分支保护 |
 | V7 | 必需 context 全绿 | **未测**(须 Draft PR) |
+| V8 | 新文件是 Integration Guard 守护路径(C6) | 见下 |
 
 V4 读数(每项改后跑 provenance 测试 + 叶子级重算,随后 `cp` 还原并核对与 HEAD blob 相同):
 
@@ -121,6 +132,19 @@ V4 读数(每项改后跑 provenance 测试 + 叶子级重算,随后 `cp` 还原
 | V4-b2 | 新文件末尾(`jobs:` 之后)加顶层 `permissions: write-all` | 红 `SEALED_EXPORT_INTERNAL_ERROR` | `evidenceFiles.s6aPowershell51Workflow` |
 | V4-c | S3 真库被测文件(未被钉)加一行 | 绿 | 无 |
 | V4-d | 新建一个任意的未被钉 workflow | 绿 | 无 |
+
+V8 读数(`printf '<路径>\0' | node scripts/ops/integration-guard-classify.mjs`;演练在工作树上改、跑、`cp` 还原并核 sha):
+
+| 项 | 内容 | 读数 |
+|---|---|---|
+| V8-a | 新文件的分类:基线 `fc684dceeb` / C5 `515d3d6f38` / C6 起 | `relevant=false` / `false` / `true`(`plugin-tests.yml` 三处都是 `true`) |
+| V8-b | 对照(不改) | provenance 测试绿;`integration-guard-required-wiring-contract` 64/64 |
+| V8-c | 只从名册删该条(`on.push.paths` 保留) | 分类 `false`;provenance 测试红(新断言);契约 63/64(集合相等用例红) |
+| V8-d | 名册与 `on.push.paths` 同时删该条 | 分类 `false`;契约 64/64 绿;provenance 测试红(新断言)⇒ 这一情形契约不拦,靠新断言发现 |
+| V8-e | 执行器改名为 `stock-prep-ps51.yml`,清单条目、测试常量、pins 都照改并重算,唯独不补守护名册 | provenance 测试在新断言处红(其前各用例都过);契约 63/64(「名册条目须存在」用例红,因旧路径已不存在) |
+| V8-f | 叶子级重算 | C6 移动 0 个叶子 |
+
+C6 / C7 之后的回归(树 `e6f218a583`):plugin-integration-core 全链 235/235;sealed-export `.test.cjs` 33/33;`integration-guard-required-wiring-contract` 64/64;V5 两条契约测试 2/2、38/38。
 
 其他回归(最终树 `d70039e563`;依赖以软链指向主检出的 node_modules,未运行任何安装命令):
 
@@ -136,10 +160,12 @@ V4 读数(每项改后跑 provenance 测试 + 叶子级重算,随后 `cp` 还原
 2. EOF 正则用 `(?=\n {2}\S|\n*$)`(无 `m` 标志,`$` 只在输入末尾);已核:原正则在新文件上不匹配,新正则抽出的块与基线逐字节相同。
 3. provenance 测试在「一个同长度负例 + 清单断言」之外,加了逐类篡改负例与解耦正例(任务要求 ① ②)。
 4. `plugin-tests.yml` 里另外几处历史叙述性的「re-pin」注释(如 A3 backfill-down-guard 步前的说明)保持原样:它们记录的是当时的提交,不改历史叙述。
+5. P2 的回归断言放在 provenance 测试,而不是 `integration-guard-required-wiring-contract.test.mjs`:该契约声明 64 条、下限 `MIN_CONTRACT_TESTS=62`、最大滞后 3,再加一条就用光余量,下一张加契约用例的 PR 必须同时改两个 workflow 的下限(其一是 `plugin-tests.yml`),与本 PR 的目标相悖。断言跑在 plugin-integration-core 链里;删名册条目的 PR 必然触及守护路径(名册文件本身在名册里),链会跑。
 
 ## 7. 过渡
 - 在飞且改了 `pluginTestsWorkflow` 的 PR(只读 `gh pr list` 前 100 个 open):#6060、#5598(均 draft)。二者改 `plugin-tests.yml` 的位置都不在被搬走的 job 内;合并本 PR 后,它们在 pins.json 上冲突一次,处理方式是丢弃自己那行 `pluginTestsWorkflow` 改动。#6165、#6098(draft)改 pins.json 的其他键,可能因相邻行冲突一次。
 - 建议本 PR 在合并列车里排第一,或在安静窗口落地。
+- 建议 squash 合并:C1 是中间态(新文件已加、`plugin-tests.yml` 里的 job 尚未删),两个 workflow 里有同名 job;squash 后 main 上不存在这一中间态。即使不 squash,必需检查只在 PR 的合并预览 / 合并队列提交与合并后的 main 头上跑,中间提交不会被单独求值。
 
 ## 8. 回退
-- 整体 revert 四个提交即可(无迁移、无开关、无数据)。revert 后须再用 `computePackageProvenancePinSet(repoRoot)` 核对 pins(revert 自带原值,应 0 差异)。
+- 整体 revert 本分支全部提交即可(无迁移、无开关、无数据)。revert 后须再用 `computePackageProvenancePinSet(repoRoot)` 核对 pins(revert 自带原值,应 0 差异)。
