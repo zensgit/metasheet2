@@ -97,7 +97,7 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 
 每条对应源码里一处或多处 `// ASSUMPTION(task-d): [R<nn>/D<nn>] …` 注释。owner 尚未 ratify M4 裁决包 v2;下表的「值」就是裁决包的推荐值,**不是** owner 裁决。
 
-下表「裁决」列写 `— (own choice, …)` 的行是**本模块自己的实现选择,不是裁决包推荐值**——这些行对应的源码注释用的是 `ASSUMPTION(task-d, own choice …` 这个不同的前缀(注意逗号,不是冒号),`grep -n 'ASSUMPTION(task-d):'`(冒号形)找不到它们;要单独列出全部 own-choice 行,用 `grep -n 'ASSUMPTION(task-d, own'`。两种前缀刻意保持视觉可区分,免得 owner 回来核对裁决时把"我们自己选的"和"裁决包推荐的"混在一起看。
+下表「裁决」列写 `— (own choice, …)` 的行是**本模块自己的实现选择,不是裁决包推荐值**,共 7 行。第三轮独立复核加的 6 行(`独立复核 item 1/2/8/9/10/11`)对应的源码注释用 `ASSUMPTION(task-d, own choice …` 这个逗号形前缀(`grep -n 'ASSUMPTION(task-d, own' packages/core-backend/src/tasks/*.ts` 能找到全部 7 处这种注释——`item 1` 那一行覆盖 `applyAddMember`/`applyChangeMemberRole` 两处站点,所以 7 处注释对应这 6 行表格,不是 1:1)。**第一轮**那一行(`canListAction` 的 `rename`/`manage_members`/`manage_groups`)不属于这 7 处——它当初标的是 `ASSUMPTION(task-d): [R12(a)]`(冒号形,跟着 R12(a) 一起写),own-choice 的说明是紧接着那条注释之后、以大写 `OWN CHOICE` 出现在散文里的(`task-lists.ts:111`),用 `grep -n 'OWN CHOICE' packages/core-backend/src/tasks/task-lists.ts` 能单独找到它。
 
 | 裁决 | 模块 / 函数 | 选的值 | 备注 |
 |---|---|---|---|

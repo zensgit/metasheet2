@@ -106,7 +106,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 | 8 | `task-pagination.ts` `parsePageParams` 的 `limit` 上界 | 去掉 `\|\| parsed > TASK_PAGE_LIMIT_MAX` | 红 2(边界格 + 不静默夹取格),还原后 19/19 绿 |
 | 9 | `task-notifications.ts` `RECIPIENT_ROLE_PRIORITY`(§6 修复之后的版本 —— 证明常量现在真正驱动行为) | `['creator','assignee','follower','list_member']` 改成 `['creator','follower','assignee','list_member']`(交换 assignee/follower 顺序) | 红 2(`assignee>follower` 优先级断言 + 「assignee+follower 同一人应记 assignee」的 mutation-sensitive 断言),还原后 24/24 绿 |
 
-后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(`scratchpad/mutation-check-round2.py`,未提交,只跑在本地)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 用 `--reporter=verbose` 跑对应测试文件、既按退出码判红/绿、也把实际失败的用例标题抓下来当证据 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。下面表格「结果」列里带引号的用例标题就是脚本抓到的真实失败标题,不是转述;19 处全部 PASS,两次哈希相同(在干净工作区上最后一次重跑得到 `2061953acb44e2c3201b2527efdbcba184b65ecd63fe44234fb0f5c63313ea59`),证明脚本自己跑完之后工作区和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
+后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(`scratchpad/mutation-check-round2.py`,未提交,只跑在本地)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 用 `--reporter=verbose` 跑对应测试文件、既按退出码判红/绿、也把实际失败的用例标题抓下来当证据 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。下面表格「结果」列里带引号的用例标题就是脚本抓到的真实失败标题,不是转述;19 处全部 PASS。最后一次重跑是在只有这两份 doc 文件有未提交改动的工作区上做的(`packages/` 当时与 `279c82002e` 逐字节一致——`git diff 279c82002e HEAD -- packages/` 零输出,`git diff` 命令本身也证实了这一点),两次哈希相同,都是 `2061953acb44e2c3201b2527efdbcba184b65ecd63fe44234fb0f5c63313ea59`(这是**那份 docs diff 的哈希,不是空 diff 的哈希**——空 diff 的哈希是 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,`printf '' | shasum -a 256` 算出来的,跟上面那个不是一回事)。两次相同证明脚本自己跑完之后 `packages/` 目录(唯一会被脚本 mutate 的地方)和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
 
 | # | 模块 / 被改的守卫 | 改法 | 结果 |
 |---|---|---|---|
@@ -119,8 +119,8 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 | 16 | `task-groups.ts` `applyMoveItem` 的 scope 断言(item 9) | 同上 | 红,还原后逐字节一致 |
 | 17 | `task-groups.ts` `arraysEqual` 的长度检查(item 12) | 删掉 `if (a.length !== b.length) return false` | 红——`applyMoveItem > "same group, SAME-LENGTH-PREFIX but different length (next is previous + one more item) -> changed: true"`,还原后逐字节一致 |
 | 18 | `task-reminders.ts` `isReminderSkippedByTaskState` 第三条判据(item 3) | 只留 status/deletedAt 判据,砍掉 remind_at 比对整段 | 红,还原后逐字节一致 |
-| 19 | `task-reminders.ts` `isInDailyDigest` 全天分支(item 4c) | `viewerToday(now, viewerTz)` 改成 `viewerToday(now, task.timeZone)` | 红,还原后逐字节一致 |
-| 20 | `task-reminders.ts` `isInDailyDigest` 定时分支(item 4c) | 两处 `viewerNextMidnight(…, viewerTz)` 改成 `task.timeZone` | 红,还原后逐字节一致 |
+| 19 | `task-reminders.ts` `isInDailyDigest` 全天分支(item 4) | `viewerToday(now, viewerTz)` 改成 `viewerToday(now, task.timeZone)` | 红,还原后逐字节一致 |
+| 20 | `task-reminders.ts` `isInDailyDigest` 定时分支(item 4) | 两处 `viewerNextMidnight(…, viewerTz)` 改成 `task.timeZone` | 红——只有用例 (b)(`"scheduled: a dueAt that falls between UTC's and the recipient's day-after-tomorrow start"`)命中,还原后逐字节一致 |
 | 21 | `task-reminders.ts` `buildTaskDailyDigestCondition` 的 `+2`/`+1` 偏移(item 5) | 改成 `+3`/`+2` | 红——`buildTaskDailyDigestCondition > "full-text SQL pin: the exact NOT EXISTS clause and the all-day (+1) / scheduled (+2) date offsets"`,还原后逐字节一致 |
 | 22 | `task-reminders.ts` `isTaskReminderDue` 的 floor 接线(item 6) | `floor.getTime()` 改成字面量 `0` | 红,还原后逐字节一致 |
 | 23 | `task-reminders.ts` `TASK_REMINDER_SCAN_WINDOW_MS`(item 7) | `2 * 60 * 60 * 1000` 改成 `3 * 60 * 60 * 1000` | 红——`"R06: TASK_REMINDER_SCAN_WINDOW_MS is pinned to 2 hours (ASSUMPTION(task-d): [R06])"` + `"absolute-time case: remindAt exactly 2h30m before now -> false"`,还原后逐字节一致 |
