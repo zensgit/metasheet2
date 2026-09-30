@@ -9757,6 +9757,44 @@ export class ApprovalProductService {
       roundPolicy: { windowDays, suite },
     })
 
+    // C-3 row 4 「最终评估:业务不可逆」 — the ORIGINAL document (held `FOR UPDATE` above) is no longer
+    // an approved document, so there is nothing left for this round to cancel. This is the creation
+    // path's own precondition (`createCancelRoundInstance`: `original.status !== 'approved'` ⇒ 409
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`) evaluated again at the decision point, which is what
+    // §2-G4 「双时点按当前策略评估」 asks of every creation-time predicate — and it answers with the
+    // SAME code, exactly as the two policy codes above do when re-derivation fails here.
+    //
+    // It closes as `blocked` (persisted in this transaction by the C-3 closer), NOT as a throw:
+    // falling through to redemption would hand C-1 a document it can no longer cancel, and the
+    // resulting error would roll the whole transaction back and leave the round `pending` with its
+    // seats — a state no retried approve can ever leave, because the document does not become
+    // approved again (only a reject or the requester's withdraw would end the round).
+    // It also must not be `expired`: the window is not why this round cannot proceed.
+    //
+    // Precedence, deliberately: after the policy derivation (so the decision snapshot is the normal
+    // one whenever the policy itself is readable; a policy that cannot be derived still reports its
+    // own code), and BEFORE the window query, so a document that is both no longer approved and past
+    // its window reports the reason that holds regardless of the clock, and the retryable
+    // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` throw below can never pre-empt a closure that no retry
+    // could change. `detail` carries the observed status beside the bounded reason (never projected
+    // to any read surface — see `projectCancelRoundCloseReasonForReadV1`).
+    //
+    // Implementer choice, FLAGGED for owner registration: the code is the existing
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`, reused in the open `business_blocked:<code>` domain
+    // (P-7) — no new code, and the P-8 registry is unchanged.
+    if (original.status !== 'approved') {
+      return {
+        roundId: round.id,
+        documentId: round.document_id,
+        evaluation: {
+          decision: 'blocked',
+          code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+          detail: typeof original.status === 'string' ? original.status : null,
+        },
+        policySnapshotAtDecision,
+      }
+    }
+
     // §2-G2 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)」 — the FIRST approved transition
     // on the original document, read off its own audit trail (`approval_instances` has no
     // `approved_at` column); `MIN` is 「首次」 and is what makes the anchor 「不随修订滚动」.
