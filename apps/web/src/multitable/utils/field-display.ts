@@ -43,8 +43,13 @@ export function formatDateOnlyValue(value: unknown): string | null {
     if (day) return day
   }
   // A spelling the business-timezone parser refuses but `Date.parse` accepts (`9/18/2026 16:00`) still names a
-  // day: keep it as written rather than echoing the raw text.
-  return formatBusinessTimestamp(text, { precision: 'day' }) ?? (typeof text === 'string' ? calendarDayFromText(text) : null)
+  // day: keep it as written rather than echoing the raw text. A value outside the `Date` range (a stray epoch
+  // like 1e20) must not throw out of a cell renderer — it names no day.
+  try {
+    return formatBusinessTimestamp(text, { precision: 'day' }) ?? (typeof text === 'string' ? calendarDayFromText(text) : null)
+  } catch {
+    return null
+  }
 }
 
 function formatDate(value: unknown): string {

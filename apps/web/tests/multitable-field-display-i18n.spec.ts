@@ -84,6 +84,12 @@ describe('date-only cells show YYYY-MM-DD', () => {
     expect(formatFieldDisplay({ field, value: 'not a day' })).toBe('not a day')
     expect(formatFieldDisplay({ field, value: null })).toBe('—')
   })
+
+  it('a value outside the Date range names no day and never throws out of a renderer', () => {
+    expect(formatDateOnlyValue(1e20)).toBeNull()
+    expect(formatDateOnlyValue(-1e20)).toBeNull()
+    expect(formatFieldDisplay({ field, value: 1e20 })).toBe(String(1e20))
+  })
 })
 
 // The same `YYYY-MM-DD` on the text surfaces that do not go through formatFieldDisplay: group header / client
