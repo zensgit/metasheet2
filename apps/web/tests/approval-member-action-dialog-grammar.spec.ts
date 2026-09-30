@@ -631,3 +631,143 @@ describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five me
     })
   }
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1 (plan R5-5) — the quick-phrase chips write their preset text UNCHANGED, in
+// either shell locale. A chip's text goes into the submitted opinion / comment as-is, so
+// localising the phrases would change the language of what gets stored; that trade-off is left to
+// the owner, and this slice keeps the written text as it was. Pinned for BOTH chip sites of
+// ApprovalDetailView (the approve / reject dialog and the comment dialog), in en and in zh-CN:
+// the chip texts are the literal presets; a click puts the literal into the input; a second click
+// appends after a full-width comma; and the payload the view hands to the approval store's
+// `executeAction` (the store double above) carries exactly the literal. In English each dialog is
+// also scanned with the chips shown: the presets are its only CJK (named exceptions,
+// quickPhrases.ts:13-15).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in both locales', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let successSpy: { mockRestore: () => void; mock: { calls: unknown[][] } } | null = null
+
+  // The view remembers a submitted chip per user + action in localStorage and lists remembered
+  // phrases first; clear them so every case starts from the preset order.
+  function forgetRememberedPhrases() {
+    for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
+      const key = window.localStorage.key(i)
+      if (key && key.startsWith('approval-quick-phrases:')) window.localStorage.removeItem(key)
+    }
+  }
+
+  beforeEach(async () => {
+    forgetRememberedPhrases()
+    mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    const { ElMessage } = await import('element-plus')
+    successSpy = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    successSpy?.mockRestore()
+    successSpy = null
+    vi.clearAllMocks()
+    forgetRememberedPhrases()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountWithSurfacingStubs() {
+    const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
+    for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
+    app.component('ElButton', ElButton)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Literal presets (quickPhrases.ts:13-15), not imported: a change to the constant must red here.
+  const CASES = [
+    { action: 'approve', open: 'approval-approve-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['同意', '情况属实', '已核实无误'], line: 13 },
+    { action: 'reject', open: 'approval-reject-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['不符合要求', '请补充材料后重新提交'], line: 14 },
+    { action: 'comment', open: 'approval-comment-button', dialog: 'approval-comment-dialog', submit: 'approval-comment-submit', presets: ['已阅', '请尽快处理'], line: 15 },
+  ] as const
+
+  async function dialogTitle(action: 'approve' | 'reject' | 'comment', isZh: boolean): Promise<string> {
+    if (action === 'comment') {
+      const grammar = await import('../src/approvals/memberActionDialogGrammar')
+      return grammar.memberActionDialogGrammar(isZh).comment.dialogTitle
+    }
+    const labels = await import('../src/views/approval/approvalDetailLabels')
+    const table = isZh ? labels.DETAIL_ZH : labels.DETAIL_EN
+    return action === 'approve' ? table.actionDialogApprove : table.actionDialogReject
+  }
+
+  for (const locale of ['en', 'zh-CN'] as const) {
+    for (const { action, open, dialog, submit, presets, line } of CASES) {
+      it(`${action} (${locale}): chips show the presets; click and submit carry them unchanged`, async () => {
+        const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+        useLocale().setLocale(locale)
+        mockActiveApproval.value = baseInstance({
+          title: 'Travel claim',
+          requester: { id: 'user_99', name: 'Requester Nine' },
+          nodeOperations: { ...ALL_ALLOWED },
+          assignments: [
+            { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+            { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: 'Approver Seven' } },
+          ],
+        })
+        await mountWithSurfacingStubs()
+        ;(q(container!, open) as HTMLButtonElement).click()
+        await flushUi()
+
+        const root = () => q(container!, dialog) as HTMLElement
+        const chips = () => Array.from(root().querySelectorAll<HTMLElement>('[data-testid^="approval-quick-phrase-"]'))
+        const input = () => root().querySelector('input') as HTMLInputElement
+        expect(root(), `${action} dialog open`).toBeTruthy()
+        expect(renderedTextAndAttributes(root()), 'dialog title in the shell locale').toContain(await dialogTitle(action, locale === 'zh-CN'))
+        expect(chips().map((chip) => chip.textContent?.trim())).toEqual([...presets])
+        if (locale === 'en') {
+          expectNoCjkOutside(
+            renderedTextAndAttributes(container!),
+            presets.map((text) => ({ text, count: 1, source: `apps/web/src/approvals/quickPhrases.ts:${line} (QUICK_PHRASES.${action})` })),
+            `detail+${action} (en)`,
+          )
+        }
+
+        chips()[0]!.click()
+        await flushUi()
+        expect(input().value).toBe(presets[0])
+        chips()[1]!.click()
+        await flushUi()
+        expect(input().value, 'a second chip appends after a full-width comma').toBe(`${presets[0]}，${presets[1]}`)
+
+        // Clear the input, pick the first chip again and submit it.
+        input().value = ''
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+        await flushUi()
+        chips()[0]!.click()
+        await flushUi()
+        expect(input().value).toBe(presets[0])
+        ;(q(container!, submit) as HTMLButtonElement).click()
+        await flushUi(12)
+
+        expect(q(container!, 'approval-action-dialog-error'), 'no dialog error').toBeNull()
+        expect(successSpy!.mock.calls.length, 'success toast shown (the submit succeeded)').toBe(1)
+        expect(executeActionSpy).toHaveBeenCalledTimes(1)
+        expect(executeActionSpy).toHaveBeenLastCalledWith('apv_1', { action, comment: presets[0] })
+      })
+    }
+  }
+})

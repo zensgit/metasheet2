@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
-import type { DelegationRecord } from '../src/approvals/delegations'
+import type { DelegationRecord, OwnDelegationForm } from '../src/approvals/delegations'
 import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
@@ -488,5 +488,26 @@ describe('O-8 / F8-1 — MyDelegationView English render scan', () => {
     useLocale().setLocale('en')
     await flushUi()
     expectNoCjkOutside(renderedTextAndAttributes(container), EXCEPTIONS, 'my delegation (en again)')
+  })
+})
+
+// O-8 / F8-1: validateOwnDelegationForm in English, the helper behind the toast the scan above
+// triggers once (empty form). Kept in this file because it runs on the required web lane (the
+// helper's zh-CN cases sit in myDelegationForm.spec.ts).
+describe('O-8 / F8-1 — validateOwnDelegationForm in English', () => {
+  it('returns null for a valid form and an English message for each failure', async () => {
+    const { CJK } = await import('./helpers/approvalLocaleScan')
+    const { validateOwnDelegationForm } = await import('../src/approvals/delegations')
+    const base: OwnDelegationForm = { delegateeUserId: 'B', scope: 'all', scopeTemplateId: '', startAt: '2026-06-22T00:00', endAt: '2026-06-23T00:00' }
+    expect(validateOwnDelegationForm(base, false)).toBeNull()
+    const messages = [
+      validateOwnDelegationForm({ ...base, delegateeUserId: '  ' }, false),
+      validateOwnDelegationForm({ ...base, scope: 'template' }, false),
+      validateOwnDelegationForm({ ...base, startAt: '2026-06-23T00:00', endAt: '2026-06-22T00:00' }, false),
+      validateOwnDelegationForm({ ...base, endAt: '' }, false),
+    ]
+    expect(messages.every((m) => typeof m === 'string' && m.length > 0)).toBe(true)
+    expect(new Set(messages).size, 'one message per failure').toBe(4)
+    expect(messages.join(' ')).not.toMatch(CJK)
   })
 })

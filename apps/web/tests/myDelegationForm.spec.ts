@@ -43,19 +43,3 @@ describe('buildOwnCreatePayload', () => {
     expect(buildOwnCreatePayload({ ...base, scope: 'template', scopeTemplateId: ' t1 ' }).scopeTemplateId).toBe('t1')
   })
 })
-
-// O-8 / F8-1: the same validation in English (MyDelegationView follows the shell locale).
-describe('validateOwnDelegationForm — en (O-8 / F8-1)', () => {
-  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
-  it('returns null for a valid form and English messages for each failure', () => {
-    expect(validateOwnDelegationForm(base, false)).toBeNull()
-    const messages = [
-      validateOwnDelegationForm({ ...base, delegateeUserId: '  ' }, false),
-      validateOwnDelegationForm({ ...base, scope: 'template' }, false),
-      validateOwnDelegationForm({ ...base, startAt: '2026-06-23T00:00', endAt: '2026-06-22T00:00' }, false),
-      validateOwnDelegationForm({ ...base, endAt: '' }, false),
-    ]
-    expect(messages.every((m) => typeof m === 'string' && m.length > 0)).toBe(true)
-    expect(messages.join(' ')).not.toMatch(CJK)
-  })
-})
