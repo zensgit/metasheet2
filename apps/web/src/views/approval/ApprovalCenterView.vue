@@ -582,7 +582,10 @@
       data-testid="approval-batch-result-dialog"
     >
       <p class="approval-center__batch-result-summary">
-        <template v-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
+        <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
+             counted on its own — it is not a failure (the row's own line says to refresh and check). -->
+        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchTrueFailureCount }} 项：</template>
+        <template v-else-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
         <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
       </p>
       <ul class="approval-center__batch-result-list">
@@ -590,6 +593,7 @@
           v-for="row in batchFailureRows"
           :key="row.id"
           class="approval-center__batch-result-item"
+          :data-batch-result-kind="row.unconfirmed ? 'unconfirmed' : 'failed'"
         >
           <div class="approval-center__batch-result-item-title">{{ row.requestNo }} · {{ row.title }}</div>
           <div class="approval-center__batch-result-item-message">{{ row.message }}</div>
@@ -597,9 +601,12 @@
       </ul>
       <template #footer>
         <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <!-- 撤销轮: an accepted-but-unconfirmed row is not a failure, so it is never retried; with no true
+             failure left the button is disabled. -->
         <el-button
           type="primary"
           :loading="batchRunning"
+          :disabled="batchTrueFailureCount === 0"
           data-testid="approval-batch-retry"
           @click="retryBatchFailures"
         >
@@ -621,6 +628,13 @@ import { useApprovalPermissions } from '../../approvals/permissions'
 import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
+import {
+  canDecideCancelRoundWith,
+  dispatchApprovalDecision,
+  isCancelRoundActedRoundUnconfirmed,
+  isCancelRoundClientRefusal,
+  isCancelRoundWorkflow,
+} from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
@@ -638,7 +652,7 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useApprovalStore()
-const { canWrite } = useApprovalPermissions()
+const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 
 // B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
 // shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
@@ -879,8 +893,12 @@ function waitClass(createdAt: string): string {
 function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
   return row.currentNodeType === 'handler'
 }
+// 撤销轮 rows decide through the attendance route, so their approve / reject affordances (inline,
+// pane, batch) follow the grant that route checks (`canDecideCancelRoundWith`) — the same predicate
+// the detail view uses. Display only; the route remains the authority.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
+    && (!isCancelRoundWorkflow(row) || canDecideCancelRoundWith(approvalAccess?.value))
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
@@ -914,15 +932,22 @@ interface ApprovalBatchFailureRow {
   title: string
   requestNo: string
   message: string
+  /** 撤销轮: accepted by the server, but not confirmed to be the round on screen — not a failure. */
+  unconfirmed: boolean
 }
 const batchResultDialogVisible = ref(false)
 const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
+const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
+const batchTrueFailureCount = computed(() => batchFailureRows.value.length - batchUnconfirmedCount.value)
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
 
-function buildFailureRows(failed: ApprovalBatchActionResult['failed']): ApprovalBatchFailureRow[] {
+function buildFailureRows(
+  failed: ApprovalBatchActionResult['failed'],
+  unconfirmedIds: ReadonlySet<string>,
+): ApprovalBatchFailureRow[] {
   return failed.map(({ id, message }) => {
     const row = batchRowSnapshot.get(id)
     return {
@@ -930,6 +955,7 @@ function buildFailureRows(failed: ApprovalBatchActionResult['failed']): Approval
       title: row?.title ?? id,
       requestNo: row?.requestNo ?? '-',
       message,
+      unconfirmed: unconfirmedIds.has(id),
     }
   })
 }
@@ -938,14 +964,30 @@ async function dispatchBatchAndHandleResult(
   ids: string[],
   action: 'approve' | 'reject',
   comment: string,
+  // 撤销轮: accepted-but-unconfirmed rows from the previous pass — not re-sent, kept in the manifest.
+  carriedUnconfirmed: ApprovalBatchFailureRow[] = [],
 ): Promise<void> {
   const trimmed = comment.trim()
+  const unconfirmedIds = new Set<string>()
   const result = await runApprovalBatchAction(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
-    (id, req) => dispatchAction(id, req),
+    // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
+    // at launch carries each row's workflowKey / businessKey for that decision. Every id comes from
+    // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
+    async (id, req) => {
+      const row = batchRowSnapshot.get(id)
+      if (!row) throw new Error('操作失败，请刷新后重试')
+      try {
+        return await dispatchApprovalDecision(row, req, dispatchAction)
+      } catch (error) {
+        // accepted but not confirmed to be this row's round: still listed, counted apart from failures
+        if (isCancelRoundActedRoundUnconfirmed(error)) unconfirmedIds.add(id)
+        throw error
+      }
+    },
   )
-  if (result.failed.length === 0) {
+  if (result.failed.length === 0 && carriedUnconfirmed.length === 0) {
     ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
     batchResultDialogVisible.value = false
     batchFailureRows.value = []
@@ -955,7 +997,7 @@ async function dispatchBatchAndHandleResult(
     lastBatchAction.value = action
     lastBatchComment.value = comment
     batchSucceededCount.value = result.succeeded.length
-    batchFailureRows.value = buildFailureRows(result.failed)
+    batchFailureRows.value = [...carriedUnconfirmed, ...buildFailureRows(result.failed, unconfirmedIds)]
     batchResultDialogVisible.value = true
   }
   clearPendingSelection()
@@ -980,14 +1022,17 @@ async function runBatch(action: 'approve' | 'reject', comment: string): Promise<
 // `batchRowSnapshot` already carries these rows' title/requestNo from the original launch, so a
 // still-failing row keeps its label; `dispatchBatchAndHandleResult` overwrites `batchFailureRows`
 // in place with whatever is left (or closes the dialog on full success).
+// 撤销轮: a row the server accepted but the page could not confirm is not a failure — it is not
+// re-sent, and it stays in the manifest (with its own "refresh and check" line) after the retry.
 async function retryBatchFailures(): Promise<void> {
   if (batchRunning.value) return
-  const ids = batchFailureRows.value.map((row) => row.id)
+  const ids = batchFailureRows.value.filter((row) => !row.unconfirmed).map((row) => row.id)
   if (ids.length === 0) return
+  const carried = batchFailureRows.value.filter((row) => row.unconfirmed)
   batchRunning.value = true
   batchAction.value = lastBatchAction.value
   try {
-    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value)
+    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value, carried)
   } finally {
     batchRunning.value = false
     batchAction.value = null
@@ -1051,11 +1096,13 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
   if (inlineApprovingId.value) return
   inlineApprovingId.value = row.id
   try {
-    await dispatchAction(row.id, { action: 'approve' })
+    await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
     ElMessage.success('审批已通过')
     loadCurrentTab()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+    // 撤销轮: the row was not (or could not be confirmed as) the leave's pending round — reload the list.
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     inlineApprovingId.value = null
   }
@@ -1090,7 +1137,7 @@ async function submitRowReject(): Promise<void> {
   rowRejectSubmitting.value = true
   rowRejectError.value = null
   try {
-    await dispatchAction(target.id, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' })
+    await dispatchApprovalDecision(target, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' }, dispatchAction)
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
@@ -1098,6 +1145,7 @@ async function submitRowReject(): Promise<void> {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
     rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     rowRejectSubmitting.value = false
   }

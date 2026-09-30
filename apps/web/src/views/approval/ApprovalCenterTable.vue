@@ -51,7 +51,7 @@
     </el-table-column>
     <el-table-column label="状态" width="100">
       <template #default="{ row }: { row: UnifiedApprovalDTO }">
-        <StatusTag domain="approvalInstance" :status="row.status" />
+        <StatusTag v-bind="closeReasons.tagProps(row)" />
       </template>
     </el-table-column>
     <el-table-column label="发起时间" width="180">
@@ -87,9 +87,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import type { UnifiedApprovalDTO } from '../../types/approval'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { useCancelRoundCloseReasons } from '../../approvals/useCancelRoundCloseReasons'
 import StatusTag from '../../components/status/StatusTag.vue'
 
 // UF-5 (ui-foundation-design-lock-20260706.md §6): the shared table body behind ApprovalCenterView's
@@ -148,6 +149,12 @@ defineEmits<{
 }>()
 
 const tableRef = ref<{ clearSelection: () => void } | null>(null)
+
+// 撤销锁 P-2: a cancel-round row renders through the `cancelRound` domain (approvals/cancelRound.ts);
+// every other row keeps the `approvalInstance` domain exactly as before. A rejected cancel-round row
+// needs the close-reason criterion the list DTO does not carry — see useCancelRoundCloseReasons.ts.
+const closeReasons = useCancelRoundCloseReasons()
+watch(() => props.rows, (rows) => closeReasons.ensure(rows), { immediate: true })
 
 // Only ever bound when `showSelection` is true (the other three tabs never had a `row-key`
 // attribute on their `<el-table>` at all).
