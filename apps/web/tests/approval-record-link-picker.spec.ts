@@ -670,3 +670,57 @@ describe('ApprovalRecordLinkPicker — async generation (stale response drop)', 
       .toBe('重开结果-应保留')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of the record-link picker dialog in
+// its list (with load-more), fail-closed and empty states. ASCII fixtures; the whole container
+// (text + every attribute value) must carry no CJK; the list state is also flipped to zh-CN
+// (Chinese appears) and back.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalRecordLinkPicker English render scan', () => {
+  beforeEach(() => {
+    useLocale().setLocale('en')
+  })
+
+  afterEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
+  it('list with load-more is English only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    listMock.mockResolvedValue({
+      ok: true,
+      data: {
+        records: [{ id: 'rec_1', display: 'Customer A' }],
+        page: { limit: 20, offset: 0, total: 40, hasMore: true },
+      },
+    })
+    await mountPicker({})
+    expect(container!.querySelector('[data-testid="approval-record-link-picker-load-more"]'), 'load-more shown').toBeTruthy()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), [], 'record-link picker list (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), [], 'record-link picker list (en again)')
+  })
+
+  for (const [label, response] of [
+    ['403', { ok: false, status: 403, code: 'FORBIDDEN', message: 'Forbidden' }],
+    ['empty', { ok: true, data: { records: [], page: { limit: 20, offset: 0, total: 0, hasMore: false } } }],
+  ] as const) {
+    it(`${label} state is English only`, async () => {
+      const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+      listMock.mockResolvedValue(response)
+      await mountPicker({})
+      const stateEl = container!.querySelector(label === '403'
+        ? '[data-testid="approval-record-link-picker-error"]'
+        : '[data-testid="approval-record-link-picker-empty"]')
+      expect(stateEl, `${label} state rendered`).toBeTruthy()
+      expectNoCjkOutside(renderedTextAndAttributes(container!), [], `record-link picker ${label} (en)`)
+    })
+  }
+})

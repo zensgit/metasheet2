@@ -463,6 +463,13 @@ describe('O-8 / F8-1 — MyDelegationView English render scan', () => {
     scope.dispatchEvent(new Event('change'))
     await flushUi()
     expect(container.querySelector('[data-testid="my-delegation-template"]'), 'form-scope input shown').toBeTruthy()
+    // Saving the empty form surfaces validateOwnDelegationForm's message as a toast (delegations.ts).
+    const { ElMessage } = await import('element-plus')
+    ;(container.querySelector('[data-testid="my-delegation-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    const warnings = vi.mocked(ElMessage.warning).mock.calls.map((call) => String(call[0]))
+    expect(warnings.length, 'validation toast shown').toBe(1)
+    expect(CJK.test(warnings[0]!), `validation toast copy: ${warnings[0]}`).toBe(false)
     const statusKeys = Array.from(container.querySelectorAll('[data-status]')).map((el) => el.getAttribute('data-status'))
     expect(statusKeys, 'the status keys sit in data-status only').toEqual(['未开始', '生效中', '已过期', '已停用', '生效中'])
     expect(CJK.test(container.textContent ?? ''), 'visible text has no CJK').toBe(false)

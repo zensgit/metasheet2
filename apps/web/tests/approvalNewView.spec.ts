@@ -2178,4 +2178,14 @@ describe('O-8 / F8-1 — ApprovalNewView English render scan', () => {
     await flushUi()
     expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new (en again)')
   })
+
+  it('a route preview that fails without a message shows the English fallback (routePreviewController.ts)', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    previewRouteOverride = () => Promise.reject('offline')
+    await mountForScan()
+    ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-route-preview-error')?.textContent?.trim()).toBe('Route preview failed')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new route-preview error (en)')
+  })
 })
