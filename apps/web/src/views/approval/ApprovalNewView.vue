@@ -2,9 +2,9 @@
   <PageShell width="narrow">
     <PageHeader
       class="approval-new__header"
-      title="发起审批"
+      :title="t.pageTitle"
       back
-      back-label="返回"
+      :back-label="t.back"
       @back="goBack"
     />
 
@@ -18,7 +18,7 @@
       @close="templateStore.error = null; approvalStore.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="retryLoad">重新加载</el-button>
+        <el-button type="primary" link @click="retryLoad">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -29,11 +29,11 @@
           <template #header>
             <div class="approval-new__info-header">
               <h2>{{ template.name }}</h2>
-              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" force-locale="zh" />
+              <StatusTag domain="approvalTemplate" :status="template.status" size="sm" />
             </div>
           </template>
           <p v-if="template.description" class="approval-new__info-desc">{{ template.description }}</p>
-          <p v-else class="approval-new__info-desc approval-new__info-desc--empty">暂无描述</p>
+          <p v-else class="approval-new__info-desc approval-new__info-desc--empty">{{ t.noDescription }}</p>
         </el-card>
 
         <!-- UX B2-13 (再次提交): shown only once a `?fromInstance=` prefill actually applied at
@@ -47,14 +47,14 @@
           data-testid="approval-draft-restore"
         >
           <template #title>
-            检测到上次未提交的草稿，是否恢复？
-            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">恢复草稿</el-button>
-            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">丢弃</el-button>
+            {{ t.draftRestorePrompt }}
+            <el-button size="small" type="primary" data-testid="approval-draft-restore-apply" @click="applyDraftRestore">{{ t.draftRestoreApply }}</el-button>
+            <el-button size="small" data-testid="approval-draft-restore-discard" @click="discardDraftRestore">{{ t.draftRestoreDiscard }}</el-button>
           </template>
         </el-alert>
         <el-alert
           v-if="prefillNoticeVisible"
-          title="已从上一次申请预填，请检查后提交"
+          :title="t.prefillNotice"
           type="info"
           show-icon
           :closable="true"
@@ -76,11 +76,11 @@
           data-testid="approval-flow-preview"
         >
           <template #header>
-            <span class="approval-new__flow-preview-header">审批流程</span>
+            <span class="approval-new__flow-preview-header">{{ t.flow }}</span>
           </template>
           <div class="approval-new__flow-preview-row">
             <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
-              发起人
+              {{ t.requester }}
             </span>
             <template v-for="step in flowPreviewSteps" :key="step.key">
               <span class="approval-new__flow-preview-arrow">→</span>
@@ -105,14 +105,14 @@
               data-testid="approval-route-preview-btn"
               @click="loadRoutePreview"
             >
-              按当前表单预览路径
+              {{ t.routePreview }}
             </el-button>
             <div v-if="routePreviewError" class="approval-new__route-preview-error" data-testid="approval-route-preview-error">
               {{ routePreviewError }}
             </div>
             <div v-else-if="routePreview" class="approval-new__flow-preview-row" data-testid="approval-route-preview-row">
               <span class="approval-new__flow-preview-chip approval-new__flow-preview-chip--requester">
-                发起人
+                {{ t.requester }}
               </span>
               <template v-for="node in routePreview.route" :key="node.nodeKey">
                 <span class="approval-new__flow-preview-arrow">→</span>
@@ -130,10 +130,10 @@
                 class="approval-new__route-preview-truncated"
                 data-testid="approval-route-preview-truncated"
               >
-                （路径未能完整解析，以实际流转为准）
+                {{ t.routeTruncated }}
               </span>
               <span v-else-if="routePreview.route.length === 0" class="approval-new__route-preview-truncated">
-                （按当前表单将直接通过，无审批节点）
+                {{ t.routeDirectPass }}
               </span>
             </div>
           </div>
@@ -152,13 +152,13 @@
           data-testid="approval-requester-choice"
         >
           <template #header>
-            <span class="approval-new__flow-preview-header">选择审批人</span>
+            <span class="approval-new__flow-preview-header">{{ t.chooseApprover }}</span>
           </template>
           <el-form label-position="top">
             <el-form-item
               v-for="chooser in requesterChoiceNodes"
               :key="chooser.nodeKey"
-              :label="`${chooser.nodeName}（${chooser.mode === 'multi' ? '可选多人' : '选一人'} · ${chooserScopeLabel(chooser)}）`"
+              :label="chooserItemLabel(chooser)"
               required
               data-testid="approval-requester-choice-item"
             >
@@ -171,7 +171,7 @@
                 :remote-method="(q: string) => searchChoiceCandidates(chooser, q)"
                 :loading="choiceSearchLoading[chooser.nodeKey] === true"
                 class="ms-w-100pct"
-                placeholder="搜索并选择审批人"
+                :placeholder="t.chooserPlaceholder"
                 :data-testid="`approval-requester-choice-picker-${chooser.nodeKey}`"
                 @update:model-value="(value: string[] | string | null) => setRequesterChoice(chooser, value)"
                 @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
@@ -188,7 +188,7 @@
           </el-form>
         </el-card>
 
-        <el-divider content-position="left">填写表单</el-divider>
+        <el-divider content-position="left">{{ t.fillForm }}</el-divider>
 
         <el-form
           ref="formRef"
@@ -220,7 +220,7 @@
                 <el-input
                   :model-value="recordLinkDisplay(field.id)"
                   readonly
-                  placeholder="请选择一条关联记录"
+                  :placeholder="t.recordLinkPlaceholder"
                   data-testid="approval-record-link-display"
                 />
                 <el-button
@@ -229,7 +229,7 @@
                   data-testid="approval-record-link-pick"
                   @click="openRecordLinkPicker(field)"
                 >
-                  选择记录
+                  {{ t.pickRecord }}
                 </el-button>
                 <el-button
                   v-if="formData[field.id]"
@@ -237,7 +237,7 @@
                   data-testid="approval-record-link-clear"
                   @click="clearRecordLink(field.id)"
                 >
-                  清除
+                  {{ t.clear }}
                 </el-button>
               </div>
             </div>
@@ -246,7 +246,7 @@
             <el-input
               v-else-if="field.type === 'text'"
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- textarea -->
@@ -255,7 +255,7 @@
               v-model="formData[field.id]"
               type="textarea"
               :rows="3"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- number -->
@@ -273,7 +273,7 @@
               v-else-if="field.type === 'date'"
               v-model="formData[field.id]"
               type="date"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             />
 
@@ -282,7 +282,7 @@
               v-else-if="field.type === 'datetime'"
               v-model="formData[field.id]"
               type="datetime"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             />
 
@@ -303,16 +303,16 @@
                   :model-value="dateRangeStart(field.id)"
                   :type="dateRangePickerElementType(field.props?.dateType)"
                   :value-format="dateRangePickerValueFormat(field.props?.dateType)"
-                  :placeholder="(field.props?.startLabel as string) || '起始'"
+                  :placeholder="(field.props?.startLabel as string) || t.rangeStart"
                   data-testid="approval-date-range-start"
                   @update:model-value="(value: string | null) => setDateRangeStart(field.id, value)"
                 />
-                <span class="approval-new__date-range-sep">至</span>
+                <span class="approval-new__date-range-sep">{{ t.rangeTo }}</span>
                 <el-date-picker
                   :model-value="dateRangeEnd(field.id)"
                   :type="dateRangePickerElementType(field.props?.dateType)"
                   :value-format="dateRangePickerValueFormat(field.props?.dateType)"
-                  :placeholder="(field.props?.endLabel as string) || '结束'"
+                  :placeholder="(field.props?.endLabel as string) || t.rangeEnd"
                   data-testid="approval-date-range-end"
                   @update:model-value="(value: string | null) => setDateRangeEnd(field.id, value)"
                 />
@@ -327,7 +327,7 @@
             <el-select
               v-else-if="field.type === 'select'"
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             >
               <el-option
@@ -343,7 +343,7 @@
               v-else-if="field.type === 'multi-select'"
               v-model="formData[field.id]"
               multiple
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             >
               <el-option
@@ -362,8 +362,8 @@
               :max-selections="userMaxSelections(field)"
               :excluded-user-ids="userExcludedIds(field)"
               :initial-options="userInitialOptions(field)"
-              :aria-label="`选择${field.label}`"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :aria-label="chooseAriaLabel(field.label)"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               @update:model-value="formData[field.id] = $event"
               @update:multiple-model-value="formData[field.id] = $event"
             />
@@ -376,8 +376,8 @@
               :max-selections="departmentMaxSelections(field)"
               :default-mode="departmentDefaultMode(field)"
               :default-department-ids="departmentDefaultIds(field)"
-              :aria-label="`选择${field.label}`"
-              :placeholder="field.placeholder || `请选择${field.label}`"
+              :aria-label="chooseAriaLabel(field.label)"
+              :placeholder="field.placeholder || selectPlaceholder(field.label)"
               @update:model-value="formData[field.id] = $event"
             />
 
@@ -474,7 +474,7 @@
                       :max-selections="userMaxSelections(column)"
                       :excluded-user-ids="userExcludedIds(column)"
                       :initial-options="userInitialOptions(column, row[column.id])"
-                      :aria-label="`选择${column.label}`"
+                      :aria-label="chooseAriaLabel(column.label)"
                       @update:model-value="row[column.id] = $event"
                       @update:multiple-model-value="row[column.id] = $event"
                     />
@@ -482,7 +482,7 @@
                     </template>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="80" align="center">
+                <el-table-column :label="t.colActions" width="80" align="center">
                   <template #default="{ $index }">
                     <el-button
                       type="danger"
@@ -490,12 +490,12 @@
                       :disabled="!canRemoveDetailRow(field)"
                       @click="removeDetailRow(field.id, $index)"
                     >
-                      删除
+                      {{ t.deleteRow }}
                     </el-button>
                   </template>
                 </el-table-column>
                 <template #empty>
-                  <span class="approval-new__detail-empty">暂无明细行，请点击下方“添加一行”</span>
+                  <span class="approval-new__detail-empty">{{ t.detailEmpty }}</span>
                 </template>
               </el-table>
               <div class="approval-new__detail-actions">
@@ -506,7 +506,7 @@
                   :disabled="!canAddDetailRow(field)"
                   @click="addDetailRow(field)"
                 >
-                  添加一行
+                  {{ t.addRow }}
                 </el-button>
                 <span v-if="detailRowsHint(field)" class="approval-new__detail-hint">
                   {{ detailRowsHint(field) }}
@@ -534,14 +534,16 @@
               <ul v-if="attachmentList(field.id).length > 0" class="approval-new__attachment-list">
                 <li v-for="item in attachmentList(field.id)" :key="item.id">
                   <span>{{ item.name }}</span>
-                  <el-button link type="danger" @click="removeAttachment(field.id, item.id)">移除</el-button>
+                  <el-button link type="danger" @click="removeAttachment(field.id, item.id)">{{ t.removeAttachment }}</el-button>
                 </li>
               </ul>
-              <span class="approval-new__field-hint">支持 PDF / JPG / PNG / TXT / CSV，单文件 ≤ 20MB，每字段 ≤ 10 个</span>
+              <span class="approval-new__field-hint">{{ t.attachmentHint }}</span>
             </div>
 
             <!-- attachment, flag OFF: B2-28 honest-disable STOPGAP (byte-identical while
-                 APPROVAL_ATTACHMENTS_ENABLED stays OFF — D5/G1). The previous el-upload
+                 APPROVAL_ATTACHMENTS_ENABLED stays OFF — D5/G1; O-8 / F8-1 therefore leaves
+                 its text untouched as a named exception of the F8-1 locale guards — the copy is
+                 retired with the stopgap itself at rung 4). The previous el-upload
                  (action="#" + auto-upload=false) was fully interactive but never actually uploaded
                  anything: the raw File a user dropped landed in formData, and JSON.stringify-ing that
                  for the request body silently turned it into `{}` — a success toast over
@@ -577,7 +579,7 @@
             <el-input
               v-else
               v-model="formData[field.id]"
-              :placeholder="field.placeholder || `请输入${field.label}`"
+              :placeholder="field.placeholder || inputPlaceholder(field.label)"
             />
 
             <!-- G-B2-16: 大写回显 — under the template-declared amount total (no label guessing),
@@ -591,7 +593,7 @@
               class="approval-new__amount-words"
               data-testid="approval-amount-words"
             >
-              大写：{{ amountWordsFor(field) }}
+              {{ t.amountInWords }}{{ amountWordsFor(field) }}
             </div>
 
             <!-- L8-C: formatted-number display caption (currency prefix / thousands grouping) —
@@ -605,7 +607,7 @@
             </div>
 
             <span v-if="isAutoSummedTotal(field.id)" class="approval-new__field-hint">
-              由明细自动汇总，无需手填
+              {{ t.autoSummed }}
             </span>
           </el-form-item>
 
@@ -618,14 +620,14 @@
               :disabled="!canWrite"
               @click="handleSubmit"
             >
-              提交审批
+              {{ t.submit }}
             </el-button>
-            <el-button @click="goBack">取消</el-button>
+            <el-button @click="goBack">{{ t.cancel }}</el-button>
           </el-form-item>
         </el-form>
       </div>
 
-      <el-empty v-else-if="!templateStore.loading" description="未找到审批表单" />
+      <el-empty v-else-if="!templateStore.loading" :description="t.notFound" />
     </div>
 
     <!-- FWB-0 Layer 2: dedicated record-link picker (pinned baseId+sheetId; no MetaField fabric). -->
@@ -645,6 +647,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
+import { NEW_EN, NEW_ZH } from './approvalNewLabels'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -719,8 +722,26 @@ import { ensureUserNamesResolved, resolvedUserNames } from '../../approvals/dire
 
 const route = useRoute()
 const router = useRouter()
-// O-8 / F8-1: this view follows the shell locale (module-scope `useLocale()` singleton).
+// O-8 / F8-1: this view follows the shell locale (module-scope `useLocale()` singleton); its own
+// copy lives in approvalNewLabels.ts, interpolated copy is an `isZh.value ? … : …` pair below.
 const { isZh } = useLocale()
+const t = computed(() => (isZh.value ? NEW_ZH : NEW_EN))
+
+function inputPlaceholder(label: string): string {
+  return isZh.value ? `请输入${label}` : `Enter ${label}`
+}
+
+function selectPlaceholder(label: string): string {
+  return isZh.value ? `请选择${label}` : `Select ${label}`
+}
+
+function chooseAriaLabel(label: string): string {
+  return isZh.value ? `选择${label}` : `Choose ${label}`
+}
+
+function requiredMessage(label: string): string {
+  return isZh.value ? `请填写${label}` : `${label} is required`
+}
 const approvalStore = useApprovalStore()
 const templateStore = useApprovalTemplateStore()
 const { canWrite } = useApprovalPermissions()
@@ -871,13 +892,13 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
   const templateId = route.params.templateId as string
   const current = attachmentList(field.id)
   if (current.length + picked.length > 10) {
-    ElMessage.error('附件数量超出上限（每字段最多 10 个）')
+    ElMessage.error(t.value.attachmentTooMany)
     return
   }
   // client mirror of the ratified caps/allowlist — the server re-validates authoritatively (422).
   const rejects = preValidateAttachments(picked.map((f) => ({ name: f.name, type: f.type, size: f.size })))
   if (rejects.length > 0) {
-    ElMessage.error(`附件被拒绝（${rejects[0].code}）`)
+    ElMessage.error(isZh.value ? `附件被拒绝（${rejects[0].code}）` : `Attachment rejected (${rejects[0].code})`)
     return
   }
   attachmentUploading.value = true
@@ -894,7 +915,7 @@ async function onAttachmentPick(field: FormField, event: Event): Promise<void> {
     syncAttachmentFormValue(field.id)
   } catch (error) {
     // values-free code from the client mirror / server reject — never file contents or paths.
-    ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
+    ElMessage.error(error instanceof Error ? error.message : t.value.attachmentUploadFailed)
   } finally {
     attachmentUploading.value = false
   }
@@ -917,7 +938,7 @@ async function removeAttachment(fieldId: string, attachmentId: string): Promise<
   try {
     await deleteApprovalAttachment(attachmentId)
   } catch {
-    ElMessage.error('附件移除失败，请重试')
+    ElMessage.error(t.value.attachmentRemoveFailed)
     return
   }
   const index = list.findIndex((item) => item.id === attachmentId)
@@ -1004,7 +1025,9 @@ async function applyDraftRestore(): Promise<void> {
     uploadedAttachments[field.id] = kept.map((id) => ({ id, name: liveByIdName.get(id) ?? id }))
   }
   if (scan.staleIds.length > 0) {
-    ElMessage.warning(`${scan.staleIds.length} 个暂存附件已过期，已从草稿中移除，请重新上传`)
+    ElMessage.warning(isZh.value
+      ? `${scan.staleIds.length} 个暂存附件已过期，已从草稿中移除，请重新上传`
+      : `${scan.staleIds.length} staged attachment(s) expired and were removed from the draft. Upload them again.`)
   }
 }
 
@@ -1051,7 +1074,7 @@ const visibleFieldIds = computed(() => visibleFields.value.map((field) => field.
 const flowPreviewSteps = computed<ApprovalFlowStep[]>(() => {
   const graph = template.value?.approvalGraph
   if (!graph) return []
-  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null)
+  return summarizeApprovalFlow(graph, template.value?.formSchema ?? null, isZh.value)
 })
 
 // ---------------------------------------------------------------------------
@@ -1114,9 +1137,16 @@ const choiceConfirmedNames = reactive<Record<string, Record<string, string>>>({}
 const choiceSearchGeneration: Record<string, number> = {}
 
 function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
-  if (chooser.scope.type === 'members') return '限指定成员'
-  if (chooser.scope.type === 'role') return '限指定角色的成员'
-  return '全公司可选'
+  if (chooser.scope.type === 'members') return t.value.scopeMembers
+  if (chooser.scope.type === 'role') return t.value.scopeRole
+  return t.value.scopeCompany
+}
+
+function chooserItemLabel(chooser: RequesterChoiceChooser): string {
+  const mode = chooser.mode === 'multi' ? t.value.chooserMulti : t.value.chooserSingle
+  return isZh.value
+    ? `${chooser.nodeName}（${mode} · ${chooserScopeLabel(chooser)}）`
+    : `${chooser.nodeName} (${mode} · ${chooserScopeLabel(chooser)})`
 }
 
 // raw-id-render fix (2026-08-19): SAME contract as ApprovalUserPicker.vue's `optionLabel` — a
@@ -1125,7 +1155,7 @@ function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
 // admin) would see whenever a scope-matched candidate's directory record has no name — the
 // primary site this fix closes (census class: requester-facing SELECT leak).
 function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string {
-  const primary = option.name?.trim() || `成员 ${index + 1}`
+  const primary = option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
 }
@@ -1323,7 +1353,7 @@ const formRules = computed<FormRules>(() => {
             trigger: ['blur', 'change'],
             validator: (_rule: unknown, _value: unknown, callback: (error?: Error) => void) => {
               if (!dateRangeStart(field.id) || !dateRangeEnd(field.id)) {
-                callback(new Error(`请填写${field.label}`))
+                callback(new Error(requiredMessage(field.label)))
                 return
               }
               callback()
@@ -1336,7 +1366,7 @@ const formRules = computed<FormRules>(() => {
         // unset could silently pass validation until submit-time. `change` catches those; `blur`
         // stays too so leaving a text/textarea/number field empty validates without a submit click.
         rules[field.id] = [
-          { required: true, message: `请填写${field.label}`, trigger: ['blur', 'change'] },
+          { required: true, message: requiredMessage(field.label), trigger: ['blur', 'change'] },
         ]
       }
     }
@@ -1468,7 +1498,7 @@ function dateRangeDurationDisplay(field: FormField): string {
 
 function dateRangeDurationLabel(field: FormField): string {
   const label = field.props?.durationLabel
-  return typeof label === 'string' && label.trim() ? label.trim() : '时长'
+  return typeof label === 'string' && label.trim() ? label.trim() : t.value.duration
 }
 
 // ---------------------------------------------------------------------------
@@ -1502,8 +1532,8 @@ function canRemoveDetailRow(field: FormField): boolean {
 
 function detailRowsHint(field: FormField): string {
   const parts: string[] = []
-  if (typeof field.minRows === 'number') parts.push(`至少 ${field.minRows} 行`)
-  if (typeof field.maxRows === 'number') parts.push(`最多 ${field.maxRows} 行`)
+  if (typeof field.minRows === 'number') parts.push(isZh.value ? `至少 ${field.minRows} 行` : `at least ${field.minRows} row(s)`)
+  if (typeof field.maxRows === 'number') parts.push(isZh.value ? `最多 ${field.maxRows} 行` : `at most ${field.maxRows} row(s)`)
   return parts.join(' · ')
 }
 
@@ -1564,7 +1594,7 @@ async function handleSubmit() {
     try {
       await formRef.value.validate()
     } catch {
-      ElMessage.warning('请检查表单中的必填项')
+      ElMessage.warning(t.value.checkRequired)
       scrollFirstErrorIntoView()
       return
     }
@@ -1586,7 +1616,9 @@ async function handleSubmit() {
   // choice — the server would 422 values-free anyway; this surfaces the actionable message.
   const missingChoice = missingRequesterChoiceNode()
   if (missingChoice) {
-    ElMessage.warning(`请为「${missingChoice.nodeName}」选择审批人`)
+    ElMessage.warning(isZh.value
+      ? `请为「${missingChoice.nodeName}」选择审批人`
+      : `Choose an approver for "${missingChoice.nodeName}"`)
     return
   }
 
@@ -1595,7 +1627,9 @@ async function handleSubmit() {
   // disabled-option UI gate above.
   const unidentifiableChoice = firstUnidentifiableChoiceNode()
   if (unidentifiableChoice) {
-    ElMessage.warning(`「${unidentifiableChoice.nodeName}」选择的审批人暂无法确认身份，请重新选择`)
+    ElMessage.warning(isZh.value
+      ? `「${unidentifiableChoice.nodeName}」选择的审批人暂无法确认身份，请重新选择`
+      : `The approver chosen for "${unidentifiableChoice.nodeName}" cannot be identified right now. Choose again.`)
     return
   }
 
@@ -1606,7 +1640,7 @@ async function handleSubmit() {
       formData: buildSubmitFormData(),
       ...(requesterChoiceNodes.value.length > 0 ? { requesterChoices: buildRequesterChoicesPayload() } : {}),
     })
-    ElMessage.success('审批已提交')
+    ElMessage.success(t.value.submitted)
     // G-B2-14: a successful submit consumes the draft.
     {
       const key = draftStorageKey()
@@ -1628,7 +1662,7 @@ async function handleSubmit() {
     }
     router.push({ name: 'approval-detail', params: { id: result.id } })
   } catch {
-    ElMessage.error('提交审批失败，请重试')
+    ElMessage.error(t.value.submitFailed)
   }
 }
 

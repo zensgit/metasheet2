@@ -26,8 +26,9 @@ export interface UpcomingApprovalNode {
  * authored/validated as DAGs (see `graphLayout.graphHasCycle`) — so this walk stays safe even
  * against a malformed one.
  */
-// O-8 / F8-1: `isZh` is forwarded to `nodeAssigneeSourceSummary`; it defaults to zh-CN for the
-// not-yet-converted graphSummary.ts caller (slice F8-3), ApprovalDetailView passes the shell locale.
+// O-8 / F8-1: `isZh` is forwarded to `nodeAssigneeSourceSummary`. Both callers pass the shell
+// locale (ApprovalDetailView directly, ApprovalNewView via graphSummary.ts); the zh-CN default only
+// keeps the existing unit tests' calls unchanged.
 export function buildUpcomingNodes(
   graph: ApprovalGraph,
   currentNodeKey: string,

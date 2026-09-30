@@ -315,7 +315,8 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalNewView choiceOptionLabel -- values-free ordinal, this PR\'s fix (census 3rd missed site)', [
-    ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+    // O-8 / F8-1: same locale-aware ordinal as ApprovalUserPicker above; the entry follows the line.
+    ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'MyDelegationView delegateeDisplay -- resolver-wrapped, never the raw column value directly', [
     ['src/views/approval/MyDelegationView.vue', 'delegateeDisplay(row.delegateeUserId)'],

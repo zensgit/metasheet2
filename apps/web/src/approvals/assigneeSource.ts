@@ -121,9 +121,9 @@ function requesterFacingSourceSummary(source: ApprovalAssigneeSource, isZh: bool
 }
 
 /**
- * O-8 / F8-1: `isZh` defaults to zh-CN for the not-yet-converted callers (graphSummary.ts, whose
- * consumers belong to slice F8-3); ApprovalDetailView passes the shell locale via
- * `buildUpcomingNodes`.
+ * O-8 / F8-1: the only caller is `buildUpcomingNodes`, which forwards the shell locale from
+ * ApprovalDetailView (upcoming nodes) and ApprovalNewView (flow preview, via graphSummary.ts); the
+ * zh-CN default only keeps the existing unit tests' calls unchanged.
  */
 export function nodeAssigneeSourceSummary(node: ApprovalNode, schema?: FormSchema | null, isZh = true): string {
   const listSeparator = isZh ? '、' : ', '
