@@ -1,0 +1,180 @@
+name: Approval real-DB acceptance (P3-3 form drafts)
+
+# EVIDENCE LANE for P3-3's `approval_form_drafts` table (server-side approval form draft storage —
+# docs contract: reviews/p33-server-draft-contract-20260914.md). ⚠️ The migration this lane exercises
+# is OWNER-GATED DDL: it is NOT applied to any shared (dev/staging/prod) database — this workflow's
+# ephemeral, first-party PostgreSQL container is the ONLY place it runs.
+#
+#   - tests/integration/approval-form-drafts.db.test.ts — contract §4 A (auth by user_id only, incl.
+#     a forged-header negative), B (session-org mutation must not change visibility — an INVERTED
+#     assertion with its own positive control proving the harness can detect a real difference), D
+#     (a poisoned DB query degrades to a values-free 5xx, never a raw error/crash, with a
+#     post-recovery positive control), E (the per-user row cap is enforced by prune-on-write and is
+#     SELF-HEALING — sequential over-cap writes, a direct-bulk-insert-then-one-write healing case,
+#     and an idempotent-re-prune case), and F (the per-draft payload cap is enforced in TWO layers:
+#     the service threshold — strictly below the DB bound — and the DB CHECK
+#     `approval_fd_payload_bounds` behind it). Also covers the empty-draft DELETE path and the
+#     TTL-sweep function (`sweepExpiredApprovalFormDrafts`, NOT wired to any running timer in this
+#     slice). Test C (server ⟷ client `formSchemaSignature` byte-parity) and test G (resubmit-prefill
+#     priority over draft restore, incl. a constructed async race) do NOT need a database and run
+#     elsewhere: packages/core-backend/tests/unit/approval-form-draft-signature-web-parity.test.ts
+#     (required `plugin-tests.yml` "Run core-backend tests" step) and
+#     apps/web/tests/approvalNewView.spec.ts (required web test lane) respectively.
+#
+# This slice does NOT touch APPROVAL_S1_ORG_PIN_ENABLED or any other approval flag — access control
+# here is by `user_id` alone (contract §2); no code path in this lane reads an org/tenant column or
+# header to gate visibility. No customer source, no deployment, no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: mirrors approval-realdb-comments.yml
+# (cloned from it) — plugin-tests.yml is an s6a sha256-pinned provenance input
+# (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so every edit forces an s6a re-pin and
+# a merge-serialisation race. plugin-tests.yml is left byte-identical by this PR. Whether this suite
+# should ALSO be promoted into plugin-tests.yml's required run-list (as #5095 later did for
+# approval-comments) is an OWNER DECISION, flagged in the PR body — not made here.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job does not collect-and-skip-green it. This workflow is the lane where the
+# suite actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a
+# run here with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole file
+# as skipped.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the approval-comments/S1 precedent: a `merge_group`
+  # event does not honour the `paths` filter the way `pull_request` does, so declaring it would spin
+  # up this PostgreSQL job for every merge group regardless of relevance.
+  pull_request:
+    # No `branches:` filter (mirrors the precedent): a brand-new workflow cannot be
+    # workflow_dispatch-ed until it has run once via a trigger it responds to. The `paths` filter
+    # keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/src/db/migrations/zzzz20260914120000_create_approval_form_drafts.ts'
+      - 'packages/core-backend/src/services/approval-form-draft-service.ts'
+      - 'packages/core-backend/src/routes/approval-form-drafts.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/index.ts'
+      # FIX 7 (gate P3-2): the suite boots a real MetaSheetServer and hits real
+      # authenticate/rbacGuard/dev-token/transaction plumbing — these were previously reachable-but-
+      # unlisted (the sibling approval-realdb-comments.yml has the same gap; not fixed here — out of
+      # scope for this lane).
+      - 'packages/core-backend/src/middleware/auth.ts'
+      - 'packages/core-backend/src/auth/jwt-middleware.ts'
+      - 'packages/core-backend/src/auth/AuthService.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
+      - 'packages/core-backend/src/db/pg.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/tests/integration/approval-form-drafts.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/approval-realdb-form-drafts.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/db/migrations/zzzz20260914120000_create_approval_form_drafts.ts'
+      - 'packages/core-backend/src/services/approval-form-draft-service.ts'
+      - 'packages/core-backend/src/routes/approval-form-drafts.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/middleware/auth.ts'
+      - 'packages/core-backend/src/auth/jwt-middleware.ts'
+      - 'packages/core-backend/src/auth/AuthService.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/routes/auth.ts'
+      - 'packages/core-backend/src/db/pg.ts'
+      - 'packages/core-backend/src/integration/db/connection-pool.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/tests/integration/approval-form-drafts.db.test.ts'
+      - 'packages/core-backend/tests/setup.integration.ts'
+      - 'packages/core-backend/tests/globalTeardown.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - 'packages/core-backend/vitest.integration.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/approval-realdb-form-drafts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-form-drafts:
+    name: approval-realdb-form-drafts
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against, INCLUDING this PR's
+          # zzzz20260914120000_create_approval_form_drafts.ts (owner-gated DDL — applied ONLY to
+          # this ephemeral, first-party CI Postgres container, never to a shared database).
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run P3-3 approval-form-drafts real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-form-drafts.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-form-drafts.db.test.ts"
+            echo "scope=P3-3 approval_form_drafts create/read/update/delete, user_id-only auth (A), org-mutation non-leakage (B), DB-failure safe-degrade (D), per-user row-cap prune-on-write self-healing (E), per-draft payload cap two-layer enforcement (F), empty-draft delete, TTL sweep function"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
