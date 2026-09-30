@@ -1,0 +1,147 @@
+# 审批成员面跟随界面语言(F8-1)设计与验证说明 · 2026-09-30
+
+分支 `feat/approval-member-surface-locale`,基于 F3-E1(#6189)的头 `51401fee50`(两者都改 `ApprovalCenterView.vue`;`handleExportCsv` 函数体逐字节未动)。只改前端;不改后端、不改 `.github/workflows/*`、零 DDL、不开任何开关,没有真库步骤。
+
+## 1. 依据
+
+- **授权**:owner 2026-09-30 原话「按建议执行」,所指清单第 2 项为「第一波的导出按钮做完后启动 F8-1」。
+- **计划**:`approval-feishu-p2-p4-slice-plan-20260930`(规划文件,不在仓内)§4「F8-1」,以及文末「第 5 轮(末轮)复验更正」节的 R5-5(更正优先于正文):
+  - 改动面(节选):「`ApprovalDetailView.vue`、`ApprovalCommentsPanel.vue`、`ApprovalNewView.vue`、`ApprovalCenterDetailPane.vue`、`ApprovalCenterTable.vue`、`MyDelegationView.vue`、`ApprovalCardDecisionView.vue` 接入 `useLocale`(#5545 的做法:同一模块级单例)」;`ApprovalCenterView.vue` 其余文案「全部改走 locale」;`ApprovalMobileList.vue:51`;三个选择器;「`force-locale="zh"` 只去 **3 处**(`ApprovalDetailView.vue:45`、`ApprovalNewView.vue:32`、`MyDelegationView.vue:24`)」;两个 helper `memberActionDialogGrammar.ts`、`urgeButtonState.ts`。
+  - R5-5:「其视图在正常界面态还渲染 9 个零 locale 模块(约 58 行),错误 / 提示态另 7 个(约 30 行);`relativeWait.ts` 应归零 locale……`quickPhrases` 本地化会改变**写入评论的语言**,须单独定性。」
+  - 验收门:「① 逐文件源码守卫……对象 = 本切片改动面全部文件」;「② 挂载渲染扫描……门须在扫描前打开五个成员动作对话框……并渲染带催办按钮的表格行……扫描命中若来自尚未并入的模块,逐条列入在场核验的具名例外表(写明来源 file:line,不得用宽松正则静默排除)……渲染扫描里的例外表是对该形状的延伸,不是既有先例」;「③ 真机 en/zh 运行时切换逐项还原」。
+  - 风险:「PR 写成『绊线 + 已知绕过枚举』,不写『已覆盖』」;「共享选择器的中间态混排,接受并在 PR 声明」;「并入的两个 helper 被 6 个前端 spec 引用……本地化后须逐个复核其语言态假设」。
+  - 锁:「不需要」。
+- `amountInWords.ts`(中文大写金额)按计划属领域功能,不本地化。
+
+## 2. 改了什么
+
+| 提交 | 内容 |
+|---|---|
+| `c14ed120e1` | 成员面 helper 接入界面语言:`memberActionDialogGrammar.ts`(中英两张同形表,`dialogTestId` / `commentRows` 只定义一次)、`urgeButtonState.ts`、`relativeWait.ts`(整句函数,避免「Waited 3 天」式半翻译)、`addSignHonestyCopy.ts`、`routePreviewSummary.ts`、`dateRangeField.ts`、`recordLinkField.ts`、`detailField.ts`、`assigneeSource.ts`、`conditionSummary.ts`、`upcomingNodes.ts` 及错误 / 提示态模块(`store.ts`、`templateStore.ts`、`cardDecision.ts`、`delegations.ts`、`memberActionErrorCopy.ts`、两个 controller、`useApprovalListFieldSummary.ts`)。成员面调用方传入界面语言;只被编排页(F8-3)使用的路径默认仍为 zh-CN。断言中文的既有 spec 显式钉 zh-CN。 |
+| `8301b763cc` | 三个共享选择器(部门 / 关联记录 / 成员)接入,文案在新表 `approvalPickerLabels.ts`。 |
+| `cc5e0cc4ff` | 审批中心(视图 + 表格 + 详情侧栏)全部界面文案接入,表在 `approvalCenterLabels.ts`;`tabEmptyText` 与导出文案 `exportCopy` 未改。 |
+| `9dd9d1fd21` | 审批详情与评论面板接入,表在 `approvalDetailLabels.ts`;去掉 `ApprovalDetailView.vue` 的 `force-locale="zh"`。 |
+| `75402759a7` | 发起页、我的委托、卡片决策页接入(各自一张表);去掉 `ApprovalNewView.vue`、`MyDelegationView.vue` 的 `force-locale="zh"`。 |
+| `85aef08fb8` | `api.ts` 通用请求错误的兜底文案跟随界面语言(其余 mock 数据与管理面错误表不动)。 |
+| `f122cf765c` | 门 ①:逐文件源码守卫。 |
+| `329334b802`、`366f9e0d74`、`6f30e544d6` | 门 ②:英文挂载渲染扫描。 |
+| `9a277995ce` | 浏览器车道两个 harness 钉 zh-CN(见 §5)。 |
+| `bbcdff4712`、`1a372065a9` | 计划门 ③:浏览器里的运行时 en / zh-CN 切换(后者只把字符类改写为转义)。 |
+| 本提交 | 本说明。 |
+
+`DelegationSettingsView.vue` 的 `force-locale="zh"` 属 F8-2,未动。
+
+## 3. R5-5 模块对账
+
+「渲染证据」指本片某条挂载扫描实际渲染出该模块的英文输出;「守卫」指只由门 ① 与单元测试覆盖。
+
+| 模块 | 处置 | 证据 |
+|---|---|---|
+| `relativeWait.ts` | 接入 | 渲染:中心页表格、移动端列表、详情页 |
+| `addSignHonestyCopy.ts` | 接入 | 渲染:详情页加签对话框 |
+| `quickPhrases.ts` | **未接入(owner 取舍,见 §6)** | 渲染扫描具名例外 |
+| `routePreviewSummary.ts` | 接入 | 渲染:发起页实时路径预览 |
+| `dateRangeField.ts` | 接入 | 渲染:发起页日期区间时长 |
+| `recordLinkField.ts` | 成员路径接入;编排路径留 F8-3 | 渲染:发起页已选记录、关联记录选择器 |
+| `assigneeSource.ts` | 成员路径接入;编排路径留 F8-3 | 渲染:发起页流程预览 |
+| `conditionSummary.ts` | 接入(编排调用方默认 zh-CN) | 渲染:发起页流程预览中的条件节点 |
+| `detailField.ts` | 成员路径接入;编排校验留 F8-3 | 守卫 + `approval-detail-field.test.ts` |
+| `store.ts` / `templateStore.ts` | 接入 | 守卫 |
+| `approvalCenterDetailPaneController.ts` | 接入 | 渲染:详情侧栏加载失败 |
+| `routePreviewController.ts` | 接入 | 渲染:发起页路径预览失败 |
+| `cardDecision.ts` | 接入 | 渲染:卡片页提交失败、钉钉登录不可用 |
+| `api.ts`(通用错误兜底) | 接入 | 守卫(限该函数)+ `approvalApiErrorSurfacing.spec.ts` |
+| `memberActionErrorCopy.ts` | 接入 | 守卫 + `approval-member-bar-operation-policy.spec.ts` |
+| `delegations.ts` | 我的委托路径接入;`validateDelegationForm`(只服务管理面)留 F8-2 | 渲染:我的委托表单校验提示 |
+
+## 4. 具名例外
+
+### 门 ①(源码守卫,`templateCenterI18n.spec.ts` 新 describe;逐条按原文与次数核在场)
+
+| 来源 | 内容 | 归属 |
+|---|---|---|
+| `assigneeSource.ts:28-57` | `assigneeSourceSummary` 的 zh-CN 分支(16 行) | 编排页专用,F8-3 |
+| `assigneeSource.ts:113-154` | 提前返回的 zh-CN 分支(6 行,英文分支紧邻其上) | 本片已接入的另一半 |
+| `delegations.ts:120-125` | `validateDelegationForm`(6 行) | 管理面,F8-2 |
+| `detailField.ts:76-207` | 新增子字段默认名与编排期校验(13 行) | F8-3 |
+| `detailField.ts:360` | 明细必填行提示的 zh-CN 分支 | 本片已接入的另一半 |
+| `recordLinkField.ts:20,35,121-122,302,305,310` | 编排期目标选项、端点标签、失效提示;无引用方的提示常量 | F8-3 |
+| `ApprovalDetailView.vue:2136` | 快捷短语插入时的全角逗号 | 与 `quickPhrases` 同一 owner 取舍 |
+| `ApprovalNewView.vue:560` | 附件开关关闭时的占位说明(B2-28,被既有 spec 逐字节钉住) | 附件梯度 |
+
+`api.ts` 只扫 `approvalRequestError` 一个函数(同 #5545 对 `tabEmptyText` 的做法),其余为开发 mock 数据与管理面错误表。
+
+### 门 ②(挂载渲染扫描;逐条按原文与次数核在场)
+
+| 渲染面 | 文本 | 来源 |
+|---|---|---|
+| 详情页评论对话框 | `已阅`、`请尽快处理` | `quickPhrases.ts:15`(`QUICK_PHRASES.comment[0]`、`[1]`) |
+| 发起页 | 附件占位说明 | `ApprovalNewView.vue:560` |
+| 我的委托 | `未开始`、`生效中`×2、`已过期`、`已停用` | `delegationStatus.ts:20` 的状态键,只出现在 `StatusTag.vue:6` 的 `data-status` 属性里;可见标签为英文(用例同时断言可见文本无 CJK) |
+
+## 5. 验收门读数
+
+读数环境:另一台机器(macOS arm64),Node 20.20.2,vitest 1.6.1,Playwright 1.57.0(Chromium)。本机只编辑与提交,所有测试都在该机器上跑。没有真库步骤(纯前端),未建库。
+
+**门 ① 源码守卫**(形状同 `templateDetailI18n.spec.ts:955-1030`):对象是本片改动的全部 39 个非测试文件(与 `git diff --name-only 51401fee50..HEAD` 去掉测试与文档后的清单逐一相等)。剥 `<style>` / HTML 注释 / 块注释 / 整行 `//` 注释后,识别五种结构(`isZh` 字符串三元、对象三元、`if (isZh.value) { return {…} } return {…}`、`*_ZH` 表且同文件有无 CJK 的 `*_EN` 兄弟、`X` / `X_EN` 常量对)并逐个核英文侧无 CJK;每个文件的结构计数都钉死(计数防空转);具名例外按原文与次数核在场;其余任一行含 CJK 即红。读数:该 describe 40 个用例全过(39 个文件 + 1 个正控);变异 4 个(视图模板插入中文、详情表英文值改回中文、催办英文标签改回中文、`relativeWait` 三元改恒真)**4/4 转红**。
+
+这是**绊线,不是证明**。已知绕过:CJK 写成 `\u` 转义或用 `String.fromCharCode` 拼;CJK 放在守卫清单以外的模块(如 `quickPhrases.ts`、`amountInWords.ts`)或由清单外的宿主作为 prop 传入;英文侧是一个绑定到中文的标识符;字符串字面量里的 `/*` 会被注释剥离误当成注释开头。
+
+**门 ② 挂载渲染扫描**(对 #5545 渲染扫描形状的延伸,见 `tests/helpers/approvalLocaleScan.ts` 头注):扫整个渲染子树的文本和**所有**属性值(#5545 只读 `aria-label` / `placeholder` / `title`);命中非本片来源时进具名例外表,例外按原文与次数核在场。夹具全为 ASCII。凡是某个 stub 声明了文案 prop 却不渲染(列标题、占位、气泡确认按钮文字、对话框标题、分隔线插槽、表格空态),新 describe 注册本地变体,不改共享 stub。每条扫描都做 en → zh-CN(必须出现中文)→ en 往返。
+
+| 宿主 spec(均在必需 web 车道) | 覆盖 |
+|---|---|
+| `approval-member-action-dialog-grammar.spec.ts` | 详情页,五个成员动作对话框**逐个打开**;每个对话框的标题、说明标签、占位、确认按钮与选择器占位作为正控必须以英文出现 |
+| `approvalCenterDesktopEmptyTextI18n.spec.ts` | 中心页五个标签都有行、「更多筛选」展开、「我发起的」行的催办按钮(催办前 / 催办后的标签、title 与提示)、行驳回与批量驳回对话框打开 |
+| `approval-center-master-detail.spec.ts` | 详情侧栏(已加载;加载失败兜底) |
+| `approvalNewView.spec.ts` | 每种成员字段类型、流程预览(多种审批人来源、抄送、条件节点)、实时路径预览(角色审批人、未解析节点)、路径预览失败兜底 |
+| `myDelegationView.spec.ts` | 所有状态行、新建对话框(含表单范围输入)、停用确认框文案、表单校验提示 |
+| `approvalCardDecisionView.spec.ts` | 可处理、必须评论、已处理、已流转、链接无效、登录不可用、提交失败兜底 |
+| `approvalMobileI18n.spec.ts`、`approval-comments-panel.spec.ts`、`approval-record-link-picker.spec.ts` | 移动端列表、评论面板、关联记录选择器(列表 / 无权 / 空) |
+
+变异(每处把一条英文文案改回中文,跑对应扫描,逐个还原):催办标签、表格列标题、侧栏关闭标签、发起页流程标题、条件运算符 `in`、路径预览未解析、我的委托标题、卡片通过按钮、评论截断提示、`relativeWait` 不足一小时、转交选择器英文占位、退回对话框英文占位、选择器 stub 隐去占位 —— **全部转红**。另有一个变异(`OPERATOR_EN.isEmpty`)未转红:该值不参与显示(`isEmpty` 走单独分支),不是扫描缺口。
+
+**任务门 ③ 引用两个 helper 的 6 个既有 spec**:
+
+| spec | 语言态 |
+|---|---|
+| `approval-member-action-dialog-grammar.spec.ts` | 原 describe 显式钉 zh-CN;新增中英表对照与英文扫描 |
+| `approval-urge-button-state.test.ts` | 所有调用显式传 `isZh`;新增英文 describe |
+| `approval-member-bar-operation-policy.spec.ts` | 文件级 `beforeEach` 钉 zh-CN;`memberActionFailure` 显式传语言,新增英文断言 |
+| `approvalCenterRemindBadge.spec.ts` | 文件级 `beforeEach` 钉 zh-CN |
+| `approval-e2e-lifecycle.spec.ts` | 外层 `beforeEach` 早已钉 zh-CN(`:550`,UF-3),本片未改 |
+| `approval-e2e-permissions.spec.ts` | 外层 `beforeEach` 早已钉 zh-CN(`:481`,UF-3b),本片未改 |
+
+**计划门 ③ 真机运行时切换**:浏览器车道新增 `verification/approval-shell-locale-switch.spec.ts`(真实 Router / Pinia / Element Plus,真实 fetch 路径,`page.route()` 代替服务端;经与应用外壳相同的 `useLocale().setLocale` 切换)。中心页(「我发起的」标签、带催办行)与详情页(五个对话框各开一次)逐项快照「每行可见文本 + 每个可见的 placeholder / aria-label / title」:英文快照无 CJK(评论对话框的两个快捷短语除外,按原值列出);切到 zh-CN 后指定项变为中文表的值;切回英文后快照与首次**逐项相等**。读数 6/6 通过;变异(转交对话框英文标签改回中文)转红。
+
+**浏览器车道既有两个 harness 钉 zh-CN**(`9a277995ce`):`approval-member-action-dialog-harness.ts`(按 zh-CN 无障碍名找对话框)与 `approval-form-builder-mounted-harness.ts`(编排页 F8-3 前仍为中文,但其中的部门选择器已随本片接入)此前不设语言,在英文浏览器下渲染英文,6 个用例红;改为挂载前 `setLocale('zh-CN')`,spec 不变,重跑 19/19 通过。
+
+**整体读数**:见 §7 末的读数表。
+
+## 6. 中间态与 owner 取舍
+
+- **快捷短语(owner 取舍)**:`quickPhrases.ts` 的短语点选后原样写入评论正文,本地化会改变写入评论的语言。本片保持其内容与写入逻辑不变(中英界面下都插入中文短语),也保持插入时的全角逗号;是否按界面语言提供短语、已写入的评论如何处理,交 owner 决定。
+- **共享选择器混排(计划已接受)**:F8-2 / F8-3 落地前,`DelegationSettingsView.vue` 与 `TemplateAuthoringView.vue` 未给选择器传占位,英文态下会出现「选择器英文、页面其余中文」;部门选择器还被编排页的字段检查器与行内编辑器引入,同样混排。
+- **共享 helper 的编排路径**:`assigneeSource.ts`、`conditionSummary.ts`、`recordLinkField.ts`、`detailField.ts`、`routePreviewSummary.ts`、`routePreviewController.ts` 的编排页调用方仍取 zh-CN 默认值,随 F8-3 接入。
+- `delegations.ts` 的 `validateDelegationForm` 只服务管理面,随 F8-2。
+
+## 7. 未跑项与残留
+
+- 与当前 main 的关系:本分支基于 #6189 合并前的头;试合并当前 main(只读 `git merge-tree`,不建 ref)在 `ApprovalCenterView.vue`、`ApprovalDetailView.vue`、`approval-center.spec.ts`、`approvalApiErrorSurfacing.spec.ts`、`verification/approval-member-action-dialog-harness.ts` 与 #6189 的说明文件上有冲突,须在推送前由主会话变基处理;变基后须重跑门 ① 与本节读数。
+- `tests/helpers/approvalLocaleScan.ts` 未加入 `approval-web-guard.yml` 的路径过滤(不改 workflow);它只被必需 web 车道上的 spec 引用。
+- 几处错误兜底文案(卡片页的登录不可用与请求失败、详情侧栏加载失败、发起页路径预览失败)在出错当时按当前语言生成一次;消息显示期间再切换语言,这条消息不会重译,重试后按新语言生成。
+- `detailField.ts` 旧附件值占位的渲染点、`store.ts` / `templateStore.ts` 的告警条只有守卫与单元测试,没有挂载扫描。
+- eslint(审批文件不在仓内 `lint` 脚本清单里,仅作参考):本片改动的 78 个 `.ts` / `.vue` 文件 0 个本片引入的 error;唯一 error 在 `ApprovalCenterView.vue:1453` 的 `exportNotice`(来自 #6189,本片未改);另一处是新浏览器 spec 的字符类写成了字面字符,已在 `1a372065a9` 改为 `\u` 转义。
+
+### 读数表(代码最终头 `1a372065a9`;该提交之前的 `6f30e544d6` 上跑完整批,之后只改了浏览器 spec 的写法并重跑相关项)
+
+| 项 | 结果 |
+|---|---|
+| 必需 web 车道 `run-required-web-tests.sh`(`6f30e544d6`) | 退出码 0;19 次 vitest 调用 0 失败;末次调用 516 files / 8537 tests passed |
+| `vue-tsc -b`(`6f30e544d6`) | 退出码 0,0 error |
+| `vue-tsc --noEmit -p tsconfig.verification-approval.json`(`6f30e544d6`) | 退出码 0 |
+| `node scripts/ops/required-web-lane-token-manifest.mjs --check`(`6f30e544d6`) | MANIFEST MATCHES(未新增 vitest spec 文件,未改 run-list) |
+| `node --test scripts/ops/approval-browser-ci-wiring.test.mjs`(`6f30e544d6`) | 3/3 pass |
+| 引用两个 helper 的 6 个 spec(`6f30e544d6`) | 6 files / 170 tests passed |
+| Approval browser verify 整车道,`CI=1 --retries=0`(`6f30e544d6`) | 47 passed(原 41 + 新增 6) |
+| 新浏览器 spec + eslint(`1a372065a9`) | 6 passed;eslint 0 error |
