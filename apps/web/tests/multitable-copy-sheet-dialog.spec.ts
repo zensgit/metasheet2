@@ -77,6 +77,8 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     expect(result).toEqual<CopySheetDryRunResult>({
       rowCount: 1239,
       fieldCount: 55,
+      builtFieldCount: null,
+      viewCount: null,
       overLimit: false,
       rowLimit: 2000,
       fieldDisclosures: [
@@ -140,6 +142,8 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     expect(await client.dryRunCopySheet('s', { withData: true, permissionMode: 'inherit' })).toEqual<CopySheetDryRunResult>({
       rowCount: 10,
       fieldCount: 5,
+      builtFieldCount: 4,
+      viewCount: 2,
       overLimit: false,
       rowLimit: 2000,
       fieldDisclosures: [{ fieldId: 'fld_m', reason: 'MIRROR_NOT_BUILT' }],
@@ -156,6 +160,8 @@ describe('MultitableApiClient — copy sheet wire (ADR §7.1 / §8)', () => {
     expect(await client.dryRunCopySheet('s', { withData: true, permissionMode: 'inherit' })).toEqual<CopySheetDryRunResult>({
       rowCount: 2400,
       fieldCount: 5,
+      builtFieldCount: 4,
+      viewCount: 2,
       overLimit: true,
       rowLimit: 2000,
       fieldDisclosures: [{ fieldId: 'fld_m', reason: 'MIRROR_NOT_BUILT' }],
@@ -275,6 +281,8 @@ function dryRunOk(overrides: Partial<CopySheetDryRunResult> = {}): CopySheetDryR
   return {
     rowCount: 1239,
     fieldCount: 7,
+    builtFieldCount: 6,
+    viewCount: 1,
     overLimit: false,
     rowLimit: 2000,
     fieldDisclosures: [],
@@ -367,6 +375,33 @@ describe('MetaCopySheetDialog', () => {
     expect(client.dryRunCopySheet).toHaveBeenCalledTimes(1)
     // probed WITHOUT a name: the route refuses a mangled name, and the plan does not depend on it
     expect(client.dryRunCopySheet).toHaveBeenCalledWith('sheet_orders', { withData: true, permissionMode: 'inherit' })
+  })
+
+  // R61 验收清单 §2.1 asks for the column count next to the row count: the structure line names the columns
+  // the copy will build (the built count, not the source's field count) and the views.
+  it('shows 「复制结构：N 列、V 个视图」 from the probe, preferring built columns; hidden without a column count', async () => {
+    await mount()
+    expect(q('copy-sheet-structure')!.textContent).toBe('复制结构：6 列、1 个视图')
+
+    mounted!.app.unmount()
+    mounted!.container.remove()
+    mounted = null
+    client.dryRunCopySheet.mockResolvedValue(dryRunOk({ builtFieldCount: null, viewCount: null }))
+    await mount()
+    expect(q('copy-sheet-structure')!.textContent).toBe('复制结构：7 列')
+
+    mounted!.app.unmount()
+    mounted!.container.remove()
+    mounted = null
+    client.dryRunCopySheet.mockResolvedValue(dryRunOk({ fieldCount: null, builtFieldCount: null, viewCount: 3 }))
+    await mount()
+    expect(q('copy-sheet-structure')).toBeNull()
+  })
+
+  it('en structure line: "Structure: N columns, V views"', async () => {
+    useLocale().setLocale('en')
+    await mount()
+    expect(q('copy-sheet-structure')!.textContent).toBe('Structure: 6 columns, 1 view')
   })
 
   it('en default name is "<name> copy"', async () => {
