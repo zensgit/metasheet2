@@ -448,3 +448,42 @@ describe('ApprovalCommentsPanel — instanceId settle race (gate P2-2, mechanism
     expect(container.textContent).not.toContain('A body')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of the comments tab body. ASCII
+// comments (own + another member's, one unresolved author, a reply) with the truncation notice on;
+// the whole container (text + every attribute value) must carry no CJK outside the named
+// exceptions, then a zh-CN flip must show Chinese and a flip back restores English.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalCommentsPanel English render scan', () => {
+  // Rendered CJK this slice does not convert (source file:line). None so far.
+  const EXCEPTIONS: Array<{ text: string; count: number; source: string }> = []
+
+  it('renders English chrome only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    resolvedNames.set('user_alice', 'Alice Example')
+    mockTruncated.value = true
+    listCommentsMock.mockResolvedValue({
+      comments: [
+        comment({ id: 'c1', authorId: 'user_alice', content: 'first note' }),
+        comment({ id: 'c2', authorId: 'user_me', content: 'my note' }),
+        comment({ id: 'c3', authorId: 'user_unresolved', content: 'a reply', parentId: 'c1' }),
+      ],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'user_me' })
+    await flushUi()
+    expect(container.querySelector('[data-testid="approval-comments-truncated-notice"]'), 'truncation notice rendered').toBeTruthy()
+    expect(container.textContent).toContain('first note')
+    expect(container.textContent).toContain('a reply')
+    expect(container.textContent, 'unresolved authors get the English ordinal').toMatch(/Member \d/)
+    expectNoCjkOutside(renderedTextAndAttributes(container), EXCEPTIONS, 'comments panel (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container), EXCEPTIONS, 'comments panel (en again)')
+  })
+})

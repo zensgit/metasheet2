@@ -60,8 +60,10 @@ export function expectNoCjkOutside(scanned: string, exceptions: RenderedExceptio
  * Element Plus stand-ins that put the copy they receive as PROPS into the DOM as text, so the scan
  * sees it: dialog title (and the dialog body only while `modelValue` is true, like the real
  * lazily-rendered el-dialog), form-item / radio / tab / column labels, empty-state description,
- * alert title, popconfirm title, timeline timestamp. Inputs and selects keep their placeholder as
- * an attribute. Column stubs never call their scoped default slot (no row to pass).
+ * alert title, popconfirm title, tooltip content (and its content slot), timeline timestamp.
+ * Inputs, selects and buttons come from the host spec, which must render their placeholder / label
+ * too. The column stub here never calls its scoped default slot (no row to pass); a host that needs
+ * row cells brings its own table stubs.
  */
 export function surfacingElementStubs(): Record<string, Component> {
   const passthrough = (name: string, tag = 'div') => defineComponent({
@@ -152,6 +154,16 @@ export function surfacingElementStubs(): Record<string, Component> {
           props.title ?? '',
           props.description ?? '',
           ...(slots.default ? slots.default() : []),
+        ])
+      },
+    }),
+    ElTooltip: defineComponent({
+      name: 'ElTooltip',
+      props: { content: String },
+      setup(props, { slots }) {
+        return () => h('span', { 'data-el-tooltip': props.content ?? '' }, [
+          ...(slots.default ? slots.default() : []),
+          ...(slots.content ? slots.content() : []),
         ])
       },
     }),

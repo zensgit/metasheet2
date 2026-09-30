@@ -1182,3 +1182,126 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     })
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of the desktop detail pane
+// (ApprovalCenterDetailPane.vue): a loaded pending row with an unresolved and a named approver,
+// and a failed detail fetch without a message (approvalCenterDetailPaneController.ts fallback).
+// Only the pane subtree is scanned — the rest of ApprovalCenterView is scanned in
+// approvalCenterDesktopEmptyTextI18n.spec.ts. ASCII fixtures. The shared popconfirm stub above
+// shows neither its title nor its button texts and teleports a 确认 button into document.body,
+// so this describe registers a local variant that renders all three inside the pane.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalCenterDetailPane English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const ScanElPopconfirm = defineComponent({
+    name: 'ElPopconfirm',
+    props: { title: String, confirmButtonText: String, cancelButtonText: String },
+    setup(props, { slots }) {
+      return () => h('span', { 'data-el-popconfirm': 'scan' }, [
+        h('span', props.title ?? ''),
+        h('span', props.confirmButtonText ?? ''),
+        h('span', props.cancelButtonText ?? ''),
+        ...(slots.reference ? slots.reference() : []),
+      ])
+    },
+  })
+
+  const asciiRow = (id: string) => ({
+    ...pendingRow(id, `Request ${id}`),
+    requester: { name: 'Requester One' },
+    assignments: [
+      { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      { id: 'asg_2', type: 'user', assigneeId: 'user_42', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: { assigneeName: 'Approver Two' } },
+    ],
+  })
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    mockPendingApprovals.value = []
+    mockMyApprovals.value = []
+    mockCcApprovals.value = []
+    mockCompletedApprovals.value = []
+    mockProcessedApprovals.value = []
+    mockLoading.value = false
+    getPendingCountSpy.mockResolvedValue({ count: 0, unreadCount: 0 })
+    getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
+    getApprovalSpy.mockReset()
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    mockRoute.name = 'approval-list'
+    mockRoute.query = {}
+    setViewport('wide')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountAndSelect(id: string) {
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    app = createApp(defineComponent({ setup: () => () => h(ApprovalCenterView as any) }))
+    app.component('ElTabs', ElTabs)
+    app.component('ElTabPane', ElTabPane)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElPagination', ElPagination)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElDialog', ElDialog)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElPopconfirm', ScanElPopconfirm)
+    app.component('ElBadge', ElBadge)
+    app.component('ElTooltip', ElTooltip)
+    app.component('ElIcon', ElIcon)
+    app.component('ElSkeleton', ElSkeleton)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+    ;(container!.querySelector(`[data-el-row="${id}"]`) as HTMLElement).click()
+    await flushUi(8)
+  }
+
+  const pane = () => container!.querySelector('[data-testid="approval-detail-pane"]') as HTMLElement | null
+
+  it('loaded pane is English only (approver labels, step, quick actions); en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    getApprovalSpy.mockResolvedValue(asciiRow('apv_1'))
+    mockPendingApprovals.value = [asciiRow('apv_1')]
+    await mountAndSelect('apv_1')
+    expect(pane(), 'pane open').toBeTruthy()
+    expect(pane()!.textContent).toContain('Approver Two')
+    expect(pane()!.textContent).toMatch(/Member \d/)
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(pane()!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane (en again)')
+  })
+
+  it('a failed detail fetch without a message shows the English fallback', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    getApprovalSpy.mockRejectedValue('network down')
+    mockPendingApprovals.value = [asciiRow('apv_1')]
+    await mountAndSelect('apv_1')
+    expect(container!.querySelector('[data-testid="approval-detail-pane-error"]')?.textContent).toContain('Failed to load details')
+    expectNoCjkOutside(renderedTextAndAttributes(pane()!), [], 'detail pane error (en)')
+  })
+})

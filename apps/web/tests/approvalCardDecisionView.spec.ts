@@ -288,3 +288,124 @@ describe('ApprovalCardDecisionView (A-3)', () => {
     expect(api).toContain('/api/approval-card-deliveries/')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalCardDecisionView in each
+// state the page can show: actionable (viewer not the recipient, comment required on reject /
+// always), acted, superseded, invalid link, DingTalk sign-in unavailable, and a submit error whose
+// server response carries no message (the cardDecision.ts fallback). ASCII fixtures; the whole
+// container (text + every attribute value) must carry no CJK. The actionable state is also
+// flipped zh-CN (Chinese appears) and back.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalCardDecisionView English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  async function mountView() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ApprovalCardDecisionView)
+    for (const name of ['ElAlert', 'ElInput', 'ElButton']) app.component(name, stub(name))
+    app.directive('loading', { mounted() {}, updated() {} })
+    app.mount(container)
+  }
+
+  const asciiSummary = (overrides: Record<string, unknown> = {}) => summaryFixture({
+    approval: { ...summaryFixture().approval, title: 'Travel claim' },
+    ...overrides,
+  })
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    routeQuery = { d: 'del_1', t: 'a'.repeat(32) }
+    apiFetchMock.mockReset()
+    mockUserId = 'user_a'
+    sessionStorage.clear()
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    useLocale().setLocale('zh-CN')
+  })
+
+  const settle = async (selector: string) => {
+    await vi.waitFor(() => expect(container?.querySelector(selector)).not.toBeNull(), UI_WAIT_OPTIONS)
+  }
+
+  it('actionable page is English only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: asciiSummary({ viewerIsRecipient: false }) }))
+    await mountView()
+    await settle('[data-testid="card-decision-reject-hint"]')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), [], 'card actionable (en)')
+
+    useLocale().setLocale('zh-CN')
+    await vi.waitFor(() => expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true), UI_WAIT_OPTIONS)
+
+    useLocale().setLocale('en')
+    await vi.waitFor(() => expect(CJK.test(renderedTextAndAttributes(container!))).toBe(false), UI_WAIT_OPTIONS)
+  })
+
+  it('comment required always, acted, superseded, invalid link and sign-in unavailable are English only', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const scenarios: Array<{ label: string; setup: () => void; ready: string }> = [
+      {
+        label: 'always',
+        setup: () => apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: asciiSummary({ approval: { ...asciiSummary().approval, commentRequired: 'always' } }) })),
+        ready: '[data-testid="card-decision-approve-hint"]',
+      },
+      {
+        label: 'acted',
+        setup: () => apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: asciiSummary({ cardState: 'acted', actionable: false, actedAction: 'approve' }) })),
+        ready: '[data-testid="card-decision-stale"]',
+      },
+      {
+        label: 'superseded',
+        setup: () => apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: asciiSummary({ cardState: 'superseded', actionable: false }) })),
+        ready: '[data-testid="card-decision-stale"]',
+      },
+      {
+        label: 'invalid link',
+        setup: () => { routeQuery = {} },
+        ready: '[data-testid="card-decision-load-error"]',
+      },
+      {
+        label: 'sign-in unavailable',
+        setup: () => {
+          mockUserId = null
+          apiFetchMock.mockResolvedValueOnce(jsonResponse({ success: false }, 503))
+        },
+        ready: '[data-testid="card-decision-launch"]',
+      },
+    ]
+    for (const { label, setup, ready } of scenarios) {
+      routeQuery = { d: 'del_1', t: 'a'.repeat(32) }
+      mockUserId = 'user_a'
+      sessionStorage.clear()
+      apiFetchMock.mockReset()
+      setup()
+      await mountView()
+      await settle(ready)
+      expectNoCjkOutside(renderedTextAndAttributes(container!), [], `card ${label} (en)`)
+      app?.unmount()
+      container?.remove()
+      app = null
+      container = null
+    }
+  })
+
+  it('a submit error without a server message shows the English fallback', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: asciiSummary() }))
+    await mountView()
+    await settle('[data-testid="card-decision-approve"]')
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, 500))
+    ;(container!.querySelector('[data-testid="card-decision-approve"]') as HTMLButtonElement).click()
+    await settle('[data-testid="card-decision-submit-error"]')
+    expect(container!.querySelector('[data-testid="card-decision-submit-error"]')?.getAttribute('data-title')).toContain('Request failed (500)')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), [], 'card submit error (en)')
+  })
+})
