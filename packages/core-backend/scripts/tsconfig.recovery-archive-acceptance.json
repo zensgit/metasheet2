@@ -12,6 +12,7 @@
     "./verify-recovery-archive-server.mts",
     "./verify-recovery-local-backup.mts",
     "./verify-recovery-local-manual-target.mts",
+    "./verify-recovery-local-rollback.mts",
     "./verify-recovery-local-startup.mts",
     "./verify-recovery-manual-source.mts",
     "./verify-recovery-manual-checkpoint.mts",

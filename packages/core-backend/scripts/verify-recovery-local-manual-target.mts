@@ -1,6 +1,6 @@
 /** Test-only target process: never opens the source database or source roots. */
 import assert from 'node:assert/strict'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { fork, spawn, type ChildProcess } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { connect, createServer } from 'node:net'
@@ -11,10 +11,12 @@ import { fileURLToPath } from 'node:url'
 import type { Pool } from 'pg'
 import type { LocalCustodyReceipt } from '../src/multitable/recovery-local-custody-store'
 import type { RecoveryArchiveRestoreJobQuery } from '../src/multitable/recovery-archive-restore-jobs'
+import type { ManualRollbackInput, ManualRollbackResult } from './verify-recovery-local-rollback.mts'
 
 const require = createRequire(import.meta.url)
 const backend = fileURLToPath(new URL('../', import.meta.url))
 const launcher = fileURLToPath(new URL('./start-recovery-local.mts', import.meta.url))
+const rollbackWitness = fileURLToPath(new URL('./verify-recovery-local-rollback.mts', import.meta.url))
 
 export interface ManualTargetInput {
   readonly databaseName: string
@@ -36,14 +38,14 @@ export interface ManualTargetInput {
   readonly attachmentBytes: Uint8Array
 }
 
-async function send(message: { kind: 'manual-target-done' } | { kind: 'manual-target-error'; code: string; frames: string[] }): Promise<void> {
+async function send(message: { kind: 'manual-target-done'; rollbackTableCount: number } | { kind: 'manual-target-error'; code: string; frames: string[] }): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     if (!process.send) return reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_IPC_MISSING'))
     process.send(message, undefined, undefined, (error) => error ? reject(error) : resolve())
   })
 }
 
-async function run(input: ManualTargetInput): Promise<void> {
+async function run(input: ManualTargetInput): Promise<number> {
   assert.equal(process.env.NODE_ENV, 'test')
   assert.equal(process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED, 'true')
   assert.equal(process.env.MULTITABLE_ENABLE_WRITER_FENCE, 'true')
@@ -76,6 +78,9 @@ async function run(input: ManualTargetInput): Promise<void> {
       workerIntervalMs: 10, leaseMs: 60_000, replayHorizonMs: 60_000,
       sweepLimit: 100, maxChunksPerRun: 20,
     })}\n`, { flag: 'wx', mode: 0o600 })
+    const rollbackInput = { databaseName: input.databaseName, identity: input.identity,
+      password: input.password, generationId: input.generationId }
+    const offBefore = await probeFlagOff(rollbackInput, appConfig, targetRoot)
     const port = await reserveLoopbackPort()
     service = launch(recoveryConfig, appConfig, targetRoot, port)
     await waitForLocked(service)
@@ -109,6 +114,10 @@ async function run(input: ManualTargetInput): Promise<void> {
     await stopLauncher(service, true)
     service = undefined
     assert.equal(await canConnect(port), false, 'RECOVERY_LOCAL_BACKUP_MANUAL_LISTENER_RESIDUE')
+    const offAfter = await probeFlagOff(rollbackInput, appConfig, targetRoot)
+    assert.deepEqual(offAfter.responses, offBefore.responses, 'RECOVERY_LOCAL_ROLLBACK_HTTP_PARITY_FAILED')
+    assert.equal(offAfter.tableCount, offBefore.tableCount)
+    return offBefore.tableCount
   } finally {
     try {
       if (service) await stopLauncher(service, false)
@@ -123,21 +132,60 @@ async function run(input: ManualTargetInput): Promise<void> {
 function launch(recoveryConfig: string, appConfig: string, targetRoot: string, port: number): ChildProcess {
   return spawn(process.execPath, ['--import', 'tsx', launcher, recoveryConfig], {
     cwd: backend,
-    env: {
-      PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
-      NODE_ENV: 'test', DATABASE_URL: process.env.DATABASE_URL,
-      ATTACHMENT_PATH: process.env.ATTACHMENT_PATH, JWT_SECRET: process.env.JWT_SECRET,
-      CONFIG_FILE: appConfig, SECRET_PROVIDER: 'env', CACHE_TYPE: 'memory',
-      SKIP_PLUGINS: 'true', DISABLE_WORKFLOW: 'true', DISABLE_EVENT_BUS: 'true',
-      APPROVAL_PROJECTION_SWEEP_DISABLED: '1', APPROVAL_SLA_SCHEDULER_DISABLED: '1',
-      WEBHOOK_RETRY_SCHEDULER_DISABLED: '1', MULTITABLE_AI_LEDGER_RETENTION_DISABLED: '1',
-      DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED: '1', DINGTALK_DELIVERY_RETENTION_DISABLED: '1',
-      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true',
-      MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true', METASHEET_ENV_DIR: targetRoot,
-      HOST: '127.0.0.1', PORT: String(port),
-    },
+    env: targetEnvironment(appConfig, targetRoot, port),
     stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
   })
+}
+
+function targetEnvironment(appConfig: string, targetRoot: string, port: number): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
+    NODE_ENV: 'test', DATABASE_URL: process.env.DATABASE_URL,
+    ATTACHMENT_PATH: process.env.ATTACHMENT_PATH, JWT_SECRET: process.env.JWT_SECRET,
+    CONFIG_FILE: appConfig, SECRET_PROVIDER: 'env', CACHE_TYPE: 'memory',
+    SKIP_PLUGINS: 'true', DISABLE_WORKFLOW: 'true', DISABLE_EVENT_BUS: 'true',
+    APPROVAL_PROJECTION_SWEEP_DISABLED: '1', APPROVAL_SLA_SCHEDULER_DISABLED: '1',
+    WEBHOOK_RETRY_SCHEDULER_DISABLED: '1', MULTITABLE_AI_LEDGER_RETENTION_DISABLED: '1',
+    DINGTALK_GROUP_DELIVERY_RETENTION_DISABLED: '1', DINGTALK_DELIVERY_RETENTION_DISABLED: '1',
+    MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+    MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true', METASHEET_ENV_DIR: targetRoot,
+    HOST: '127.0.0.1', PORT: String(port),
+  }
+}
+
+async function probeFlagOff(input: ManualRollbackInput, appConfig: string, targetRoot: string): Promise<ManualRollbackResult> {
+  const child = fork(rollbackWitness, [], {
+    cwd: backend, execArgv: ['--import', 'tsx'],
+    env: { ...targetEnvironment(appConfig, targetRoot, 0),
+      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'false', MULTITABLE_ENABLE_WRITER_FENCE: 'false' },
+    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  })
+  child.stdout?.on('data', () => {})
+  child.stderr?.on('data', () => {})
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await new Promise<ManualRollbackResult>((resolve, reject) => {
+      let result: ManualRollbackResult | undefined
+      timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_ROLLBACK_TIMEOUT')), 180_000)
+      child.once('error', () => reject(new Error('RECOVERY_LOCAL_ROLLBACK_LAUNCH_FAILED')))
+      child.on('message', (message: { kind: string; result?: ManualRollbackResult; code?: string; frames?: string[] }) => {
+        if (message.kind === 'flag-off-done') result = message.result
+        else if (message.kind === 'flag-off-error') {
+          if (message.frames?.length) console.log(JSON.stringify({ phase: 'flag-off', frames: message.frames }))
+          reject(new Error(message.code && /^RECOVERY_[A-Z0-9_]+$/.test(message.code)
+            ? message.code : 'RECOVERY_LOCAL_ROLLBACK_FAILED'))
+        }
+      })
+      child.once('exit', (code, signal) => {
+        if (code === 0 && signal === null && result) resolve(result)
+        else reject(new Error('RECOVERY_LOCAL_ROLLBACK_EARLY_EXIT'))
+      })
+      child.send(input, error => { if (error) reject(new Error('RECOVERY_LOCAL_ROLLBACK_IPC_FAILED')) })
+    })
+  } finally {
+    clearTimeout(timer)
+    await stopLauncher(child, false)
+  }
 }
 
 async function reserveLoopbackPort(): Promise<number> {
@@ -227,8 +275,8 @@ async function stopLauncher(child: ChildProcess, requireGraceful: boolean): Prom
 process.once('message', (input: ManualTargetInput) => {
   void (async () => {
     try {
-      await run(input)
-      await send({ kind: 'manual-target-done' })
+      const rollbackTableCount = await run(input)
+      await send({ kind: 'manual-target-done', rollbackTableCount })
     } catch (error) {
       const code = error instanceof Error && /^RECOVERY_[A-Z0-9_]+$/.test(error.message)
         ? error.message : 'RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_FAILED'

@@ -25,6 +25,14 @@ The two drivers cannot be joined by swapping only a generation ID. The backup fi
 - A foreign or newly registered generation must not stand in for the HTTP-returned generation. Source and target selected bindings and the single generation on the synthetic sheet must match. The source database and file roots must be unavailable before target restore.
 - Existing driver negatives and product authorization tests remain in force; this synthetic local drill does not grant a new authorization bypass. Mutation checks must restore original bytes and rerun the positive path.
 
+## Local rollback parity extension
+
+Before the imported generation is restored, start a fresh ordinary `MetaSheetServer` process with both archive and writer-fence flags exact `false`, authenticate the synthetic owner, and call the catalog and preview routes. Repeat in another fresh process after the official recovery launcher has restored the same generation and stopped. Assert the exact disabled/unavailable HTTP status and body, and equality of the two HTTP baselines.
+
+For each flag-OFF process, compare all owned-database `meta_recovery_*` table contents plus the synthetic sheet's records and revision contents before startup and after shutdown. Counts and opaque content digests must match within that process; restoration changes between the two baselines remain governed by the existing positive restore assertions. Neither OFF process receives the recovery secret or archive configuration. Both must exit cleanly with no listener. Emit only fixed response codes, booleans, counts and opaque digests.
+
+This is a same-host synthetic rollback rehearsal. The independent-provider/KMS D7 staging rollback still requires its selected environment, exact candidate and owner-authorized window.
+
 ## Evidence and release boundary
 
 The result is **same-host, quiesced, synthetic APFS portability** only. It does not prove remote staging storage/KMS, independent physical-host durability, hot backup, power-loss recovery, real tenant fidelity, production capture policy, NAS behavior, or customer UAT. Existing Phase 5 nightly missing latency samples are a separate open operational gate; no threshold relaxation or production sample-generating operation is part of this slice.

@@ -497,7 +497,7 @@ async function main(): Promise<Record<string, unknown>> {
     assert.equal(await exactOnceRecordCount(targetRuntime.query, fixture.fixture.sheetId), recoveryLocalBackupRecordCount())
 
     await assertPathMissing(targetAttachmentPath)
-    await runManualTargetChild({
+    const rollbackTableCount = await runManualTargetChild({
       databaseName: names.target,
       local: {
         archivePath: targetArchive, custodyPath: targetCustody, custodyId, storeId,
@@ -532,6 +532,10 @@ async function main(): Promise<Record<string, unknown>> {
         officialTargetLauncher: true,
         lockedUntilOperatorUnlock: true,
         gracefulStopWithNoListener: true,
+        flagOffRollbackHttpParity: true,
+        flagOffRollbackNoWrites: true,
+        flagOffFreshProcesses: 2,
+        flagOffComparedTables: rollbackTableCount,
       },
       writerBlockReleased: true,
       derivedEffectsDrained: recoveryLocalBackupRecordCount(),
@@ -834,7 +838,7 @@ async function runManualTargetChild(input: {
   readonly attachmentFieldId: string
   readonly attachmentId: string
   readonly attachmentBytes: Uint8Array
-}, targetDatabaseUrl: URL): Promise<void> {
+}, targetDatabaseUrl: URL): Promise<number> {
   assert.equal(input.local.archivePath.startsWith(`${args.workRoot}/target/`), true)
   assert.equal(input.local.custodyPath.startsWith(`${args.workRoot}/target/`), true)
   const child = fork(manualTargetPath, [], {
@@ -856,7 +860,7 @@ async function runManualTargetChild(input: {
   })
   children.add(child)
   try {
-    await new Promise<void>((resolvePromise, reject) => {
+    return await new Promise<number>((resolvePromise, reject) => {
       const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 240_000)
       const finish = (work: () => void) => {
         clearTimeout(timer)
@@ -864,8 +868,12 @@ async function runManualTargetChild(input: {
       }
       child.once('error', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_SPAWN_FAILED'))))
       child.once('exit', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_EXITED_WITHOUT_RESULT'))))
-      child.on('message', (message: { kind?: string; code?: string; frames?: string[] }) => {
-        if (message.kind === 'manual-target-done') finish(resolvePromise)
+      child.on('message', (message: { kind?: string; code?: string; frames?: string[]; rollbackTableCount?: number }) => {
+        if (message.kind === 'manual-target-done') {
+          finish(() => Number.isSafeInteger(message.rollbackTableCount) && (message.rollbackTableCount ?? 0) >= 6
+            ? resolvePromise(message.rollbackTableCount!)
+            : reject(new Error('RECOVERY_LOCAL_ROLLBACK_RESULT_INVALID')))
+        }
         else if (message.kind === 'manual-target-error') {
           if (message.frames?.length) console.log(JSON.stringify({ phase: 'manual-target', frames: message.frames }))
           finish(() => reject(new Error(message.code ?? 'RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_FAILED')))
