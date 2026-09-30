@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { formatDateOnlyValue, formatFieldDisplay } from '../src/multitable/utils/field-display'
+import { dateTimeExportText, formatDateOnlyValue, formatFieldDisplay } from '../src/multitable/utils/field-display'
+import { resetLookupTargetFields, setLookupTargetFields } from '../src/multitable/utils/lookup-target-fields'
 import type { MetaField } from '../src/multitable/types'
 
 describe('formatFieldDisplay i18n fallbacks', () => {
@@ -82,5 +83,34 @@ describe('date-only cells show YYYY-MM-DD', () => {
     expect(formatDateOnlyValue(undefined)).toBeNull()
     expect(formatFieldDisplay({ field, value: 'not a day' })).toBe('not a day')
     expect(formatFieldDisplay({ field, value: null })).toBe('—')
+  })
+})
+
+// The same `YYYY-MM-DD` on the text surfaces that do not go through formatFieldDisplay: group header / client
+// export (dateTimeExportText) and a lookup of a `date` column (display + export).
+describe('date-only text surfaces beyond the cell', () => {
+  const field: MetaField = { id: 'due', name: 'Due', type: 'date' }
+
+  it('a Date.parse-only spelling keeps its day as written instead of echoing the raw text', () => {
+    expect(formatDateOnlyValue('9/18/2026 16:00')).toBe('2026-09-18')
+  })
+
+  it('group header / export text of a date cell is its YYYY-MM-DD, empty stays null', () => {
+    expect(dateTimeExportText(field, '2026-09-17T16:00:00.000Z')).toBe('2026-09-18')
+    expect(dateTimeExportText(field, '2026-09-18')).toBe('2026-09-18')
+    expect(dateTimeExportText(field, '')).toBeNull()
+    expect(dateTimeExportText(field, null)).toBeNull()
+  })
+
+  it('a lookup of a date column shows and exports the same YYYY-MM-DD as the column itself', () => {
+    const lookup: MetaField = { id: 'lk_due', name: 'Due (lookup)', type: 'lookup', property: { foreignSheetId: 'sheet_x', targetFieldId: 'due' } }
+    setLookupTargetFields({ lk_due: { type: 'date' } })
+    try {
+      expect(formatFieldDisplay({ field: lookup, value: ['2026-09-17T16:00:00.000Z', '2026-09-18', ''] })).toBe('2026-09-18, 2026-09-18')
+      expect(dateTimeExportText(lookup, ['2026-09-17T16:00:00.000Z', '2026-09-18'])).toBe('2026-09-18; 2026-09-18')
+      expect(formatFieldDisplay({ field: lookup, value: [] })).toBe('—')
+    } finally {
+      resetLookupTargetFields()
+    }
   })
 })

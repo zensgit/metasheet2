@@ -42,7 +42,9 @@ export function formatDateOnlyValue(value: unknown): string | null {
     const day = calendarDayFromText(text)
     if (day) return day
   }
-  return formatBusinessTimestamp(text, { precision: 'day' })
+  // A spelling the business-timezone parser refuses but `Date.parse` accepts (`9/18/2026 16:00`) still names a
+  // day: keep it as written rather than echoing the raw text.
+  return formatBusinessTimestamp(text, { precision: 'day' }) ?? (typeof text === 'string' ? calendarDayFromText(text) : null)
 }
 
 function formatDate(value: unknown): string {
@@ -115,12 +117,14 @@ export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null 
 export function lookupDateTimeTexts(field: Pick<MetaField, 'type'> & { id?: string }, value: unknown): string[] | null {
   if (field.type !== 'lookup') return null
   const target = getLookupTargetField(field.id)
-  if (!target || !isDateTimeLikeFieldType(target.type)) return null
-  const zone = dateTimeFieldTimezone(target)
+  if (!target) return null
   const items = Array.isArray(value) ? value : [value]
-  return items
-    .filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
-    .map((item) => formatDateTimeInZone(item, zone) ?? String(item))
+  const present = items.filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
+  // A looked-up `date` column shows the same `YYYY-MM-DD` its own cells show (formatDateOnlyValue).
+  if (target.type === 'date') return present.map((item) => formatDateOnlyValue(item) ?? String(item))
+  if (!isDateTimeLikeFieldType(target.type)) return null
+  const zone = dateTimeFieldTimezone(target)
+  return present.map((item) => formatDateTimeInZone(item, zone) ?? String(item))
 }
 
 /**
@@ -134,6 +138,8 @@ export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'> &
     const texts = lookupDateTimeTexts(field, value)
     return texts && texts.length > 0 ? texts.join('; ') : null
   }
+  // A `date` cell exports / groups as the `YYYY-MM-DD` it shows — not the raw stored instant.
+  if (field.type === 'date') return formatDateOnlyValue(value)
   if (!isDateTimeLikeFieldType(field.type)) return null
   if (value === null || value === undefined || value === '') return null
   return formatDateTimeInZone(value, dateTimeFieldTimezone(field))
