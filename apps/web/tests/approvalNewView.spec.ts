@@ -1128,6 +1128,233 @@ describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment
       }
     })
 
+    // -----------------------------------------------------------------------
+    // Reviewer-found residual in the FIX C machinery above: `draftSaveInFlight` used to be a
+    // SINGLE slot that each debounced save's `.finally` overwrote/cleared based on `=== this
+    // call's own promise`. That is only correct while at most one save is ever outstanding at a
+    // time -- but two CAN be outstanding at once (typing again 800ms later while the first
+    // save's HTTP request is still on the wire). If the SECOND (later-issued) save's promise
+    // settled BEFORE the first, the old `.finally` nulled the slot while the first save was still
+    // unsettled, and a quiescing caller (submit/discard) reading the slot right then saw "nothing
+    // in flight" and issued its CLEAR immediately -- if the first save's transaction then
+    // committed AFTER that CLEAR had already committed, its INSERT resurrected the draft. Same
+    // resurrection shape FIX C closes for "one save in flight"; this is that window reached
+    // through a second, later-issued save completing first, not through a rejected/late network
+    // response. The earlier "closed for the dominant case" claim in this file's history was too
+    // broad -- it did not cover two in-flight saves settling out of order.
+    //
+    // Fix: `draftSaveInFlight` is now the TAIL of a per-slot promise chain (see
+    // `scheduleDraftSave` in ApprovalNewView.vue) -- a later save is not even ISSUED (its
+    // fetcher not called) until an earlier unsettled one from the same slot has settled, so the
+    // slot always names the chain's true tail and can never be nulled out from under a still-
+    // pending earlier save.
+    //
+    // Both tests below construct the SAME timeline (two debounced saves, the second one
+    // conditionally resolved "early" to mirror the reviewer's reverse-completion repro) and stay
+    // tolerant of EITHER implementation up to the discriminating CLEAR assertion, so a mutation
+    // that reverts the chain back to a plain overwrite reds on that CLEAR assertion specifically
+    // (see this PR's mutation-testing note), not on an incidental earlier assertion.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (reverse-completion window): submit does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView() // default mock resolves the initial restore GET quickly -> draftArmed=true
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // first SAVE issued, held open (unsettled)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // second debounce elapses
+
+        // Mirrors "resolve B before A": under the reverted single-slot code a second save IS
+        // already issued here (independent of the first), and settling it "first" is exactly the
+        // reviewer's repro. Under the fix this is a same-tick no-op -- nothing is queued to
+        // resolve yet, because the second save is not issued until the first settles.
+        if (resolvers.length > 1) resolvers[1]()
+        await flushUi()
+
+        submitButton().click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'CLEAR must not be issued while an earlier same-slot SAVE is still unsettled, regardless of what order any LATER save from that slot completes in',
+        ).not.toHaveBeenCalled()
+
+        // Drain the chain and confirm CLEAR follows once everything outstanding has settled.
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2) // neither save was dropped by the chain
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('P3-3 FIX (reverse-completion window, discard path): discard does not issue CLEAR while an EARLIER debounced SAVE is still unsettled, even after a LATER save from the same slot has also been scheduled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy() // the restore offer fired
+
+        const resolvers: Array<() => void> = []
+        saveFormDraftServerSpy.mockImplementation(
+          () => new Promise<void>((resolve) => { resolvers.push(resolve) }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(resolvers.length).toBe(1)
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+
+        if (resolvers.length > 1) resolvers[1]() // no-op under the fix -- see the sibling submit-path test above
+        await flushUi()
+
+        discardBtn!.click()
+        await flushUi()
+
+        expect(
+          clearFormDraftServerSpy,
+          'discard must not issue CLEAR while an earlier same-slot SAVE is still unsettled either',
+        ).not.toHaveBeenCalled()
+
+        resolvers[0]()
+        await flushUi()
+        expect(resolvers.length, 'the second save must eventually be issued once the first settles').toBe(2)
+        resolvers[1]()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Order guarantee behind the fix above: the chain does not just make `cancelPendingDraft-
+    // SaveThenClear` wait on the right promise, it also stops a later same-slot save from ever
+    // being ISSUED (its fetcher called) while an earlier one is still unsettled -- proven directly
+    // here via the fetcher's own call count, independent of any CLEAR/submit behaviour.
+    // -----------------------------------------------------------------------
+    it('P3-3 FIX (order guarantee): a second debounced SAVE from the same slot is not issued until the earlier one has settled', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        await mountView()
+
+        let resolveFirst: () => void = () => {}
+        saveFormDraftServerSpy.mockImplementationOnce(
+          () => new Promise<void>((resolve) => { resolveFirst = resolve }),
+        )
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+
+        reasonInput!.value = 'first edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).toHaveBeenCalledTimes(1) // the first save IS issued
+
+        reasonInput!.value = 'second edit'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        await vi.advanceTimersByTimeAsync(900) // the second debounce elapses
+        expect(
+          saveFormDraftServerSpy,
+          'a second same-slot SAVE must not be issued while an earlier one is still unsettled',
+        ).toHaveBeenCalledTimes(1)
+
+        resolveFirst()
+        await flushUi()
+        expect(saveFormDraftServerSpy, 'once the earlier save settles, the queued one is issued').toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Discard must not permanently disarm autosave (contract note in `cancelPendingDraftSave-
+    // ThenClear`'s own comment: `discardDraftRestore` runs early in the component's lifecycle and
+    // the user is expected to keep filling out the SAME form afterward). This is the "keep typing
+    // after discard" half of that contract -- distinct from the tests above, which only check that
+    // a save PRE-DATING the discard is still respected.
+    //
+    // Types ONCE *before* discard (inside the debounce window, so that edit's own timer is what
+    // discard cancels -- proving the "not disarmed" claim below is about a NEW edit surviving a
+    // real disarm-of-the-old-timer, not merely about autosave that happened to never get armed in
+    // the first place). Without that pre-discard keystroke this test could not tell "discard leaves
+    // autosave armed" apart from "nothing here was ever armed to begin with" -- which is exactly
+    // the distinction that matters, since the one thing this test must catch is `draftArmed = false`
+    // being (re)introduced into `discardDraftRestore`.
+    // -----------------------------------------------------------------------
+    it('discard then keep typing: autosave is not permanently disarmed by a discard', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        loadFormDraftServerSpy.mockResolvedValueOnce({ reason: 'restored from a previous session' })
+        await mountView()
+
+        const reasonInput = container!.querySelector('input') as HTMLInputElement | null
+        expect(reasonInput).toBeTruthy()
+        reasonInput!.value = 'typed just before discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled() // still inside the 800ms debounce window -- a real pending timer exists
+
+        const discardBtn = container!.querySelector('[data-testid="approval-draft-restore-discard"]') as HTMLElement | null
+        expect(discardBtn).toBeTruthy()
+        discardBtn!.click()
+        await flushUi()
+        expect(clearFormDraftServerSpy).toHaveBeenCalledTimes(1) // no IN-FLIGHT save at discard time -- CLEAR fires right away
+        // The pre-discard timer was cancelled (FIX 8 behavior, unchanged) -- advancing past its
+        // window must NOT fire the pre-discard save.
+        await vi.advanceTimersByTimeAsync(900)
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        reasonInput!.value = 'typed after discard'
+        reasonInput!.dispatchEvent(new Event('input'))
+        await flushUi()
+        // Negative control: not yet -- still inside this NEW 800ms debounce window.
+        expect(saveFormDraftServerSpy).not.toHaveBeenCalled()
+
+        await vi.advanceTimersByTimeAsync(900)
+        // Positive: a discard must not permanently disarm autosave for the rest of the session.
+        expect(
+          saveFormDraftServerSpy,
+          'discard must not permanently disarm autosave for the rest of the session',
+        ).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('restore drops GC-swept attachment refs, warns, and keeps the live ones (positive control)', async () => {
       seedDraft(['att_live', 'att_swept'])
       fetchApprovalAttachmentRefsSpy.mockResolvedValue([

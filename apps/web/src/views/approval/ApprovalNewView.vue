@@ -944,8 +944,45 @@ let draftArmed = false
 // (`void saveFormDraftServer(...)`) — cancelling the TIMER (FIX 8, below) only stops a save that
 // has not been ISSUED yet. Once the timer fires, the HTTP request is in flight and clearing the
 // timer does nothing for it. `draftSaveInFlight` tracks that in-flight request's promise so a
-// later CLEAR (submit) can wait for it to settle FIRST — see the submit handler below for why
-// this, and not a `res.ok`/abort-based approach, is what actually closes the race.
+// later CLEAR (submit/discard) can wait for it to settle FIRST — see the submit handler below for
+// why this, and not a `res.ok`/abort-based approach, is what actually closes the race.
+//
+// FIX (this round, reviewer-found): the FIRST version of this fix let `scheduleDraftSave` simply
+// OVERWRITE this slot with each new save's own promise — a single slot, not a queue. That is only
+// correct while at most one save is ever outstanding, but two CAN be outstanding at once (the user
+// types again 800ms later while the first save's HTTP request is still on the wire). If the LATER
+// save's promise settles BEFORE the earlier one, the old `.finally` (keyed on
+// `draftSaveInFlight === <this call's own promise>`) nulled the slot while the earlier save was
+// still unsettled — a quiescing caller reading the slot at that instant saw "nothing in flight"
+// and issued its CLEAR immediately, and if the earlier save's transaction then committed AFTER
+// that CLEAR's DELETE had already committed, its INSERT resurrected the draft. Same resurrection
+// shape FIX C below closes for "one save in flight"; this is that same window reached through a
+// SECOND, later-issued save completing first, not through a rejected/late network response —
+// reproduced with an in-memory probe of the extracted save/clear helpers.
+//
+// This slot is now the TAIL of a promise CHAIN scoped to THIS COMPONENT INSTANCE, not a single
+// overwritten promise — see `scheduleDraftSave` below: each new save is chained onto whatever this
+// slot currently holds, so (a) saves issued from this instance run in the order they were
+// scheduled (a later save's fetch is not even issued until the earlier one has settled) and (b)
+// this slot always names the chain's current tail, so any quiescing caller reading it is always
+// waiting on the true tail, never a promise a later save has already superseded and nulled out
+// from under it. `cancelPendingDraftSaveThenClear` needed NO change for this — it already just
+// reads whatever is in this slot, and this slot is now always correct.
+//
+// Scope, precisely: NOT per-(user,template) — `currentDraftTemplateId()` is re-read independently
+// at each call site (this timer's own callback, and `cancelPendingDraftSaveThenClear`), so if this
+// instance were ever reused across a templateId change (Vue Router's default same-record-reuse
+// behavior — this route has no `:key` and no `beforeRouteUpdate` guard to force a remount, though
+// nothing here relies on one existing), a save queued for the OLD template would chain ahead of
+// one for the NEW template. That is a latency artifact, not a resurrection risk: every save/clear
+// still carries its OWN correct templateId captured at ITS OWN call time, so the wrong-order
+// effect is "the newer template's autosave is delayed," never "data lands under the wrong row."
+//
+// Chaining relies on `saveFormDraftServer` never rejecting (its own `try { … } catch {}` body in
+// serverFormDraft.ts) — a link that rejected would skip every save queued behind it. One accepted,
+// deliberate consequence: a slow save now makes later debounced saves QUEUE behind it in order
+// rather than fire independently of it — the most recently typed content still wins once the
+// chain drains, just later than before.
 let draftSaveInFlight: Promise<void> | null = null
 
 function currentDraftTemplateId(): string | null {
@@ -1079,15 +1116,31 @@ function scheduleDraftSave(): void {
     const data = attachmentUploadEnabled.value
       ? { ...formData }
       : stripAttachmentFields(template.value.formSchema, { ...formData })
+    // Snapshotted NOW, at debounce-fire time — same timing as `data` above, and as the whole
+    // pre-fix synchronous call — even though the actual network call below may not run until
+    // later (chained behind an earlier unsettled save). Reading `template.value` again from
+    // inside the (possibly much later) `.then()` callback instead would let a template swap that
+    // happens while this save is queued silently change what gets persisted.
+    const schemaSignature = formSchemaSignature(template.value.formSchema)
     // Fire-and-forget from THIS call site's point of view — saveFormDraftServer never throws, and
     // the 800ms debounce already keeps this off the hot path, so nothing here needs to await the
     // network round-trip. The promise itself IS retained (`draftSaveInFlight`), though: it is the
-    // only way a later submit-triggered CLEAR can tell "a save I already issued has not settled
-    // yet" and wait for it — see FIX C above and the submit handler below.
-    const inFlightSave = saveFormDraftServer(templateId, formSchemaSignature(template.value.formSchema), data)
-    draftSaveInFlight = inFlightSave
-    void inFlightSave.finally(() => {
-      if (draftSaveInFlight === inFlightSave) draftSaveInFlight = null
+    // only way a later submit/discard-triggered CLEAR can tell "a save I already issued has not
+    // settled yet" and wait for it — see FIX C above and the submit handler below.
+    //
+    // Chained onto the EXISTING slot, not assigned over it (this round's fix — see the slot's own
+    // declaration comment above for the reverse-completion-order window this closes, and for this
+    // slot's exact scope): the actual `saveFormDraftServer` call is deferred inside the `.then()`,
+    // so if an earlier save from this instance is still unsettled, this one is not even ISSUED
+    // until that earlier one settles — saves from this instance always run in issue order, and
+    // this slot always names the chain's current TAIL, never a stale link a later save has already
+    // superseded.
+    const tail: Promise<void> = (draftSaveInFlight ?? Promise.resolve()).then(() =>
+      saveFormDraftServer(templateId, schemaSignature, data),
+    )
+    draftSaveInFlight = tail
+    void tail.finally(() => {
+      if (draftSaveInFlight === tail) draftSaveInFlight = null
     })
   }, 800)
 }
