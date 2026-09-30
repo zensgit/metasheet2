@@ -59,6 +59,7 @@ import {
 } from './approval-effective-node-operations'
 import {
   assignmentMatchesActor,
+  decisionDoorIsSeatGated,
   readParallelBranchStates,
   resolveCanDecideCurrentNode,
 } from './approval-seat-authorization'
@@ -13703,12 +13704,19 @@ export class ApprovalProductService {
     // detail read: the FE store publishes an action response into the slot the detail read fills,
     // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
     // moment an approver acts.
-    dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+    const canDecideCurrentNode = resolveCanDecideCurrentNode({
       instance: row,
       assignments: assignmentsResult.rows,
       viewerUserId: viewerUserId ?? null,
       viewerRoles: viewerRoles ?? null,
     })
+    dto.canDecideCurrentNode = canDecideCurrentNode
+    // Process-evidence (过程附件) uploader affordance — the identical expression
+    // `ApprovalBridgeService.getApproval` (the detail read) carries: the seat answer above,
+    // restricted to the seat-gated door. Filled HERE too for the same reason as the field above: the
+    // FE store publishes an action response into the slot the detail read fills, so a builder that
+    // omitted it would take the uploader away from a seated approver the moment they post a 评论.
+    dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
 
     // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
     // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a reader who reloads

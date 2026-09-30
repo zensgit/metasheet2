@@ -1009,21 +1009,18 @@
             :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel"
           />
         </el-form-item>
-        <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND
-             `isMyTurn`, deliberately NOT `canAct` (the coarse `approvals:act` scope grant, which
-             the 评论 button above has no gate on at all and so also renders for requesters/CC
-             recipients). Budgets are server-authoritative and unratified (OD-L9-8) — no
-             client-side count/size cap here.
-             Lock-9 FE fix round (gate P3-1): `isMyTurn` is a narrower, FAIL-CLOSED approximation
-             of the server's seat check, not an exact mirror — the server's `assignmentMatchesActor`
-             also admits `assignment_type === 'role'`; `isMyTurn` (below) matches only
-             `type === 'user'`. A role-seated approver whose upload the server would accept sees no
-             uploader here. No security impact (fails closed) and consistent with the shipped action
-             bar's own `v-if="isMyTurn"` (line ~67, unchanged by this slice) — this is a display gap,
-             not a new capability gap, and correcting the "exact mirror" wording, not the gate choice
-             itself, is what this fix round changed. -->
+        <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND the
+             server-resolved `canAttachProcessEvidence`, deliberately NOT `canAct` (the coarse
+             `approvals:act` scope grant, which the 评论 button above has no gate on at all and so
+             also renders for requesters/CC recipients). Budgets are server-authoritative and
+             unratified (OD-L9-8) — no client-side count/size cap here.
+             The gate used to be the client-side `isMyTurn`, which matches `type === 'user'` seats
+             only while the server's seat check also admits role seats, so a role-seated approver
+             saw no uploader. The server now ships its own answer (see `canAttachProcessEvidence`
+             below); `isMyTurn` is kept for the 「等待你处理」 cue only. The flag conjunct comes
+             first, so with the pipeline OFF nothing here renders whatever the field says. -->
         <el-form-item
-          v-if="attachmentPipelineEnabled && isMyTurn"
+          v-if="attachmentPipelineEnabled && canAttachProcessEvidence"
           label="附件"
           data-testid="approval-comment-attachment-upload"
         >
@@ -1706,6 +1703,17 @@ const canDecidePrimary = computed(() =>
 )
 const canDecide = computed(() => !isCancelRound.value && canAct.value && canDecideCurrentNode.value)
 
+// Process-evidence (过程附件) uploader affordance — the server's answer, not a client mirror. The
+// backend resolves it with the decision door's own seat predicate restricted to the seat-gated door
+// (both detail builders fill it; see `UnifiedApprovalDTO.canAttachProcessEvidence`), so a role seat
+// and a parallel-branch seat are covered and a legacy / `plm:` instance is not.
+//
+// `=== true`, deliberately unlike `canDecideCurrentNode` above: there the prior behaviour (render
+// the bar) was the wider one and absence must not hide it; here an absent field means a backend
+// that cannot say who may attach, and not rendering an optional uploader is the safe side. The
+// upload route's seat check and the bind-time 403 remain the authority either way.
+const canAttachProcessEvidence = computed(() => approval.value?.canAttachProcessEvidence === true)
+
 const nodeOperations = computed(() => approval.value?.nodeOperations ?? null)
 const allowTransfer = computed(() => nodeOperations.value?.allowTransfer !== false)
 const allowAddSign = computed(() => nodeOperations.value?.allowAddSign !== false)
@@ -1728,6 +1736,8 @@ const canResubmit = computed(() => {
 
 // B1-01: "等待你处理" cue — the reader holds a still-active user assignment at the current
 // node (or any branch of a parallel region). Mirrors, not replaces, the server-side action gate.
+// A CUE only: it matches user seats and nothing else, so no affordance is gated on it (the
+// process-evidence uploader reads `canAttachProcessEvidence` above instead).
 const isMyTurn = computed(() => {
   const me = currentUserId.value
   const detail = approval.value
@@ -2471,9 +2481,9 @@ function openCommentDialog() {
 
 /**
  * Lock-9 OD-L9-10(a) — process-attachment picker for the comment dialog. Gated by the caller
- * template on `attachmentPipelineEnabled && isMyTurn` (never `canAct`, which is the coarse
- * `approvals:act` scope grant — a requester/CC recipient with that scope on a DIFFERENT instance
- * must not see an uploader here). `stagedInstanceId` is this instance's own id: the row does not
+ * template on `attachmentPipelineEnabled && canAttachProcessEvidence` (never `canAct`, which is
+ * the coarse `approvals:act` scope grant — a requester/CC recipient with that scope on a DIFFERENT
+ * instance must not see an uploader here). `stagedInstanceId` is this instance's own id: the row does not
  * commit to it until the comment action's `attachmentIds` rider binds it (§5.4).
  */
 async function onCommentAttachmentPick(event: Event): Promise<void> {

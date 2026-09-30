@@ -19,7 +19,7 @@ import {
   seatNodeKeysForViewer,
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
-import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { decisionDoorIsSeatGated, resolveCanDecideCurrentNode } from './approval-seat-authorization'
 import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
@@ -989,12 +989,20 @@ export class ApprovalBridgeService {
     // route hands the dispatch door (`resolveApprovalActorRoles`), so a ROLE-typed seat is
     // first-class here exactly as it is there.
     if (dto) {
-      dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+      const canDecideCurrentNode = resolveCanDecideCurrentNode({
         instance: row,
         assignments: instanceAssignments,
         viewerUserId: viewerUserId ?? null,
         viewerRoles: viewerRoles ?? null,
       })
+      dto.canDecideCurrentNode = canDecideCurrentNode
+      // Process-evidence (过程附件) uploader affordance: the seat answer above, restricted to the
+      // seat-gated door. `canDecideCurrentNode` alone is `true` on a pending instance with no seat
+      // gate (legacy platform row, `plm:` mirror), where nothing binds process evidence — see the
+      // field's doc in `approval-bridge-types.ts`. Two existing exports composed, no new predicate.
+      // THIS is the builder `GET /api/approvals/:id` serves; `ApprovalProductService.getApproval`
+      // builds the action / create responses and carries the identical expression.
+      dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
