@@ -18,7 +18,7 @@
 |---|---|---|
 | 文件 | `scripts/ops/approval-detail-attachment-census.sql`(在 OPEN #5476 里,未进 main) | `scripts/ops/approval-attachment-canary-census-20260930/01-top-level-attachment-census.sql` |
 | 数的形状 | `detail` 组的 `columns` 里有 `attachment` | `form_schema.fields` 顶层有 `attachment` |
-| 主闸 ON 后这类版本行会怎样 | 走校验的读者报错(见 §2 G3 与 §5) | 不报错。它是合法字段类型(`ApprovalProductService.ts:1007`),旗控扫描只拒 detail 形状(`:2366-2372`)。ON 后发起页出现真实上传口(`ApprovalNewView.vue:522`) |
+| 主闸 ON 后这类版本行会怎样 | 走校验的读者报错(见 §2 G3 与 §4) | 不报错。它是合法字段类型(`ApprovalProductService.ts:1007`),旗控扫描只拒 detail 形状(`:2366-2372`)。ON 后发起页出现真实上传口(`ApprovalNewView.vue:522`) |
 | 在本核对单里的角色 | **硬门**:(b) `matching_versions` = 0 | **owner 取舍输入**:读数交 Q1 (a) / (b) 选择,本文件不把它写成门 |
 | 处置 | 依 #5476 处置(owner) | Q1 (b) 的「先定这些模板的处置」,形态由 owner 定 |
 
@@ -76,7 +76,7 @@ echo "rc=$?"   # 必须是 0,并且日志里 (a)(b)(c)(c-detail) 四个结果块
   - 删一条被实例冻结的版本行,会连带删掉其发布定义,并把实例的两个指针置空。
 - **停用模板不是处置**:
   - 停用不改变任何读路径。
-  - ON 态下停用本身就是「已落库但返回 500」(§5 P2)。
+  - ON 态下停用本身就是「已落库但返回 500」(§4 P2)。
 
 ⇒ 只剩两条路,**都需 owner 另行授权**:
 
@@ -119,7 +119,7 @@ grep '^INVENTORY_RESULT' top-level-attachment-census.log   # 没有这一行 ⇒
 - G2 的 (b) 必须仍为 0。
 - G4 的读数若与交给 owner 的那份不同,先交 owner 再决定。
 
-### G7 — ON,然后立即按 §4 / §5 跑 UAT
+### G7 — ON,然后立即按 §4–§6 跑 UAT
 
 ---
 
@@ -128,8 +128,8 @@ grep '^INVENTORY_RESULT' top-level-attachment-census.log   # 没有这一行 ⇒
 | # | 项 | 期望 / 做法 | 依据 |
 |---|---|---|---|
 | C1 | 三支附件迁移已应用 | `zzzz20260715210000_create_approval_attachments`、`zzzz20260721120000_approval_attachments_scan_and_purge_dedup`、`zzzz20260822130000_approval_attachments_process_binding` 三行都在 `kysely_migration` 里(只读 SELECT 核)。最后一支的文件头原文:「`APPROVAL_ATTACHMENTS_ENABLED` must never be turned ON in an environment that has not applied this migration」 | `packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts:8-9` |
-| C2 | S3 配置完整 | 生产必须 `NODE_ENV=production`,并同时给 `APPROVAL_ATTACHMENT_S3_BUCKET` 与 `APPROVAL_ATTACHMENT_S3_REGION`,缺一即视为未配置。可选 `APPROVAL_ATTACHMENT_S3_ENDPOINT`,必须是 https,除非 `APPROVAL_ATTACHMENT_S3_ALLOW_HTTP=true`。可选 `APPROVAL_ATTACHMENT_S3_FORCE_PATH_STYLE`。客户端构造时没有显式凭据 ⇒ 走 SDK 默认凭据链(静态判读) | `services/approval-attachment-s3.ts:44-46`、`:47-60`、`:65`、`:87-91`;`services/approval-attachment-runtime.ts:91-104`;锁 §7 / §9 O3 |
-| C3 | 启动探针真的通过 | **启动成功 ≠ S3 可用**。生产配置不全时不会中止启动:路由照挂、`storageAvailable:false`,上传 / 下载返回 503 `storage_unavailable`,日志是 warn「incomplete S3 configuration in production」。只有已解析的存储 put→delete 探针失败才会中止启动。要看到的是两行 info:「Approval attachment storage: built-in S3 object-store provider (probe ok)」与「Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)」 | `services/approval-attachment-runtime.ts:394-410`;`routes/approval-attachments.ts:202`;`index.ts:4334-4355`(`:4349` info、`:4351-4354` 中止) |
+| C2 | S3 配置完整 | 生产必须 `NODE_ENV=production`,并同时给 `APPROVAL_ATTACHMENT_S3_BUCKET` 与 `APPROVAL_ATTACHMENT_S3_REGION`,缺一即视为未配置。可选 `APPROVAL_ATTACHMENT_S3_ENDPOINT`,必须是 https,除非 `APPROVAL_ATTACHMENT_S3_ALLOW_HTTP=true`(不合规则启动中止,见 C3 ②)。可选 `APPROVAL_ATTACHMENT_S3_FORCE_PATH_STYLE`。客户端构造时没有显式凭据 ⇒ 走 SDK 默认凭据链(静态判读) | `services/approval-attachment-s3.ts:44-46`、`:47-60`、`:65`、`:87-91`;`services/approval-attachment-runtime.ts:91-104`;锁 §7 / §9 O3 |
+| C3 | 启动探针真的通过 | **启动成功 ≠ S3 可用**。生产缺 bucket 或 region 时不会中止启动:路由照挂、`storageAvailable:false`,上传 / 下载返回 503 `storage_unavailable`,日志是 warn「incomplete S3 configuration in production」。主闸 ON 时中止启动的只有三种情形:① `APPROVAL_ATTACHMENT_SCAN_ENABLED=true` 而启动未注入扫描器(见 C4d);② 生产且 bucket 与 region 都已给出时,`APPROVAL_ATTACHMENT_S3_ENDPOINT` 不是合法 URL,或不是 https 且未设 `APPROVAL_ATTACHMENT_S3_ALLOW_HTTP=true`(缺 bucket / region 时先按「未配置」处理,走上面的 warn / 503,不中止);③ 已解析的存储 put→delete 探针失败。要看到的是两行 info:「Approval attachment storage: built-in S3 object-store provider (probe ok)」与「Approval attachment pipeline initialized (APPROVAL_ATTACHMENTS_ENABLED)」 | ① `services/approval-attachment-runtime.ts:392` → `services/approval-attachment-scan.ts:39-47`;② `services/approval-attachment-s3.ts:54`、`:58`(经 `:193`)← `services/approval-attachment-runtime.ts:92`(`resolveApprovalAttachmentStorage` `:87`)← `:394`;③ `services/approval-attachment-runtime.ts:395-405`(探针 `:399`、`:404`);warn `:407-409`;`routes/approval-attachments.ts:202`;三者都在 `index.ts:4341-4355` 的 try 内,`:4349` info、`:4351-4354` 记错并重新抛出(中止) |
 | C4a | `APPROVAL_ATTACHMENTS_ENABLED` | 值写成精确的 `true`。解析是 trim 后大小写不敏感(`'TRUE'` 也开),是否预期是计划记下的未裁项 | `routes/approval-attachments.ts:128-130`;锁 §9 `:684` |
 | C4b | `APPROVAL_ATTACHMENT_MAX_SIZE` | **代码不读这个键**。上限是常量:单文件 20 MB、每字段 10 个、每次提交 50 MB,与锁 §9 / O1 的取值一致。设了也无效;本包不提锁勘误 | `services/approval-attachment-validation.ts:30-34`;锁 §9 `:685`、`:693-694` |
 | C4c | `APPROVAL_ATTACHMENT_UNBOUND_RETENTION_HOURS` | 不设 ⇒ 168(7 天);取值范围 1–8760 | `services/approval-attachment-runtime.ts:490`;锁 §9 `:686` |
@@ -189,7 +189,7 @@ grep '^INVENTORY_RESULT' top-level-attachment-census.log   # 没有这一行 ⇒
 | A4 | 上传一个允许类型的小文件 | `POST /api/approval/attachments` → 201 `{ id, sizeBytes }`(`routes/approval-attachments.ts:208-209`、`:265`) |
 | A5 | 负例:不允许的类型;单文件 > 20 MB;同一字段提交 11 个附件 id 发起 | 分别被拒:415 `rejected`(`approval-attachment-validation.ts:86-92`);413 `rejected` / `file_too_large`(`routes/approval-attachments.ts:150-157`);413 `APPROVAL_ATTACHMENT_CAP_EXCEEDED` 且整单回滚(`ApprovalProductService.ts:8681-8688`)。上限常量见 `approval-attachment-validation.ts:30-34` |
 | A6 | 提交发起 | 2xx。实例的 `form_snapshot[字段 id]` 是附件 id 数组(只读 SELECT 核类型即可,不看值) |
-| A7 | 详情页查看附件;参与者下载;非参与者下载 | 详情经 `POST /api/approval/attachments/refs` 解析并显示附件(`:601-602`);参与者 `GET /api/approval/attachments/:id/download` 成功;非参与者得到 values-free 404 `not_found`(`routes/approval-attachments.ts:370-417`) |
+| A7 | 详情页查看附件;参与者下载;非参与者下载 | 详情经 `POST /api/approval/attachments/refs` 解析并显示附件(`routes/approval-attachments.ts:601-602`);参与者 `GET /api/approval/attachments/:id/download` 成功;非参与者得到 values-free 404 `not_found`(`routes/approval-attachments.ts:370-417`) |
 | A8 | **探针**:对该实例做一次通过 / 驳回;对该模板停用再启用;对该模板做一次纯元数据 PATCH 再改回 | 全部 2xx,且随后 GET 的状态与动作一致(§4 P1–P3) |
 | A9 | **观察项,不判通过 / 失败**:G4 (d) 段有 `string` / `object` 旧值时,打开一张这类实例的详情页 | 记录现象:ON 后这些旧值不再内联显示(`detailField.ts:588`;`attachmentRefs.ts:77,104` 只认 id 数组;静态判读),交 owner |
 | A10 | 回退演练:主闸改回 OFF,重启 | 发起页回到 B2-28 占位;`POST /api/approval/attachments` 不再注册(404);启动日志无附件初始化行 |
@@ -216,7 +216,7 @@ grep '^INVENTORY_RESULT' top-level-attachment-census.log   # 没有这一行 ⇒
 
 ## 7. 不在本包 / 残留
 
-- **detail (b) 定位段**:见 §2 G3。随 #5476(owner 评审意见)或 F2-A0 落地。
+- **detail (b) 定位段**:见 §2 G3。随 #5476(owner 评审意见)或 F2-A0 落地。计划 r4 正文把它列在本切片内;本包未交付,属偏离计划正文,待 owner 确认。
 - **#5476 普查 (a) 段 active 优先**:与模板读取 latest 优先不一致(§2 G2)。建议 owner 作为 #5476 的评审意见处置;本包零 PR 操作。
 - **owner 未裁**:
   - Q1:放行形态,以及 #5476 处置 ①合入 / ②F2-A0。
