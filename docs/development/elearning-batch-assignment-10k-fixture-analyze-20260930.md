@@ -81,7 +81,19 @@
 - 该步只有一个 vitest 进程,`vitest.integration.config.ts` 设 `fileParallelism: false`、`maxConcurrency: 1`,文件串行。该用例全程只用一条连接(`withRolledBackDb` 的 client,解析器也经它执行)。
 - 该步只设 `DATABASE_URL`;41 个文件和 `tests/setup.integration.ts` 里没有别的 `*_DATABASE_URL`。它是迁移之后第一个用库的步骤;之前唯一起过数据库的步骤用的是自己 `initdb`、另一个端口的临时实例。Postgres 是 job 内自起的实例,步骤之间串行。
 - 这 41 个文件没有任何针对 `users` / `user_orgs` 的表级语句(ANALYZE / VACUUM / ALTER / LOCK / TRUNCATE / 建索引 / 建触发器)。模板化的 `ALTER TABLE ${table}` 所用的表清单也核过:都是 `elearning_*` 表。
-- 全仓测试里没有对这两张表的 `ANALYZE` / `VACUUM`。对 `users` 做 DDL 的测试有:5 个 approval 文件,在 `approval-realdb-acceptance.yml`,另一个 workflow、另一个库;以及 `invite-accept-concurrency-rollback`,在本 workflow 靠后的另一个步骤。
+- 全仓测试里没有对这两张表的 `ANALYZE` / `VACUUM`(另两处 `ANALYZE` 针对别的表:`elearning-scope-access.db.test.ts:129`、`attendance-w7-2-group-shadow-dualrun.db.test.ts:875`)。
+- 对 `users` / `user_orgs` 做 DDL 的测试(都取比 `RowExclusiveLock` 更强的锁,且都不与本步并发):
+
+  | 调用点 | 语句 | 跑在哪里 |
+  |---|---|---|
+  | `approval-user-group.db.test.ts:244`、`approval-requester-choice.db.test.ts:190` | `ALTER TABLE users ADD COLUMN` | `approval-realdb-acceptance.yml`(另一 workflow、另一库) |
+  | `approval-field-edit-enforcement.db.test.ts:179` | 同上 | `approval-realdb-field-edit.yml` |
+  | `approval-handler-node.db.test.ts:190` | 同上 | `approval-realdb-handler.yml` |
+  | `approval-lock7b-required-at-node.db.test.ts:191` | 同上 | `approval-realdb-required-at-node.yml` |
+  | `attendance-w4pre1-user-orgs-admission.db.test.ts:287`、`attendance-w4pre1-user-orgs-directory-sync.db.test.ts:162`、`attendance-w4pre1b-user-orgs-lifecycle.db.test.ts:142` | `CREATE TRIGGER … ON user_orgs` | 本 workflow 靠后的「Run attendance integration tests」步骤(串行) |
+  | `invite-accept-concurrency-rollback.db.test.ts:132–149` | `ALTER TABLE users ADD COLUMN / ALTER COLUMN` | 本 workflow 靠后的步骤 |
+
+  `approval-instance-org-backfill-b` 的 `DROP TABLE users/user_orgs` 在自建 schema 中执行,不计。(更正:初稿把 5 个 approval 文件都写在 `approval-realdb-acceptance.yml`,实际分布在 4 个 workflow,且漏了 3 处 `CREATE TRIGGER … ON user_orgs`;结论不变。)
 - 剩下的只有 autovacuum。
 
 **autovacuum,两个方向。** 【重取】
