@@ -172,7 +172,14 @@ describe('ApprovalCommentsPanel — truncation notice (gate P2-1, previously unt
 
     const notice = container.querySelector('[data-testid="approval-comments-truncated-notice"]')
     expect(notice, 'the truncation notice never rendered — gate P2-1 was previously untested because every spec stubbed truncated:false').toBeTruthy()
+    // O-8 / F8-1: this suite runs in English (outer beforeEach), so the wrapper's own notice is
+    // English; the zh-CN copy is unchanged and follows a runtime locale switch.
+    expect(notice!.textContent).toContain('most recent comments')
+    useLocale().setLocale('zh-CN')
+    await flushUi()
     expect(notice!.textContent).toContain('最近')
+    useLocale().setLocale('en')
+    await flushUi()
 
     // Positive control in the other direction, same mount path.
     mockTruncated.value = false
@@ -201,6 +208,26 @@ describe('ApprovalCommentsPanel — one-level threading only', () => {
 })
 
 describe('ApprovalCommentsPanel — member-display-identity guard', () => {
+  // O-8 / F8-1: the ordinal follows the shell locale; these cases pin its zh-CN spelling.
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
+  it('in English the same values-free ordinal reads "Member N" (never the raw id)', async () => {
+    useLocale().setLocale('en')
+    listCommentsMock.mockResolvedValue({
+      comments: [
+        comment({ id: 'c1', authorId: 'raw_id_unresolved_marker_4411', content: 'first' }),
+      ],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'someone_else' })
+    await flushUi()
+
+    expect(container.textContent).not.toContain('raw_id_unresolved_marker_4411')
+    expect(container.textContent).toContain('Member 1')
+    expect(container.textContent).not.toContain('成员')
+  })
+
   it('never renders a raw author id; an unresolved author gets a values-free 成员 N ordinal, a resolved one gets its real name', async () => {
     resolvedNames.set('raw_id_resolved_marker_9911', 'Alice Resolved')
     // 'raw_id_unresolved_marker_7788' is intentionally absent from resolvedNames -> null.
@@ -305,6 +332,11 @@ describe('ApprovalCommentsPanel — delete flow re-hydrates the tombstone (appro
 })
 
 describe('ApprovalCommentsPanel — member-display-identity guard covers the MENTION DROPDOWN too (not just the thread list)', () => {
+  // O-8 / F8-1: pins the zh-CN spelling of the ordinal (the English one is covered above).
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
   // The kit's own mention-suggestion dropdown (MetaCommentComposer.vue) is a SEPARATE render
   // surface from the thread list, only mounted once the composer's `showSuggestions` computed
   // goes true (draft ends in `@...`). It has TWO of its own raw-id fallback paths the earlier
