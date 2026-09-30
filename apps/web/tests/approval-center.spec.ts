@@ -1185,7 +1185,7 @@ describe('ApprovalCenterView', () => {
   // Blob to the browser; this view builds no CSV itself. Acceptance gates covered here: filter
   // pass-through, the truncation notice, the PLM-disabled state. The wire half (URL, headers,
   // refusals) lives in approvalApiErrorSurfacing.spec.ts; a real download is driven in the browser
-  // lane (verification/approval-center-export-csv.spec.ts).
+  // lane (verification/approval-list-csv-download.spec.ts).
   // -------------------------------------------------------------------------
   describe('F3-E1: 导出 CSV', () => {
     const CJK_RE = /[㐀-鿿]/
