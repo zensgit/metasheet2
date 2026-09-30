@@ -181,7 +181,7 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaRecord, MetaTimelineViewConfig, MultitableCommentPresenceSummary } from '../types'
 import { resolveTimelineViewConfig } from '../utils/view-config'
-import { formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { formatFieldDisplay, viewDateOnlyDayUtcMs, viewDayZone, viewTodayKey } from '../utils/field-display'
 import { dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { useLocale } from '../../composables/useLocale'
 import MetaAttachmentList from './MetaAttachmentList.vue'
@@ -282,9 +282,13 @@ watch(
 
 const dateFields = computed(() => props.fields.filter((f) => f.type === 'date' || f.type === 'dateTime'))
 // 客户反馈 2026-09-24 #4c follow-up: a date-time start / end field is put onto days in its field / business
-// timezone (the day its cell shows); a `date` field (floating day) keeps the UTC-midnight day math below.
-const startDayZone = computed(() => viewDayZone(props.fields.find((f) => f.id === startFieldId.value)))
-const endDayZone = computed(() => viewDayZone(props.fields.find((f) => f.id === endFieldId.value)))
+// timezone (the day its cell shows). #6181: a `date` field is put on the day ITS cell shows (a day as written
+// keeps it; a stored instant takes its business-timezone day), placed at UTC midnight of that day
+// (viewDateOnlyDayUtcMs) — so the UTC-midnight day math below reads that day, not the UTC day of the instant.
+const startDayField = computed(() => props.fields.find((f) => f.id === startFieldId.value))
+const endDayField = computed(() => props.fields.find((f) => f.id === endFieldId.value))
+const startDayZone = computed(() => viewDayZone(startDayField.value))
+const endDayZone = computed(() => viewDayZone(endDayField.value))
 const labelFields = computed(() => props.fields)
 
 const displayField = computed(() =>
@@ -370,25 +374,30 @@ function attachmentItems(record: MetaRecord, field: MetaField): MetaAttachment[]
   }))
 }
 
-function parseDate(val: unknown, zone: string | null = null): Date | null {
+function parseDate(val: unknown, zone: string | null = null, field?: MetaField): Date | null {
   if (!val) return null
   // A date-time value is read in its zone (a zone-less legacy string is a business wall clock, never a
   // browser-local read); text the grammar cannot read falls back to the old parse rather than vanishing.
   const zonedMs = zone ? dateTimeValueToUtcMs(val, zone) : null
   if (zonedMs !== null) return new Date(zonedMs)
+  const dayMs = viewDateOnlyDayUtcMs(field, val)
+  if (dayMs !== null) return new Date(dayMs)
   const d = new Date(String(val))
   return isNaN(d.getTime()) ? null : d
 }
 
 function parseStart(row: MetaRecord): Date | null {
-  return parseDate(row.data[startFieldId.value], startDayZone.value)
+  return parseDate(row.data[startFieldId.value], startDayZone.value, startDayField.value)
 }
 
 function parseEnd(row: MetaRecord): Date | null {
-  return parseDate(row.data[endFieldId.value], endDayZone.value)
+  return parseDate(row.data[endFieldId.value], endDayZone.value, endDayField.value)
 }
 
-/** `YYYY-MM-DD` of an instant: the business day for a date-time field, the UTC day otherwise (unchanged). */
+/**
+ * `YYYY-MM-DD` of an axis position: the business day for a date-time field; otherwise the UTC day — for a `date`
+ * field that is the day its cell shows, because its bars sit at UTC midnight of that day (viewDateOnlyDayUtcMs).
+ */
 function dayKeyOf(date: Date, zone: string | null): string {
   return zone ? dayKeyInZone(date.getTime(), zone) : date.toISOString().slice(0, 10)
 }
@@ -525,8 +534,8 @@ function onSelect(recordId: string) {
 function snapToIsoDate(timestamp: number, zone: string | null = null): string {
   // The day the drop lands on, in the SAME frame the bars are placed in (dayKeyOf): a date-time field's zone
   // day (written as that day, read back as its 00:00 there); for a `date` field the UTC day — its bars sit at
-  // UTC midnight of the day as written. The old `setHours(0)` + UTC date wrote the PREVIOUS day on UTC+
-  // browsers.
+  // UTC midnight of the day its cell shows (#6181). The old `setHours(0)` + UTC date wrote the PREVIOUS day on
+  // UTC+ browsers.
   return dayKeyOf(new Date(timestamp), zone)
 }
 
