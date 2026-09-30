@@ -14,6 +14,8 @@ import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
 import {
   businessTodayKey,
+  calendarDayFromText,
+  formatBusinessTimestamp,
   formatDateTimeInZone,
   getBusinessTimezone,
   parseDateTimeInput,
@@ -21,11 +23,31 @@ import {
 } from './business-timezone'
 import { getLookupTargetField } from './lookup-target-fields'
 
+// Text that carries a time of day (`2026-09-18T16:00:00.000Z`, `2026-09-18 08:00`): an instant, not a day as
+// written. A bare day (`2026-09-18`, `2026/9/18`, `2026年9月18日`) has none.
+const DATE_TIME_TEXT_RE = /[T\s]\d{1,2}:\d{2}/
+
+/**
+ * R61 上机观察 2026-09-30 (客户反馈 #4c follow-up): a `date` cell is a calendar day and is shown as `YYYY-MM-DD`
+ * — the same spelling as the day half of a `dateTime` cell — never the browser locale's month name
+ * (`18 Sept 2026` under zh-CN, `Sep 18, 2026` under en-US). Two stored shapes exist: a day as written (the
+ * `<input type="date">` editor stores `YYYY-MM-DD`) keeps that day; an instant (the PLM refresh writes ISO
+ * instants into the managed table's date columns) is the day it falls on in the business timezone, so every
+ * viewer sees the same day. `null` when the value is empty or names no day (callers keep their own fallback).
+ */
+export function formatDateOnlyValue(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null
+  const text = typeof value === 'string' ? value.trim() : value
+  if (typeof text === 'string' && !DATE_TIME_TEXT_RE.test(text)) {
+    const day = calendarDayFromText(text)
+    if (day) return day
+  }
+  return formatBusinessTimestamp(text, { precision: 'day' })
+}
+
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  return formatDateOnlyValue(value) ?? String(value)
 }
 
 // 客户反馈 2026-09-24 #4c: date-times are shown AND parsed in ONE business timezone, fixed

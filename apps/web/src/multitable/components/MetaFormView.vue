@@ -145,7 +145,7 @@
             :aria-required="fieldIsRequired(field) ? 'true' : undefined"
             :aria-invalid="(!!fieldErrors?.[field.id] || !!validationErrors[field.id]) ? 'true' : undefined"
             :aria-describedby="(fieldErrors?.[field.id] || validationErrors[field.id]) ? `error_${field.id}` : undefined"
-            :value="formData[field.id] ?? ''"
+            :value="formatDateOnlyValue(formData[field.id]) ?? ''"
             @input="formData[field.id] = ($event.target as HTMLInputElement).value"
           />
           <!-- dateTime: business-timezone wall clock, YYYY-MM-DD HH:mm 24h (客户反馈 2026-09-24 #4c) -->
@@ -418,6 +418,7 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 import {
+  formatDateOnlyValue,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
