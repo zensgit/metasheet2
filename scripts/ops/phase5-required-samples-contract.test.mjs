@@ -164,3 +164,19 @@ test('keeps overall status pass when required latency samples satisfy thresholds
   assert.equal(result.json.latency_source_census.snapshot_create_latency_p99.reason, 'observed');
   assert.equal(result.json.latency_source_census.snapshot_create_latency_p99.selector_samples, 10);
 });
+
+test('keeps measured latency breaches failed when all required samples are present', async () => {
+  const slowLatencySamples = passingLatencySamples.replaceAll('le="1"', 'le="20"');
+  const result = await runPhase5Validation(`${passingCounters}\n${slowLatencySamples}`);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.requestCount, 1);
+  assert.deepEqual(result.json.summary, {
+    total_checks: 11,
+    passed: 5,
+    failed: 6,
+    na: 0,
+    overall_status: 'fail',
+  });
+  assert.equal(result.json.latency_source_census.snapshot_restore_latency_p95.reason, 'observed');
+});
