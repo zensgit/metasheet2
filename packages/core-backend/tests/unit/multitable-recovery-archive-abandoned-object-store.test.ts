@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { fork } from 'node:child_process'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -80,6 +81,80 @@ describe('operation-bound abandoned object discard (LOCAL synthetic)', () => {
     if (pin.status === 'fulfilled') expect(discarded.value).toEqual({ outcome: 'retained' })
     else expect(discarded.value.outcome).toBe('absent')
   })
+
+  test('two child processes race pin/discard on one LOCAL root without both succeeding', async () => {
+    const { options, provider, object, binding, request, file } = await setup()
+    await provider.put(object)
+    const contenders = (['pin', 'discard'] as const).map((action) => {
+      const child = fork(path.resolve('tests/fixtures/recovery-abandoned-store-contender.mts'), [], {
+        execArgv: ['--import', 'tsx'], silent: true,
+        env: { PATH: process.env.PATH, TSX_DISABLE_CACHE: '1', NODE_ENV: 'test' },
+      })
+      let result: unknown
+      let output = ''
+      child.stdout!.on('data', (chunk) => { output += chunk })
+      child.stderr!.on('data', (chunk) => { output += chunk })
+      const ready = new Promise<unknown>((resolve) => {
+        child.on('message', (message) => {
+          if (typeof message === 'object' && message !== null && 'ready' in message) resolve(message)
+          else result = message
+        })
+      })
+      const closed = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+        child.on('error', () => { output += 'CHILD_PROCESS_FAILED' })
+        child.once('close', (code, signal) => resolve({ code, signal }))
+      })
+      const { transactionDepth: _transactionDepth, ...serializableOptions } = options
+      child.send({ action, options: serializableOptions, request })
+      return { child, ready, closed, result: () => result, output: () => output }
+    })
+    let timer: ReturnType<typeof setTimeout>
+    try {
+      await Promise.race([
+        (async () => {
+          const ready = await Promise.all(contenders.map((item) => Promise.race([
+            item.ready, item.closed.then(() => { throw new Error('CONTENDER_EXIT_BEFORE_READY') }),
+          ])))
+          expect(ready).toEqual(contenders.map(({ child }) => ({ ready: true, pid: child.pid })))
+          expect(new Set(contenders.map(({ child }) => child.pid)).size).toBe(2)
+          expect(contenders.every(({ child }) => child.pid !== process.pid)).toBe(true)
+          // Neither child starts provider IO until both independent providers report ready.
+          for (const { child } of contenders) child.send({ start: true })
+          expect(await Promise.all(contenders.map((item) => item.closed))).toEqual([
+            { code: 0, signal: null }, { code: 0, signal: null },
+          ])
+          expect(contenders.map((item) => item.output())).toEqual(['', ''])
+          const pin = contenders[0].result()
+          const discarded = contenders[1].result()
+          const { bytes: _bytes, ...descriptor } = object
+          if (typeof pin === 'object' && pin !== null && 'pin' in pin && pin.pin === 'succeeded') {
+            expect(pin).toEqual({ pin: 'succeeded', object: { ...descriptor, pinned: true } })
+            expect(discarded).toEqual({ discard: { outcome: 'retained' } })
+            expect(await provider.status(request)).toEqual({ outcome: 'retained' })
+            expect(await provider.get(binding)).toEqual({ ...object, pinned: true })
+          } else {
+            expect(pin).toEqual({ pin: 'refused', code: 'RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED' })
+            const absent = { outcome: 'absent', receiptSha256: recoveryArchiveDiscardReceipt(request) }
+            expect(discarded).toEqual({ discard: absent })
+            expect(await provider.status(request)).toEqual(absent)
+            expect(await provider.head(binding)).toBeNull()
+            await expect(fs.stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
+            await expect(provider.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE')
+          }
+        })(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('CONTENDER_TIMEOUT')), 10_000)
+        }),
+      ])
+    } finally {
+      clearTimeout(timer!)
+      for (const { child } of contenders) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }
+      // afterEach may remove only this test's root, and only after both children exit.
+      await Promise.all(contenders.map((item) => item.closed))
+    }
+  }, 15_000)
 
   test('crash after tombstone before unlink stays ambiguous until status durably reconciles', async () => {
     const { options, provider, object, request, store, file } = await setup()

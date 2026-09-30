@@ -27,7 +27,7 @@ No timer, startup activation, provider selection, flags, retention defaults, ver
 
 This slice does not close full D7 fault/cleanup acceptance. Verified-receipt, pinned-object, and late-finalization cases remain OPEN conservative refusals. Legacy unrepresented uploads remain OPEN and are never guessed from missing HEAD results. Terminal staging receipts preserve key-reference inventory; no key reference release or destruction is implemented. Sealed staging entries in a normally verified generation retain immutable provenance and are ineligible for this abandoned-builder path.
 
-The pin/discard race test uses two independent provider instances within one process. It is not cross-process acceptance; a cross-process discard/fault gate remains unproven. Existing file-store neighbor coverage is reported separately.
+LOCAL pin/discard contention has both independent same-process provider coverage and a two-child-process gate: each child independently constructs its provider on one parent-owned synthetic root, waits for both ready signals, then races pin against operation-bound discard. Exact retained/absent outcomes, receipt, availability and child exits are checked before root removal. This proves bounded local contention only; cross-process crash/restart fault acceptance and full D7 remain unproven. Existing file-store neighbor coverage is reported separately.
 
 ## CI and file census
 
