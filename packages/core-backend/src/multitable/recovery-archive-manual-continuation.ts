@@ -1,3 +1,4 @@
+import { lockRecoveryArchiveObjectScope, registerRecoveryArchiveStagingObject, recoveryArchivePreparedStagingPlan } from './recovery-archive-abandoned-object-cleanup'
 import type { RecoveryArchiveScopeIdentity } from './recovery-archive-worker-authorization'
 import {
   uploadRecoveryArchivePreparedCapture,
@@ -65,13 +66,14 @@ function bindManualObjectUpload(
   const provider = input.provider
   const transactionDepth = input.transactionDepth
   const authorizedPayload = async (query: SealQuery) => {
+    const keyId = await lockRecoveryArchiveObjectScope(query, identity, owner.generationId, true).catch(() => { throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE') })
     let allowed = false
     try { allowed = await authorize(query, identity) } catch { /* Values-free below. */ }
     if (!allowed) throw new Error('RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE')
     const payload = await readRecoveryArchivePreparedCapture(query, owner)
     if (!payload) throw new Error('RECOVERY_ARCHIVE_MANUAL_SOURCE_UNAVAILABLE')
     const envelope = decodeRecoveryArchivePreparedEnvelope(payload)
-    if (envelope.binding.generationId !== owner.generationId || envelope.binding.sheetId !== identity.sheetId
+    if (envelope.binding.keyId !== keyId || envelope.binding.generationId !== owner.generationId || envelope.binding.sheetId !== identity.sheetId
       || envelope.binding.baseId !== identity.baseId || envelope.binding.workspaceId !== identity.workspaceId) {
       throw new Error('RECOVERY_ARCHIVE_MANUAL_SCOPE_MISMATCH')
     }
@@ -103,6 +105,13 @@ function bindManualObjectUpload(
       }
     }
     const sha256 = createHash('sha256').update(bytes).digest('hex')
+    await transaction(async (query) => {
+      const current = await authorizedPayload(query)
+      if (!current.payload.equals(admitted.payload)) throw new Error('RECOVERY_ARCHIVE_PREPARED_CAPTURE_CONFLICT')
+      for (const registration of recoveryArchivePreparedStagingPlan(current.payload, admitted.expiresAt)) {
+        await registerRecoveryArchiveStagingObject(query, owner, registration)
+      }
+    })
     const evidence = await compileRecoveryArchiveObjectReceipt({ provider, transactionDepth,
       object: { generationId: owner.generationId, objectId: sha256, version: sha256,
         sha256, size: String(bytes.byteLength), bytes,

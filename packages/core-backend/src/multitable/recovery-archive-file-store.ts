@@ -3,6 +3,7 @@ import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
+import { validateRecoveryArchiveDiscardRequest, recoveryArchiveDiscardReceipt, type RecoveryArchiveAbandonedObjectStore, type RecoveryArchiveDiscardRequest, type RecoveryArchiveDiscardResult } from './recovery-archive-abandoned-object-store'
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
 import {
   RecoveryArchiveObjectStoreError,
@@ -185,7 +186,7 @@ function encode(request: RecoveryArchiveObjectPutRequest): Buffer {
 }
 
 /** Persistent local POSIX provider; deliberately not automatically wired to application startup. */
-export async function createRecoveryArchiveFileStoreProvider(options: RecoveryArchiveFileStoreOptions): Promise<RecoveryArchiveObjectStoreProvider> {
+export async function createRecoveryArchiveFileStoreProvider(options: RecoveryArchiveFileStoreOptions): Promise<RecoveryArchiveObjectStoreProvider & RecoveryArchiveAbandonedObjectStore> {
   return guarded(async () => {
     options = { ...options }
     if (!UUID.test(options.storeId) || !Number.isSafeInteger(options.maxObjectBytes) || options.maxObjectBytes <= 0 || options.maxObjectBytes > 256 * 1024 * 1024) refuse()
@@ -237,6 +238,38 @@ export async function createRecoveryArchiveFileStoreProvider(options: RecoveryAr
       const result = await readObject(expected)
       if (!result && retention) refuse()
       return result && { ...result, object: retention?.object ?? result.object }
+    }
+    // Operation files bind one UUID permanently, independently of the object retention winner.
+    const discard = async (request: RecoveryArchiveDiscardRequest, start: boolean): Promise<RecoveryArchiveDiscardResult> => {
+      await checkRoot()
+      const operationName = `${request.operationId}.discard`
+      const encoded = Buffer.from(JSON.stringify(request))
+      if (start) await publish(root, operationName, encoded)
+      const operation = await readFile(root, operationName, HEADER_LIMIT)
+      if (!operation) return { outcome: 'unknown' }
+      if (!operation.equals(encoded)) mismatch()
+      const prior = await readRetention(request)
+      if (prior?.kind === 'pinned') return { outcome: 'retained' }
+      const current = await readObject(request)
+      if (current?.object.pinned) return { outcome: 'retained' }
+      // Tombstone even a never-uploaded object. A late PUT must observe this same decision.
+      const object = current?.object ?? {
+        generationId: request.generationId, objectId: request.objectId,
+        version: request.expectedVersion, sha256: request.expectedSha256,
+        size: request.expectedSize, expiresAt: request.expectedExpiresAt, pinned: false,
+      }
+      await publish(root, names(request).retention, Buffer.from(JSON.stringify({ kind: 'deleted', object })))
+      const decision = await readRetention(request)
+      if (!decision) refuse()
+      if (decision.kind === 'pinned') return { outcome: 'retained' }
+      // Always reconcile unlink/fsync, including after a terminal receipt or lost response.
+      // An in-flight PUT that crashes before its second tombstone check can leave raw bytes.
+      await unlinkDeleted(request)
+      const receiptSha256 = recoveryArchiveDiscardReceipt(request)
+      const receiptName = `${request.operationId}.discard-receipt`
+      await publish(root, receiptName, Buffer.from(receiptSha256))
+      if ((await readFile(root, receiptName, 64))?.toString() !== receiptSha256) mismatch()
+      return { outcome: 'absent', receiptSha256 }
     }
     const provider: RecoveryArchiveObjectStoreProvider = {
       async put(request) {
@@ -295,6 +328,8 @@ export async function createRecoveryArchiveFileStoreProvider(options: RecoveryAr
       return work()
     })
     return {
+      discard: (request) => { const frozen = validateRecoveryArchiveDiscardRequest(request); return run(() => discard(frozen, true)) },
+      status: (request) => { const frozen = validateRecoveryArchiveDiscardRequest(request); return run(() => discard(frozen, false)) },
       put: (request) => run(() => provider.put(validateRecoveryArchiveObjectPutRequest(request))),
       get: (request) => run(() => provider.get(validateRecoveryArchiveObjectExpectedBinding(request))),
       head: (request) => run(() => provider.head(validateRecoveryArchiveObjectExpectedBinding(request))),

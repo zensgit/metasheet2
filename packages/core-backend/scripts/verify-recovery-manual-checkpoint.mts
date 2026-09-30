@@ -1910,6 +1910,21 @@ try {
     assert.equal(finalObjects.length, 11 + syntheticAttachments.length)
     assert.ok(finalObjects.every((row) => row.state === 'verified'))
     for (const ref of archiveReferences) assert.equal(ref.immutable_version, finalObjects.find((row) => row.attachment_id === ref.attachment_id).provider_version)
+    const stagingProvenance = (await query(`SELECT s.object_state,s.terminal_receipt_sha256,b.operation_id,
+      o.state AS receipt_state FROM meta_recovery_archive_staging_objects s
+      JOIN meta_recovery_archive_abandoned_bindings b USING(generation_id,staging_object_id)
+      JOIN meta_recovery_archive_objects o ON o.generation_id=b.generation_id AND o.object_id=b.object_id
+      WHERE s.generation_id=$1::uuid`, [attachmentCapture.owner.generationId])).rows
+    assert.equal(stagingProvenance.length, finalObjects.length)
+    assert.equal(new Set(stagingProvenance.map(row => row.operation_id)).size, finalObjects.length)
+    assert.ok(stagingProvenance.every(row => row.object_state === 'sealed' && row.terminal_receipt_sha256 === null && row.receipt_state === 'verified'))
+    const abandonedCleanup = require('../src/multitable/recovery-archive-abandoned-object-cleanup.ts') as typeof import('../src/multitable/recovery-archive-abandoned-object-cleanup')
+    await assert.rejects(abandonedCleanup.claimRecoveryArchiveAbandonedObjectCleanup(uploadInput.transaction, async () => true,
+      { identity: attachmentCapture.identity, owner: attachmentCapture.owner, cleanupOwnerId: 'synthetic-refused-cleaner',
+        leaseExpiresAt: new Date(Date.now() + 60000).toISOString() }), { message: 'RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED' })
+    assert.deepEqual(await pins(attachmentCapture.owner.generationId), archiveReferences)
+    console.log('PASS: complete sealed staging provenance preserves normal finalization/source-pin handoff; verified generation refuses abandoned cleanup claim')
+
     const attachmentReader = require('../src/multitable/recovery-archive-reader.ts') as typeof import('../src/multitable/recovery-archive-reader')
     const attachmentPreview = require('../src/multitable/recovery-archive-preview.ts') as typeof import('../src/multitable/recovery-archive-preview')
     const readAuthority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
