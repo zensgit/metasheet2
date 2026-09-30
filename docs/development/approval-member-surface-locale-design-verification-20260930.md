@@ -4,7 +4,7 @@
 
 ## 1. 依据
 
-- **授权**:owner 2026-09-30 原话「按建议执行」,所指清单第 2 项为「第一波的导出按钮做完后启动 F8-1」。
+- **授权**:owner 2026-09-30 原话「按建议执行」,所指的是主会话在其前一条消息里列出的清单;该清单(主会话所写,非 owner 原话)的第 2 项是在导出按钮(F3-E1)完成后启动 F8-1。
 - **计划**:`approval-feishu-p2-p4-slice-plan-20260930`(规划文件,不在仓内)§4「F8-1」,以及文末「第 5 轮(末轮)复验更正」节的 R5-5(更正优先于正文):
   - 改动面(节选):「`ApprovalDetailView.vue`、`ApprovalCommentsPanel.vue`、`ApprovalNewView.vue`、`ApprovalCenterDetailPane.vue`、`ApprovalCenterTable.vue`、`MyDelegationView.vue`、`ApprovalCardDecisionView.vue` 接入 `useLocale`(#5545 的做法:同一模块级单例)」;`ApprovalCenterView.vue` 其余文案「全部改走 locale」;`ApprovalMobileList.vue:51`;三个选择器;「`force-locale="zh"` 只去 **3 处**(`ApprovalDetailView.vue:45`、`ApprovalNewView.vue:32`、`MyDelegationView.vue:24`)」;两个 helper `memberActionDialogGrammar.ts`、`urgeButtonState.ts`。
   - R5-5:「其视图在正常界面态还渲染 9 个零 locale 模块(约 58 行),错误 / 提示态另 7 个(约 30 行);`relativeWait.ts` 应归零 locale……`quickPhrases` 本地化会改变**写入评论的语言**,须单独定性。」
@@ -23,6 +23,7 @@
 | `9dd9d1fd21` | 审批详情与评论面板接入,表在 `approvalDetailLabels.ts`;去掉 `ApprovalDetailView.vue` 的 `force-locale="zh"`。 |
 | `75402759a7` | 发起页、我的委托、卡片决策页接入(各自一张表);去掉 `ApprovalNewView.vue`、`MyDelegationView.vue` 的 `force-locale="zh"`。 |
 | `85aef08fb8` | `api.ts` 通用请求错误的兜底文案跟随界面语言(其余 mock 数据与管理面错误表不动)。 |
+| `674abd5839` | 中心页表格的提交时间原先固定按 zh-CN 格式化、我的委托的时间窗按浏览器默认语言格式化;两处改为与详情页相同的规则(界面为 zh-CN 用 zh-CN,否则 en-US)。 |
 | `f122cf765c` | 门 ①:逐文件源码守卫。 |
 | `329334b802`、`366f9e0d74`、`6f30e544d6` | 门 ②:英文挂载渲染扫描。 |
 | `9a277995ce` | 浏览器车道两个 harness 钉 zh-CN(见 §5)。 |
@@ -83,7 +84,7 @@
 
 读数环境:另一台机器(macOS arm64),Node 20.20.2,vitest 1.6.1,Playwright 1.57.0(Chromium)。本机只编辑与提交,所有测试都在该机器上跑。没有真库步骤(纯前端),未建库。
 
-**门 ① 源码守卫**(形状同 `templateDetailI18n.spec.ts:955-1030`):对象是本片改动的全部 39 个非测试文件(与 `git diff --name-only 51401fee50..HEAD` 去掉测试与文档后的清单逐一相等)。剥 `<style>` / HTML 注释 / 块注释 / 整行 `//` 注释后,识别五种结构(`isZh` 字符串三元、对象三元、`if (isZh.value) { return {…} } return {…}`、`*_ZH` 表且同文件有无 CJK 的 `*_EN` 兄弟、`X` / `X_EN` 常量对)并逐个核英文侧无 CJK;每个文件的结构计数都钉死(计数防空转);具名例外按原文与次数核在场;其余任一行含 CJK 即红。读数:该 describe 40 个用例全过(39 个文件 + 1 个正控);变异 4 个(视图模板插入中文、详情表英文值改回中文、催办英文标签改回中文、`relativeWait` 三元改恒真)**4/4 转红**。
+**门 ① 源码守卫**(形状同 `templateDetailI18n.spec.ts:955-1030`):对象是本片改动的全部 39 个非测试文件(与 `git diff --name-only 51401fee50..HEAD` 去掉 `apps/web/tests/`、`apps/web/verification/` 与 `docs/` 后的清单逐一相等)。剥 `<style>` / HTML 注释 / 块注释 / 整行 `//` 注释后,识别五种结构(`isZh` 字符串三元、对象三元、`if (isZh.value) { return {…} } return {…}`、`*_ZH` 表且同文件有无 CJK 的 `*_EN` 兄弟、`X` / `X_EN` 常量对)并逐个核英文侧无 CJK;每个文件的结构计数都钉死(计数防空转);具名例外按原文与次数核在场;其余任一行含 CJK 即红。读数:该 describe 40 个用例全过(39 个文件 + 1 个正控);变异 4 个(视图模板插入中文、详情表英文值改回中文、催办英文标签改回中文、`relativeWait` 三元改恒真)**4/4 转红**。
 
 这是**绊线,不是证明**。已知绕过:CJK 写成 `\u` 转义或用 `String.fromCharCode` 拼;CJK 放在守卫清单以外的模块(如 `quickPhrases.ts`、`amountInWords.ts`)或由清单外的宿主作为 prop 传入;英文侧是一个绑定到中文的标识符;字符串字面量里的 `/*` 会被注释剥离误当成注释开头。
 
@@ -133,7 +134,7 @@
 - `detailField.ts` 旧附件值占位的渲染点、`store.ts` / `templateStore.ts` 的告警条只有守卫与单元测试,没有挂载扫描。
 - eslint(审批文件不在仓内 `lint` 脚本清单里,仅作参考):本片改动的 78 个 `.ts` / `.vue` 文件 0 个本片引入的 error;唯一 error 在 `ApprovalCenterView.vue:1453` 的 `exportNotice`(来自 #6189,本片未改);另一处是新浏览器 spec 的字符类写成了字面字符,已在 `1a372065a9` 改为 `\u` 转义。
 
-### 读数表(代码最终头 `1a372065a9`;该提交之前的 `6f30e544d6` 上跑完整批,之后只改了浏览器 spec 的写法并重跑相关项)
+### 读数表(完整批在 `6f30e544d6` 上跑;其后 `1a372065a9` 只改浏览器 spec 的写法、`674abd5839` 只改两处日期格式,均重跑相关项)
 
 | 项 | 结果 |
 |---|---|
@@ -145,3 +146,5 @@
 | 引用两个 helper 的 6 个 spec(`6f30e544d6`) | 6 files / 170 tests passed |
 | Approval browser verify 整车道,`CI=1 --retries=0`(`6f30e544d6`) | 47 passed(原 41 + 新增 6) |
 | 新浏览器 spec + eslint(`1a372065a9`) | 6 passed;eslint 0 error |
+| 日期格式改动后(`674abd5839`) | 门 ① 与中心页 / 我的委托相关 14 个 spec 文件全过(11 files / 295 tests、6 files / 97 tests 两批);新浏览器 spec 6 passed;`vue-tsc -b` 0 error |
+| 代码最终状态(`674abd5839` 的树,其后只有本说明的提交)重跑 | 必需 web 车道退出码 0,19 次调用 0 失败,末次 516 files / 8537 tests passed;Approval browser verify 整车道 `CI=1 --retries=0` 47 passed |
