@@ -96,8 +96,8 @@ export function dateTimeFieldTimezone(field: Pick<MetaField, 'type' | 'property'
 
 /**
  * The zone the calendar / timeline / Gantt views put a field's values onto days in (客户反馈 2026-09-24 #4c
- * follow-up): a date-time-like field's zone (so a record lands on the day its cell shows), else `null` — a
- * `date` field (floating day, #3417) and text / number fields keep their existing day logic untouched.
+ * follow-up): a date-time-like field's zone (so a record lands on the day its cell shows), else `null`. A `date`
+ * field is put on its day by {@link viewDateOnlyDayKey} (#6181); text / number fields keep their existing day logic.
  */
 export function viewDayZone(field: Pick<MetaField, 'type' | 'property'> | null | undefined): string | null {
   return field && isDateTimeLikeFieldType(field.type) ? dateTimeFieldTimezone(field) : null
@@ -111,6 +111,31 @@ export function viewDayZone(field: Pick<MetaField, 'type' | 'property'> | null |
  */
 export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null | undefined, nowMs: number = Date.now()): string {
   return businessTodayKey(viewDayZone(field) ?? getBusinessTimezone(), nowMs)
+}
+
+/**
+ * #6181: the calendar day (`YYYY-MM-DD`) the calendar / timeline / Gantt views put a `date` (date-only) field's
+ * value on — the day its cell shows ({@link formatDateOnlyValue}): a day as written keeps that day; a stored
+ * instant (`2026-09-17T16:00:00.000Z`) is the day it falls on in the business timezone (`2026-09-18`). Never the
+ * UTC day of the instant, never the browser's day. `null` when the field is not a `date` field or the value
+ * names no day — the caller keeps its own fallback. (Date-time-like fields go through {@link viewDayZone}.)
+ */
+export function viewDateOnlyDayKey(field: Pick<MetaField, 'type'> | null | undefined, value: unknown): string | null {
+  return field?.type === 'date' ? formatDateOnlyValue(value) : null
+}
+
+/**
+ * #6181: where the timeline / Gantt views place a `date` value on their time axis — UTC midnight of
+ * {@link viewDateOnlyDayKey}. A zone-free day frame: those views read a `date` position back as its UTC day
+ * (`toISOString().slice(0, 10)`), which in this frame IS the day the cell shows, whatever the browser's zone —
+ * a day as written sits exactly where it always did (`2026-09-18` → `2026-09-18T00:00:00.000Z`). `null` when
+ * `viewDateOnlyDayKey` is.
+ */
+export function viewDateOnlyDayUtcMs(field: Pick<MetaField, 'type'> | null | undefined, value: unknown): number | null {
+  const day = viewDateOnlyDayKey(field, value)
+  if (!day) return null
+  const ms = Date.parse(`${day}T00:00:00.000Z`)
+  return Number.isFinite(ms) ? ms : null
 }
 
 /**

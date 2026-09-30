@@ -351,7 +351,7 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
-import { formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { formatFieldDisplay, viewDateOnlyDayKey, viewDayZone, viewTodayKey } from '../utils/field-display'
 import { dateTimeValueDayKey } from '../utils/business-timezone'
 import {
   buildCalendarDay,
@@ -699,12 +699,14 @@ function normalizeDate(raw: string): string | null {
  * The calendar day a record's value falls on. A date-time (dateTime / createdTime / modifiedTime) lands on the
  * day its cell SHOWS — its wall clock in the field / business timezone (客户反馈 2026-09-24 #4c follow-up) —
  * never on the UTC day (`normalizeDateKey` reads the first ten characters of the stored `…Z` instant) nor on
- * the browser's day. Every other field type — a `date` (floating day, #3417) included — keeps `normalizeDate`.
+ * the browser's day. A `date` field lands on the day ITS cell shows too (#6181, viewDateOnlyDayKey): a day as
+ * written keeps that day; a stored instant (`2026-09-17T16:00:00.000Z`) is its business-timezone day
+ * (`2026-09-18`), not the UTC day the first ten characters name. Text / number fields keep `normalizeDate`.
  */
 function recordDayKey(field: MetaField | null, value: unknown): string | null {
   const zone = viewDayZone(field)
-  // A date-time value the grammar cannot read (legacy junk) keeps the old day logic rather than vanishing.
-  const businessDay = zone ? dateTimeValueDayKey(value, zone) : null
+  // A value the grammar cannot read (legacy junk) keeps the old day logic rather than vanishing.
+  const businessDay = zone ? dateTimeValueDayKey(value, zone) : viewDateOnlyDayKey(field, value)
   return businessDay ?? normalizeDate(String(value ?? ''))
 }
 

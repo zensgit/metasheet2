@@ -5,7 +5,8 @@
  * instance business timezone → Asia/Shanghai), fixed 24-hour format, never the browser's zone / locale:
  *   1. calendar / timeline / Gantt put a dateTime record on the BUSINESS day its cell shows (calendar used the
  *      UTC day of the stored `…Z` text, timeline / Gantt the UTC day of the instant), and "today" is the
- *      business today; `date` fields (floating day, #3417) are untouched;
+ *      business today; a `date` field (#3417) lands on the day ITS cell shows (#6181, #6178's rule): a day as
+ *      written keeps that day, a stored instant takes its business-timezone day — never the UTC day;
  *   2. grid group headers — already fixed by #6083 (its N5 test); nothing added here;
  *   3. history / audit / config-history / automation-log / notification / comment timestamps: business
  *      timezone, `YYYY-MM-DD HH:mm[:ss]` instead of `toLocaleString()` (browser zone, 12-hour under en-US);
@@ -339,7 +340,7 @@ describe('deferred date-time surfaces — UI surfaces (TZ-independent)', () => {
     document.body.innerHTML = ''
   })
 
-  it('calendar (month): a dateTime record lands on the business day its cell shows; a date record is untouched', async () => {
+  it('calendar (month): a dateTime record lands on the business day its cell shows; so does a date record (#6181)', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-10T04:00:00.000Z'))
     const container = mount(() => h(MetaCalendarView, {
@@ -358,13 +359,18 @@ describe('deferred date-time surfaces — UI surfaces (TZ-independent)', () => {
 
     unmountAll()
     const dateContainer = mount(() => h(MetaCalendarView, {
-      rows: [row('rec_plain', { fld_title: 'Plain day', fld_day: '2026-09-24' })],
+      rows: [
+        row('rec_plain', { fld_title: 'Plain day', fld_day: '2026-09-24' }),
+        row('rec_instant_day', { fld_title: 'Instant day', fld_day: JUST_AFTER_MIDNIGHT }),
+      ],
       fields: DT_FIELDS,
       loading: false,
       viewConfig: { dateFieldId: 'fld_day', titleFieldId: 'fld_title', defaultView: 'month', weekStartsOn: 0 },
     }))
     await flushUi()
-    expect(calendarCellDayOf(dateContainer, 'Plain day')).toBe('24') // floating day, as written
+    expect(calendarCellDayOf(dateContainer, 'Plain day')).toBe('24') // a day as written keeps its day
+    // #6181: a `date` holding an instant is its business day (09-25 00:30 北京时间), not the UTC day 09-24.
+    expect(calendarCellDayOf(dateContainer, 'Instant day')).toBe('25')
   })
 
   it('calendar: the end field is bucketed by its own business day too', async () => {
@@ -456,7 +462,7 @@ describe('deferred date-time surfaces — UI surfaces (TZ-independent)', () => {
     expect(createSpy).toHaveBeenCalledWith({ fld_start: '2026-09-24', fld_end: '2026-09-24' })
   })
 
-  it('timeline: date fields keep their existing day math (floating day)', async () => {
+  it('timeline: a date field keeps a day as written (#6181: an instant takes its business day, below)', async () => {
     const container = mount(() => h(MetaTimelineView, {
       rows: [row('rec_1', { fld_title: 'Plain', fld_day: '2026-09-24' })],
       fields: DT_FIELDS,
@@ -465,6 +471,45 @@ describe('deferred date-time surfaces — UI surfaces (TZ-independent)', () => {
     }))
     await flushUi()
     expect((container.querySelector('.meta-timeline__bar') as HTMLElement).getAttribute('title')).toBe('2026-09-24 → 2026-09-24')
+  })
+
+  it('#6181: timeline / Gantt `date` values holding instants sit on their business day; a drop writes the day it lands on', async () => {
+    const patchSpy = vi.fn()
+    const timeline = mount(() => h(MetaTimelineView, {
+      rows: [row('rec_1', { fld_title: 'PLM', fld_day: EARLY_MORNING, fld_day_end: LATER_EARLY_MORNING }, 4)],
+      fields: [...DT_FIELDS, { id: 'fld_day_end', name: 'Day end', type: 'date' }],
+      loading: false,
+      canEdit: true,
+      viewConfig: { startFieldId: 'fld_day', endFieldId: 'fld_day_end', labelFieldId: 'fld_title', zoom: 'week' },
+      onPatchDates: patchSpy,
+    }))
+    await flushUi()
+    const bar = timeline.querySelector('.meta-timeline__bar') as HTMLElement
+    expect(bar.getAttribute('title')).toBe('2026-09-24 → 2026-09-26') // UTC days of the instants: 09-23 → 09-25
+    const barArea = timeline.querySelector('.meta-timeline__bar-area') as HTMLElement
+    Object.defineProperty(barArea, 'getBoundingClientRect', {
+      value: () => ({ left: 0, width: 264, top: 0, height: 24, right: 264, bottom: 24 }),
+    })
+    // The instants sit exactly where the days as written would (UTC midnight of 09-24 / 09-26), so the N6 geometry
+    // holds: x=162 → 09-25T06:00Z → 2026-09-25 (had the bar sat at the 09-23T17:00Z instant, the same drop is 09-24).
+    bar.dispatchEvent(new Event('dragstart', { bubbles: true }))
+    barArea.dispatchEvent(new MouseEvent('drop', { bubbles: true, clientX: 162 }))
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy.mock.calls[0]![0]).toMatchObject({ startValue: '2026-09-25', endValue: '2026-09-27' })
+
+    unmountAll()
+    const gantt = mount(() => h(MetaGanttView, {
+      loading: false,
+      fields: [...DT_FIELDS, { id: 'fld_day_end', name: 'Day end', type: 'date' }],
+      rows: [row('rec_1', { fld_title: 'PLM', fld_day: EARLY_MORNING, fld_day_end: LATER_EARLY_MORNING })],
+      viewConfig: { startFieldId: 'fld_day', endFieldId: 'fld_day_end', titleFieldId: 'fld_title' },
+    }))
+    await flushUi()
+    const small = gantt.querySelector('.meta-gantt__row small')?.textContent ?? ''
+    expect(small).toContain('2026-09-24')
+    expect(small).toContain('2026-09-26')
+    expect(small).not.toContain('2026-09-23')
+    expect(gantt.querySelector('.meta-gantt__bar')?.getAttribute('title')).toBe('2026-09-24 → 2026-09-26')
   })
 
   it('gantt: task dates, resize value, dateTime group label and quick-create use the business day', async () => {
@@ -921,9 +966,9 @@ describe('deferred UI surfaces under a foreign process zone (child vitest runs)'
     async (tz) => {
       const summary = await runChild(tz)
       expect(summary.numFailedTests).toBe(0)
-      // The UI-surfaces describe holds 16 tests; `-t` leaves the rest skipped. Asia/Shanghai is the UTC+ zone the old
+      // The UI-surfaces describe holds 17 tests; `-t` leaves the rest skipped. Asia/Shanghai is the UTC+ zone the old
       // `date` drop snap and quick-create seed wrote the previous day in (N6).
-      expect(summary.numPassedTests).toBeGreaterThanOrEqual(16)
+      expect(summary.numPassedTests).toBeGreaterThanOrEqual(17)
     },
   )
 })
