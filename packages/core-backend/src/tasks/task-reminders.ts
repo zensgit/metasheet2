@@ -37,7 +37,12 @@ export type ParseRemindPolicyResult = { ok: true; policy: TaskRemindPolicy } | {
 // being absent from `task_user_settings` entirely. This function additionally treats a `null`/
 // `undefined` COLUMN VALUE (a row exists, but `default_remind_policy` itself is null) the same way
 // — defaulting to `{mode:'default'}` — generalizing "missing" to cover both cases; ANY other
-// non-matching value (wrong shape, unknown `mode`, extra/missing keys) is rejected.
+// non-matching value (wrong shape, unknown `mode`, extra/missing keys) is rejected. This is the
+// ROW-READ context specifically. `task-settings.ts`'s `parseSettingsPatch` — the PATCH-WRITE
+// context — does NOT call this function with a `null` `defaultRemindPolicy`: an explicit `null`
+// inside a patch body has no "reset to default" semantics and is rejected as `invalid_policy`
+// BEFORE reaching here (see the ASSUMPTION note above `parseSettingsPatch`'s own `null` check) —
+// only `undefined` (key absent from the patch) means "leave the current value alone" there.
 /** `{"mode":"default"}` | `{"mode":"none"}`; missing (row or value) defaults to `{mode:'default'}`. */
 export function parseRemindPolicy(raw: unknown): ParseRemindPolicyResult {
   if (raw === null || raw === undefined) {
@@ -74,6 +79,34 @@ const SCHEDULED_REMIND_OFFSET_MS = 30 * 60 * 1000
 /** All-day branch local time-of-day (lock §4.4: "18:00"). */
 const ALL_DAY_REMIND_TIME_OF_DAY = '18:00'
 
+// ASSUMPTION(task-d, own choice — not ruling-derived, fixing a real bug found in independent
+// review): `computeDateReminderOccurrence` (the function this module reuses for the all-day branch)
+// parses its `dateValue` with `new Date(String(dateValue))` — the PLATFORM's lenient Date parser,
+// not a strict `YYYY-MM-DD` parser. Two confirmed silent-corruption cases: `new
+// Date('2026-02-30')` (Feb 30 does not exist) does NOT throw or yield `Invalid Date` — it silently
+// ROLLS OVER to March 2; `new Date('2026-3-8')` (non-zero-padded, not canonical ISO) silently
+// parses as a valid date instead of being rejected as malformed. Both would make
+// `computeDefaultRemindAt` return a WRONG (but plausible-looking) reminder instant instead of
+// erroring — exactly the class of bug lock §4.4/R15's "never silently coerce" philosophy exists to
+// prevent. Mirrors `task-dates.ts`'s PRIVATE (unexported) `parseIsoDate` helper's exact two-step
+// check (strict regex, THEN a UTC round-trip to catch a syntactically-valid-but-nonexistent date
+// like day 30 of February) rather than importing it — same "small shared helper stays local"
+// pattern this module tree already uses for `task-lists.ts`'s/`task-groups.ts`'s name validators,
+// so this file does not create a new cross-module dependency for an ~8-line check.
+function assertValidCalendarDateString(dueDate: string): void {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate)
+  if (!m) {
+    throw new RangeError(`computeDefaultRemindAt: dueDate must be YYYY-MM-DD, got "${dueDate}"`)
+  }
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  const probe = new Date(Date.UTC(year, month - 1, day))
+  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
+    throw new RangeError(`computeDefaultRemindAt: "${dueDate}" is not a real calendar date`)
+  }
+}
+
 // ASSUMPTION(task-d): [D6] (already in `task-b`/lock territory — restated here because this is
 // where the arithmetic actually runs) the scheduled branch is PURE instant arithmetic
 // (`dueAt − 30min`); a `due_time` in `00:00`-`00:29` rolling the reminder onto the PREVIOUS calendar
@@ -83,10 +116,12 @@ const ALL_DAY_REMIND_TIME_OF_DAY = '18:00'
  * `policy.mode === 'none'` ⇒ `null` (no default reminder). No due date at all (`dueDate` AND
  * `dueAt` both null/absent) ⇒ `null`. Scheduled (`dueTime` present): `dueAt − 30min` — throws if
  * `dueTime` is given without a computed `dueAt` (caller contract violation, not a data problem).
- * All-day: validates `timeZone` via `isValidIanaTimeZone` FIRST and THROWS on failure (never
- * silently degrades to UTC — the opposite of `computeDateReminderOccurrence`'s own fallback
- * behavior), then calls `computeDateReminderOccurrence(dueDate, {timeOfDay:'18:00', offsetDays:0,
- * timezone: timeZone}, {floating:true})` (lock `:140`/`:253`, reused verbatim).
+ * All-day: validates `dueDate` is a STRICT, REAL `YYYY-MM-DD` calendar date and `timeZone` via
+ * `isValidIanaTimeZone`, BOTH before calling anything else, and THROWS on either failure (never
+ * silently degrades to UTC or rolls a nonexistent date over to a nearby real one — the opposite of
+ * `computeDateReminderOccurrence`'s own lenient/fallback behavior for both), then calls
+ * `computeDateReminderOccurrence(dueDate, {timeOfDay:'18:00', offsetDays:0, timezone: timeZone},
+ * {floating:true})` (lock `:140`/`:253`, reused verbatim).
  */
 export function computeDefaultRemindAt(input: ComputeDefaultRemindAtInput): Date | null {
   const { dueDate, dueTime, dueAt, timeZone, policy } = input
@@ -98,6 +133,7 @@ export function computeDefaultRemindAt(input: ComputeDefaultRemindAtInput): Date
     return new Date(dueAt.getTime() - SCHEDULED_REMIND_OFFSET_MS)
   }
   if (!dueDate) return null
+  assertValidCalendarDateString(dueDate)
   if (!isValidIanaTimeZone(timeZone)) {
     throw new RangeError(`computeDefaultRemindAt: invalid IANA time zone "${timeZone}"`)
   }
@@ -139,9 +175,24 @@ export function isTaskReminderDue(remindAt: Date, now: Date, floor: Date): boole
 // over already-loaded task state, kept here (not invented as a throwaway inline check at the PR-3b
 // call site) because it is a named part of R06's recommended algorithm and is independently
 // testable/mutable.
+// ASSUMPTION(task-d): [R06, third skip condition — relayed by independent review, pack wording not
+// re-checked against the original ruling text] a queued delivery was created against a SPECIFIC
+// `remind_at` value at enqueue time; by the time the scanner reaches it, the task's CURRENT
+// `remind_at` may have since changed (the due date/time was edited, recomputing a new `remind_at`)
+// or been cleared entirely (policy flipped to `{mode:'none'}`, or the due date/time removed). A
+// delivery whose `remind_at` no longer matches the task's LIVE `remind_at` — including the task's
+// live `remind_at` now being `null` — is stale and must never fire: the task has already had a
+// fresh reminder (re)scheduled against its new `remind_at` (or none at all), and this stale
+// delivery is not that one. Compared BY VALUE (`getTime()`), not by reference — two `Date` objects
+// for the same instant must compare equal, matching every other instant comparison in this module.
 /** `true` ⇒ the worker must record this delivery as `skipped` rather than sending it. */
-export function isReminderSkippedByTaskState(task: { status: 'open' | 'done'; deletedAt: Date | null }): boolean {
-  return task.status !== 'open' || task.deletedAt !== null
+export function isReminderSkippedByTaskState(
+  task: { status: 'open' | 'done'; deletedAt: Date | null; remindAt: Date | null },
+  deliveryRemindAt: Date,
+): boolean {
+  if (task.status !== 'open' || task.deletedAt !== null) return true
+  if (task.remindAt === null) return true
+  return task.remindAt.getTime() !== deliveryRemindAt.getTime()
 }
 
 // ── outbox source_key builders — all four families (§3.1 "source_key 四族构造器") ────────────────

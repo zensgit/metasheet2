@@ -146,6 +146,37 @@ describe('task-reminders', () => {
       ).toThrow(RangeError)
     })
 
+    // Confirmed bug (independent review): `computeDateReminderOccurrence`'s own date parser is
+    // `new Date(String(dateValue))` — the platform's LENIENT parser, not a strict YYYY-MM-DD one.
+    // `new Date('2026-02-30')` silently rolls over to 2026-03-02 instead of erroring;
+    // `new Date('2026-3-8')` (not zero-padded) silently parses instead of being rejected as
+    // malformed. Both would make computeDefaultRemindAt return a WRONG reminder instant instead of
+    // throwing — this is what `assertValidCalendarDateString` (mirroring task-dates.ts's private
+    // `parseIsoDate`) now catches BEFORE either string ever reaches computeDateReminderOccurrence.
+    it('all-day: a syntactically-invalid dueDate ("2026-3-8", not zero-padded) THROWS RangeError', () => {
+      expect(() =>
+        computeDefaultRemindAt({
+          dueDate: '2026-3-8',
+          dueTime: null,
+          dueAt: null,
+          timeZone: 'UTC',
+          policy: { mode: 'default' },
+        }),
+      ).toThrow(RangeError)
+    })
+
+    it('all-day: a syntactically-valid but NONEXISTENT calendar date ("2026-02-30") THROWS RangeError, never silently rolls over', () => {
+      expect(() =>
+        computeDefaultRemindAt({
+          dueDate: '2026-02-30',
+          dueTime: null,
+          dueAt: null,
+          timeZone: 'UTC',
+          policy: { mode: 'default' },
+        }),
+      ).toThrow(RangeError)
+    })
+
     describe('DST dates — America/New_York (all-day branch, offsetDays: 0)', () => {
       it('spring-forward day (2026-03-08): 18:00 local is already EDT (UTC-4) -> 22:00 UTC', () => {
         const result = computeDefaultRemindAt({
@@ -211,32 +242,91 @@ describe('task-reminders', () => {
       expect(isTaskReminderDue(justInside, now, floor)).toBe(true)
     })
 
-    it('remindAt before the floor -> false, even though within the scan window', () => {
-      const beforeFloor = new Date(floor.getTime() - 1)
-      // beforeFloor is only ~1ms before floor, well within the 2h window relative to `now`.
-      expect(isTaskReminderDue(beforeFloor, now, floor)).toBe(false)
+    // The window guard (2h) rejects anything more than 2h before `now`, so a case meant to isolate
+    // the FLOOR guard alone must use a `floor` close enough to `now` that the window guard would
+    // NOT already reject it on its own — otherwise the test passes for the wrong reason (this
+    // module's own earlier version of this test did exactly that: floor 12h before now, so the
+    // window guard silently did the rejecting instead of the floor guard being exercised at all).
+    it('boundary: ONLY the floor guard fails — remindAt is 1ms before a floor that itself is well within the scan window', () => {
+      const nearFloor = new Date(now.getTime() - 60 * 60 * 1000) // now - 1h: inside the 2h window
+      const justBeforeNearFloor = new Date(nearFloor.getTime() - 1) // floor - 1ms
+      // Sanity: justBeforeNearFloor is NOT rejected by the window guard on its own (only ~1h1ms
+      // before `now`, inside the 2h window) and is NOT in the future — the floor guard is the only
+      // one that can produce `false` here.
+      expect(now.getTime() - justBeforeNearFloor.getTime()).toBeLessThan(TASK_REMINDER_SCAN_WINDOW_MS)
+      expect(justBeforeNearFloor.getTime()).toBeLessThan(now.getTime())
+      expect(isTaskReminderDue(justBeforeNearFloor, now, nearFloor)).toBe(false)
     })
 
     it('boundary: remindAt exactly at the floor -> true (floor <= remind_at is inclusive)', () => {
       expect(isTaskReminderDue(floor, new Date(floor.getTime() + 1000), floor)).toBe(true)
     })
+
+    it('R06: TASK_REMINDER_SCAN_WINDOW_MS is pinned to 2 hours (ASSUMPTION(task-d): [R06])', () => {
+      expect(TASK_REMINDER_SCAN_WINDOW_MS).toBe(2 * 60 * 60 * 1000)
+    })
+
+    it('absolute-time case: remindAt exactly 2h30m before now -> false (well outside the 2h window)', () => {
+      const twoHoursThirtyBefore = new Date(now.getTime() - 2.5 * 60 * 60 * 1000)
+      expect(isTaskReminderDue(twoHoursThirtyBefore, now, floor)).toBe(false)
+    })
   })
 
   describe('isReminderSkippedByTaskState', () => {
-    it('open, not deleted -> not skipped', () => {
-      expect(isReminderSkippedByTaskState({ status: 'open', deletedAt: null })).toBe(false)
+    const REMIND_AT = new Date('2026-09-30T10:00:00.000Z')
+
+    it('open, not deleted, remind_at matches the delivery -> not skipped', () => {
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: null, remindAt: REMIND_AT }, REMIND_AT),
+      ).toBe(false)
     })
 
     it('done -> skipped', () => {
-      expect(isReminderSkippedByTaskState({ status: 'done', deletedAt: null })).toBe(true)
+      expect(
+        isReminderSkippedByTaskState({ status: 'done', deletedAt: null, remindAt: REMIND_AT }, REMIND_AT),
+      ).toBe(true)
     })
 
     it('soft-deleted -> skipped, even if status open', () => {
-      expect(isReminderSkippedByTaskState({ status: 'open', deletedAt: new Date() })).toBe(true)
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: new Date(), remindAt: REMIND_AT }, REMIND_AT),
+      ).toBe(true)
     })
 
     it('done AND deleted -> skipped', () => {
-      expect(isReminderSkippedByTaskState({ status: 'done', deletedAt: new Date() })).toBe(true)
+      expect(
+        isReminderSkippedByTaskState({ status: 'done', deletedAt: new Date(), remindAt: REMIND_AT }, REMIND_AT),
+      ).toBe(true)
+    })
+
+    // R06 third skip condition (relayed by independent review; see the ASSUMPTION note on the
+    // function itself — pack wording not re-checked against the original ruling text).
+    it('R06 third skip condition: task remind_at differs from the delivery remind_at -> skipped', () => {
+      const taskRemindAt = new Date('2026-09-30T11:00:00.000Z')
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: null, remindAt: taskRemindAt }, REMIND_AT),
+      ).toBe(true)
+    })
+
+    it('R06 third skip condition: task remind_at is null (policy/date cleared since enqueue) -> skipped', () => {
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: null, remindAt: null }, REMIND_AT),
+      ).toBe(true)
+    })
+
+    it('remind_at comparison is BY VALUE (getTime), not by reference — two Date objects for the same instant match', () => {
+      const same = new Date(REMIND_AT.getTime())
+      expect(same).not.toBe(REMIND_AT) // different object identity, same instant
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: null, remindAt: same }, REMIND_AT),
+      ).toBe(false)
+    })
+
+    it('a 1ms remind_at drift is enough to skip (no fuzzy tolerance)', () => {
+      const driftedByOneMs = new Date(REMIND_AT.getTime() + 1)
+      expect(
+        isReminderSkippedByTaskState({ status: 'open', deletedAt: null, remindAt: driftedByOneMs }, REMIND_AT),
+      ).toBe(true)
     })
   })
 
@@ -364,6 +454,40 @@ describe('task-reminders', () => {
       const dueTomorrowInShanghai = digestTask({ dueDate: '2026-09-16' })
       expect(isInDailyDigest(dueTomorrowInShanghai, NOW, 'Asia/Shanghai')).toBe(true)
     })
+
+    describe('discriminating viewer-time-zone cases (independent review, item 4)', () => {
+      // NOW = 2026-09-15T20:00Z. In UTC, "today" is 09-15 and "tomorrow" is 09-16 (day-after-
+      // tomorrow starts 09-17). In Asia/Shanghai (UTC+8, local = 2026-09-16T04:00), "today" is
+      // already 09-16 and "tomorrow" is 09-17 — the SAME calendar date reads as "day after
+      // tomorrow" (excluded) under UTC and "tomorrow" (included) under Shanghai.
+      const DISC_NOW = new Date('2026-09-15T20:00:00.000Z')
+
+      it('all-day due 2026-09-17: true for Asia/Shanghai, false for UTC (same instant, different viewer tz)', () => {
+        const task = digestTask({ dueDate: '2026-09-17' })
+        expect(isInDailyDigest(task, DISC_NOW, 'Asia/Shanghai')).toBe(true)
+        expect(isInDailyDigest(task, DISC_NOW, 'UTC')).toBe(false)
+      })
+
+      it('scheduled: a dueAt that falls between UTC\'s and the recipient\'s day-after-tomorrow start', () => {
+        // UTC's day-after-tomorrow starts 2026-09-17T00:00:00Z; Shanghai's (day-after-tomorrow in
+        // Shanghai local, converted to UTC) starts 2026-09-17T16:00:00Z. A dueAt in between —
+        // 2026-09-17T10:00:00Z — is EXCLUDED for a UTC recipient but INCLUDED for a Shanghai one.
+        const dueAt = new Date('2026-09-17T10:00:00.000Z')
+        const task = digestTask({ dueTime: '18:00', dueAt })
+        expect(isInDailyDigest(task, DISC_NOW, 'UTC')).toBe(false)
+        expect(isInDailyDigest(task, DISC_NOW, 'Asia/Shanghai')).toBe(true)
+      })
+
+      it('task.timeZone and the recipient (viewerTz) time zone DISAGREE — only viewerTz may affect the outcome', () => {
+        // task.timeZone='Asia/Tokyo' (UTC+9) disagrees with viewerTz='UTC'. At DISC_NOW, Tokyo local
+        // is already 2026-09-16 (tomorrow would read as 09-17 in Tokyo), but the recipient's own
+        // viewerTz is UTC, where 09-17 is the DAY AFTER tomorrow — this must read `false`. A
+        // function that accidentally consulted `task.timeZone` instead of (or in addition to)
+        // `viewerTz` for this boundary would wrongly return `true` here (mutation-checked below).
+        const task = digestTask({ dueDate: '2026-09-17', timeZone: 'Asia/Tokyo' })
+        expect(isInDailyDigest(task, DISC_NOW, 'UTC')).toBe(false)
+      })
+    })
   })
 
   describe('buildTaskDailyDigestCondition', () => {
@@ -375,6 +499,23 @@ describe('task-reminders', () => {
       expect(result.sql).not.toContain('created_by')
       expect(result.sql).toContain("tasks.status = 'open'")
       expect(result.sql).toContain('$3')
+    })
+
+    // Full-text SQL pin (same style as task-access.test.ts's `buildTaskPendingCondition` pins) —
+    // freezes the exact NOT EXISTS clause and the +1/+2 date-offset arithmetic for BOTH branches, so
+    // a future edit that silently changes either offset, drops the `completed_at IS NOT NULL`
+    // clause, or swaps `<`/`<=` is caught character-for-character, not just by substring `toContain`
+    // checks (item 5, independent review; mutation-checked below).
+    it('full-text SQL pin: the exact NOT EXISTS clause and the all-day (+1) / scheduled (+2) date offsets', () => {
+      const { sql, params } = buildTaskDailyDigestCondition({
+        actorParam: 'u1',
+        orgParam: 'org1',
+        viewerTzParam: 'Asia/Shanghai',
+      })
+      expect(sql).toBe(
+        "(tasks.org_id = $2) AND tasks.deleted_at IS NULL AND (EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = tasks.id AND ta.user_id = $1)) AND tasks.status = 'open' AND NOT EXISTS (SELECT 1 FROM task_assignees ta_done WHERE ta_done.task_id = tasks.id AND ta_done.user_id = $1 AND ta_done.completed_at IS NOT NULL) AND ((tasks.due_time IS NOT NULL AND tasks.due_at < (((now() AT TIME ZONE $3)::date + 2)::timestamp AT TIME ZONE $3)) OR (tasks.due_time IS NULL AND tasks.due_date <= ((now() AT TIME ZONE $3)::date + 1)))",
+      )
+      expect(params).toEqual(['u1', 'org1', 'Asia/Shanghai'])
     })
   })
 })

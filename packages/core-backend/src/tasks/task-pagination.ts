@@ -45,15 +45,23 @@ export interface TaskPageParams {
 
 export type ParsePageParamsResult = { ok: true; params: TaskPageParams } | { ok: false; reason: TaskPageParamsReason }
 
-/** Accepts a JS integer, OR a canonical non-negative-integer STRING (`^\d+$` — an HTTP query value
- * arrives as a string; this is the one place that boundary is crossed). Anything else (floats,
- * scientific notation, whitespace, a leading `+`/`-`, `NaN`/`Infinity`) is rejected outright — R15:
- * "非整数或越界返回 422,不静默夹取" (never silently clamp). */
+// ASSUMPTION(task-d, own choice — not ruling-derived, fixing a real bug found in independent
+// review): the NUMBER branch used `Number.isInteger`, which is TRUE for values like `1e300` (no
+// fractional part, but astronomically outside any real row-count/offset range and far beyond
+// `Number.MAX_SAFE_INTEGER`) — `parsePageParams({ offset: 1e300 })` used to return `ok: true,
+// params: { offset: 1e+300 }`, a value that would silently corrupt a downstream SQL `OFFSET` bind.
+// `Number.isSafeInteger` closes this for BOTH branches (the string branch already used it).
+/** Accepts a JS integer, OR a CANONICAL non-negative-integer STRING (`^(0|[1-9]\d*)$` — no leading
+ * zeros, so `"007"`/`"00"` are rejected rather than silently parsed as `7`/`0`; an HTTP query value
+ * arrives as a string, and this is the one place that boundary is crossed). Anything else (floats,
+ * scientific notation, whitespace, a leading `+`/`-`, `NaN`/`Infinity`, a non-canonical digit
+ * string, or a value outside `Number.MAX_SAFE_INTEGER`) is rejected outright — R15: "非整数或越界返回
+ * 422,不静默夹取" (never silently clamp or coerce). */
 function toStrictNonNegativeInteger(value: unknown): number | null {
   if (typeof value === 'number') {
-    return Number.isInteger(value) && value >= 0 ? value : null
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
   }
-  if (typeof value === 'string' && /^\d+$/.test(value)) {
+  if (typeof value === 'string' && /^(0|[1-9]\d*)$/.test(value)) {
     const n = Number(value)
     return Number.isSafeInteger(n) ? n : null
   }

@@ -77,6 +77,12 @@ describe('task-groups', () => {
       })
       expect(result.ok).toBe(true)
     })
+
+    it('item 9 (independent review): an unrecognized scope THROWS TypeError', () => {
+      expect(() =>
+        applyCreateGroup({ id: 'tgrp_1', scope: 'team' as never, name: 'X', existingCount: 0, actorId: ACTOR }),
+      ).toThrow(TypeError)
+    })
   })
 
   describe('applyRenameGroup', () => {
@@ -93,6 +99,12 @@ describe('task-groups', () => {
     it('D2: user-scope rename emits no event', () => {
       const result = applyRenameGroup({ scope: 'user', name: 'New', previousName: 'Old', actorId: ACTOR })
       expect(result).toEqual({ name: 'New', events: [] })
+    })
+
+    it('item 9 (independent review): an unrecognized scope THROWS TypeError', () => {
+      expect(() =>
+        applyRenameGroup({ scope: 'team' as never, name: 'New', previousName: 'Old', actorId: ACTOR }),
+      ).toThrow(TypeError)
     })
   })
 
@@ -134,6 +146,12 @@ describe('task-groups', () => {
         actorId: ACTOR,
       })
       expect(result).toEqual({ ok: true, reassignToGroupId: 'def', events: [] })
+    })
+
+    it('item 9 (independent review): an unrecognized scope THROWS TypeError', () => {
+      expect(() =>
+        applyDeleteGroup({ group: group('g2', false), defaultGroupId: 'def', scope: 'team' as never, actorId: ACTOR }),
+      ).toThrow(TypeError)
     })
   })
 
@@ -211,6 +229,44 @@ describe('task-groups', () => {
       })
       expect(result.changed).toBe(true)
       expect(result.taskEvents).toEqual([{ type: 'group_changed', userId: ACTOR }])
+    })
+
+    it('item 9 (independent review): an unrecognized scope THROWS TypeError', () => {
+      expect(() =>
+        applyMoveItem({
+          scope: 'team' as never,
+          fromGroupId: 'g1',
+          toGroupId: 'g1',
+          previousOrderedItemIds: ['a'],
+          nextOrderedItemIds: ['a'],
+          actorId: ACTOR,
+        }),
+      ).toThrow(TypeError)
+    })
+
+    // item 12 (independent review): arraysEqual's length check, isolated. If `previous` were the
+    // LONGER array, `.every()` alone would already fail on the extra trailing element(s) even
+    // without an explicit length check — so that direction can't tell the length check apart from
+    // `.every()`. The direction that DOES depend on the length check is the opposite one: `next` is
+    // LONGER than `previous`, and `previous` is an exact PREFIX of `next` — `.every()` iterating
+    // over `previous`'s (shorter) indices alone would find every one of them equal and wrongly
+    // report "no change" without the length check catching the leftover length mismatch first.
+    it('same group, SAME-LENGTH-PREFIX but different length (next is previous + one more item) -> changed: true', () => {
+      const result = applyMoveItem({
+        scope: 'list',
+        fromGroupId: 'g1',
+        toGroupId: 'g1',
+        previousOrderedItemIds: ['a', 'b'],
+        nextOrderedItemIds: ['a', 'b', 'c'],
+        actorId: ACTOR,
+      })
+      expect(result.changed).toBe(true)
+      expect(result.positions).toEqual([
+        { itemId: 'a', groupId: 'g1', position: 0 },
+        { itemId: 'b', groupId: 'g1', position: 1 },
+        { itemId: 'c', groupId: 'g1', position: 2 },
+      ])
+      expect(result.taskEvents).toEqual([]) // same group -> no group_changed regardless
     })
   })
 })

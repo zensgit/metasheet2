@@ -93,6 +93,42 @@ describe('task-pagination', () => {
       expect(parsePageParams({ offset: 'abc' })).toEqual({ ok: false, reason: 'invalid_offset' })
     })
 
+    // item 11 (independent review): confirmed bug — the NUMBER branch used `Number.isInteger`,
+    // which is TRUE for `1e300` (no fractional part, but astronomically outside any real
+    // row-count/offset range and far beyond `Number.MAX_SAFE_INTEGER`). Before the fix,
+    // `parsePageParams({ offset: 1e300 })` returned `{ ok: true, params: { offset: 1e+300 } }` — a
+    // value that would silently corrupt a downstream SQL `OFFSET` bind. `offset` has no UPPER
+    // bound check of its own (unlike `limit`), so this is the case that actually discriminates the
+    // fix — `limit: 1e300` would already be rejected by the `> TASK_PAGE_LIMIT_MAX` bound alone,
+    // whether or not `Number.isSafeInteger` is used.
+    it('offset as the NUMBER 1e300 is rejected -> invalid_offset (not silently accepted as an unsafe "integer")', () => {
+      expect(parsePageParams({ offset: 1e300 })).toEqual({ ok: false, reason: 'invalid_offset' })
+    })
+
+    it('limit as the NUMBER 1e300 is also rejected -> invalid_limit', () => {
+      expect(parsePageParams({ limit: 1e300 })).toEqual({ ok: false, reason: 'invalid_limit' })
+    })
+
+    it('an unsafe-integer digit STRING is rejected (the string branch already used isSafeInteger; this is a regression pin, not a new discriminator)', () => {
+      expect(parsePageParams({ offset: '99999999999999999999' })).toEqual({ ok: false, reason: 'invalid_offset' })
+    })
+
+    // "canonical" (the docstring's own word) means no leading zeros except the bare digit "0"
+    // itself — `"007"`/`"00"` are non-canonical spellings of 7/0 and must be rejected, not silently
+    // parsed. Before the fix, `^\d+$` accepted them.
+    it('a leading-zero digit string ("007") is rejected, not silently parsed as 7', () => {
+      expect(parsePageParams({ offset: '007' })).toEqual({ ok: false, reason: 'invalid_offset' })
+      expect(parsePageParams({ limit: '007' })).toEqual({ ok: false, reason: 'invalid_limit' })
+    })
+
+    it('"00" is rejected (not a canonical spelling of 0)', () => {
+      expect(parsePageParams({ offset: '00' })).toEqual({ ok: false, reason: 'invalid_offset' })
+    })
+
+    it('the bare digit "0" itself is still accepted (canonical spelling of zero)', () => {
+      expect(parsePageParams({ offset: '0' })).toEqual({ ok: true, params: { limit: 100, offset: 0 } })
+    })
+
     it('never silently clamps: an out-of-range limit does NOT fall back to the default or the max', () => {
       const result = parsePageParams({ limit: 999 })
       expect(result).toEqual({ ok: false, reason: 'invalid_limit' })

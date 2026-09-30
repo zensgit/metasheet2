@@ -76,6 +76,26 @@ describe('task-settings', () => {
       })
     })
 
+    // item 8 (independent review): `parseBadgeScope`/`parseRemindPolicy` treat a `null` VALUE as
+    // "use the default" — correct when reading a ROW (a NULL column really does mean "never set"),
+    // but a PATCH's only "leave alone" spelling is an ABSENT key; an explicit `null` inside a patch
+    // body has no defined "reset to default" semantics and must 422, not silently reset the field.
+    it('explicit null for badgeScope in a patch -> 422 invalid_badge_scope (not silently reset to default)', () => {
+      const current = settings({ badgeScope: 'overdue_or_today' })
+      expect(parseSettingsPatch({ badgeScope: null }, current)).toEqual({
+        ok: false,
+        reason: 'invalid_badge_scope',
+      })
+    })
+
+    it('explicit null for defaultRemindPolicy in a patch -> 422 invalid_policy (not silently reset to default)', () => {
+      const current = settings({ defaultRemindPolicy: { mode: 'none' } })
+      expect(parseSettingsPatch({ defaultRemindPolicy: null }, current)).toEqual({
+        ok: false,
+        reason: 'invalid_policy',
+      })
+    })
+
     it('patches dailyReminderEnabled true, with a valid timeZone already set', () => {
       const current = settings({ timeZone: 'Asia/Shanghai' })
       const result = parseSettingsPatch({ dailyReminderEnabled: true }, current)

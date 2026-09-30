@@ -29,11 +29,44 @@ export type TaskListMemberRole = (typeof TASK_LIST_MEMBER_ROLES)[number]
 export const TASK_LIST_MEMBER_ASSIGNABLE_ROLES = ['read', 'edit'] as const
 export type TaskListMemberAssignableRole = (typeof TASK_LIST_MEMBER_ASSIGNABLE_ROLES)[number]
 
+export type ParseTaskListMemberRoleReason = 'invalid_role'
+export type ParseTaskListMemberRoleResult =
+  | { ok: true; role: TaskListMemberAssignableRole }
+  | { ok: false; reason: ParseTaskListMemberRoleReason }
+
+/**
+ * Runtime closed-set guard for a caller-supplied ASSIGNABLE role, for the HTTP route boundary
+ * (`req.body.role` arrives as `unknown`, not a `TaskListMemberAssignableRole` — TypeScript's
+ * compile-time parameter type on `applyAddMember`/`applyChangeMemberRole` below is not itself a
+ * runtime check; a caller that bypasses the type system, or forwards an unvalidated request body
+ * straight through, can still reach those functions with anything). `'owner'` is deliberately
+ * REJECTED here even though it is a member of `TASK_LIST_MEMBER_ROLES` — it is not in
+ * `TASK_LIST_MEMBER_ASSIGNABLE_ROLES` (R12(c): ownership only ever moves via `applyTransferOwner`,
+ * never a direct role assignment). Any other non-`'read'`/`'edit'` string, or a non-string, is also
+ * `invalid_role`. `applyAddMember`/`applyChangeMemberRole` call this SAME function internally (not a
+ * parallel check) so the route-boundary guard and the write-path guard can never drift apart.
+ */
+export function parseTaskListMemberRole(raw: unknown): ParseTaskListMemberRoleResult {
+  if (typeof raw === 'string' && (TASK_LIST_MEMBER_ASSIGNABLE_ROLES as readonly string[]).includes(raw)) {
+    return { ok: true, role: raw as TaskListMemberAssignableRole }
+  }
+  return { ok: false, reason: 'invalid_role' }
+}
+
 export interface TaskListMemberRow {
   userId: string
   role: TaskListMemberRole
 }
 
+// ASSUMPTION(task-d, own choice — not ruling-derived): an unrecognized `role` reaching this bridge
+// (i.e. outside the `TASK_LIST_MEMBER_ROLES` closed set the DB CHECK is supposed to guarantee)
+// THROWS rather than silently dropping the row or defaulting it to `'editor'`. This matches
+// `canListAction` below's own fail-closed style — THROW on anything outside a closed set, never
+// silently coerce — rather than "fail-closed by omission" (dropping the row): a corrupt/unknown
+// role reaching here indicates a DB-level invariant violation (the CHECK constraint should have
+// prevented it), and the caller should see that loudly, not have list membership silently vanish
+// from a permission computation with no trace. Reversible: could be changed to drop-the-row without
+// changing this file's shape.
 /**
  * Bridges a list-membership row set into the `TaskListMembership[]` shape `task-access.ts`'s
  * `resolveTaskRoles` accepts (lock §6.1 `:98-108`): `read` → `'reader'`, `edit`/`owner` → `'editor'`
@@ -46,10 +79,11 @@ export interface TaskListMemberRow {
 export function toTaskListMemberships(
   rows: Array<{ listId: string; role: TaskListMemberRole }>,
 ): TaskListMembership[] {
-  return rows.map((row) => ({
-    listId: row.listId,
-    role: row.role === 'read' ? 'reader' : 'editor',
-  }))
+  return rows.map((row) => {
+    if (row.role === 'read') return { listId: row.listId, role: 'reader' as const }
+    if (row.role === 'edit' || row.role === 'owner') return { listId: row.listId, role: 'editor' as const }
+    throw new TypeError(`toTaskListMemberships: unknown role "${String(row.role)}" for list "${row.listId}"`)
+  })
 }
 
 // ── List-action ability matrix (§3.1: "canListAction(ctx, action) 的动作闭集") ───────────────────
@@ -183,7 +217,7 @@ export interface TaskListEvent {
 // ── Member transitions (§3.1: applyAddMember / applyRemoveMember / applyChangeMemberRole /
 //    applyTransferOwner) ─────────────────────────────────────────────────────────────────────────
 
-export type TaskListMemberWriteReason = 'limit' | 'inactive_org_member'
+export type TaskListMemberWriteReason = 'limit' | 'inactive_org_member' | 'invalid_role'
 export type ApplyAddListMemberResult =
   | { ok: true; members: TaskListMemberRow[]; events: TaskListEvent[] }
   | { ok: false; reason: TaskListMemberWriteReason }
@@ -193,6 +227,13 @@ export type ApplyAddListMemberResult =
 // `task-membership.ts`'s soft-limit checks being pure booleans the caller assembles). Already-a-
 // member is checked BEFORE the org-membership gate: re-adding an existing member is always a noop
 // regardless of that member's current org status (this function never REMOVES a row).
+// ASSUMPTION(task-d, own choice — not ruling-derived): the `role` closed-set guard runs FIRST, even
+// before the already-a-member noop — a structurally malformed request (an untyped caller passing
+// `'owner'`/`'admin'`/non-string through `req.body.role`) should be rejected regardless of whether
+// the target user happens to already be a member; silently succeeding on garbage input just because
+// membership already existed would mask a client bug. `role`'s compile-time type
+// (`TaskListMemberAssignableRole`) is a TypeScript-only guarantee, not a runtime one — this reuses
+// `parseTaskListMemberRole` (not a parallel check) so the two can never drift apart.
 /**
  * Already a member ⇒ noop (role is NOT changed here even if `role` differs from the existing row —
  * use `applyChangeMemberRole` for that). R17: caller must have already resolved whether `userId` is
@@ -206,6 +247,9 @@ export function applyAddMember(input: {
   isActiveInOrg: boolean
 }): ApplyAddListMemberResult {
   const { members, userId, role, actorId, isActiveInOrg } = input
+  if (!parseTaskListMemberRole(role).ok) {
+    return { ok: false, reason: 'invalid_role' }
+  }
   if (members.some((m) => m.userId === userId)) {
     return { ok: true, members: members.map((m) => ({ ...m })), events: [] }
   }
@@ -258,13 +302,16 @@ export function applyRemoveMember(input: {
   }
 }
 
-export type TaskListChangeRoleReason = 'not_found' | 'owner_must_transfer'
+export type TaskListChangeRoleReason = 'not_found' | 'owner_must_transfer' | 'invalid_role'
 export type ApplyChangeMemberRoleResult =
   | { ok: true; members: TaskListMemberRow[]; events: TaskListEvent[] }
   | { ok: false; reason: TaskListChangeRoleReason }
 
 // ASSUMPTION(task-d): [R12(c)] current role `'owner'` ⇒ `owner_must_transfer` (same rule as
 // `applyRemoveMember`: ownership only moves via `applyTransferOwner`).
+// ASSUMPTION(task-d, own choice — not ruling-derived): same role-first ordering and same reused
+// `parseTaskListMemberRole` guard as `applyAddMember` above, for the same reason — see that
+// function's ASSUMPTION note.
 /**
  * Not a member ⇒ `not_found` (this is a change to an EXISTING member, unlike `applyAddMember`'s
  * noop-on-existing shape — there is no row to no-op against). Same role requested ⇒ noop.
@@ -276,6 +323,9 @@ export function applyChangeMemberRole(input: {
   actorId: string
 }): ApplyChangeMemberRoleResult {
   const { members, userId, role, actorId } = input
+  if (!parseTaskListMemberRole(role).ok) {
+    return { ok: false, reason: 'invalid_role' }
+  }
   const existing = members.find((m) => m.userId === userId)
   if (!existing) return { ok: false, reason: 'not_found' }
   if (existing.role === 'owner') return { ok: false, reason: 'owner_must_transfer' }

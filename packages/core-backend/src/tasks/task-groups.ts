@@ -28,6 +28,19 @@ export interface TaskGroupRow {
   position: number
 }
 
+// ASSUMPTION(task-d, own choice — not ruling-derived): every `apply*` function below runtime-checks
+// its `scope` input against `TASK_GROUP_SCOPES` and THROWS (`TypeError`) for anything outside the
+// closed set, rather than silently treating an unrecognized scope as `'user'` (no `task_list_events`)
+// or as `'list'` (writes events for a scope that may not even have a `listId`). `scope`'s
+// compile-time type (`TaskGroupScope`) is a TypeScript-only guarantee, same rationale as
+// `task-lists.ts`'s `parseTaskListMemberRole` guard — a caller crossing an untyped boundary (e.g. a
+// raw HTTP body) is not bound by it. Matches `canListAction`'s own fail-closed-by-throwing style.
+function assertValidTaskGroupScope(scope: TaskGroupScope, fnName: string): void {
+  if (!(TASK_GROUP_SCOPES as readonly string[]).includes(scope)) {
+    throw new TypeError(`${fnName}: unknown scope "${String(scope)}"`)
+  }
+}
+
 // ── Soft limit + name validation (D14) ────────────────────────────────────────────────────────
 
 // ASSUMPTION(task-d): [D14] single-point, reversible constant (D14 is a gate default, not an owner
@@ -91,6 +104,7 @@ export function applyCreateGroup(input: {
   actorId: string
 }): ApplyCreateGroupResult {
   const { id, scope, name, existingCount, actorId } = input
+  assertValidTaskGroupScope(scope, 'applyCreateGroup')
   if (existingCount >= TASK_GROUPS_PER_SCOPE_SOFT_LIMIT) {
     return { ok: false, reason: 'limit' }
   }
@@ -112,6 +126,7 @@ export function applyRenameGroup(input: {
   actorId: string
 }): ApplyRenameGroupResult {
   const { scope, name, previousName, actorId } = input
+  assertValidTaskGroupScope(scope, 'applyRenameGroup')
   if (name === previousName) return { name: previousName, events: [] }
   const events: TaskGroupListEvent[] = scope === 'list' ? [{ type: 'group_renamed', userId: actorId }] : []
   return { name, events }
@@ -136,6 +151,7 @@ export function applyDeleteGroup(input: {
   actorId: string
 }): ApplyDeleteGroupResult {
   const { group, defaultGroupId, scope, actorId } = input
+  assertValidTaskGroupScope(scope, 'applyDeleteGroup')
   if (!group) return { ok: false, reason: 'not_found' }
   if (group.isDefault) return { ok: false, reason: 'is_default' }
   const events: TaskGroupListEvent[] = scope === 'list' ? [{ type: 'group_deleted', userId: actorId }] : []
@@ -183,6 +199,7 @@ export function applyMoveItem(input: {
   actorId: string
 }): { changed: boolean; positions: TaskGroupItemPosition[]; taskEvents: TaskGroupChangedEvent[] } {
   const { scope, fromGroupId, toGroupId, previousOrderedItemIds, nextOrderedItemIds, actorId } = input
+  assertValidTaskGroupScope(scope, 'applyMoveItem')
   const sameGroup = fromGroupId === toGroupId
   if (sameGroup && arraysEqual(previousOrderedItemIds, nextOrderedItemIds)) {
     return { changed: false, positions: [], taskEvents: [] }

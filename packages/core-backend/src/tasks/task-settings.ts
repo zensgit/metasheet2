@@ -104,8 +104,19 @@ export type ParseSettingsPatchResult =
  * invariant on the MERGED result.
  */
 export function parseSettingsPatch(patch: TaskUserSettingsPatch, current: TaskUserSettings): ParseSettingsPatchResult {
+  // ASSUMPTION(task-d, own choice — not ruling-derived, fixing a real bug found in independent
+  // review): `parseBadgeScope`/`parseRemindPolicy` treat a `null` VALUE as "missing, use default" —
+  // that reading is correct for a ROW being read back (a `NULL` column really does mean "no value
+  // was ever set, fall back"), but it is WRONG for a PATCH: a PATCH's only "leave it alone" spelling
+  // is an ABSENT key (`undefined`, handled by the `!== undefined` checks below); an explicit `null`
+  // in a patch body is a malformed request (there is no "reset this field to its default via PATCH"
+  // semantics defined anywhere in this module) and must 422, not silently reset the field. This is
+  // deliberately narrower than `timeZone`'s explicit `null` handling a few lines down, which DOES
+  // have defined PATCH semantics ("clear the zone") — `badgeScope`/`defaultRemindPolicy` have no
+  // such "clear" concept (a badge scope or remind policy is never simply "absent" on a live row).
   let badgeScope = current.badgeScope
   if (patch.badgeScope !== undefined) {
+    if (patch.badgeScope === null) return { ok: false, reason: 'invalid_badge_scope' }
     const parsed = parseBadgeScope(patch.badgeScope)
     if (!parsed.ok) return { ok: false, reason: 'invalid_badge_scope' }
     badgeScope = parsed.scope
@@ -121,6 +132,7 @@ export function parseSettingsPatch(patch: TaskUserSettingsPatch, current: TaskUs
 
   let defaultRemindPolicy = current.defaultRemindPolicy
   if (patch.defaultRemindPolicy !== undefined) {
+    if (patch.defaultRemindPolicy === null) return { ok: false, reason: 'invalid_policy' }
     const parsed = parseRemindPolicy(patch.defaultRemindPolicy)
     if (!parsed.ok) return { ok: false, reason: 'invalid_policy' }
     defaultRemindPolicy = parsed.policy

@@ -11,6 +11,7 @@ import {
   applyTransferOwner,
   applyUnarchive,
   canListAction,
+  parseTaskListMemberRole,
   planAddTaskToList,
   planRemoveTaskFromList,
   toTaskListMemberships,
@@ -43,6 +44,51 @@ describe('task-lists', () => {
 
     it('empty input -> empty output', () => {
       expect(toTaskListMemberships([])).toEqual([])
+    })
+
+    it('an unknown role THROWS rather than silently becoming editor (item 2, independent review)', () => {
+      expect(() =>
+        toTaskListMemberships([{ listId: 'l1', role: 'admin' as never }]),
+      ).toThrow(TypeError)
+      expect(() =>
+        toTaskListMemberships([{ listId: 'l1', role: '' as never }]),
+      ).toThrow(TypeError)
+      expect(() =>
+        toTaskListMemberships([{ listId: 'l1', role: null as never }]),
+      ).toThrow(TypeError)
+    })
+
+    it('a valid row before the bad one is processed fine — the throw happens exactly at the bad row', () => {
+      expect(() =>
+        toTaskListMemberships([
+          { listId: 'l1', role: 'read' },
+          { listId: 'l2', role: 'bogus' as never },
+        ]),
+      ).toThrow(/l2/)
+    })
+  })
+
+  describe('parseTaskListMemberRole (route-boundary guard, item 1)', () => {
+    it('accepts "read" and "edit"', () => {
+      expect(parseTaskListMemberRole('read')).toEqual({ ok: true, role: 'read' })
+      expect(parseTaskListMemberRole('edit')).toEqual({ ok: true, role: 'edit' })
+    })
+
+    it('rejects "owner" — ownership only ever moves via applyTransferOwner (R12(c))', () => {
+      expect(parseTaskListMemberRole('owner')).toEqual({ ok: false, reason: 'invalid_role' })
+    })
+
+    it('rejects an unrecognized string', () => {
+      expect(parseTaskListMemberRole('admin')).toEqual({ ok: false, reason: 'invalid_role' })
+      expect(parseTaskListMemberRole('READ')).toEqual({ ok: false, reason: 'invalid_role' })
+    })
+
+    it('rejects a non-string', () => {
+      expect(parseTaskListMemberRole(42)).toEqual({ ok: false, reason: 'invalid_role' })
+      expect(parseTaskListMemberRole(null)).toEqual({ ok: false, reason: 'invalid_role' })
+      expect(parseTaskListMemberRole(undefined)).toEqual({ ok: false, reason: 'invalid_role' })
+      expect(parseTaskListMemberRole({})).toEqual({ ok: false, reason: 'invalid_role' })
+      expect(parseTaskListMemberRole(['read'])).toEqual({ ok: false, reason: 'invalid_role' })
     })
   })
 
@@ -187,6 +233,63 @@ describe('task-lists', () => {
       const result = applyAddMember({ members, userId: 'new', role: 'read', actorId: ACTOR, isActiveInOrg: true })
       expect(result.ok).toBe(true)
     })
+
+    describe('item 1 (independent review): runtime role closed-set guard', () => {
+      it('role "owner" is rejected -> invalid_role (owner only via applyTransferOwner)', () => {
+        const result = applyAddMember({
+          members: [],
+          userId: 'u2',
+          role: 'owner' as never,
+          actorId: ACTOR,
+          isActiveInOrg: true,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('role "admin" (unrecognized string) is rejected -> invalid_role', () => {
+        const result = applyAddMember({
+          members: [],
+          userId: 'u2',
+          role: 'admin' as never,
+          actorId: ACTOR,
+          isActiveInOrg: true,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('role "READ" (wrong case) is rejected -> invalid_role', () => {
+        const result = applyAddMember({
+          members: [],
+          userId: 'u2',
+          role: 'READ' as never,
+          actorId: ACTOR,
+          isActiveInOrg: true,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('a non-string role is rejected -> invalid_role', () => {
+        const result = applyAddMember({
+          members: [],
+          userId: 'u2',
+          role: 42 as never,
+          actorId: ACTOR,
+          isActiveInOrg: true,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('the role guard runs BEFORE the already-a-member noop — a bad role is rejected even for an existing member', () => {
+        const result = applyAddMember({
+          members: [member('u2', 'read')],
+          userId: 'u2',
+          role: 'owner' as never,
+          actorId: ACTOR,
+          isActiveInOrg: true,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+    })
   })
 
   describe('applyRemoveMember', () => {
@@ -279,6 +382,58 @@ describe('task-lists', () => {
         ok: true,
         members: [member('u2', 'edit')],
         events: [{ type: 'member_role_changed', userId: ACTOR, targetUserId: 'u2' }],
+      })
+    })
+
+    describe('item 1 (independent review): runtime role closed-set guard', () => {
+      it('role "owner" is rejected -> invalid_role', () => {
+        const result = applyChangeMemberRole({
+          members: [member('u2', 'read')],
+          userId: 'u2',
+          role: 'owner' as never,
+          actorId: ACTOR,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('role "admin" (unrecognized string) is rejected -> invalid_role', () => {
+        const result = applyChangeMemberRole({
+          members: [member('u2', 'read')],
+          userId: 'u2',
+          role: 'admin' as never,
+          actorId: ACTOR,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('role "READ" (wrong case) is rejected -> invalid_role', () => {
+        const result = applyChangeMemberRole({
+          members: [member('u2', 'read')],
+          userId: 'u2',
+          role: 'READ' as never,
+          actorId: ACTOR,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('a non-string role is rejected -> invalid_role', () => {
+        const result = applyChangeMemberRole({
+          members: [member('u2', 'read')],
+          userId: 'u2',
+          role: null as never,
+          actorId: ACTOR,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
+      })
+
+      it('the role guard runs BEFORE not_found — a bad role is rejected even for a nonexistent member', () => {
+        const result = applyChangeMemberRole({
+          members: [],
+          userId: 'ghost',
+          role: 'owner' as never,
+          actorId: ACTOR,
+        })
+        expect(result).toEqual({ ok: false, reason: 'invalid_role' })
       })
     })
   })
