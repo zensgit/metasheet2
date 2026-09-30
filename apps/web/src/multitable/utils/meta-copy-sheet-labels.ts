@@ -189,6 +189,19 @@ export function copySheetWithDataLabel(rowCount: number | null, isZh: boolean): 
   return isZh ? `包含数据（共 ${rowCount} 行）` : `Include data (${rowCount} ${rowCount === 1 ? 'row' : 'rows'})`
 }
 
+/**
+ * 「复制结构：N 列、V 个视图」 — the structure the copy builds, shown once a dry-run answered (R61 验收清单
+ * §2.1 asks for the column count next to the row count). N is the count of columns actually built (mirror
+ * columns are not), V the views; null when the probe sent no column count (nothing to say yet).
+ */
+export function copySheetStructureLabel(fieldCount: number | null, viewCount: number | null, isZh: boolean): string | null {
+  if (fieldCount === null) return null
+  const columns = isZh ? `${fieldCount} 列` : `${fieldCount} ${fieldCount === 1 ? 'column' : 'columns'}`
+  if (viewCount === null) return isZh ? `复制结构：${columns}` : `Structure: ${columns}`
+  const views = isZh ? `${viewCount} 个视图` : `${viewCount} ${viewCount === 1 ? 'view' : 'views'}`
+  return isZh ? `复制结构：${columns}、${views}` : `Structure: ${columns}, ${views}`
+}
+
 function joinNames(names: string[], isZh: boolean): string {
   return isZh ? names.map((n) => `「${n}」`).join('、') : names.map((n) => `“${n}”`).join(', ')
 }
