@@ -865,12 +865,14 @@ export async function deleteComment(id: string, commentId: string): Promise<Comm
  *  actual source of truth. */
 const COMMENT_EDGE_TRIM_RE = /^[\p{White_Space}\u200B\u200C\u200D\uFEFF]+|[\p{White_Space}\u200B\u200C\u200D\uFEFF]+$/gu
 
-export function checkCommentBody(body: string): 'ok' | 'COMMENT_BLANK' | 'COMMENT_TOO_LONG' {
+export function checkCommentBody(body: string): 'ok' | 'COMMENT_BLANK' | 'COMMENT_TOO_LONG' | 'COMMENT_INVALID_CHAR' {
   // Same steps as the server's normalizeUserText: NFC, trim Unicode White_Space and the four
   // zero-width marks from both edges only, NFC again.
   const normalized = body.normalize('NFC').replace(COMMENT_EDGE_TRIM_RE, '').normalize('NFC')
   if (normalized.length === 0) return 'COMMENT_BLANK'
   if (Array.from(normalized).length > 5000) return 'COMMENT_TOO_LONG'
+  // The server rejects U+0000 after the two checks above, in the same order (contract §3.6).
+  if (normalized.includes('\u0000')) return 'COMMENT_INVALID_CHAR'
   return 'ok'
 }
 

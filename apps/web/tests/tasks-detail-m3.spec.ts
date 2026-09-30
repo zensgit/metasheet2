@@ -925,6 +925,42 @@ describe('TasksView detail — delete task', () => {
     expect(shown(el, 'tasks-detail')).toBeTruthy()
   })
 
+  it('a 409 TASK_BUSY shows a retry message inline and does not navigate', async () => {
+    h_.deleteTask.mockResolvedValue({ kind: 'conflict', code: 'TASK_BUSY' })
+    const el = await mountAt('/tasks/t1')
+
+    ;(shown(el, 'tasks-detail-delete') as HTMLButtonElement).click()
+    await flush()
+    ;(shown(el, 'tasks-detail-delete-confirm-yes') as HTMLButtonElement).click()
+    await flush()
+
+    expect(shown(el, 'tasks-detail-delete-error')?.textContent).toBe('任务正在被修改，请稍后重试')
+    expect(router!.currentRoute.value.path).toBe('/tasks/t1')
+  })
+
+  it('a comment containing U+0000 is stopped client-side with its own message, no request sent', async () => {
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-comment-input', 'a\u0000b')
+    await flush()
+    submitForm(el, 'tasks-detail-comment-form')
+    await flush()
+
+    expect(h_.createComment).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-detail-comment-error')?.textContent?.trim()).toBe('评论包含无法保存的字符')
+  })
+
+  it('a server 422 COMMENT_INVALID_CHAR maps to the same message', async () => {
+    h_.createComment.mockResolvedValue({ kind: 'validation', code: 'COMMENT_INVALID_CHAR' })
+    const el = await mountAt('/tasks/t1')
+    typeInto(el, 'tasks-detail-comment-input', 'hello')
+    await flush()
+    submitForm(el, 'tasks-detail-comment-form')
+    await flush()
+
+    expect(h_.createComment).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-detail-comment-error')?.textContent?.trim()).toBe('评论包含无法保存的字符')
+  })
+
   it('a forbidden delete result shows the generic tasks-action-error banner and does not navigate', async () => {
     h_.deleteTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountAt('/tasks/t1')

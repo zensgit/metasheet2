@@ -606,6 +606,14 @@ describe('checkCommentBody (client-side pre-check, mirrors normalizeCommentBody)
     expect(checkCommentBody('x'.repeat(5001))).toBe('COMMENT_TOO_LONG')
   })
 
+  it('returns COMMENT_INVALID_CHAR for a U+0000 anywhere, after the blank and length checks (server order)', () => {
+    expect(checkCommentBody('a\u0000b')).toBe('COMMENT_INVALID_CHAR')
+    expect(checkCommentBody('\u0000')).toBe('COMMENT_INVALID_CHAR')
+    expect(checkCommentBody('x'.repeat(5001) + '\u0000')).toBe('COMMENT_TOO_LONG')
+    expect(checkCommentBody('   ')).toBe('COMMENT_BLANK')
+    expect(checkCommentBody('a\u0001b')).toBe('ok')
+  })
+
   // Measured by UNICODE CODE POINTS, not UTF-16 code units: a surrogate-pair astral character
   // (e.g. an emoji) is ONE code point, so 5000 of them must still read as 'ok' even though
   // `.length` (UTF-16 units) would report 10000.

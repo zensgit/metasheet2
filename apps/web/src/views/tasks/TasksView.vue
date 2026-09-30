@@ -530,7 +530,9 @@ const CODE_MESSAGES: Record<string, string> = {
   INVALID_MODE: '无效的完成模式',
   COMMENT_BLANK: '评论内容不能为空',
   COMMENT_TOO_LONG: '评论内容过长',
+  COMMENT_INVALID_CHAR: '评论包含无法保存的字符',
   HAS_CHILDREN: '请先删除子任务',
+  TASK_BUSY: '任务正在被修改，请稍后重试',
 }
 
 function codeMessage(code: string): string {
