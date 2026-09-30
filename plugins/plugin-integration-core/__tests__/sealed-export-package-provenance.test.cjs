@@ -6,6 +6,7 @@ const fs = require('node:fs')
 const fsPromises = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { pathToFileURL } = require('node:url')
 
 const {
   SealedExportError,
@@ -467,6 +468,28 @@ async function s6aPowershell51ExecutorTamperFails() {
   }
 }
 
+// The pinned S6-A PowerShell 5.1 executor keeps the Integration Guard trigger it had while its job
+// lived in plugin-tests.yml (itself a guarded path): a change to it runs this chain, and with it the
+// live compare above, in that required check. The path comes from the pinned roster entry, so
+// re-pointing `s6aPowershell51Workflow` without updating the guard roster fails here too.
+async function s6aPowershell51ExecutorIsIntegrationGuarded() {
+  const { classify } = await import(
+    pathToFileURL(
+      path.join(REPO_ROOT, 'scripts/ops/integration-guard-classify.mjs'),
+    ).href
+  )
+  const executor = PINNED_EVIDENCE_FILES.find(
+    (entry) => entry.id === 's6aPowershell51Workflow',
+  )
+  assert.ok(executor)
+  assert.equal(
+    classify([executor.relativePath]),
+    true,
+    `${executor.relativePath} must be listed in scripts/ops/integration-guard-guarded-paths.mjs ` +
+      '(and in integration-guard.yml on.push.paths)',
+  )
+}
+
 // plugin-tests.yml executes no pinned file and is not a provenance input: editing it (a comment,
 // a new run-list step) or deleting it moves no pin and keeps the frozen manifest digest.
 async function pluginTestsWorkflowIsNotAProvenanceInput() {
@@ -689,6 +712,7 @@ async function main() {
   await canonicalJsonDependencyMutationFails()
   await evidenceRunnerMutationFails()
   await s6aPowershell51ExecutorTamperFails()
+  await s6aPowershell51ExecutorIsIntegrationGuarded()
   await pluginTestsWorkflowIsNotAProvenanceInput()
   await packageBuildNoDepsControlMutationFails()
   await isolatedDependencyMutationFails()
