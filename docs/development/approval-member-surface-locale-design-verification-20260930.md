@@ -77,6 +77,7 @@
 | 渲染面 | 文本 | 来源 |
 |---|---|---|
 | 详情页评论对话框 | `已阅`、`请尽快处理` | `quickPhrases.ts:15`(`QUICK_PHRASES.comment[0]`、`[1]`) |
+| 详情页通过 / 驳回对话框(修复轮 1 补;不在计划门 ② 的五个对话框之内,扫描见 §9) | 通过:`同意`、`情况属实`、`已核实无误`;驳回:`不符合要求`、`请补充材料后重新提交` | `quickPhrases.ts:13` / `:14`(`QUICK_PHRASES.approve` / `.reject`) |
 | 发起页 | 附件占位说明 | `ApprovalNewView.vue:560` |
 | 我的委托 | `未开始`、`生效中`×2、`已过期`、`已停用` | `delegationStatus.ts:20` 的状态键,只出现在 `StatusTag.vue:6` 的 `data-status` 属性里;可见标签为英文(用例同时断言可见文本无 CJK) |
 
@@ -122,6 +123,7 @@
 ## 6. 中间态与 owner 取舍
 
 - **快捷短语(owner 取舍)**:`quickPhrases.ts` 的短语点选后原样写入评论正文,本地化会改变写入评论的语言。本片保持其内容与写入逻辑不变(中英界面下都插入中文短语),也保持插入时的全角逗号;是否按界面语言提供短语、已写入的评论如何处理,交 owner 决定。
+  - (修复轮 1 补)同一取舍也覆盖通过 / 驳回对话框:那里的短语原样写入审批意见。所以英文界面下,通过对话框显示 3 个中文短语(`同意`、`情况属实`、`已核实无误`),驳回对话框显示 2 个(`不符合要求`、`请补充材料后重新提交`),评论对话框显示 2 个(`已阅`、`请尽快处理`)。三处写入内容的门内钉子见 §9。
 - **共享选择器混排(计划已接受)**:F8-2 / F8-3 落地前,`DelegationSettingsView.vue` 与 `TemplateAuthoringView.vue` 未给选择器传占位,英文态下会出现「选择器英文、页面其余中文」;部门选择器还被编排页的字段检查器与行内编辑器引入,同样混排。
 - **共享 helper 的编排路径**:`assigneeSource.ts`、`conditionSummary.ts`、`recordLinkField.ts`、`detailField.ts`、`routePreviewSummary.ts`、`routePreviewController.ts` 的编排页调用方仍取 zh-CN 默认值,随 F8-3 接入。
 - `delegations.ts` 的 `validateDelegationForm` 只服务管理面,随 F8-2。
@@ -129,6 +131,9 @@
 ## 7. 未跑项与残留
 
 - 与当前 main 的关系:本分支基于 #6189 合并前的头;试合并当前 main(只读 `git merge-tree`,不建 ref)在 `ApprovalCenterView.vue`、`ApprovalDetailView.vue`、`approval-center.spec.ts`、`approvalApiErrorSurfacing.spec.ts`、`verification/approval-member-action-dialog-harness.ts` 与 #6189 的说明文件上有冲突,须在推送前由主会话变基处理;变基后须重跑门 ① 与本节读数。
+- (修复轮 1 补)本片改过的两个 spec 不在任何 CI 门里(既不在 `run-required-web-tests.sh`,也不在 `approval-web-guard.yml` 的 run-list):
+  - `myDelegationForm.spec.ts`:本片给其 zh 断言补了 `isZh` 实参(参数必填)。原先加在这里的英文 describe 已在修复轮 1 移到必需车道上的 `myDelegationView.spec.ts`。
+  - `approvalMobileDetailActions.spec.ts`:它是 `run-required-web-tests.sh` 头注所列的既有红文件之一,本片只加了文件级 zh-CN 钉。它在本片头与 main `48ae5025a5` 上都是 3 红 / 8 绿,红的是同样 3 条(读数见 §9),不是本片引入。其中 B1-05(点快捷短语填入)两边都绿,但它不在门内;写入路径的门内钉子是 §9 的新 describe。
 - `tests/helpers/approvalLocaleScan.ts` 未加入 `approval-web-guard.yml` 的路径过滤(不改 workflow);它只被必需 web 车道上的 spec 引用。
 - 几处错误兜底文案(卡片页的登录不可用与请求失败、详情侧栏加载失败、发起页路径预览失败)在出错当时按当前语言生成一次;消息显示期间再切换语言,这条消息不会重译,重试后按新语言生成。
 - `detailField.ts` 旧附件值占位的渲染点、`store.ts` / `templateStore.ts` 的告警条只有守卫与单元测试,没有挂载扫描。
@@ -151,7 +156,7 @@
 
 ## 8. 并入 main 与重跑(2026-10-01)
 
-§7 第一条所说的「须在推送前并入当前 main」已做,读数如下;本节之前的内容保持原样(是 `2b8ecc9ea8` 时点的记录)。
+§7 第一条所说的「须在推送前并入当前 main」已做,读数如下;本节之前的内容保持原样(是 `2b8ecc9ea8` 时点的记录;标「修复轮 1 补」的句子除外,见 §9)。
 
 **合并提交 `02a65651de`**:把 main `48ae5025a5`(含 #6189 的 squash `39891dc205`,即 F3-E1 加上其在途导出加固;以及 #6190 `ba8065517f`、#6191、#6192、#6193)并入本分支;本 PR 最终 squash 合并,合并提交只是中间态。六个文件冲突,逐个按「F8-1 的改动重放在 main 的行上」解:
 
@@ -186,3 +191,60 @@
 | 变异(把 `stillSameFeed` 改恒真) | `approval-center.spec.ts` 恰红 3 条在途用例(切 tab / 筛选变化 / 提交搜索),还原后 47/47 —— 与 #6189 加固时的读数相同。 |
 
 **残留**:详情页评论对话框里过程附件上传口的英文标签(`t.attachments`)只有门 ① 与单元测试覆盖,没有挂载英文扫描(扫描夹具不开附件开关、不带 `canAttachProcessEvidence`);合并前如此,合并后亦然,记在这里不在本次改。
+
+## 9. 修复轮 1(2026-10-01)
+
+门审(规划侧记录,不在仓内)在 `1510445ee4` 上的结论是 0 P1 / 1 P2 / 3 P3 / 4 NIT。逐条处置如下。
+
+| 项 | 处置 |
+|---|---|
+| P2-1:快捷短语写入的内容没有门内测试钉住(门审的变异 M5a / M5b 在已门控文件上全绿) | 修。`approval-member-action-dialog-grammar.spec.ts`(必需 web 车道)新增一个 describe,见下 |
+| P3-1:通过 / 驳回对话框在英文态显示 5 个中文预置短语,既没扫描也没单列 | 修。同一 describe 在英文态打开该对话框做整页扫描,把 5 条列为具名例外(`quickPhrases.ts:13` / `:14`);§4 门 ② 表与 §6 各补一句 |
+| P3-2:改过的两个 spec 不在门内,说明里没写 | 修。§7 补上披露;`myDelegationForm.spec.ts` 的英文 describe 移到必需车道上的 `myDelegationView.spec.ts`,并加一条「每种失败各有一条不同的消息」 |
+| P3-3、N4:提交尾行 | 属于提交元数据,不在仓内文档里处理;交合并时处理 |
+| N1、N2 | 不改(已分别在 §8、§2 声明) |
+| N3:§4 的行号基准 | 补注:§4 的行号以 `2b8ecc9ea8` 为准。并入 main 后,§4 引用的文件里只有 `ApprovalDetailView.vue` 行号有变,快捷短语插入时的全角逗号那一行由 `:2136` 移到 `:2146`;其余文件在 `2b8ecc9ea8..HEAD` 之间没有改动 |
+
+**新 describe**(`O-8 / F8-1 — quick-phrase chips write the preset text unchanged in both locales`):通过、驳回、评论三个对话框各跑 en 与 zh-CN,共 6 个用例。每个用例做四件事:
+
+1. chip 文本等于字面预置值。测试里直接写字面值,不引用常量,所以常量一改就会红。
+2. 点第 1 个 chip,输入框的值等于该字面值;再点第 2 个,值是两者以全角逗号相接。
+3. 清空输入框,再点第 1 个并提交。断言视图交给审批 store 替身 `executeAction` 的参数恰为 `('apv_1', { action, comment: <字面值> })`,成功提示出现一次,对话框没有错误。这里钉的是「视图 → store」这一跳,不是 HTTP 请求体;「store → API」那一跳不在本片改动面内。
+4. 英文态下,在对话框打开、尚未点 chip 时扫描整页(文本加所有属性值):除该动作的预置短语(各 1 次,作为具名例外,带来源行)外没有 CJK。另有正控:对话框标题按当前语言显示。
+
+这是对写入内容的**绊线**:它钉住的是本片不改写入内容这一现状,不是在替 owner 做取舍。owner 若决定本地化短语,改这个 describe 即可。
+
+**变异**:在另一台机器上跑。每项都是 cp 备份 → 改 → 跑 grammar spec 整文件 → 还原 → cmp 一致,全部结束后 `git status` 干净。
+
+| 变异 | 结果(整文件 26 条) |
+|---|---|
+| M5a:两处 chip 都改成 `applyQuickPhrase(isZh ? phrase : 'x')`(与门审同名变异相同) | 3 红:三个对话框的 en 用例。zh 用例绿,符合预期(zh 的写入没变) |
+| M5b:两处都改成 `applyQuickPhrase(phrase + '!')`(与门审同名变异相同) | 6 红 |
+| 只改通过 / 驳回对话框的 chip(`phrase + '!'`) | 4 红:通过、驳回的 en / zh;评论绿 |
+| 只改评论对话框的 chip | 2 红:评论的 en / zh |
+| 追加分隔的全角逗号改成 `, ` | 6 红 |
+| `submitAction` 的提交参数在英文态改成 `'x'`(只改这一处) | 2 红:通过、驳回的 en |
+| `submitComment` 的提交参数在英文态改成 `'x'` | 1 红:评论的 en |
+| `quickPhrases.ts` 的 `情况属实` 改成 `Verified` | 2 红:通过的 en / zh |
+| `DETAIL_EN.actionDialogApprove` 改回中文(检验通过对话框的英文扫描) | 1 红:通过的 en |
+
+**重跑读数**:另一台机器(macOS arm64),Node 20.20.2,vitest 1.6.1。在 `633585ecd4` 上跑,lockfile 未变。纯前端,没有真库步骤,未建库。浏览器车道本轮未重跑:本轮只改了两个 vitest spec、移走一个 describe 和本说明,`src/` 与 `verification/` 都没动。
+
+| 项 | 结果 |
+|---|---|
+| 改过的三个 spec | 3 files / 43 tests passed。其中 grammar 26 条 = 原 20 + 新 6 |
+| 门 ① `templateCenterI18n.spec.ts` | 1 file / 58 tests passed(与 §8 相同) |
+| 门 ②:引用 `approvalLocaleScan` 的 9 个 spec | 9 files / 168 tests passed(§8 的 161 + 新 7) |
+| 引用两个 helper 的 6 个 spec | 6 files / 176 tests passed(§8 的 170 + 新 6) |
+| `myDelegationForm.spec.ts` + `approvalQuickPhrases.spec.ts` | 2 files / 14 tests passed |
+| `approvalMobileDetailActions.spec.ts`(门外,只作对照) | 本片头 `633585ecd4` 与 main `48ae5025a5` 都是 3 failed / 8 passed,失败的是同样 3 条(B1-01 requester-only、B1-04 reject confirm、flag ON + narrow → approve);B1-05 两边都绿 |
+| `vue-tsc -b` | 退出码 0,0 error |
+| `required-web-lane-token-manifest.mjs --check` | MANIFEST MATCHES(没有新增 spec 文件,没改 run-list) |
+| `approval-browser-ci-wiring.test.mjs` | 3/3 pass |
+| 必需 web 车道 `run-required-web-tests.sh` | 跑了三次。第三次:**退出码 0,19 次调用 0 失败,末次 516 files / 8553 tests passed**(比 §8 多的 7 条就是本轮新增的用例)。前两次都是退出码 1。当时那台机器上还有与本仓无关的进程在跑,1 分钟负载均值 35–50(10 核)。第一次 15 条失败:14 条 `Test timed out in 5000ms`,另 1 条是 spy 调用次数不符(与一条超时用例同在 `public-multitable-form-view-migration.spec.ts`);第二次 16 条,全是超时。两次失败都落在 multitable、备料、审批中心等本轮未改的 spec 上。失败文件单独重跑全绿:第一次的 5 个文件跑出 312/313(剩 1 条超时),那 1 个文件再单独跑 1/1;第二次的 5 个文件 428/428。第二次另有 1 个 unhandled error:`approvalNewView.spec.ts` 里某条用例排下的 800 ms 草稿保存定时器,在测试环境拆除后才触发(`ApprovalNewView.vue` 的 `scheduleDraftSave` 在卸载时不清定时器,是既有代码)。探针显示,本片头与 main `48ae5025a5` 上排下该定时器的都是同样 9 条既有用例,本片新增的 2 条扫描用例不排。单独连跑该文件 4 次,4 次都是 45/45、0 error。这条记入残留,本轮不改 |
+
+**残留(修复轮 1)**:
+
+- 快捷短语是否按界面语言提供、已写入的内容如何处理,仍待 owner 决定(§6)。§9 的新 describe 钉住的是现状,不是结论。
+- `ApprovalNewView.vue` 的草稿保存定时器在卸载时不清除。高负载下它可能在测试环境拆除后触发,使车道报 unhandled error(见上表)。这是既有代码,不属本片改动面。
+- 浏览器车道本轮未重跑(理由见上)。
