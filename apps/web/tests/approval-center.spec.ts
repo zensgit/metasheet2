@@ -1580,6 +1580,39 @@ describe('ApprovalCenterView', () => {
       expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
     })
 
+    it('an export still in flight across a FILTER change saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      changeSelect('approval-source-filter', 'platform')
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ sourceSystem: 'platform' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight across a SUBMITTED search posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      const search = container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+      search.value = 'PO-2026'
+      search.dispatchEvent(new Event('input'))
+      await flushUi()
+      search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'PO-2026' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+    })
+
     it('an export still in flight across a reload of the SAME feed keeps its result line', async () => {
       let resolveExport: (value: unknown) => void = () => {}
       exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))

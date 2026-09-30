@@ -25,7 +25,7 @@
 
 ## 3. 验收门实测读数
 
-读数环境:Mac mini 执行机(macOS),Node 20.20.2,pnpm 10.16.1,Playwright chromium-1200,PostgreSQL 16.15(Homebrew)。本机只做编辑和提交,所有测试都在 Mac mini 上跑。
+读数环境:另一台机器(macOS arm64),Node 20.20.2,pnpm 10.16.1,Playwright chromium-1200,PostgreSQL 16.15(Homebrew)。本机只做编辑和提交,所有测试都在另一台机器上跑。
 
 | 验收门 | 读数 |
 |---|---|
@@ -37,13 +37,13 @@
 | 所在车道整体 | 用 `CI=1 --retries=0` 跑完整的 `playwright.approval-verification.config.ts`,**41 passed**。跑之前确认 5175 端口没有监听,避免复用其他 lane 已起的服务。 |
 | 类型检查 | `pnpm run type-check`(`vue-tsc -b`、`type-check:verification-approval`、`type-check:verification-stock-prep`)退出码 0。 |
 | 车道接线 | `node --test scripts/ops/approval-browser-ci-wiring.test.mjs` **3/3 pass**:新 spec 在 approval 车道的 `--list` 中,不在共享车道中,也在 approval 的 tsconfig 覆盖范围内。 |
-| 必需 web 车道 token | `node scripts/ops/required-web-lane-token-manifest.mjs --check` 结果为「MANIFEST MATCHES」(545 个 token)。用这 545 个 token 逐一对新 spec 的 CI 路径和 Mac mini 路径做子串匹配:**0 命中**。正控:如果文件名叫 `approval-center-export-csv.spec.ts`,会被 `approval-center` 命中,所以改用现在的名字。 |
+| 必需 web 车道 token | `node scripts/ops/required-web-lane-token-manifest.mjs --check` 结果为「MANIFEST MATCHES」(545 个 token)。用这 545 个 token 逐一对新 spec 的 CI 路径和另一台机器上的路径做子串匹配:**0 命中**。正控:如果文件名叫 `approval-center-export-csv.spec.ts`,会被 `approval-center` 命中,所以改用现在的名字。 |
 | 服务端契约读数(真库) | 用一次性库 `ms2_w1_e1_impl_20260930`(`createdb -O ms2testbed`),先断言 `current_database()` 就是这个库;环境里唯一的 `*_DATABASE_URL` 是 `DATABASE_URL`,已指向该库;`EXPECT_DB=1`。迁移沿用 `approval-realdb-export-csv.yml` 的 `MIGRATION_EXCLUDE`(与 `plugin-tests.yml` 的 approval 真库迁移步相同),退出码 0,建出 415 张表。之后原样运行 `tests/integration/approval-export-csv.db.test.ts`:**22/22 passed**,0 skipped。其中包括 BOM、固定文件名、四个导出头、`sourceSystem=plm` 返回 400 这几条,正是本片客户端依赖的契约。跑完先终止连接再 `dropdb`,复查确认该库已不存在。 |
 
 ## 4. 未跑项与残留
 
 - 「字节一致」比的是浏览器保存的文件和 Playwright 路由返回的字节,不是和真实服务器比。服务端的响应体和响应头由上面的真库用例单独覆盖。没有跑「浏览器连真实后端」的端到端测试。
-- GitHub CI 还没有在本分支上跑过(本片不 push);以上读数都来自 Mac mini。
+- GitHub CI 还没有在本分支上跑过(本片不 push);以上读数都来自另一台机器。
 - 跨源部署:后端 CORS 的 `exposedHeaders` 目前只有 `X-Correlation-ID` 和 `X-Method-Overridden`。如果前端和 API 不同源,浏览器读不到 `X-Approval-Export-*` 和 `Content-Disposition`,这时页面会如实提示「无法确认文件是否完整」,文件名回落到同名默认值 `approvals-export.csv`。同源部署不受影响:`getApiBase()` 默认用页面自身的 origin;仓内生产镜像构建时不传 `VITE_API_URL` / `VITE_API_BASE`(`Dockerfile.frontend:24`),并由同一个 nginx 把 `/api/` 反代到后端(`docker/nginx.conf:75`),因此是同源部署。要在跨源部署下也显示行数,需要改后端,不在本片范围内。
 - 移动布局不提供导出按钮,这是有意的:移动端动作集只有通过 / 驳回 / 评论 / 发起。
 - 宿主视图里其余的硬编码文案归 F8-1 处理;Q7(导出真库车道是否升为必需检查)不在本片范围内。
@@ -71,7 +71,7 @@
 | 类型检查(`3cc6b64e17`) | `vue-tsc -b` 退出码 0;`vue-tsc --noEmit -p tsconfig.verification-approval.json` 退出码 0。 |
 | 浏览器下载用例(`3cc6b64e17`) | `CI=1 --retries=0` 运行 `verification/approval-list-csv-download.spec.ts`:**3/3 passed**。运行前确认 5175 端口无监听。 |
 | 必需 web 车道 token | 未新增 spec 文件,未改 run-list;`required-web-lane-token-manifest.mjs --check` 为「MANIFEST MATCHES」(545 个 token)。 |
-| 公开文本 | 三个新提交:私有短语表 0 命中(正控命中),主机名 / 局域网地址 / 用户名 0 命中;作者与提交者均为 noreply 身份。 |
+| 公开文本 | 三个新提交:公开文本纪律检查 0 命中(正控命中),主机名 / 局域网地址 / 用户名 0 命中;作者与提交者均为 noreply 身份。 |
 
 ### 5.2 变异(均在 `3cc6b64e17`,精确串单点替换,替换处不唯一则拒绝施加;每条跑完还原并逐字节比对,收尾工作树 0 改动)
 
@@ -93,3 +93,7 @@
 - GitHub CI 未跑(本轮不 push)。
 - 本轮除 `handleExportCsv` 函数体外,还改了 `loadCurrentTab()` 里的一处赋值位置,并改了 `tests/approval-center.spec.ts`。并行的 F8-1 分支基于 `51401fee50`,如果它也改这两处,合入时会有文本冲突,需要人工合并。
 - P3-2 用例定位状态下拉依赖「全视图只有一个 `option[value="approved"]`」;若以后出现第二个,用例会在计数断言处明确失败,不会悄悄选错。
+
+### 5.x 主会话补充(门审 r1 的 E1)
+
+门审建议把导出在途时「筛选变化」「提交搜索」两条路径也钉住(原先只钉了切换 tab)。已按门审附录 A 加两条用例,紧邻切换 tab 的用例;读数见 PR 正文。
