@@ -342,6 +342,7 @@ on:
       - 'scripts/ops/integration-guard-run-web-specs.sh'
       - 'scripts/ops/integration-guard-required-wiring-contract.test.mjs'
       - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/stock-prep-powershell51.yml'
 
 jobs:
   integration-guard:
