@@ -154,4 +154,22 @@ describe('operation-bound abandoned object discard (LOCAL synthetic)', () => {
     expect(provider.status).not.toHaveBeenCalled()
   })
 
+  test('snapshots result data descriptors without rereading changing provider Proxy values', async () => {
+    const { request, options } = await setup()
+    const expected = recoveryArchiveDiscardReceipt(request)
+    let reads = 0
+    const result = new Proxy({ outcome: 'absent' as const, receiptSha256: expected }, {
+      get(target, property) {
+        if (property === 'receiptSha256') return ++reads === 1 ? expected : 'f'.repeat(64)
+        return Reflect.get(target, property)
+      },
+    })
+    const provider = { discard: async () => result, status: async () => result }
+    const store = createGuardedRecoveryArchiveAbandonedObjectStore(provider, options.transactionDepth)
+    expect(await store.discard(request)).toEqual({ outcome: 'absent', receiptSha256: expected })
+    expect(reads).toBe(0)
+    expect(await store.status(request)).toEqual({ outcome: 'absent', receiptSha256: expected })
+    expect(reads).toBe(0)
+  })
+
 })

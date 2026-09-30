@@ -51,13 +51,16 @@ export function createGuardedRecoveryArchiveAbandonedObjectStore(
       const result = await provider[verb]({ ...request })
       const fields = Object.getOwnPropertyDescriptors(result)
       if (!fields.outcome || !('value' in fields.outcome)) refuseRecoveryArchiveDiscard()
-      if (result.outcome === 'unknown' || result.outcome === 'retained') {
+      const outcome: unknown = fields.outcome.value
+      if (outcome === 'unknown' || outcome === 'retained') {
         if (Object.keys(fields).join(',') !== 'outcome') refuseRecoveryArchiveDiscard()
-        return { outcome: result.outcome }
+        return { outcome }
       }
-      if (result.outcome !== 'absent' || Object.keys(fields).sort().join(',') !== 'outcome,receiptSha256'
-        || !('value' in fields.receiptSha256) || result.receiptSha256 !== recoveryArchiveDiscardReceipt(request)) refuseRecoveryArchiveDiscard()
-      return { outcome: 'absent', receiptSha256: result.receiptSha256 }
+      if (outcome !== 'absent' || Object.keys(fields).sort().join(',') !== 'outcome,receiptSha256'
+        || !('value' in fields.receiptSha256)) refuseRecoveryArchiveDiscard()
+      const receiptSha256: unknown = fields.receiptSha256.value
+      if (typeof receiptSha256 !== 'string' || receiptSha256 !== recoveryArchiveDiscardReceipt(request)) refuseRecoveryArchiveDiscard()
+      return { outcome: 'absent', receiptSha256 }
     } catch { return refuseRecoveryArchiveDiscard() }
   }
   return { discard: (request) => call('discard', request), status: (request) => call('status', request) }
