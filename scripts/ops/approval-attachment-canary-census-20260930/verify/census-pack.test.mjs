@@ -2,12 +2,17 @@
 // census-pack.test.mjs — self-test for the approval attachment canary census
 // (scripts/ops/approval-attachment-canary-census-20260930/, F2-A1)
 // ============================================================================
-// LAYER 1 (hermetic, no database): static contract checks on the census file —
-//   it includes the read-only preamble, every SQL statement is a SELECT, no
-//   write / DDL / side-effect token appears, the jsonpath predicate has ONE
-//   pinned definition that every query uses, no detail-shaped predicate crept
-//   in (that census belongs to OPEN PR #5476), no identity/label/value column
-//   is selected, and the INVENTORY_RESULT line is the last statement.
+// LAYER 1 (hermetic, no database): static contract checks on BOTH files that
+//   a census run executes — _preamble.sql holds exactly the pinned execution
+//   contract, line for line (it runs first on every census run, so nothing
+//   else may sit in it); the census includes it first, every census SQL
+//   statement is a SELECT, no write / DDL / side-effect token appears, psql
+//   meta-commands appear only as whole allowlisted lines (none mid-line, none
+//   chained), the jsonpath predicate has ONE pinned definition that every
+//   query uses, no detail-shaped predicate crept in (that census belongs to
+//   OPEN PR #5476), no identity/label/value column is selected, and the
+//   INVENTORY_RESULT line is the last statement. Each check carries its own
+//   negative controls (a mutated in-memory copy must be flagged).
 // LAYER 2 (DATABASE_URL-gated): runs the REAL file with `psql -f` against a
 //   synthetic fixture schema and asserts every count, the locator/count
 //   invariant, values-free output, abort ⇒ no completion line, read-only
@@ -86,24 +91,109 @@ function statements(code) {
   return parts.map((s) => s.trim()).filter((s) => s.length > 0)
 }
 
+// `_` is a word character, so `\bSET\b` / `\bNOTIFY\b` never match set_config /
+// pg_notify: function families are listed with their own `\w*` tails.
 const WRITE_OR_SIDE_EFFECT =
-  /\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|INTO|SET|RESET|LOCK|VACUUM|ANALYZE|CLUSTER|REINDEX|REFRESH|COMMENT|SECURITY|NOTIFY|LISTEN|PREPARE|EXECUTE|NEXTVAL|SETVAL|PG_ADVISORY_LOCK|PG_ADVISORY_XACT_LOCK|DBLINK|LO_IMPORT|LO_EXPORT|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND)\b/i
+  /\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|COPY|CALL|DO|INTO|SET|RESET|LOCK|VACUUM|ANALYZE|CLUSTER|REINDEX|REFRESH|COMMENT|SECURITY|NOTIFY|LISTEN|PREPARE|EXECUTE|NEXTVAL|SETVAL|SET_CONFIG|PG_NOTIFY|PG_(?:TRY_)?ADVISORY_\w*|DBLINK\w*|LO_\w+|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND)\b/i
 
 function writeTokens(code) {
   return [...code.matchAll(new RegExp(WRITE_OR_SIDE_EFFECT.source, 'gi'))].map((m) => m[0].toUpperCase())
 }
 
+// The preamble's ENTIRE executable content, in order (blank and `--` comment
+// lines dropped, each line trimmed). The census `\ir`s it as its first line, so
+// anything else placed in it would run on every census run — before or after
+// the read-only default. It is therefore pinned line for line, not scanned.
+const PREAMBLE_CODE_LINES = [
+  '\\set ON_ERROR_STOP on',
+  '\\pset pager off',
+  '\\timing off',
+  '\\if :{?schema}',
+  'SET search_path = :"schema";',
+  '\\endif',
+  'SET default_transaction_read_only = on;',
+  "SET statement_timeout = '120s';",
+  "SET lock_timeout = '5s';",
+  "SET idle_in_transaction_session_timeout = '30s';",
+]
+
+function preambleCodeLines(text) {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('--'))
+}
+
+/** Executable preamble lines that are not on the pinned list (order is checked separately). */
+function preambleOffenders(text) {
+  const allowed = new Set(PREAMBLE_CODE_LINES)
+  return preambleCodeLines(text).filter((line) => !allowed.has(line))
+}
+
+// Whole-line psql meta-commands each file may use. A quoted argument may hold
+// no quote, backslash or backquote, so no second meta-command (psql ends one at
+// the next unquoted backslash) and no backquote expansion can ride on an
+// allowlisted line.
+const CENSUS_META = /^(\\ir _preamble\.sql|\\set tla_path '[^'\\`]*'|\\echo '[^'\\`]*')$/
+const PREAMBLE_META = /^(\\set ON_ERROR_STOP on|\\pset pager off|\\timing off|\\if :\{\?schema\}|\\endif)$/
+
+function metaOffenders(text, allowed) {
+  return text
+    .split('\n')
+    .filter((line) => /^\s*\\/.test(line))
+    .filter((line) => !allowed.test(line.trim()))
+}
+
+/**
+ * Syntax the quote-aware scanner above does not model. `sqlCode` tracks only
+ * '…' / "…" literals and `--` comments; a backslash in code is a psql
+ * meta-command (or an escape-string escape), and a block comment or a dollar
+ * quote holding a quote character would desynchronise the tracker. The census
+ * code needs none of them, so each one is refused outright.
+ */
+function unmodelledSyntax(code) {
+  const hits = []
+  if (code.includes('\\')) hits.push('backslash')
+  if (code.includes('/*')) hits.push('block comment')
+  if (/\$\w*\$/.test(code)) hits.push('dollar quote')
+  return hits
+}
+
 // ── LAYER 1 — hermetic ──────────────────────────────────────────────────────
 
-test('the census includes the read-only preamble first, and the preamble pins the execution contract', () => {
+test('the census includes the read-only preamble first, and the preamble holds exactly the pinned contract', () => {
   const src = read(CENSUS_FILE)
   assert.equal(src.split('\n')[0], '\\ir _preamble.sql', 'first line must be `\\ir _preamble.sql`')
   const pre = read(PREAMBLE_FILE)
-  assert.match(pre, /^\\set ON_ERROR_STOP on$/m)
-  assert.match(pre, /^SET default_transaction_read_only = on;$/m)
-  assert.match(pre, /^SET statement_timeout = '120s';$/m)
-  assert.match(pre, /^SET lock_timeout = '5s';$/m)
-  assert.match(pre, /^SET idle_in_transaction_session_timeout = '30s';$/m)
+  assert.deepEqual(preambleCodeLines(pre), PREAMBLE_CODE_LINES, '_preamble.sql executable lines drifted from the pinned list')
+  assert.deepEqual(preambleOffenders(pre), [])
+})
+
+test('preamble pin negative controls: added statements, side tables, mid-line meta-commands and reorders are all flagged', () => {
+  const pre = read(PREAMBLE_FILE)
+  const ro = 'SET default_transaction_read_only = on;'
+  const mutate = (from, to) => {
+    const out = pre.replace(from, to)
+    assert.notEqual(out, pre, `mutation anchor not found: ${from}`)
+    return out
+  }
+  // A DDL statement placed BEFORE the read-only default.
+  const create = 'CREATE TABLE a1census_probe (id int);'
+  assert.deepEqual(preambleOffenders(mutate(ro, `${create}\n${ro}`)), [create])
+  // A side table plus a row written into it.
+  const insert = 'INSERT INTO a1census_probe VALUES (1);'
+  assert.deepEqual(preambleOffenders(mutate(ro, `${create}\n${insert}\n${ro}`)), [create, insert])
+  // A meta-command appended mid-line to an allowlisted line.
+  const midLine = "SET lock_timeout = '5s'; \\o a1census-probe.out"
+  assert.deepEqual(preambleOffenders(mutate("SET lock_timeout = '5s';", midLine)), [midLine])
+  // An extra meta-command line.
+  assert.deepEqual(preambleOffenders(mutate('\\timing off', '\\timing off\n\\ir a1census-probe.sql')), ['\\ir a1census-probe.sql'])
+  // Every line allowlisted, but the read-only default moved last: order is pinned too.
+  const reordered = mutate(`${ro}\n`, '') + `${ro}\n`
+  assert.deepEqual(preambleOffenders(reordered), [])
+  assert.notDeepEqual(preambleCodeLines(reordered), PREAMBLE_CODE_LINES)
+  // A duplicated line is a drift as well.
+  assert.notDeepEqual(preambleCodeLines(mutate(ro, `${ro}\n${ro}`)), PREAMBLE_CODE_LINES)
 })
 
 test('every census statement is a SELECT (six: a, b, b-locate, c, d, INVENTORY_RESULT)', () => {
@@ -121,15 +211,55 @@ test('no write / DDL / side-effect token anywhere in the census code (and the ch
   assert.ok(writeTokens(`${code}\nINSERT INTO approval_templates (id) VALUES ('x');`).includes('INSERT'))
   assert.ok(writeTokens(`${code}\nSELECT 1 INTO scratch_copy;`).includes('INTO'))
   assert.ok(writeTokens(`${code}\nSELECT nextval('approval_request_no_seq');`).includes('NEXTVAL'))
+  // Function-form side effects (the `_` in their names defeats a bare `\bSET\b`-style token).
+  const functionForms = [
+    ["SELECT 1 WHERE set_config('default_transaction_read_only','off',false) IS NOT NULL;", 'SET_CONFIG'],
+    ["SELECT pg_notify('a1census', 'x');", 'PG_NOTIFY'],
+    ['SELECT pg_advisory_lock_shared(1);', 'PG_ADVISORY_LOCK_SHARED'],
+    ['SELECT pg_try_advisory_lock(1);', 'PG_TRY_ADVISORY_LOCK'],
+    ['SELECT pg_try_advisory_xact_lock_shared(1);', 'PG_TRY_ADVISORY_XACT_LOCK_SHARED'],
+    ['SELECT lo_create(0);', 'LO_CREATE'],
+    ['SELECT lo_unlink(1);', 'LO_UNLINK'],
+    ["SELECT dblink_exec('x', 'y');", 'DBLINK_EXEC'],
+  ]
+  for (const [sql, token] of functionForms) {
+    assert.ok(writeTokens(`${code}\n${sql}`).includes(token), `${token} not flagged in: ${sql}`)
+  }
 })
 
-test('the only psql meta-commands are the preamble include, the predicate \\set and \\echo lines', () => {
-  const meta = read(CENSUS_FILE)
-    .split('\n')
-    .filter((line) => /^\s*\\/.test(line))
-  for (const line of meta) {
-    assert.match(line, /^(\\ir _preamble\.sql|\\set tla_path '.*'|\\echo '.*')$/, `unexpected meta-command: ${line}`)
+test('psql meta-commands only as whole allowlisted lines, in the census and in the preamble (and the check itself bites)', () => {
+  assert.deepEqual(metaOffenders(read(CENSUS_FILE), CENSUS_META), [])
+  assert.deepEqual(metaOffenders(read(PREAMBLE_FILE), PREAMBLE_META), [])
+  // Negative controls: a second meta-command chained onto an allowlisted line, an
+  // extra include, and a meta-command line outside the preamble allowlist.
+  const src = read(CENSUS_FILE)
+  const echo = src.split('\n').find((line) => line.startsWith("\\echo '"))
+  const chained = `${echo} \\o a1census-probe.out`
+  assert.deepEqual(metaOffenders(src.replace(echo, chained), CENSUS_META), [chained])
+  assert.deepEqual(metaOffenders(`${src}\n\\ir a1census-probe.sql\n`, CENSUS_META), ['\\ir a1census-probe.sql'])
+  assert.deepEqual(metaOffenders(`${read(PREAMBLE_FILE)}\n\\o a1census-probe.out\n`, PREAMBLE_META), ['\\o a1census-probe.out'])
+})
+
+test('census code off the meta lines carries no backslash, block comment or dollar quote (and the check itself bites)', () => {
+  const src = read(CENSUS_FILE)
+  assert.deepEqual(unmodelledSyntax(sqlCode(src)), [])
+  const mutated = (from, to) => {
+    const out = src.replace(from, to)
+    assert.notEqual(out, src, `mutation anchor not found: ${from}`)
+    return sqlCode(out)
   }
+  // A meta-command placed mid-line inside a statement, the statement closed on the next line.
+  assert.ok(
+    unmodelledSyntax(mutated('FROM approval_template_versions;', 'FROM approval_template_versions \\o a1census-probe.out\n;')).includes('backslash'),
+  )
+  // An include placed mid-line.
+  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', 'GROUP BY i.status \\ir a1census-probe.sql\n')).includes('backslash'))
+  // Syntax that would let a quote character hide code from the quote tracker (quotes kept
+  // balanced here, so the tracker's own unbalanced-quote assertion is not what fires).
+  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', "/* ' */ GROUP BY i.status /* ' */")).includes('block comment'))
+  assert.ok(unmodelledSyntax(mutated('GROUP BY i.status', "GROUP BY i.status, length($q$'$q$), length($q$'$q$)")).includes('dollar quote'))
+  // A `--` trailing comment is stripped before the scan: a backslash inside it is inert and not flagged.
+  assert.deepEqual(unmodelledSyntax(mutated('GROUP BY i.status', 'GROUP BY i.status -- see \\ir note')), [])
 })
 
 test('ONE pinned predicate definition, used by every jsonpath call, no inline jsonpath literal', () => {
@@ -153,19 +283,73 @@ test('scope guard: no detail-shaped predicate (the detail-embedded census belong
   assert.ok(!/"detail"|columns\[/.test(PINNED_PREDICATE))
 })
 
-test('values-free (static): no identity / label / free-text column is referenced; ->> only reads a field id', () => {
-  const code = sqlCode(read(CENSUS_FILE))
+// The only shapes in which the census may touch a JSON column that holds
+// labels or submitted values. Each form is anchored through its closing
+// parenthesis and the token after it, so a raw or cast copy of the same
+// expression elsewhere in the file does not count as allowed.
+const SCHEMA_FORMS = [
+  /jsonb_path_exists\((?:\w+\.)?form_schema, :'tla_path'\)/g,
+  /jsonb_array_length\(jsonb_path_query_array\(v\.form_schema, :'tla_path'\)\)::int AS attachment_field_count/g,
+  /CROSS JOIN LATERAL jsonb_path_query\(v\.form_schema, :'tla_path'\) AS f\(field\)/g,
+]
+const SNAPSHOT_FORMS = [
+  /jsonb_typeof\(i\.form_snapshot -> \(f\.field ->> 'id'\)\) AS value_kind,/g,
+  /jsonb_typeof\(i\.form_snapshot\) = 'object'/g,
+  /i\.form_snapshot \? \(f\.field ->> 'id'\)\n/g,
+  /\(i\.form_snapshot -> \(f\.field ->> 'id'\)\) NOT IN \(/g,
+]
+
+function valuesFreeOffences(code) {
+  const out = []
   const forbidden = /\b(name|key|description|label|title|comment|reason|requester_snapshot|requester_id|requester_name|created_by|updated_by|actor_id|approval_graph|runtime_graph)\b/i
   for (const [i, line] of code.split('\n').entries()) {
-    assert.ok(!forbidden.test(line), `census line ${i + 1} references a value-bearing column: ${line.trim()}`)
+    if (forbidden.test(line)) out.push(`line ${i + 1} references a value-bearing column: ${line.trim()}`)
   }
   for (const m of code.matchAll(/->>\s*('[^']*')/g)) {
-    assert.equal(m[1], "'id'", `->> may only read a field id inside a predicate, found ->> ${m[1]}`)
+    if (m[1] !== "'id'") out.push(`->> may only read a field id inside a predicate, found ->> ${m[1]}`)
   }
-  // form_snapshot is only ever typed, key-tested or dereferenced into jsonb_typeof / a NOT IN test.
-  const snapshotUses = [...code.matchAll(/form_snapshot/g)].length
-  const allowed = [...code.matchAll(/jsonb_typeof\(i\.form_snapshot|i\.form_snapshot \?|\(i\.form_snapshot ->/g)].length
-  assert.equal(snapshotUses, allowed, 'form_snapshot used outside the kind/presence predicates')
+  const count = (re) => [...code.matchAll(re)].length
+  const sum = (forms) => forms.reduce((n, re) => n + count(re), 0)
+  // form_schema: only as the tested argument of the pinned jsonpath calls.
+  if (count(/form_schema/g) !== sum(SCHEMA_FORMS)) out.push('form_schema used outside the pinned jsonpath forms')
+  // form_snapshot: only typed, key-tested, or dereferenced into jsonb_typeof / a NOT IN test.
+  if (count(/form_snapshot/g) !== sum(SNAPSHOT_FORMS)) out.push('form_snapshot used outside the kind/presence predicates')
+  // f.field (a whole matched field object, label included): only to read its id.
+  if (count(/\bf\.field\b/g) !== count(/\bf\.field ->> 'id'/g)) out.push('f.field used other than to read its id')
+  // No text cast and no path-extraction operator anywhere.
+  if (/::\s*(text|varchar|character|char|bpchar|name|citext)\b/i.test(code)) out.push('text cast')
+  if (/#>/.test(code)) out.push('#> / #>> path extraction')
+  return out
+}
+
+test('values-free (static): no identity / label / free-text column is referenced; JSON columns only in pinned shapes', () => {
+  assert.deepEqual(valuesFreeOffences(sqlCode(read(CENSUS_FILE))), [])
+})
+
+test('values-free (static) negative controls: selecting form_schema or a cast raw value is flagged', () => {
+  const src = read(CENSUS_FILE)
+  const mutated = (from, to) => {
+    const out = src.replace(from, to)
+    assert.notEqual(out, src, `mutation anchor not found: ${from}`)
+    return valuesFreeOffences(sqlCode(out))
+  }
+  const locateHead = '  v.id AS template_version_id,'
+  // MC: the whole schema selected in the locator.
+  assert.ok(mutated(locateHead, `${locateHead}\n  v.form_schema AS schema_json,`).includes('form_schema used outside the pinned jsonpath forms'))
+  // MD: the raw stored value cast to text in (d).
+  const kindHead = "  jsonb_typeof(i.form_snapshot -> (f.field ->> 'id')) AS value_kind,"
+  const md = mutated(kindHead, `${kindHead}\n  (i.form_snapshot -> (f.field ->> 'id'))::text AS raw_value,`)
+  assert.ok(md.includes('form_snapshot used outside the kind/presence predicates'))
+  assert.ok(md.includes('text cast'))
+  // The matched field object itself, and a path extraction.
+  assert.ok(mutated(kindHead, `${kindHead}\n  f.field AS field_json,`).includes('f.field used other than to read its id'))
+  assert.ok(mutated(kindHead, `${kindHead}\n  i.form_snapshot #>> '{x}' AS v,`).includes('#> / #>> path extraction'))
+  // The array of matched field objects selected raw instead of counted.
+  assert.ok(
+    mutated('  jsonb_array_length(jsonb_path_query_array(', '  jsonb_path_query_array(v.form_schema, :\'tla_path\') AS fields_json,\n  jsonb_array_length(jsonb_path_query_array(').includes(
+      'form_schema used outside the pinned jsonpath forms',
+    ),
+  )
 })
 
 test('the INVENTORY_RESULT completion statement is the last statement', () => {
@@ -300,17 +484,20 @@ if (!DATABASE_URL || !psqlAvailable()) {
       // (a) T1 is both; T2 (draft adds), T6 (never published), T7 (archived), T8 (inactive
       // definition) are fill-page-only; T9 (latest removed it) is upload-target-only.
       assert.deepEqual(block(r.stdout, H_A), [['10', '5', '2', '4', '1']])
-      // (b) T1v1, T2v2, T3v1, T6v1, T7v1, T8v1, T9v1 of 13 versions; T4 (detail-only),
-      // T5 (text id'd "attachment", select option) and T11 (array form_schema) do not match.
-      assert.deepEqual(block(r.stdout, H_B), [['7', '13']])
+      // (b) T1v1, T2v2, T3v1, T3v3 (archived status), T6v1, T7v1, T8v1, T9v1 of 14 versions;
+      // T4 (detail-only), T5 (text id'd "attachment", select option) and T11 (array
+      // form_schema) do not match.
+      assert.deepEqual(block(r.stdout, H_B), [['8', '14']])
 
       const loc = block(r.stdout, H_LOC)
-      assert.equal(loc.length, 7, '(b-locate) row count must equal (b).matching_versions')
+      assert.equal(loc.length, 8, '(b-locate) row count must equal (b).matching_versions')
       const byVersion = Object.fromEntries(loc.map((row) => [row[1], row]))
       // T1v1: two TOP-LEVEL fields (the nested detail column is not counted), 4 frozen instances.
       assert.deepEqual(byVersion['a1a1a1a1-0000-4000-8000-000000000001'].slice(2), ['1', 'published', 'published', 't', 't', '2', '4'])
       assert.deepEqual(byVersion['a2a2a2a2-0000-4000-8000-000000000002'].slice(2), ['2', 'draft', 'published', 'f', 't', '1', '0'])
       assert.deepEqual(byVersion['a3a3a3a3-0000-4000-8000-000000000001'].slice(2), ['1', 'published', 'published', 'f', 'f', '1', '1'])
+      // Any version status counts, including 'archived' (allowed by the column CHECK).
+      assert.deepEqual(byVersion['a3a3a3a3-0000-4000-8000-000000000003'].slice(2), ['3', 'archived', 'published', 'f', 'f', '1', '0'])
       assert.deepEqual(byVersion['a6a6a6a6-0000-4000-8000-000000000001'].slice(2), ['1', 'draft', 'draft', 'f', 't', '1', '0'])
       assert.deepEqual(byVersion['a9a9a9a9-0000-4000-8000-000000000001'].slice(2), ['1', 'published', 'published', 't', 'f', '1', '0'])
 
@@ -368,8 +555,8 @@ if (!DATABASE_URL || !psqlAvailable()) {
     try {
       const r = runCensus(schema, file)
       assert.equal(r.status, 0, r.stderr)
-      // Any-depth matching also counts T4 (detail-only) and T11 (array form_schema): 9, not 7.
-      assert.deepEqual(block(r.stdout, H_B), [['9', '13']])
+      // Any-depth matching also counts T4 (detail-only) and T11 (array form_schema): 10, not 8.
+      assert.deepEqual(block(r.stdout, H_B), [['10', '14']])
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
       dropFixture(schema)

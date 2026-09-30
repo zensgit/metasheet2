@@ -50,7 +50,10 @@ CREATE TABLE approval_instances (
 -- T1 published, one version (active = latest), 2 top-level attachment fields
 --    plus a detail group that ALSO nests an attachment column (not counted).
 -- T2 published; active v1 clean, latest v2 draft adds an attachment field.
--- T3 published; v1 (superseded) had one, active = latest v2 is clean.
+-- T3 published; v1 (superseded) had one, active = latest v2 is clean; v3 is an
+--    'archived'-status version row that has one — the column CHECK allows
+--    'archived' (zzzz20260411120100_approval_templates_and_instance_extensions.ts:32)
+--    though the app never writes that status. Counted by (b) / (b-locate) only.
 -- T4 published; attachment ONLY inside a detail group (#5476's shape) — no hit.
 -- T5 published; a text field id'd/labelled "attachment" + select option — no hit.
 -- T6 draft, never published; latest v1 has one.
@@ -87,6 +90,8 @@ INSERT INTO approval_template_versions (id, template_id, version, status, form_s
    '{"fields":[{"id":"fld_sentinelx_c","type":"attachment","label":"sentinelx label c"}]}'),
   ('a3a3a3a3-0000-4000-8000-000000000002', '11111111-0000-4000-8000-000000000003', 2, 'published',
    '{"fields":[{"id":"fld_sentinelx_c2","type":"text","label":"sentinelx label c2"}]}'),
+  ('a3a3a3a3-0000-4000-8000-000000000003', '11111111-0000-4000-8000-000000000003', 3, 'archived',
+   '{"fields":[{"id":"fld_sentinelx_c3","type":"attachment","label":"sentinelx label c3"}]}'),
   ('a4a4a4a4-0000-4000-8000-000000000001', '11111111-0000-4000-8000-000000000004', 1, 'published',
    '{"fields":[{"id":"fld_sentinelx_rows","type":"detail","label":"sentinelx rows","columns":[
                   {"id":"col_sentinelx_file","type":"attachment","label":"sentinelx col"}]}]}'),
