@@ -48,3 +48,48 @@
 - 移动布局不提供导出按钮,这是有意的:移动端动作集只有通过 / 驳回 / 评论 / 发起。
 - 宿主视图里其余的硬编码文案归 F8-1 处理;Q7(导出真库车道是否升为必需检查)不在本片范围内。
 - 本片是**续做**:上一轮实现被会话额度打断。`d58d2da352` 和 `3c43716f5c` 是上一轮的提交,本轮逐条核对过,没有改写。本说明里的所有读数都是本轮重新取的:vitest、12 个变异、类型检查、接线、manifest、Playwright、BM1、真库。
+
+## 5. 门审 r1 处置
+
+门审 r1(记录不在仓内)结论为 0 P1 / 0 P2 / 5 P3。本轮处置其中 P3-1、P3-2、P3-3;P3-4 已在推送前处理,本轮不涉及;P3-5(后端 CORS `exposedHeaders`)属 owner 项,本片不改后端,仍见 §4。
+
+| 门审项 | 处置 | 提交 |
+|---|---|---|
+| P3-1 导出进行中切换 tab / 筛选后,旧导出的结果行写到新列表上 | `handleExportCsv` 点击时取 `const filters = appliedListFilters.value`;成功或失败返回时,只有 `appliedListFilters.value === filters` 才写 `exportOutcome`。文件照常保存,因为它就是点击那一刻要的内容。门审的探针转为正式用例(成功半:导出 → 切到「抄送我的」→ 返回 ⇒ 无结果行、文件已交给浏览器;失败半:导出 → 切到「我发起的」→ 503 ⇒ 无结果行)。 | `108217fadb` |
+| P3-1 附带改动(**与门审修法文字的差异,请 r2 判定**) | 门审修法的前提是「`loadCurrentTab` 每次都赋新对象」。但 `loadCurrentTab()` 也在同一列表的重载里被调用:「重新加载」按钮、行内通过 / 驳回成功、批量操作完成、翻页、点击新待办提示。若照原样保留每次赋新对象,这些重载只要发生在导出途中,就会把本该显示的结果行丢掉。所以改为:只有在原有的 JSON 比较判定「列表已换」时(也就是原本就会清空结果行的那个分支)才替换快照对象;列表未换时保留原对象,内容逐键相同,导出参数不变。这样快照对象的身份恰好随列表变化。另加用例钉住:导出途中对同一列表重载(搜索框回车)⇒ 结果行照常显示。 | `108217fadb` |
+| P3-2 「LAST LOADED」用例没钉住 `status` 透传 | 用例通过状态下拉选 `approved`(该下拉没有 test id,用唯一的 `option[value="approved"]` 定位,并先断言它恰好出现 1 次);断言导出查询 `status: 'approved'`,并单独断言最后一次列表请求的 `status` 为 `'approved'`(`toEqual` 会忽略值为 `undefined` 的键,单靠它发现不了两边同时丢失)。 | `a939f80bc7` |
+| P3-3 网络不可达分支没有视图用例 | 在「拒绝导出」用例旁新增一例:以 `{ code: 'NETWORK_UNAVAILABLE', status: 0 }` 拒绝,断言结果行文本等于 `NETWORK_UNREACHABLE_COPY.en`、无 CJK、`role=alert`、未保存文件、无 toast;切到 zh 后等于 `NETWORK_UNREACHABLE_COPY.zh`。 | `3cc6b64e17` |
+
+### 5.1 读数
+
+读数环境:另一台机器(macOS arm64),Node 20.20.2,pnpm 10.16.1,Playwright 1.57.0(chromium)。本机只做编辑和提交。本轮零后端改动、未建库,所以没有 PostgreSQL 读数。
+
+| 项 | 读数 |
+|---|---|
+| vitest(`approval-center`、`approvalApiErrorSurfacing`、`approvalMobileResponsive` 三个受影响文件,加邻居 `approvalCenterSourceFilter`、`approval-center-master-detail`) | `108217fadb`:**5 files / 125 tests passed**;`a939f80bc7`:**125 passed**;`3cc6b64e17`:**126 passed**。`approval-center.spec.ts` 的用例数 42 → 44 → 44 → 45,与新增用例数一致。 |
+| 引用 `ApprovalCenterView` 的全部 spec(19 个文件) | `loadCurrentTab()` 在本视图有 14 处调用点(含模板里的「重新加载」),所以把 `tests/` 下所有提到 `ApprovalCenterView` 的 spec 都跑一遍。`51401fee50`:**1 failed / 18 passed 文件,2 failed / 407 passed 用例**;`3cc6b64e17`:**1 failed / 18 passed 文件,2 failed / 410 passed 用例**。两边失败的是同样两个用例,都在 `approval-ui-workspace.spec.ts`(详情页与模板编排的源码结构断言),该文件不在必需 web 车道,基线上本来就红,与本片无关;多出的 3 个用例就是本轮新增的 3 个。 |
+| 类型检查(`3cc6b64e17`) | `vue-tsc -b` 退出码 0;`vue-tsc --noEmit -p tsconfig.verification-approval.json` 退出码 0。 |
+| 浏览器下载用例(`3cc6b64e17`) | `CI=1 --retries=0` 运行 `verification/approval-list-csv-download.spec.ts`:**3/3 passed**。运行前确认 5175 端口无监听。 |
+| 必需 web 车道 token | 未新增 spec 文件,未改 run-list;`required-web-lane-token-manifest.mjs --check` 为「MANIFEST MATCHES」(545 个 token)。 |
+| 公开文本 | 三个新提交:私有短语表 0 命中(正控命中),主机名 / 局域网地址 / 用户名 0 命中;作者与提交者均为 noreply 身份。 |
+
+### 5.2 变异(均在 `3cc6b64e17`,精确串单点替换,替换处不唯一则拒绝施加;每条跑完还原并逐字节比对,收尾工作树 0 改动)
+
+| 变异 | 门审 r1 时(与 `51401fee50` 同树) | 本轮 |
+|---|---|---|
+| `V-snap-status-undef`:快照写成 `{ ...filters, status: undefined, tab }` | 绿,存活 | **红**,1 failed / 45(「LAST LOADED」用例) |
+| `V-literal-drop-status`:从 `loadCurrentTab` 的 `filters` 字面量删掉 `status` 行(列表和导出同时丢) | 行为上存活 | **红**,1 failed / 45(同上) |
+| `V-no-network-branch`:删掉 `exportFailureOf` 的网络分支 | 绿,存活 | **红**,1 failed / 45(网络不可达用例) |
+| 探针等价:视图文件换回 `51401fee50` 的版本,spec 用本轮的 | 探针 1 failed | **红**,1 failed / 45(切换 tab 用例的成功半断言) |
+| `V-p31-no-guard-resolve`:成功分支不再判断是否同一列表 | — | **红**,1 failed / 45(切换 tab 用例的成功半) |
+| `V-p31-no-guard-reject`:失败分支不再判断 | — | **红**,1 failed / 45(切换 tab 用例的失败半) |
+| `V-p31-guard-always-true`:判断恒真 | — | **红**,1 failed / 45(切换 tab 用例) |
+| `V-p31-assign-every-load`:恢复每次加载都赋新快照对象(即门审修法文字的前提) | — | **红**,1 failed / 45(同一列表重载用例) |
+| `V-p31-guard-always-false`:判断恒假 | — | **红**,10 failed / 45(所有依赖结果行的用例) |
+
+### 5.3 未跑项与残留
+
+- 真库:NOT RUN。本轮零后端改动,没有建库;服务端契约的真库读数见 §3,本轮未重跑。
+- GitHub CI 未跑(本轮不 push)。
+- 本轮除 `handleExportCsv` 函数体外,还改了 `loadCurrentTab()` 里的一处赋值位置,并改了 `tests/approval-center.spec.ts`。并行的 F8-1 分支基于 `51401fee50`,如果它也改这两处,合入时会有文本冲突,需要人工合并。
+- P3-2 用例定位状态下拉依赖「全视图只有一个 `option[value="approved"]`」;若以后出现第二个,用例会在计数断言处明确失败,不会悄悄选错。
