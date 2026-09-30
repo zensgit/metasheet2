@@ -471,6 +471,27 @@ describeIfDatabase('cancel-round outlet guards (§14.3 #2/#4/#6/#7/#7′/#8): a 
       )
       expect(after.rows[0], `action=${action}`).toEqual(before.rows[0])
     }
+
+    // F4-S1 (Lock-5 L5-B): an `add_sign` in the new `after` mode consumes the actor's seat as an
+    // approval, but it is still the `add_sign` VERB — the allow-set judges the verb, so a cancel
+    // round refuses it with the same code before any mode logic runs, and the row is unchanged.
+    const beforeAfterSign = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    await expect(
+      service.dispatchAction(
+        cancelRoundInstanceId,
+        { action: 'add_sign', targetUserIds: [`${approverId}-addee`], addSignMode: 'after' } as ApprovalActionRequest,
+        { userId: approverId, userName: 'member-pin actor', roles: [] },
+      ),
+      'action=add_sign addSignMode=after',
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CANCEL_ROUND_OUTLET_FORBIDDEN' })
+    const afterAfterSign = await pool().query<{ version: number; status: string }>(
+      `SELECT version, status FROM approval_instances WHERE id = $1`,
+      [cancelRoundInstanceId],
+    )
+    expect(afterAfterSign.rows[0]).toEqual(beforeAfterSign.rows[0])
   })
 
   it('#7 legacy POST /:id/approve — a cancel-round instance is rejected 409 CANCEL_ROUND_OUTLET_FORBIDDEN via handleApprovalsError; the row is unchanged', async () => {
