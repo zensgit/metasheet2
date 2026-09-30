@@ -59,7 +59,7 @@
 M2 的 `onDetailComplete`/`onDetailReopen` 用 `taskId.value !== id` 判断"响应是否还对得上当前页面"。M3 的新增动作全部改用 `token !== detailActionToken`（`token = ++detailActionToken` 在动作开始时捕获）。两者不等价：`taskId.value !== id` 只能发现"现在看的是别的任务"，发现不了"离开这个任务又回到同一个任务"——这种往返会让 `detailActionToken` 递增两次，而 `taskId.value` 又变回同一个值。`tasks-detail-m3.spec.ts` 专门有一条用例（"the token guard also catches 'left t1 for the list, then came back to t1'"）验证这个更严格的守卫。M2 现有代码未改动（不在本片范围内）。
 
 ### 3.7 路径段中的 id
-成员、评论与任务 id 放进 URL 路径之前先检查：空串、`.`、`..` 不发请求，成员 id 直接返回 `validation`（`INVALID_ASSIGNEES`），任务与评论 id 返回 `not_found`。`encodeURIComponent` 不转义 `.`，而 URL 解析会折叠 `.`/`..` 路径段，请求会落到另一条路由上。
+成员、评论与任务 id 放进 URL 路径之前先检查：空串、`.`、`..` 不发请求，成员 id 直接返回 `validation`（`INVALID_ASSIGNEES`），任务与评论 id 返回 `not_found`。规则与后端对成员 id 的校验一致。
 
 ### 3.8 共享 pending 状态
 所有 M3 动作与既有的 complete/reopen 复用同一个 `detailActionPending`/`detailActionToken`——不是每个 section 一个独立 token。理由：这些按钮本来就都挂在同一个 `:disabled="detailActionPending"` 上，同一时刻只可能有一个点击发起一个动作，分 section 各自开 token 只会扩大守卫面而不增加覆盖率（advisor 复核建议，已采纳）。

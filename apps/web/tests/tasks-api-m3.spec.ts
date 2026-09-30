@@ -612,6 +612,9 @@ describe('checkCommentBody (client-side pre-check, mirrors normalizeCommentBody)
     expect(checkCommentBody('x'.repeat(5001) + '\u0000')).toBe('COMMENT_TOO_LONG')
     expect(checkCommentBody('   ')).toBe('COMMENT_BLANK')
     expect(checkCommentBody('a\u0001b')).toBe('ok')
+    expect(checkCommentBody('a\uD800b')).toBe('COMMENT_INVALID_CHAR')
+    expect(checkCommentBody('a\uDC00b')).toBe('COMMENT_INVALID_CHAR')
+    expect(checkCommentBody('\uD83D\uDE00')).toBe('ok')
   })
 
   // Measured by UNICODE CODE POINTS, not UTF-16 code units: a surrogate-pair astral character
@@ -674,8 +677,8 @@ describe('deleteTask', () => {
 })
 
 // ---------------------------------------------------------------------------------------------
-// Path-segment safety: an id that is `.` or `..` would be collapsed by URL parsing and reach a
-// different route, so every M3 write refuses it before building a request.
+// Ids placed in a request path must be non-empty and not `.` or `..`; every M3 write refuses
+// such ids before building a request.
 // ---------------------------------------------------------------------------------------------
 
 describe('path-segment safety', () => {

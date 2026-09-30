@@ -231,6 +231,11 @@ describe('createTask', () => {
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'org_missing' })
   })
 
+  it('resolves invalid_title for a 422 INVALID_TITLE', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'invalid_title' })
+  })
+
   it('resolves error (NOT org_missing) for a 422 with a different error code', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'VALIDATION_FAILED' } }))
     await expect(createTask({ title: '' })).resolves.toEqual({ kind: 'error', status: 422 })

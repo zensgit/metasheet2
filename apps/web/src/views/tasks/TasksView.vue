@@ -362,7 +362,7 @@
           >创建</button>
         </form>
         <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
-          创建任务失败，请稍后重试
+          {{ createErrorInvalidTitle ? '标题为空或包含无法保存的字符' : '创建任务失败，请稍后重试' }}
         </p>
         <!-- Complete/reopen results other than ok/org_missing (forbidden / not_found / error) used
              to be silently dropped — the click just did nothing, with no way to tell "it worked" from
@@ -514,6 +514,7 @@ const newTitle = ref('')
 const newCompletionMode = ref<CompletionMode>('all')
 const creating = ref(false)
 const createErrorVisible = ref(false)
+const createErrorInvalidTitle = ref(false)
 
 // ---------------------------------------------------------------------------------------------
 // M3 (backend contract §3.1, §3.3-§3.7): subtasks, membership, followers, comments, delete.
@@ -732,6 +733,7 @@ async function onCreate(): Promise<void> {
   if (!title || creating.value) return
   creating.value = true
   createErrorVisible.value = false
+  createErrorInvalidTitle.value = false
   const page = listPageToken
   try {
     const result = await createTask({ title, completionMode: newCompletionMode.value })
@@ -755,6 +757,7 @@ async function onCreate(): Promise<void> {
     } else if (result.kind === 'org_missing') {
       orgMissingFromAction.value = true
     } else {
+      createErrorInvalidTitle.value = result.kind === 'invalid_title'
       createErrorVisible.value = true
     }
   } finally {

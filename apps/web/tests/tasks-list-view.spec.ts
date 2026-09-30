@@ -246,7 +246,26 @@ describe('TasksView create / complete / reopen mutations', () => {
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
     await flush()
 
-    expect(shown(el, 'tasks-create-error')).toBeTruthy()
+    expect(shown(el, 'tasks-create-error')?.textContent?.trim()).toBe('创建任务失败，请稍后重试')
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    // Only ONE list read (the initial mount) — a failed create must not refresh the list either.
+    expect(h.listTasks).toHaveBeenCalledTimes(1)
+    expect(h.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+  it('create returning invalid_title says the title is the problem, not \'retry later\'', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'invalid_title' })
+    const el = await mountReady()
+
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = 'New task'
+    titleInput.dispatchEvent(new Event('input'))
+    await flush()
+    const form = shown(el, 'tasks-create-form') as HTMLFormElement
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+
+    expect(shown(el, 'tasks-create-error')?.textContent?.trim()).toBe('标题为空或包含无法保存的字符')
     expect(shown(el, 'tasks-view-org-missing')).toBeNull()
     // Only ONE list read (the initial mount) — a failed create must not refresh the list either.
     expect(h.listTasks).toHaveBeenCalledTimes(1)

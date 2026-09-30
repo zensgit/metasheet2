@@ -130,6 +130,7 @@ export interface CreateTaskInput {
  *  fresh row itself always comes from the subsequent `loadList()`. */
 export type CreateTaskResult =
   | { kind: 'ok'; id: string }
+  | { kind: 'invalid_title' }
   | { kind: BaseResultKind; status?: number }
 
 export type CompleteTaskResult =
@@ -348,7 +349,10 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   if (response.status === 404) return { kind: 'not_found' }
   if (response.status === 422) {
     const errorBody = await safeJson(response)
-    if (extractErrorCode(errorBody) === 'ORG_MISSING') return { kind: 'org_missing' }
+    const code = extractErrorCode(errorBody)
+    if (code === 'ORG_MISSING') return { kind: 'org_missing' }
+    // Deterministic: retrying the same title fails the same way, so the caller says so.
+    if (code === 'INVALID_TITLE') return { kind: 'invalid_title' }
     return { kind: 'error', status: 422 }
   }
   if (response.status !== 200) return { kind: 'error', status: response.status }
@@ -464,9 +468,8 @@ export async function fetchPendingCount(): Promise<PendingCountResult> {
  * ---------------------------------------------------------------------------------------------
  */
 
-/** Whether a value can be placed in a URL path as ONE segment. `encodeURIComponent` leaves `.`
- *  unescaped and URL parsing collapses `.` and `..` segments, so such a value would change which
- *  route the request reaches; it is refused before any request is built. */
+/** Whether an id can be placed in a request URL path: it must be non-empty and not `.` or `..`.
+ *  Other ids are refused before any request is built. */
 export function isPathSafeSegment(value: string): boolean {
   return value.length > 0 && value !== '.' && value !== '..'
 }
@@ -865,14 +868,17 @@ export async function deleteComment(id: string, commentId: string): Promise<Comm
  *  actual source of truth. */
 const COMMENT_EDGE_TRIM_RE = /^[\p{White_Space}\u200B\u200C\u200D\uFEFF]+|[\p{White_Space}\u200B\u200C\u200D\uFEFF]+$/gu
 
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+
 export function checkCommentBody(body: string): 'ok' | 'COMMENT_BLANK' | 'COMMENT_TOO_LONG' | 'COMMENT_INVALID_CHAR' {
   // Same steps as the server's normalizeUserText: NFC, trim Unicode White_Space and the four
   // zero-width marks from both edges only, NFC again.
   const normalized = body.normalize('NFC').replace(COMMENT_EDGE_TRIM_RE, '').normalize('NFC')
   if (normalized.length === 0) return 'COMMENT_BLANK'
   if (Array.from(normalized).length > 5000) return 'COMMENT_TOO_LONG'
-  // The server rejects U+0000 after the two checks above, in the same order (contract §3.6).
-  if (normalized.includes('\u0000')) return 'COMMENT_INVALID_CHAR'
+  // The server rejects U+0000 and lone UTF-16 surrogates after the two checks above, in the same
+  // order (contract §3.6).
+  if (normalized.includes('\u0000') || LONE_SURROGATE_RE.test(normalized)) return 'COMMENT_INVALID_CHAR'
   return 'ok'
 }
 
