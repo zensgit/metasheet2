@@ -256,6 +256,7 @@
    - 缺陷所在:已合入的 C-1 / C-2 兑现路径(#5851 / #5856)对「原单已不是已批准请假」这一业务拒绝走的是抛错,没有走锁 §3 C-3 的 `blocked` 持久化收口(C-3:「业务拒绝与基础设施异常是两条路径、两种返回,不共用 throw」)。不在本分支 diff 内,但**只能经本入口到达**;入口的请假谓词只在发起时判定(§2.2),无从拦截。
    - **与 A2 开关的关系**:该序列要先有一个在途轮;开关默认 OFF 时经本入口开不出新轮,这条路径随之不可达。本分支**不修**它(归 C-1 线),开关打开之前须由 owner 知悉。
    - **建议**(不是授权):修复归 C-1 线 —— 兑现侧把这一拒绝改走 C-3 的 `blocked` 收口;或由 owner 另定「有在途撤销轮时直接取消路由拒绝」之类的守卫(锁级决定)。另请 owner 知悉:同一请假今天并存两条撤销通道(需审批的撤销轮、既有的本人直接取消),这是 main 既有行为,本分支未改。
+   - → 已由 §13(P3-A 修复)按锁 §3 C-3 第 4 行收口为 `blocked`,待合并;「有在途撤销轮时拒绝直接取消」仍是锁级决定。
 1. **P-3 三个读面**:`/history` 与两个 `getApproval` 的 `cancellationOutcome` 投影已随 #5856 在 main;本阶段按 owner 所选 (iii) 再加摘要端点。P-3 条款写「不得同批」,本 PR 只加 (iii),字面成立;摘要端点复用同一投影器且有一致性用例。**请 owner 知悉:同一事实现有三个读面、一个投影规则**;员工只能到达 (iii)(P-10)。
 2. **员工撤回的 HTTP 路径**:阶段 A 时没有(员工令牌在审批侧动作路由得 403,T-WD 钉住);A2 按 owner 11:0x 选项加了考勤侧撤回端点 `POST …/cancel-round/withdraw`(`attendance:write`,§8.3.3),`canWithdraw: true` 从此对应一个可达的 HTTP 动作。FE 呈现仍属阶段 B。
 3. **快照 requester ≠ 请假本人的单据**:插件自己的请求写入方今天不会产生这种形状(都把请求 `user_id` 写进 `requester_snapshot.id`),路由层的 requester 检查对它是**纵深防御**;若将来出现(例如另案的代理发起),请假本人不是原实例参与者时摘要对其 404、发起不可达(I7 与 lock:157 的直接后果)。
@@ -1214,3 +1215,45 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
    - CI(未推送);
    - CI 所用 PostgreSQL 大版本(本地为 15.17);
    - 浏览器层。
+
+### 13.9 门审 r1 处置(2026-09-30)
+
+门审 r1 的判定是 APPROVE-with-hardening(0 P1 / 0 P2 / 3 P3 / 3 NIT)。本轮只处置下表各项,不扩范围;授权口径同 §13.0。
+
+**本节取代 §13 中的这些陈述**(其余不变):
+- §13.0 与 §13.3「未改」中的「前端零改动」;
+- §13.4 最后两点:该码显示分类级文案、「本分支未做」;
+- §13.3「未改」末尾的实测与文件数:现在 `git diff --stat fc684dceeb -- plugins/ packages/core-backend/src/db/` 仍为空,`apps/` 下有 2 个文件(`cancelRound.ts` 与 `cancelRoundEntryCore.spec.ts`);整个分支改 5 个文件,`ApprovalProductService.ts` 在本轮零改动;
+- §13.5 的「三条用例」;
+- §13.7 的 ENTRY 65/65、尾部 227/227、前端 115/115,以及 §13.7 与 §13.8 第 6 项的「本地 15.17」。本轮读数在 PostgreSQL 16.15 上。
+
+| 门审项 | 处置 |
+|---|---|
+| P3-1 新码只有分类级文案 | 前端 `CANCEL_ROUND_BLOCK_CODE_COPY` 为 `CANCEL_ROUND_DOCUMENT_NOT_APPROVED` 加专属中英文案:「该请假已不再是已通过状态(例如已被取消),本次撤销未执行」/ "This leave is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out"。文案是静态的,不拼 `cancelRoundBlockDetail`(P-7)。「Known producers」注释同步更新。`cancelRoundEntryCore.spec.ts` 逐字钉住中英两语、`known: true` 与原始码,并断言它既不是分类文案,也不是创建期拒绝文案。 |
+| P3-2 锚点顺序无测 | ENTRY 的 P3-A 块加第 4 条用例。先在发起前照 REDEEM 套件的抹锚语句原样抹掉原单锚点(`UPDATE approval_records SET to_status = 'pending' WHERE instance_id = $1 AND to_status = 'approved'`,rowCount 1),再发起、直接取消、考勤侧批准。期望 200 `blocked` + 该码,而不是 409 `CANCEL_ROUND_WINDOW_ANCHOR_MISSING`。夹具帮助函数加了可选的 `beforeLaunch` 钩子,其余三条用例不变。产品代码零改动。 |
+| P3-3 码复用登记 | owner 项。代码不动,保持现码(§13.4)。 |
+| NIT-1 §6 0b 仍用现在时 | 0b 末尾加一句指向本节。:108、:1210 的回指未动。 |
+| NIT-2 vitest 缓存 | 本轮的测试全部在另一台机器的独立工作树上跑(真实安装的依赖,不是软链);编辑所在的机器上零测试。 |
+| NIT-3 夹具重复 | A3 的内联块与 P3-A 的 `compTimeLeaveTypeId` 合成阶段 D 帮助区里的一个 `compTimeLeaveTypeId(admin, name)`。已有行照旧复用,并断言需审批;只有新建时才登录管理员。A3 的行为不变;P3-A 原先总是先登录管理员,现在只在新建时登录,差别只是少写几行登录审计,任何断言都不受影响。 |
+
+**文案措辞的依据**:服务端按原单实例状态判该码,不看是哪个写入方改的。门审 r1 与本轮的有界普查中,找到的把已批准考勤原单改离 `approved` 的生产写入方是既有直接取消(改为 `cancelled`);普查没有证明穷尽,历史存量数据也 UNVERIFIED。所以文案把「已被取消」写成例子,不写成唯一原因;文案也不暗示原请假仍然有效。
+
+**读数**(另一台机器上的一次性库,PostgreSQL 16.15;每次跑前 `select current_database()` 断言;迁移的 `MIGRATION_EXCLUDE` 照抄 plugin-tests.yml 的 DB migrations 步):
+- ENTRY 整文件:**66/66**(原 65 条 + 新 1 条)。第 2、3 个提交各跑一次。
+- 撤销轮真库尾部 9 个文件,按 CI 同序在新迁移的一次性库上一次跑完:**228/228**,零跳过。分文件:census 27 · creation 66 · REDEEM 36 · seat-guards 3 · fk-migration 11 · outlet 7 · node-timeout 5 · seed-visibility 7 · ENTRY 66。
+- 前端 `cancelRoundEntry*` 8 个文件:**116/116**(原 115 条 + 新钉点 1 条)。
+- `apps/web` 的 `vue-tsc -b`:退出码 **0**。
+- core-backend `type-check` 的两段(`tsc --noEmit`,`tsc -p scripts/tsconfig.recovery-archive-acceptance.json`):退出码均为 **0**。
+- 私有短语:逐提交 **0** 命中;提交身份为 noreply。
+
+**mutation**(做法:cp 备份 → 改 → 跑整文件、不用 `-t` → cp 还原 → `cmp` 逐字节 → 工作树无改动):
+
+| mutation | numstat | 读数 |
+|---|---|---|
+| 删掉新文案条目 | `0 4` | 前端 8 个文件 **1 红 / 115 绿**,红的恰是新钉点 |
+| 把 §13.3 的分支原样移到锚点抛错之后、`expired` 判定之前(即门审 r1 的 mutation MD) | `13 12` | ENTRY **1 红 / 65 绿**,红的恰是新用例,得 409 `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` |
+
+**残留**:
+1. P3-3 仍待 owner 登记(或改用新的开放域码)。
+2. 历史存量里「已批准但无锚点」的原单是否存在:UNVERIFIED,需要在目标环境做只读核查。
+3. NOT RUN:本轮提交的 CI(尚未推送);浏览器层。
