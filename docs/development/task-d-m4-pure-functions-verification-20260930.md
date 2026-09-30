@@ -11,7 +11,7 @@
 独立复核经过三轮,发现的问题均已修复(均为同分支的后续 commit,非 amend),详见 §6:
 1. 多处 `ASSUMPTION(task-d)` 标记只在散文里提了裁决编号,没有用可 `grep` 的字面 token,以及 `task-settings.ts` 里把 R07(`time_zone` 列)错标成了 R02③/R02④。
 2. `task-notifications.ts` 里两个标了 `ASSUMPTION(task-d)` 的常量其实是死代码:`RECIPIENT_ROLE_PRIORITY` 声明了但从未被读取(真正的优先级是硬编码在四次 `consider(...)` 调用的书写顺序里),`TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` 这个"开关"改成 `true` 也不会让 `assignee_added` 真的进入通知闭集。两处都已改成常量真正驱动行为(§6)。
-3. 第二轮独立复核(协调方转达,13 个编号项)发现 5 处 P1/P2 实质缺口(角色/scope 无运行时闭集校验、R06 第三条跳过判据缺失、`isInDailyDigest` 的时区判别用例不真正判别、SQL 只有子串断言没有全文 pin、`isTaskReminderDue` 的"floor 之前"用例其实是窗口在挡不是 floor 在挡)+ 5 处 P3/NIT(含两处**实测确认**的真 bug:`parsePageParams({offset:1e300})` 会静默通过、`computeDefaultRemindAt` 对 `'2026-02-30'` 会静默滚成 3 月 2 日)。全部已修复,详见 §6 第三条 commit。
+3. 第三轮独立复核(协调方转达,13 个编号项)发现 5 处 P1/P2 实质缺口(角色/scope 无运行时闭集校验、R06 第三条跳过判据缺失、`isInDailyDigest` 的时区判别用例不真正判别、SQL 只有子串断言没有全文 pin、`isTaskReminderDue` 的"floor 之前"用例其实是窗口在挡不是 floor 在挡)+ 5 处 P3/NIT(含两处**实测确认**的真 bug:`parsePageParams({offset:1e300})` 会静默通过、`computeDefaultRemindAt` 对 `'2026-02-30'` 会静默滚成 3 月 2 日)。全部已修复,详见 §6 第三条 commit。
 
 ## 2. 命令与结果
 
@@ -23,7 +23,7 @@
 ./node_modules/.bin/vitest run tests/unit/task-*.test.ts --reporter=dot
 ```
 
-结果(第三轮修复后重跑):**22 个文件、684 个用例,全部通过**(第二轮独立复核新增 41 个用例:643 → 684;含七个新模块各自的测试文件,以及因 `task-ids.ts` 加前缀而更新的 `task-ids.test.ts`;`task-access.test.ts`/`task-dates.test.ts`/`task-completion.test.ts`/`task-membership.test.ts`/`task-tree.test.ts`/`task-comments.test.ts`/`task-deletion.test.ts`/`task-lock-keys.test.ts` 等任务 B/C 遗留测试原样通过,未受影响)。
+结果(第三轮修复后重跑):**22 个文件、684 个用例,全部通过**(第三轮独立复核新增 41 个用例:643 → 684;含七个新模块各自的测试文件,以及因 `task-ids.ts` 加前缀而更新的 `task-ids.test.ts`;`task-access.test.ts`/`task-dates.test.ts`/`task-completion.test.ts`/`task-membership.test.ts`/`task-tree.test.ts`/`task-comments.test.ts`/`task-deletion.test.ts`/`task-lock-keys.test.ts` 等任务 B/C 遗留测试原样通过,未受影响)。
 
 ### 2.2 门 20(`task-pure-no-io.test.ts`)
 
@@ -35,7 +35,7 @@
 
 结果:**5/5 通过**。**订正(独立复核 item 13):下面这段此前的措辞过强,现按 harness 源码(`tests/unit/task-pure-no-io.test.ts`)的实际行为重写。**
 
-harness 用 `readdirSync` 自动发现 `src/tasks/*.ts`(现为 16 个文件 = 任务 B/C 遗留的 9 个 + 本次新增的 7 个),对每个导出的函数只调用**一次**,用一个由参数名正则猜出来的占位参数列表(参数名匹配 `/query|executor|client|db/i` 的位置传入桩查询函数,其余一律传入字符串 `'x'`)——它**不**按函数自身的分支/reason 逐一构造输入去覆盖每条路径。实测这类占位调用对本模块树里绝大多数函数(例如 `applyAddMember`)会在函数体第一行解构/属性访问处就直接抛出 `TypeError`(`'x'.members` 是 `undefined`),被 harness 自己的 try/catch 归类为"ok-or-other"——即这次调用根本没有跑到函数的任何有意义分支,更谈不上"逐一调用一遍"覆盖了调用路径。
+harness 用 `readdirSync` 自动发现 `src/tasks/*.ts`(现为 16 个文件 = 任务 B/C 遗留的 9 个 + 本次新增的 7 个),对每个导出的函数只调用**一次**,用一个由参数名正则猜出来的占位参数列表(参数名匹配 `/query|executor|client|db/i` 的位置传入桩查询函数,其余一律传入字符串 `'x'`)——它**不**按函数自身的分支/reason 逐一构造输入去覆盖每条路径。实测这类占位调用对本模块树里的函数,要么在函数体第一行解构/属性访问处就直接抛出 `TypeError`(例如 `applyRemoveMember`:`'x'` 解构出的 `members` 是 `undefined`,`undefined.find(...)` 直接抛;实测确认,`packages/core-backend` 下用 `tsx` 跑过)、要么落进第一条守卫就直接返回一个拒绝结果而不抛错(例如 `applyAddMember`:`'x'` 解构出的 `role` 是 `undefined`,`parseTaskListMemberRole(undefined)` 返回 `{ok:false, reason:'invalid_role'}`,函数据此直接 `return`,同样不抛)——两种情形都被 harness 自己的 try/catch 归类为"ok-or-other"。无论哪种,这次调用都没有跑到函数除了最前面这一两行之外的任何有意义分支,更谈不上"逐一调用一遍"覆盖了调用路径。
 
 harness 真正给出的、站得住的保证只有两层:①`vi.mock('pg', …)`/`vi.mock('.../connection-pool', …)` 在任何 `src/tasks/*.ts` 文件被 import **之前**就已生效——只要这些文件(或它们传递 import 的任何东西)真的 `import` 了 `pg`/连接池,模块图本身就会先命中被 mock 的桩,不需要等到"调用某个分支"才发现;②对 `src/tasks/` 全体源文件跑 `grep -rn "from 'pg'|connection-pool|poolManager|pg\.query|db/pg"`,结果只有 `task-access.ts` 文档注释里的一句纯文字提及,零个真实 import。这两点合起来——本模块树没有任何文件导入过 db 访问入口,而 mock 又抢在 import 之前生效——才是"`src/tasks` 无 I/O"这个结论真正的依据;harness 的"逐个导出调用一次"只是这之上一层很弱的附加信号(证明**这一次**用占位输入调用,没有立刻命中桩),不是"证明新代码在调用路径上都没有 I/O"的充分条件。本文档不再复述后者这个过强表述。
 
@@ -88,6 +88,8 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 
 **核对时序说明**(避免与 §1/§6 的叙述冲突):本节这次 eslint 核对是在 §6 的死代码修复(commit `25df44d066`)**之后**跑的,不是发现问题的手段。修复**之前**,`RECIPIENT_ROLE_PRIORITY` 在模块内从未被任何代码引用过——`core-backend/.eslintrc.json` 里确实配了 `@typescript-eslint/no-unused-vars`(warn 级),按理说能抓到这种未引用的模块级常量,但 CI 从不对 `packages/core-backend` 跑 eslint(§2.5 上文已确认该包没有 `"lint"` 脚本),所以没有任何自动检查真正抓到它,是靠独立复核逐行读代码发现的。
 
+**第三轮修复后(`279c82002e`)重跑同一条 eslint 命令**:结果同上,仍然只有那一条既有的 `task-ids.ts` `no-misleading-character-class`,零新增问题——本轮新增/改动的五个源文件(`task-lists.ts`/`task-groups.ts`/`task-reminders.ts`/`task-settings.ts`/`task-pagination.ts`)干净。
+
 ## 3. Mutation 抽查(28 处关键守卫;备份 → 改 → 跑 → 还原 → 比对,不用 `git checkout --`)
 
 前 9 处(第一/二轮独立复核期间做的):每一条都用 `cp` 先备份到 `/tmp`,`python3` 做定点字符串替换,跑对应测试文件确认变红,再用原文件 `cp` 覆盖回来并用 `cmp` 逐字节核对还原。
@@ -104,7 +106,7 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 | 8 | `task-pagination.ts` `parsePageParams` 的 `limit` 上界 | 去掉 `\|\| parsed > TASK_PAGE_LIMIT_MAX` | 红 2(边界格 + 不静默夹取格),还原后 19/19 绿 |
 | 9 | `task-notifications.ts` `RECIPIENT_ROLE_PRIORITY`(§6 修复之后的版本 —— 证明常量现在真正驱动行为) | `['creator','assignee','follower','list_member']` 改成 `['creator','follower','assignee','list_member']`(交换 assignee/follower 顺序) | 红 2(`assignee>follower` 优先级断言 + 「assignee+follower 同一人应记 assignee」的 mutation-sensitive 断言),还原后 24/24 绿 |
 
-后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(`scratchpad/mutation-check-round2.py`,未提交,只跑在本地)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 跑对应测试文件、按退出码判红/绿 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。脚本本身的完整输出见下方;两次哈希相同(`56da6f18a7eef7dab7ff40022a7d5f5779d5a966e30414f7a11b5be0832bad1f`),证明脚本自己跑完之后工作区和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
+后 19 处(第三轮独立复核,协调方 13 项转述,`279c82002e` 引入的新守卫):不再逐条手跑,写了一个脚本化驱动(`scratchpad/mutation-check-round2.py`,未提交,只跑在本地)——对每一条:`git diff | sha256` 记基线 → 备份 → 用 Python 字符串替换做定点 mutate → 用 `--reporter=verbose` 跑对应测试文件、既按退出码判红/绿、也把实际失败的用例标题抓下来当证据 → 用备份覆盖还原 → `filecmp.cmp` 逐字节核对还原 → 全部跑完后再取一次 `git diff | sha256` 跟基线比对。下面表格「结果」列里带引号的用例标题就是脚本抓到的真实失败标题,不是转述;19 处全部 PASS,两次哈希相同(在干净工作区上最后一次重跑得到 `2061953acb44e2c3201b2527efdbcba184b65ecd63fe44234fb0f5c63313ea59`),证明脚本自己跑完之后工作区和跑之前逐字节一致,不依赖人工记忆去核对 19 次还原。
 
 | # | 模块 / 被改的守卫 | 改法 | 结果 |
 |---|---|---|---|
@@ -115,18 +117,18 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
 | 14 | `task-groups.ts` `applyRenameGroup` 的 scope 断言(item 9) | 同上 | 红,还原后逐字节一致 |
 | 15 | `task-groups.ts` `applyDeleteGroup` 的 scope 断言(item 9) | 同上 | 红,还原后逐字节一致 |
 | 16 | `task-groups.ts` `applyMoveItem` 的 scope 断言(item 9) | 同上 | 红,还原后逐字节一致 |
-| 17 | `task-groups.ts` `arraysEqual` 的长度检查(item 12) | 删掉 `if (a.length !== b.length) return false` | 红(前缀同序但更短的用例),还原后逐字节一致 |
+| 17 | `task-groups.ts` `arraysEqual` 的长度检查(item 12) | 删掉 `if (a.length !== b.length) return false` | 红——`applyMoveItem > "same group, SAME-LENGTH-PREFIX but different length (next is previous + one more item) -> changed: true"`,还原后逐字节一致 |
 | 18 | `task-reminders.ts` `isReminderSkippedByTaskState` 第三条判据(item 3) | 只留 status/deletedAt 判据,砍掉 remind_at 比对整段 | 红,还原后逐字节一致 |
 | 19 | `task-reminders.ts` `isInDailyDigest` 全天分支(item 4c) | `viewerToday(now, viewerTz)` 改成 `viewerToday(now, task.timeZone)` | 红,还原后逐字节一致 |
 | 20 | `task-reminders.ts` `isInDailyDigest` 定时分支(item 4c) | 两处 `viewerNextMidnight(…, viewerTz)` 改成 `task.timeZone` | 红,还原后逐字节一致 |
-| 21 | `task-reminders.ts` `buildTaskDailyDigestCondition` 的 `+2`/`+1` 偏移(item 5) | 改成 `+3`/`+2` | 红(全文 SQL pin 断言),还原后逐字节一致 |
+| 21 | `task-reminders.ts` `buildTaskDailyDigestCondition` 的 `+2`/`+1` 偏移(item 5) | 改成 `+3`/`+2` | 红——`buildTaskDailyDigestCondition > "full-text SQL pin: the exact NOT EXISTS clause and the all-day (+1) / scheduled (+2) date offsets"`,还原后逐字节一致 |
 | 22 | `task-reminders.ts` `isTaskReminderDue` 的 floor 接线(item 6) | `floor.getTime()` 改成字面量 `0` | 红,还原后逐字节一致 |
-| 23 | `task-reminders.ts` `TASK_REMINDER_SCAN_WINDOW_MS`(item 7) | `2 * 60 * 60 * 1000` 改成 `3 * 60 * 60 * 1000` | 红(字面量 pin 断言 + 2h30m 绝对时间用例),还原后逐字节一致 |
-| 24 | `task-reminders.ts` `computeDefaultRemindAt` 的严格日期校验(item 10) | 删掉 `assertValidCalendarDateString(dueDate)` 这一行调用 | 红('2026-02-30'/'2026-3-8' 两个新用例),还原后逐字节一致 |
+| 23 | `task-reminders.ts` `TASK_REMINDER_SCAN_WINDOW_MS`(item 7) | `2 * 60 * 60 * 1000` 改成 `3 * 60 * 60 * 1000` | 红——`"R06: TASK_REMINDER_SCAN_WINDOW_MS is pinned to 2 hours (ASSUMPTION(task-d): [R06])"` + `"absolute-time case: remindAt exactly 2h30m before now -> false"`,还原后逐字节一致 |
+| 24 | `task-reminders.ts` `computeDefaultRemindAt` 的严格日期校验(item 10) | 删掉 `assertValidCalendarDateString(dueDate)` 这一行调用 | 红——`"...\"2026-3-8\", not zero-padded) THROWS RangeError"` + `"...\"2026-02-30\") THROWS RangeError, never silently rolls over"`,还原后逐字节一致 |
 | 25 | `task-settings.ts` `parseSettingsPatch` 的 `badgeScope` 显式 null 守卫(item 8) | 删掉 `if (patch.badgeScope === null) return {…}` | 红,还原后逐字节一致 |
 | 26 | `task-settings.ts` `parseSettingsPatch` 的 `defaultRemindPolicy` 显式 null 守卫(item 8) | 同上 | 红,还原后逐字节一致 |
-| 27 | `task-pagination.ts` `toStrictNonNegativeInteger` 数字分支(item 11) | `Number.isSafeInteger` 退回 `Number.isInteger` | 红(`offset: 1e300` 用例——`limit` 同款用例本来就会被上界单独挡住,不具判别力),还原后逐字节一致 |
-| 28 | `task-pagination.ts` `toStrictNonNegativeInteger` 字符串分支正则(item 11) | `^(0\|[1-9]\d*)$` 退回 `^\d+$` | 红(`'007'`/`'00'` 用例),还原后逐字节一致 |
+| 27 | `task-pagination.ts` `toStrictNonNegativeInteger` 数字分支(item 11) | `Number.isSafeInteger` 退回 `Number.isInteger` | 红——`"offset as the NUMBER 1e300 is rejected -> invalid_offset (not silently accepted as an unsafe \"integer\")"`(`limit` 同款用例本来就会被上界单独挡住,不具判别力),还原后逐字节一致 |
+| 28 | `task-pagination.ts` `toStrictNonNegativeInteger` 字符串分支正则(item 11) | `^(0\|[1-9]\d*)$` 退回 `^\d+$` | 红——`"a leading-zero digit string (\"007\") is rejected, not silently parsed as 7"` + `"\"00\" is rejected (not a canonical spelling of 0)"`,还原后逐字节一致 |
 
 全部 28 处按预期变红,还原后逐字节比对(`cmp`/`filecmp.cmp`)与原文件相同,对应测试文件回到全绿;第 10–28 处的脚本运行还额外核对了"整个循环跑完,工作区 diff 跟循环开始前逐字节一致"这一条,不只是逐条各自还原。
 
@@ -154,17 +156,19 @@ CI 的 "Run type checking" 前一步是 "Run linting"(`.github/workflows/plugin-
   - `task-notifications.ts` 的 `RECIPIENT_ROLE_PRIORITY` 声明了但从未被 `resolveNotificationRecipients` 读取——真正的优先级是硬编码在四次 `consider(...)` 调用的书写顺序里;改后 owner 就算裁定不同优先级、把这个常量改一下,行为也不会跟着变。已改成显式 `for (const role of RECIPIENT_ROLE_PRIORITY)` 驱动,常量现在是唯一真相(mutation #9 证实)。
   - `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` 这个"开关"常量改成 `true` 不会让 `assignee_added` 真的进入 `TASK_NOTIFIABLE_EVENTS`(该数组是独立的字面量,不读这个布尔值)——是纯装饰性的死代码。已删除该常量与对应测试断言,`[R05-opt]` 标记直接移到 `TASK_NOTIFIABLE_EVENTS` 数组本身上,数组字面量就是唯一真相。
   - `task-settings.ts` 里 `timeZone` 字段与 `daily_reminder_requires_time_zone` 校验被错标成 R02③/R02④——M4 裁决包 v2 §0.1 已把这一列明确从 R02 移到 R07("原④『加 time_zone 列』移到 R07")。改标为 `[R07]`,`[R02]` 只留给 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 三个字段。设计文档 §2.5/§5 与对应测试标题同步改正。
-- **commit `279c82002e`**(第三轮独立复核,协调方转述的 13 个编号项;第 5 条"重跑 CI lint"不需要代码改动,已在本文档 §2.5 覆盖,不算独立一条源码改动):
+- **commit `279c82002e`**(第三轮独立复核,协调方转述的 13 个编号项;编号与协调方原文一一对应):
   1. `task-lists.ts` `applyAddMember`/`applyChangeMemberRole`:`role` 参数只有编译期类型,没有运行时闭集校验——两处入口现在都先调用新导出的 `parseTaskListMemberRole(raw: unknown)`(同一函数,不是两套平行逻辑),`'owner'`/未知字符串/非字符串一律 422 `invalid_role`,且排在其它检查之前。
   2. `task-lists.ts` `toTaskListMemberships`:闭集外的 `role` 此前会落进三元表达式的 `else` 分支,静默变成 `'editor'`(过度授权)。改成显式三分支,闭集外 `throw TypeError`(同 `canListAction` 的 fail-closed-by-throwing 风格)。
   3. `task-reminders.ts` `isReminderSkippedByTaskState`:新增 R06 第三条跳过判据(协调方转述,未回查原始裁决包文本——文件已按规定删除)——排队投递锁定的 `remind_at` 与任务当前 `remind_at` 不一致(含当前为 `null`)⇒ skipped。函数签名从 `(task)` 改为 `(task, deliveryRemindAt)`。
   4. `isInDailyDigest`:新增三个真正能区分"用对 `viewerTz`"和"用错成 `task.timeZone`"的判别用例——第一版的 `task.timeZone` 用例对两种实现给出同一结果,不具判别力,已发现并重做。
   5. `buildTaskDailyDigestCondition`:新增全文 SQL pin(同 `task-access.test.ts` 的风格),取代此前只有 `toContain` 子串断言的覆盖。
-  6. `isTaskReminderDue`:原"remindAt 在 floor 之前"用例其实是被 2 小时扫描窗口挡住的(相差约 12 小时,远超窗口),floor 守卫本身从未被单独触发过——已替换成真正只有 floor 守卫会拒绝的用例。`TASK_REMINDER_SCAN_WINDOW_MS` 新增字面量 pin 测试,外加一个 2 小时 30 分钟的绝对时间用例。
-  7. `task-settings.ts` `parseSettingsPatch`:PATCH 体里显式 `badgeScope: null`/`defaultRemindPolicy: null` 现在 422,不再静默重置成默认值(`parseBadgeScope`/`parseRemindPolicy` 的"null 视为缺省"读法只对"读一行既有记录"成立,PATCH 语境的"别碰"写法只有键缺失)。
-  8. `task-groups.ts`:四个 `apply*` 函数入口新增 `scope` 运行时闭集校验,闭集外 `throw TypeError`。
-  9. `computeDefaultRemindAt`(全天分支):调用 `computeDateReminderOccurrence` 前新增严格 `YYYY-MM-DD` + 真实日历日期校验。**实测确认的真 bug**:`new Date('2026-02-30')` 会静默滚成 2026-03-02,`new Date('2026-3-8')`(非规范拼写)会被静默接受——两者此前都会让 `computeDefaultRemindAt` 返回一个看似合理但错误的提醒时间,而不是报错。
-  10. `task-pagination.ts`:数字分支的 `Number.isInteger` 改成 `Number.isSafeInteger`。**实测确认的真 bug**:修复前 `parsePageParams({offset: 1e300})` 返回 `{ok:true, params:{offset:1e+300}}`——`offset` 没有上界检查(不像 `limit`),这个离谱的值会原样传给下游 SQL 的 `OFFSET` 绑定。字符串分支正则从 `^\d+$` 收紧为 `^(0|[1-9]\d*)$`,不再静默接受 `"007"`/`"00"` 这类带前导零的非规范拼写。
-  11. `task-groups.ts` `arraysEqual`:新增能区分"删掉长度检查"这个 mutation 的用例(`previous` 是 `next` 的严格前缀、`next` 更长的方向)。
-  12. 本文档 §2.2:订正了对门 20 harness 实际行为的过强描述(见上方 §2.2 的订正段落)。
-  13. 19 处新守卫(表格第 10–28 行)全部脚本化 mutation 抽查确认;`tests/unit/task-*.test.ts` 从 643 增至 684;两条 `tsc` 命令、eslint 复核均重新跑过并确认干净。
+  6. `isTaskReminderDue`:原"remindAt 在 floor 之前"用例其实是被 2 小时扫描窗口挡住的(相差约 12 小时,远超窗口),floor 守卫本身从未被单独触发过——已替换成真正只有 floor 守卫会拒绝的用例。
+  7. `TASK_REMINDER_SCAN_WINDOW_MS` 新增字面量 pin 测试(`=== 2 * 60 * 60 * 1000`),外加一个 2 小时 30 分钟的绝对时间用例。
+  8. `task-settings.ts` `parseSettingsPatch`:PATCH 体里显式 `badgeScope: null`/`defaultRemindPolicy: null` 现在 422,不再静默重置成默认值(`parseBadgeScope`/`parseRemindPolicy` 的"null 视为缺省"读法只对"读一行既有记录"成立,PATCH 语境的"别碰"写法只有键缺失)。
+  9. `task-groups.ts`:四个 `apply*` 函数入口新增 `scope` 运行时闭集校验,闭集外 `throw TypeError`。
+  10. `computeDefaultRemindAt`(全天分支):调用 `computeDateReminderOccurrence` 前新增严格 `YYYY-MM-DD` + 真实日历日期校验。**实测确认的真 bug**:`new Date('2026-02-30')` 会静默滚成 2026-03-02,`new Date('2026-3-8')`(非规范拼写)会被静默接受——两者此前都会让 `computeDefaultRemindAt` 返回一个看似合理但错误的提醒时间,而不是报错。
+  11. `task-pagination.ts`:数字分支的 `Number.isInteger` 改成 `Number.isSafeInteger`。**实测确认的真 bug**:修复前 `parsePageParams({offset: 1e300})` 返回 `{ok:true, params:{offset:1e+300}}`——`offset` 没有上界检查(不像 `limit`),这个离谱的值会原样传给下游 SQL 的 `OFFSET` 绑定。字符串分支正则从 `^\d+$` 收紧为 `^(0|[1-9]\d*)$`,不再静默接受 `"007"`/`"00"` 这类带前导零的非规范拼写。
+  12. `task-groups.ts` `arraysEqual`:新增能区分"删掉长度检查"这个 mutation 的用例(`previous` 是 `next` 的严格前缀、`next` 更长的方向)。
+  13. 本文档 §2.2:订正了对门 20 harness 实际行为的过强描述(见上方 §2.2 的订正段落)。
+
+以上 13 项之外:19 处新守卫(表格第 10–28 行)全部脚本化 mutation 抽查确认;`tests/unit/task-*.test.ts` 从 643 增至 684;两条 `tsc` 命令、eslint 复核均重新跑过并确认干净(§2.3/§2.5)。

@@ -97,6 +97,8 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 
 每条对应源码里一处或多处 `// ASSUMPTION(task-d): [R<nn>/D<nn>] …` 注释。owner 尚未 ratify M4 裁决包 v2;下表的「值」就是裁决包的推荐值,**不是** owner 裁决。
 
+下表「裁决」列写 `— (own choice, …)` 的行是**本模块自己的实现选择,不是裁决包推荐值**——这些行对应的源码注释用的是 `ASSUMPTION(task-d, own choice …` 这个不同的前缀(注意逗号,不是冒号),`grep -n 'ASSUMPTION(task-d):'`(冒号形)找不到它们;要单独列出全部 own-choice 行,用 `grep -n 'ASSUMPTION(task-d, own'`。两种前缀刻意保持视觉可区分,免得 owner 回来核对裁决时把"我们自己选的"和"裁决包推荐的"混在一起看。
+
 | 裁决 | 模块 / 函数 | 选的值 | 备注 |
 |---|---|---|---|
 | R23 | `task-ids.ts` `TASK_ID_PREFIXES` | `group:'tgrp'`, `listEvent:'tlev'` | 沿用 `tev` 先例的加词手法 |
