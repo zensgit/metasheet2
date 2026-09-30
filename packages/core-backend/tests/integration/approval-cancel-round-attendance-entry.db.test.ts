@@ -33,6 +33,7 @@ import { invalidateUserPerms } from '../../src/rbac/service'
 import { applyTodoMirrorTaskCreated } from '../../src/services/dingtalk-todo-mirror-service'
 import { DingTalkTodoMirrorWorker, type TodoMirrorWorkerQuery } from '../../src/services/dingtalk-todo-mirror-worker'
 import { buildApprovalTaskCreatedEvent } from '../../src/services/ApprovalTaskCreatedEvent'
+import { eventBus } from '../../src/integration/events/event-bus'
 
 /**
  * Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记 —— 产品入口增补 v2」,
@@ -3496,6 +3497,336 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
         )
         expect(statuses.rows).toEqual([{ status: 'cancelled' }, { status: 'cancelled' }])
         expect((await roundsFor(leaves[0].documentId)).map((row) => row.outcome)).toEqual(['applied'])
+      })
+
+      /**
+       * P3-A (`docs/development/approval-cancel-entry-phase-a-design-20260928.md` §6 item 0b and its
+       * 「P3-A 修复」 section). A round is launched, then the SAME leave is cancelled through the
+       * existing direct channel (`POST /api/attendance/requests/:id/cancel`, unchanged), and only then
+       * does the seat holder approve. The contract is lock §3 C-3 row 4 (最终评估:业务不可逆 —
+       * 持久化收口(同事务); round `blocked` + reason; engine 复用现有 `rejected`, actor = 系统终结身份,
+       * reason = `business_blocked:<code>`, 同步关闭引擎待办; 占位释放) and §14.2 判据 IV: the approve
+       * is answered 200, the round is closed by the system as `blocked`, its seat is released, and
+       * nothing is written to the leave or its balance — never a 500 that leaves the round pending.
+       *
+       * Everything below is real: the leave is created and approved through the plugin routes and
+       * deducts a real balance lot; the direct cancel returns it; the approve runs the production
+       * attendance boundary (no stand-in is bound in this block).
+       */
+      describe('P3-A: the original leave is cancelled through the existing direct channel while its round is pending', () => {
+        // The creation path's own code for the same predicate, reused in the open block-code domain (P-7).
+        const BLOCK_CODE = 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED'
+        const CLOSE_REASON = `business_blocked:${BLOCK_CODE}`
+        const SYSTEM_ACTOR = 'system:approval-cancel-round'
+
+        async function compTimeLeaveTypeId(adminToken: string): Promise<string> {
+          const existing = await pool().query<{ id: string; requires_approval: boolean; is_active: boolean }>(
+            `SELECT id::text AS id, requires_approval, is_active FROM attendance_leave_types
+              WHERE org_id = 'default' AND code = 'comp_time'`,
+          )
+          if (existing.rows[0]) {
+            expect(existing.rows[0], 'the existing comp_time leave type must require approval').toMatchObject({
+              requires_approval: true,
+              is_active: true,
+            })
+            return existing.rows[0].id
+          }
+          const created = await http('POST', '/api/attendance/leave-types', adminToken, {
+            code: 'comp_time',
+            name: `G4-P3A comp time ${TS}`,
+            paid: true,
+            requiresApproval: true,
+          })
+          expect(created.status, created.text).toBe(201)
+          const id = created.json.data.id as string
+          createdLeaveTypeIds.add(id)
+          return id
+        }
+
+        type DirectlyCancelledRound = {
+          employee: string
+          employeeToken: string
+          approver: string
+          approverToken: string
+          approverFixtureToken: string
+          requestId: string
+          documentId: string
+          roundInstanceId: string
+          roundId: string
+        }
+
+        /** A pending round whose ORIGINAL leave has since been cancelled through the direct channel. */
+        async function pendingRoundOverDirectlyCancelledLeave(label: string): Promise<DirectlyCancelledRound> {
+          const admin = `g4p3a-${label}-adm-${TS}`
+          await seedLoginUser(admin, { roles: ['admin'], admin: true })
+          const leaveTypeId = await compTimeLeaveTypeId(await loginToken(admin))
+          const employee = `g4p3a-${label}-emp-${TS}`
+          const approver = `g4p3a-${label}-apr-${TS}`
+          const employeeToken = await seedPerson(employee, 'attendance_employee')
+          const seated = await seedApprovingPerson(approver, 'attendance_approver')
+
+          const lot = await pool().query<{ id: string }>(
+            `INSERT INTO attendance_leave_balances
+               (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key,
+                granted_at, expires_at, status)
+             VALUES ('default', $1, 'comp_time', 480, 480, 'grant', $2,
+                     now() - interval '10 days', now() + interval '300 days', 'active')
+             RETURNING id::text AS id`,
+            [employee, `g4p3a-${label}-${employee}`],
+          )
+          createdLeaveBalanceIds.add(lot.rows[0].id)
+
+          const create = await http('POST', '/api/attendance/requests', employeeToken, {
+            workDate: '2031-05-14',
+            requestType: 'leave',
+            leaveTypeId,
+            minutes: 120,
+          })
+          expect(create.status, create.text).toBe(201)
+          const requestId = create.json.data.request.id as string
+          createdRequestIds.add(requestId)
+          const approveLeave = await http('POST', `/api/attendance/requests/${requestId}/approve`, seated.token, { comment: 'ok' })
+          expect(approveLeave.status, approveLeave.text).toBe(200)
+          const original = await pool().query<{ status: string; approval_instance_id: string }>(
+            'SELECT status, approval_instance_id FROM attendance_requests WHERE id = $1',
+            [requestId],
+          )
+          expect(original.rows[0].status).toBe('approved')
+          const documentId = original.rows[0].approval_instance_id
+          createdApprovalIds.add(documentId)
+
+          const launch = await http('POST', entryPath(requestId), employeeToken, {})
+          expect(launch.status, launch.text).toBe(201)
+          const roundInstanceId = launch.json.data.round.engineInstanceId as string
+          createdApprovalIds.add(roundInstanceId)
+          expect(await activeUserSeats(roundInstanceId)).toEqual([approver])
+
+          // The existing direct channel, exactly as an employee reaches it today. Its in-process
+          // cancellation announcement is also the positive control for the zero-event capture the
+          // cases below make on the same bus.
+          const directEvents = captureRoundEvents(roundInstanceId)
+          let direct: Raw
+          try {
+            direct = await http('POST', `/api/attendance/requests/${requestId}/cancel`, employeeToken, {})
+          } finally {
+            directEvents.stop()
+          }
+          expect(direct.status, direct.text).toBe(200)
+          expect(directEvents.seen).toEqual(['attendance.request.cancelled'])
+          const afterDirect = await pool().query<{ request_status: string; document_status: string }>(
+            `SELECT r.status AS request_status, i.status AS document_status
+               FROM attendance_requests r JOIN approval_instances i ON i.id = r.approval_instance_id
+              WHERE r.id = $1`,
+            [requestId],
+          )
+          expect(afterDirect.rows[0]).toEqual({ request_status: 'cancelled', document_status: 'cancelled' })
+          expect((await roundsFor(documentId)).map((row) => row.outcome)).toEqual(['pending'])
+
+          return {
+            employee,
+            employeeToken,
+            approver,
+            approverToken: seated.token,
+            approverFixtureToken: seated.fixtureToken,
+            requestId,
+            documentId,
+            roundInstanceId,
+            roundId: launch.json.data.round.roundId as string,
+          }
+        }
+
+        /** Every row the leave's business state lives in, whole (`SELECT *`), for a before/after equality. */
+        async function leaveBusinessState(fixture: DirectlyCancelledRound): Promise<unknown> {
+          const request = await pool().query('SELECT * FROM attendance_requests WHERE id = $1', [fixture.requestId])
+          const document = await pool().query('SELECT * FROM approval_instances WHERE id = $1', [fixture.documentId])
+          const documentRecords = await pool().query(
+            'SELECT * FROM approval_records WHERE instance_id = $1 ORDER BY occurred_at, id',
+            [fixture.documentId],
+          )
+          const lots = await pool().query(
+            'SELECT * FROM attendance_leave_balances WHERE user_id = $1 ORDER BY id',
+            [fixture.employee],
+          )
+          const events = await pool().query(
+            'SELECT * FROM attendance_leave_balance_events WHERE user_id = $1 ORDER BY id',
+            [fixture.employee],
+          )
+          return {
+            request: request.rows,
+            document: document.rows,
+            documentRecords: documentRecords.rows,
+            lots: lots.rows,
+            events: events.rows,
+          }
+        }
+
+        function captureRoundEvents(instanceId: string): { seen: string[]; stop: () => void } {
+          const seen: string[] = []
+          const ids = (
+            ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled', 'attendance.request.cancelled'] as const
+          ).map((type) =>
+            eventBus.subscribe(type, (payload: unknown) => {
+              const approval = (payload as { approval?: { instanceId?: unknown } } | null)?.approval
+              if (type === 'attendance.request.cancelled' || (approval && approval.instanceId === instanceId)) seen.push(type)
+            }),
+          )
+          return { seen, stop: () => ids.forEach((id) => eventBus.unsubscribe(id)) }
+        }
+
+        /** C-3 row 4, read off the database and both read surfaces after the approve. */
+        async function expectClosedAsSystemBlocked(fixture: DirectlyCancelledRound): Promise<void> {
+          const round = await pool().query<{
+            outcome: string
+            ended_at: Date | null
+            block_reason: string | null
+            policy_snapshot_at_decision: unknown
+          }>(
+            `SELECT outcome, ended_at, block_reason, policy_snapshot_at_decision
+               FROM approval_rounds WHERE engine_instance_id = $1`,
+            [fixture.roundInstanceId],
+          )
+          expect(round.rows).toHaveLength(1)
+          expect(round.rows[0].outcome).toBe('blocked')
+          expect(round.rows[0].ended_at).not.toBeNull()
+          expect(round.rows[0].block_reason).toBe(CLOSE_REASON)
+          expect(round.rows[0].policy_snapshot_at_decision).not.toBeNull()
+
+          // 复用现有 `rejected`, closed by the system (not the approver), and its todo closed with it.
+          const engine = await pool().query<{ status: string; current_node_key: string | null }>(
+            'SELECT status, current_node_key FROM approval_instances WHERE id = $1',
+            [fixture.roundInstanceId],
+          )
+          expect(engine.rows[0]).toEqual({ status: 'rejected', current_node_key: null })
+          const activeSeats = await pool().query<{ count: string }>(
+            'SELECT COUNT(*)::text AS count FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE',
+            [fixture.roundInstanceId],
+          )
+          expect(activeSeats.rows[0].count).toBe('0')
+          const sentinel = await pool().query<{ action: string; to_status: string; metadata: Record<string, unknown> | null }>(
+            'SELECT action, to_status, metadata FROM approval_records WHERE instance_id = $1 AND actor_id = $2',
+            [fixture.roundInstanceId, SYSTEM_ACTOR],
+          )
+          expect(sentinel.rows).toHaveLength(1)
+          expect(sentinel.rows[0]).toMatchObject({ action: 'reject', to_status: 'rejected' })
+          expect(sentinel.rows[0].metadata).toMatchObject({
+            cancelRoundSystemClose: true,
+            cancelRoundCloseReason: CLOSE_REASON,
+            cancelRoundOutcome: 'blocked',
+            // The observed document status, BESIDE the bounded reason (never concatenated into it).
+            cancelRoundBlockDetail: 'cancelled',
+          })
+          const approvedRows = await pool().query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM approval_records WHERE instance_id = $1 AND to_status = 'approved'`,
+            [fixture.roundInstanceId],
+          )
+          expect(approvedRows.rows[0].count).toBe('0')
+
+          // 释放: no pending round is left on the document.
+          const pending = await pool().query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM approval_rounds WHERE document_id = $1 AND outcome = 'pending'`,
+            [fixture.documentId],
+          )
+          expect(pending.rows[0].count).toBe('0')
+
+          // The requester's summary: the existing V6 presentation (P-2 / P-7) — code only, no detail.
+          const summary = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+          expect(summary.status, summary.text).toBe(200)
+          expect(summary.json.data.round).toMatchObject({
+            roundId: fixture.roundId,
+            outcome: 'blocked',
+            status: 'cancellation_blocked',
+            closedBySystem: true,
+            closeReason: CLOSE_REASON,
+            blockCode: BLOCK_CODE,
+            cancellationOutcome: null,
+            canWithdraw: false,
+          })
+          const again = await http('GET', entryPath(fixture.requestId), fixture.employeeToken)
+          expect(again.text).toBe(summary.text)
+
+          // The approval-side detail of the SAME round carries the same bounded token.
+          const detail = await http('GET', `/api/approvals/${fixture.roundInstanceId}`, fixture.approverFixtureToken)
+          expect(detail.status, detail.text).toBe(200)
+          expect(detail.json.status).toBe('rejected')
+          expect(detail.json.cancelRoundCloseReason).toBe(CLOSE_REASON)
+
+          // The approver's attendance-side pending list no longer shows it.
+          const list = await http('GET', '/api/attendance/cancel-rounds/pending', fixture.approverToken)
+          expect(list.status, list.text).toBe(200)
+          expect(list.json.data.items.map((item: { requestId: string }) => item.requestId)).not.toContain(fixture.requestId)
+
+          // A new launch on the same leave is still refused, and opens nothing. NOT evidence of the
+          // release above: this 409 answers the same way while a round is still pending (the leave
+          // itself is no longer approved); the `pending = 0` count above is the release witness.
+          const relaunch = await http('POST', entryPath(fixture.requestId), fixture.employeeToken, {})
+          expect(relaunch.status, relaunch.text).toBe(409)
+          expect(relaunch.json.error.code).toBe('CANCEL_ROUND_DOCUMENT_NOT_APPROVED')
+          expect((await roundsFor(fixture.documentId)).map((row) => row.outcome)).toEqual(['blocked'])
+        }
+
+        it('attendance-side approve by the seat holder (real token): 200 with the minimal body saying blocked; the round is closed by the system as business_blocked, its seat released, the leave and its balance untouched, zero completion events', async () => {
+          const fixture = await pendingRoundOverDirectlyCancelledLeave('att')
+          const before = await leaveBusinessState(fixture)
+          const events = captureRoundEvents(fixture.roundInstanceId)
+          let decided: Raw
+          try {
+            decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
+          } finally {
+            events.stop()
+          }
+          expect(decided.status, decided.text).toBe(200)
+          expect(decided.json).toEqual({
+            ok: true,
+            data: {
+              requestId: fixture.requestId,
+              roundId: fixture.roundId,
+              outcome: 'blocked',
+              status: 'cancellation_blocked',
+            },
+          })
+          expect(events.seen).toEqual([])
+          expect(await leaveBusinessState(fixture)).toEqual(before)
+          await expectClosedAsSystemBlocked(fixture)
+          expect(await leaveBusinessState(fixture)).toEqual(before)
+        })
+
+        it('approval-side approve by the same seat holder: 200 with the closed DTO (rejected + the bounded close reason), the same system close, and the leave and its balance untouched', async () => {
+          const fixture = await pendingRoundOverDirectlyCancelledLeave('apr')
+          const before = await leaveBusinessState(fixture)
+          const events = captureRoundEvents(fixture.roundInstanceId)
+          let decided: Raw
+          try {
+            decided = await http('POST', `/api/approvals/${fixture.roundInstanceId}/actions`, fixture.approverFixtureToken, {
+              action: 'approve',
+            })
+          } finally {
+            events.stop()
+          }
+          expect(decided.status, decided.text).toBe(200)
+          expect(decided.json.status).toBe('rejected')
+          expect(decided.json.cancelRoundCloseReason).toBe(CLOSE_REASON)
+          expect(events.seen).toEqual([])
+          expect(await leaveBusinessState(fixture)).toEqual(before)
+          await expectClosedAsSystemBlocked(fixture)
+        })
+
+        it('precedence: when the window has ALSO closed, the close is still blocked with this code, not expired — the reason that holds regardless of the clock', async () => {
+          const fixture = await pendingRoundOverDirectlyCancelledLeave('win')
+          // §2-G2 anchor moved past the leave suite's 90-day ceiling — the anchor, not the clock
+          // (same fixture move as the V5 case above).
+          const aged = await pool().query(
+            `UPDATE approval_records SET created_at = now() - make_interval(days => 200)
+              WHERE instance_id = $1 AND to_status = 'approved'`,
+            [fixture.documentId],
+          )
+          expect(aged.rowCount).toBe(1)
+          const before = await leaveBusinessState(fixture)
+          const decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
+          expect(decided.status, decided.text).toBe(200)
+          expect(decided.json.data).toMatchObject({ outcome: 'blocked', status: 'cancellation_blocked' })
+          expect(await leaveBusinessState(fixture)).toEqual(before)
+          await expectClosedAsSystemBlocked(fixture)
+        })
       })
     })
   })
