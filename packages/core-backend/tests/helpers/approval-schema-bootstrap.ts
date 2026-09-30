@@ -2,10 +2,13 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump (P3-3 fix round, gate P3-5) adds the `approval_fd_signature_*`
+// idempotent DDL. The current bump (F3-D1, 2026-10-01) is a relabel only, with no DDL change:
+// owner ruling Q9 ④ renamed the `approval_form_drafts` migration so it sorts after main's newest
+// migration, and this marker now carries the same date as the renamed migration file.
+// The bump before that (P3-3 fix round, gate P3-5) adds the `approval_fd_signature_*`
 // CHECKs (non-blank + 8192-byte bound) to `approval_form_drafts.signature`, which previously had NO
 // bound at all — matches the amended production migration
-// zzzz20260914120000_create_approval_form_drafts.ts (owner-gated DDL, not applied anywhere outside
+// zzzz20261001120000_create_approval_form_drafts.ts (owner-gated DDL, not applied anywhere outside
 // CI/throwaway test DBs). A DB already bootstrapped under the PRIOR P3-3 version (below) would
 // otherwise keep running with the old, unbounded `signature` column forever — this bump's ALTER
 // TABLE ... ADD CONSTRAINT statements are what force it to converge.
@@ -38,7 +41,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // The bump before that added Lock-5's `policy_denied` action to the approval_records CHECK so the
 // per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
 // migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260914-p33-approval-form-drafts-signature-bounds'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20261001-f3d1-approval-form-drafts'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -510,7 +513,7 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_form_field_revisions_instance ON approval_form_field_revisions(instance_id, id)`)
 
     // P3-3 — `approval_form_drafts` (server-side approval form draft storage). Idempotent
-    // convergence matches the production migration zzzz20260914120000_create_approval_form_drafts.ts
+    // convergence matches the production migration zzzz20261001120000_create_approval_form_drafts.ts
     // (owner-gated DDL — not applied anywhere outside CI/throwaway test DBs). NO org_id column
     // (contract §2) and deliberately NO FK to approval_templates (id-type mismatch + templates are
     // deletable) — see the migration's own docblock for the full reasoning.

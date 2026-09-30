@@ -49,7 +49,7 @@ on:
     # workflow_dispatch-ed until it has run once via a trigger it responds to. The `paths` filter
     # keeps it off unrelated PRs.
     paths:
-      - 'packages/core-backend/src/db/migrations/zzzz20260914120000_create_approval_form_drafts.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20261001120000_create_approval_form_drafts.ts'
       - 'packages/core-backend/src/services/approval-form-draft-service.ts'
       - 'packages/core-backend/src/routes/approval-form-drafts.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
@@ -76,7 +76,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'packages/core-backend/src/db/migrations/zzzz20260914120000_create_approval_form_drafts.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20261001120000_create_approval_form_drafts.ts'
       - 'packages/core-backend/src/services/approval-form-draft-service.ts'
       - 'packages/core-backend/src/routes/approval-form-drafts.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
@@ -152,7 +152,7 @@ jobs:
           # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
           # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
           # identical schema the approval real-DB steps run against, INCLUDING this PR's
-          # zzzz20260914120000_create_approval_form_drafts.ts (owner-gated DDL — applied ONLY to
+          # zzzz20261001120000_create_approval_form_drafts.ts (owner-gated DDL — applied ONLY to
           # this ephemeral, first-party CI Postgres container, never to a shared database).
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: pnpm --filter @metasheet/core-backend db:migrate

@@ -90,7 +90,8 @@ describe('approval admin jump migration and bootstrap sync', () => {
     // bounds CHECKs (`approval_fd_signature_bounds` / `approval_fd_signature_nonblank`) — this pin
     // was left behind pointing at the PRIOR version when that bump landed, reddening this test on
     // its own; keep it synchronized going forward.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260914-p33-approval-form-drafts-signature-bounds'")
+    // F3-D1 (owner ruling Q9 ④) relabelled it to the renamed migration's date; no DDL change.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20261001-f3d1-approval-form-drafts'")
     // ANCHORED on the FULL member list, not the old floating fragment. The previous substring
     // (`'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'`) still passed with BOTH `handle`
     // and `policy_denied` missing from the bootstrap — an unanchored pin over load-bearing DDL, the
