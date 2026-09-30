@@ -327,8 +327,12 @@ function canonicalTimeZoneName(timeZone: string): string | null {
  * failure (missing, blank, not a real zone per `isValidIanaTimeZone`, or a bare-offset form per the
  * `OFFSET_FORM_RE` guard above). Returns the CANONICAL zone name (the platform's canonical spelling, e.g. `Asia/Kolkata` and
  * `Asia/Calcutta` collapse to one name) so two spellings of the same zone collapse to one string for a caller that keys a cache
- * or a `COALESCE($3, …)` bind value on it. `isValidIanaTimeZone` is the ONE external import this
- * module tree is allowed.
+ * or a `COALESCE($3, …)` bind value on it. `isValidIanaTimeZone` is the ONE external import THIS
+ * FILE is allowed (task-b's original wording said "this module tree", which M4 ruling pack v2 D11
+ * flags as stale: `task-reminders.ts`, elsewhere in this same `src/tasks/` tree, additionally
+ * imports `computeDateReminderOccurrence` from `../multitable/automation-date-reminder` — lock
+ * `:140` names that function itself as the required all-day remind_at implementation, so this
+ * per-file statement is the accurate one).
  */
 export function validateViewerTimeZoneHeader(headerValue: unknown): string | null {
   if (typeof headerValue !== 'string') return null

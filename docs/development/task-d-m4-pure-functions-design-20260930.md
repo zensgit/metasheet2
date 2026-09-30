@@ -1,0 +1,132 @@
+# 任务功能线 — 任务 D(M4 P1 纯函数 + 单测)设计(PROPOSED, 2026-09-30)
+
+- 分支:`claude/tasks-d-pure`,基于 `origin/main`。只在本 worktree 写**无 I/O 纯函数与单测**;不含 DDL、路由、服务、前端;不合并;不启用任何 flag。
+- 授权:调用方指示「起任务 D(只做纯函数)」,先例为任务 B(`docs/development/task-b-pure-functions-design-20260926.md`)与任务 C(`docs/development/task-c-m3-pure-functions-design-20260928.md`),同样只做 `packages/core-backend/src/tasks/` 下的无 I/O 模块与单测。
+- 设计来源:M4 裁决包 v2(私有工作件,未提交入库)§3.1 的任务 D 模块表,以及它所引用的 R01–R23 裁决行、N1/N2 窄问、§3.4 D1–D14 闸方默认值;任务功能线设计锁 `docs/development/task-feature-design-lock-20260917.md` §4、§4.4、§6、§13。
+- **裁决状态**:M4 裁决包 v2 是闸方 PROPOSED 建议,**owner 尚未 ratify**。本设计按裁决包的「推荐值」实现,每一处依赖未裁决值的地方,源码里都有一条 `// ASSUMPTION(task-d): R<nn> …` 或 `[D<nn>]` 注释,命名对应的裁决编号 —— owner 改裁决时,`grep -rn 'ASSUMPTION(task-d)' src/tasks/` 就能找到全部要改的点。
+
+## 1. 范围
+
+八个新模块 + 两处对既有模块的小改动,全部无 I/O,由门 20 的 harness(`tests/unit/task-pure-no-io.test.ts`)自动发现并校验:
+
+| 模块 | 状态 |
+|---|---|
+| `src/tasks/task-lists.ts` | 新增 |
+| `src/tasks/task-groups.ts` | 新增 |
+| `src/tasks/task-reminders.ts` | 新增 |
+| `src/tasks/task-notifications.ts` | 新增 |
+| `src/tasks/task-settings.ts` | 新增 |
+| `src/tasks/task-pagination.ts` | 新增 |
+| `src/tasks/task-realtime.ts` | 新增 |
+| `src/tasks/task-ids.ts` | 改:`TASK_ID_PREFIXES` 加 `group: 'tgrp'`、`listEvent: 'tlev'`(R23) |
+| `src/tasks/task-dates.ts` | 改:修正一条注释(见 §5「D11 注释修正」),不改行为 |
+| `src/tasks/task-access.ts` | **未改**(见 §6「明确推迟」) |
+
+不做:DDL、迁移、路由、服务、前端、flag、真实数据库/staging/生产验证 —— 与任务 B/C 同一条边界。
+
+## 2. 各模块规则
+
+### 2.1 `task-lists.ts`
+
+清单角色闭集 `read | edit | owner`(`TASK_LIST_MEMBER_ROLES`)。`toTaskListMemberships` 把这套角色桥接到 `task-access.ts` 已经存在的 `TaskListMembership`(`read→'reader'`,`edit`/`owner`→`'editor'`)——这是清单侧角色表与任务级角色表之间**唯一**的桥接函数,不再另开第三套角色枚举。
+
+`canListAction(ctx, action)` 是一张 `角色 × 动作` 真相表(闭集 9 个动作:`view/rename/archive/unarchive/manage_members/transfer_owner/add_item/remove_item/manage_groups`),`archive`/`unarchive` 额外接受 `ctx.isCreator` 覆盖(锁 §13-14,已定:归档权 = `created_by ∪ edit/owner`)。
+
+成员/所有权转换函数:`applyAddMember`(R17 在职校验以调用方已算好的布尔量 `isActiveInOrg` 传入;越界 D14 软上限)、`applyRemoveMember`(R12(b):`created_by` 永不可移除;R12(c):当前 `owner` 不可直接移除,须先转让)、`applyChangeMemberRole`(同样挡住 `owner`)、`applyTransferOwner`(R12(d):目标必须已是成员,原 owner 降为 `edit`)。`applyArchive`/`applyUnarchive` 只算状态转换,不复核权限(权限已由 `canListAction` 单独判定,同 `task-tree.ts` 的 `canReparent` 与 `validateSetParent` 分离先例)。
+
+`validateTaskListName` 复用 `task-ids.ts` 的 `normalizeUserText`,按 Unicode 码点(不是 UTF-16 单元)判 100 上限(D14)。
+
+`planAddTaskToList`/`planRemoveTaskFromList` 实现 D2 的两事件规则:同一次加入/移出清单在同一事务里写 `task_events.list_added/list_removed` **与** `task_list_events.item_added/item_removed`——本函数只规划这两个事件对象,写入由调用方在同一事务内完成。无变化(已在清单里 / 不在清单里)不产生任何事件。
+
+### 2.2 `task-groups.ts`
+
+`scope` 闭集 `list | user`(R11,已接受)。`applyCreateGroup`/`applyRenameGroup`/`applyDeleteGroup`(删组后项回默认组,不可删默认组)/`applyMoveItem`(整数重排,同一事务内全量重算目标组的 position)。
+
+D2 的「个人分组的移动不写事件」被本模块推广到**全部** `task_list_events`(`group_created`/`group_renamed`/`group_deleted`):这三个事件都需要 `listId`,而 `user` scope 的个人分组没有所属清单,所以这个推广是形状上唯一说得通的读法,已在源码注释里标出。
+
+### 2.3 `task-reminders.ts`
+
+`parseRemindPolicy` 实现 R02③ 的闭集 `{"mode":"default"}` / `{"mode":"none"}`,缺行/缺值按 default 处理,其余一律 422。
+
+`computeDefaultRemindAt` 是锁 §4.4(**已定**算法)的实现:定时分支纯瞬时算术 `due_at − 30min`;全天分支**先** `isValidIanaTimeZone` 校验再调用 `computeDateReminderOccurrence(dueDate, {timeOfDay:'18:00', offsetDays:0, timezone}, {floating:true})`(`automation-date-reminder.ts:241`,锁 `:140`/`:253` 指名复用)——校验失败直接抛错,不像 `computeDateReminderOccurrence` 自身那样静默退化为 UTC。
+
+`shouldEnqueueReminder`(写入时门槛,R06)与 `isTaskReminderDue`(扫描期门槛,R06:直接调用 `isDateReminderDue`,窗口常量 `TASK_REMINDER_SCAN_WINDOW_MS = 2` 小时)是两个独立的时间门槛,分别对应写入时刻与 tick 扫描时刻。`isReminderSkippedByTaskState` 是到点时的任务状态短路(已完成或已软删 ⇒ `skipped`)。
+
+四族 `source_key` 构造器(`buildTaskReminderSourceKey`/`buildTaskDailyDigestSourceKey`/`buildTaskEventSourceKey`/`buildTaskListEventSourceKey`)沿用仓库里唯一的现成先例(`UnscheduledReminderService.ts` 的 `<prefix>:<id>:recipient:<uid>:channel:<ch>` 形)。
+
+`isInDailyDigest`(TS)与 `buildTaskDailyDigestCondition`(SQL,由 `buildTaskScopeCondition({view:'assigned'})` 派生,不自建角色臂)实现 R07 的每日汇总内容:「已逾期的任务与今明两天将截止的未完成任务」。
+
+### 2.4 `task-notifications.ts`
+
+D13 的触发闭集(`completed`/`completed_by_any`/`reopened`/`deleted`/`commented`;`attachment_added` 留 P2)与 `recipient_role` 闭集(`creator`/`assignee`/`follower`/`list_member`)。`resolveNotificationRecipients` 按优先级去重并排除 actor。`resolveReminderRecipients`/`reminderRecipientRole` 实现 R06 的提醒收件人规则。`resolveListArchiveNotificationRecipients` 实现 R05(e) 的清单归档通知(通知清单创建人,`recipientRole` 仍记 `'list_member'`)。`TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN = false` 是 R05-opt 的默认关闭开关。
+
+### 2.5 `task-settings.ts`
+
+`parseBadgeScope`/`pendingScopeForBadge` 实现锁 §13-4(已定方向)+ D5(`'off'` 时调用方短路,不查库)。`parseSettingsPatch` 是整行 `task_user_settings` 的合并校验器:对合并后的结果强制 R02③ 的 CHECK(`daily_reminder_enabled=false OR time_zone IS NOT NULL`),`timeZone` 的写入复用 `task-dates.ts` 的 `validateViewerTimeZoneHeader` 做规范化(D7:写入时只落规范名)。
+
+### 2.6 `task-pagination.ts`
+
+R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认值会让第 51–100 行对「从不传 `limit`」的调用方静默消失)。`limit` 1..100、`offset ≥ 0`,越界一律 422,不静默夹取。`TASK_PAGE_SORT_KEY`(D9)是 `(updated_at DESC, id DESC)` 稳定排序键常量。
+
+### 2.7 `task-realtime.ts`
+
+`countsUpdateRecipients`(R16)= 写入前后负责人集合的并集(排序去重)。
+
+## 3. 对既有模块的改动
+
+- **`task-ids.ts`**:`TASK_ID_PREFIXES` 加 `group: 'tgrp'`、`listEvent: 'tlev'`(R23),连带更新了它们的格式文档注释与生成/校验单测(`tests/unit/task-ids.test.ts`)。
+- **`task-dates.ts`**:仅改了 `validateViewerTimeZoneHeader` 上方一条注释——它曾写「`isValidIanaTimeZone` 是这整棵模块树唯一允许的外部导入」,而本次新增的 `task-reminders.ts`(同一棵 `src/tasks/` 树下)按锁 `:140` 额外导入了 `computeDateReminderOccurrence`。改成了逐文件表述(D11)。不改行为,不改测试断言。
+
+## 4. 复用 main 上的既有函数(不重复实现)
+
+- `task-access.ts`:`buildTaskScopeCondition`(`task-reminders.ts` 的每日汇总条件由它派生)、`TaskListMembership` 类型(`task-lists.ts` 的桥接目标)、`TaskPendingScope` 类型。
+- `task-dates.ts`:`isOverdue`/`viewerToday`/`viewerNextMidnight`(`task-reminders.ts` 的每日汇总判定)、`validateViewerTimeZoneHeader`(`task-settings.ts` 的时区写入规范化)。
+- `task-ids.ts`:`normalizeUserText`(清单名、分组名校验)。
+- `../multitable/automation-date-reminder.ts`:`computeDateReminderOccurrence`、`isDateReminderDue`(锁 `:140` 指名复用,不重新实现)。
+- `../multitable/automation-timezone.ts`:`isValidIanaTimeZone`(全天提醒分支调用前的强制校验)。
+
+## 5. ASSUMPTION(task-d) 一览
+
+每条对应源码里一处或多处 `// ASSUMPTION(task-d): [R<nn>/D<nn>] …` 注释。owner 尚未 ratify M4 裁决包 v2;下表的「值」就是裁决包的推荐值,**不是** owner 裁决。
+
+| 裁决 | 模块 / 函数 | 选的值 | 备注 |
+|---|---|---|---|
+| R23 | `task-ids.ts` `TASK_ID_PREFIXES` | `group:'tgrp'`, `listEvent:'tlev'` | 沿用 `tev` 先例的加词手法 |
+| R12(a) | `task-lists.ts` `canListAction` | `add_item`/`remove_item` 需要清单 `edit`/`owner` | 裁决包原文明确 |
+| — (own choice, 非 R 编号) | `task-lists.ts` `canListAction` | `rename`/`manage_members`/`manage_groups` 与 `add_item` 同档(edit 即可) | 裁决包未点名这三个动作;沿用 `list-editor` 在 `task-access.ts` 里「edit ⇒ 广泛可写」的同形状,可逆 |
+| R17 | `task-lists.ts` `applyAddMember` | `isActiveInOrg` 为调用方已算好的布尔量 | 真正的 `user_orgs` 查询是 I/O,留给调用方 |
+| R12(b) | `task-lists.ts` `applyRemoveMember` | `created_by` 永不可移除 | 422 `created_by_immutable` |
+| R12(c) | `task-lists.ts` `applyRemoveMember`/`applyChangeMemberRole` | 当前 `owner` 不可直接移除/改角色 | 422 `owner_must_transfer` |
+| R12(d) | `task-lists.ts` `applyTransferOwner` | 目标必须已是成员;原 owner 降为 `edit`(不是 `read`) | 「目标必须已是成员」是本模块在 R12(d) 原文之上的保守读法 |
+| D14 | `task-lists.ts` | 清单成员 ≤100,单任务所属清单 ≤10,清单名 ≤100 码点 | 软限额,可逆常量 |
+| R11 | `task-groups.ts` | `scope='list'\|'user'`,删组后项回默认组,不可删默认组 | |
+| D14 | `task-groups.ts` | 每 scope 分组 ≤50,分组名 ≤100 码点 | |
+| D2(推广) | `task-groups.ts` | `group_created`/`group_renamed`/`group_deleted` 只在 `scope==='list'` 时产生 | D2 原文只点名了「分组移动」;本模块把同一条理由(个人分组没有 `listId`)推广到创建/改名/删除 |
+| R02③(推广) | `task-reminders.ts` `parseRemindPolicy` | `null`/`undefined` **值**(不只是缺行)按 default 处理 | 原文只写「缺行」;推广到「缺值」 |
+| R06 | `task-reminders.ts` | 扫描窗口 `W=2` 小时(`TASK_REMINDER_SCAN_WINDOW_MS`) | 单点常量,要求 ≥ 调度间隔(由 PR-3b 保证) |
+| R06 | `task-reminders.ts` `isReminderSkippedByTaskState` | 已完成或已软删 ⇒ skipped | |
+| R05/R06/R07(推广) | `task-reminders.ts` 四个 `source_key` 构造器 | `<prefix>:<id>:recipient:<uid>:channel:<ch>` | 裁决包只给了每族的前缀;内部形状取自仓库里唯一的现成先例(`UnscheduledReminderService.ts`) |
+| R07 | `task-reminders.ts` `isInDailyDigest`/`buildTaskDailyDigestCondition` | 逾期 ∪ (今天或明天截止);今天/明天用查看者(收件人)时区 | 源码注释记录了"逾期"这一支在逻辑上被第二支吸收的事实 |
+| D13 | `task-notifications.ts` | 触发闭集 5 值,`recipient_role` 优先级 creator>assignee>follower>list_member | `attachment_added` 留 P2 |
+| R05-opt | `task-notifications.ts` `TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN` | `false`(默认不含) | 裁决包自称"语料无原页的自有设计" |
+| R06 | `task-notifications.ts` `resolveReminderRecipients` | 零行 ⇒ `[creatorId]`;非零行但全部已完成 ⇒ 空数组(不回退到 creator) | 对"零负责人"的字面读法 |
+| R05(e) | `task-notifications.ts` `resolveListArchiveNotificationRecipients` | 通知清单创建人,`recipientRole:'list_member'` | |
+| D5 | `task-settings.ts` `pendingScopeForBadge` | `'off'` → `null`,调用方短路 | |
+| R02③ | `task-settings.ts` `parseSettingsPatch` | 对**合并后**结果强制 daily-reminder-需要-time_zone | 不是只查 patch 里出现的字段 |
+| D7 | `task-settings.ts` `parseSettingsPatch` | 写入 `timeZone` 复用 `validateViewerTimeZoneHeader` 规范化 | |
+| R15(v2) | `task-pagination.ts` | `limit` 默认 **100**(v2 把 v1 的 50 改正) | v1 的 50 会让第 51–100 行静默消失 |
+| D9 | `task-pagination.ts` `TASK_PAGE_SORT_KEY` | `(updated_at DESC, id DESC)` | |
+| R16 | `task-realtime.ts` `countsUpdateRecipients` | 写入前后负责人集合的并集 | 关注人不在收件人内 |
+
+## 6. 明确推迟(不在本切片)
+
+- **`task-access.ts` 的 `buildTaskByIdCondition`**(裁决包 §3.1 原本把它列进任务 D):这是对任务 B 已落 main 模块的行为面改动,裁决包自己也写明「改任务 B 模块,需 owner 确认」。本次没有任何任务 D 纯函数需要调用它——它只服务未来 `GET /api/tasks/:id` 详情路由(PR-3a,R04)。按调用方指示的「不确定就不改」原则,`task-access.ts` 本次**未改**,留给 PR-3a 并同时经 owner 对 R04 的确认。
+- **N1**(all 模式下增删负责人使任务状态翻转时是否补发 `completed`/`reopened` 事件):这需要在同一数据库事务里追加 `task_events` 行,是 PR-3a/3b 的 I/O 职责,不是纯函数职责;`task-membership.ts`(任务 C)已经在 NOTE 里记录了这个空白,本次未改该文件。
+- **N2**(在职校验回填 M2 的 `POST /api/tasks`):同样是路由 + 真库夹具的工作,留给 PR-3a。
+- **R01**(M4 退出门集合)、**R03**(日期写入 API/PATCH 路由 + `remind_at` 列)、**R04**(详情路由角色解析)、**R09/R10/R13/R18/R19/R20/R21/R22**:全部是路由、DDL、前端或纯流程性裁决,不产生任何任务 D 纯函数,留给对应的后端/前端 PR。
+- **R08**(follower 能力冲突 `{follower, list-reader}`):裁决包标注为「事实已落 main」——`task-access.ts` 的 `TASK_ROLE_ABILITY` 早已按建议值实现(任务 B),本次不需要任何改动。
+- **staging 真投递**(post-merge owner 步骤):不适用于本切片。
+
+## 7. 与门表的关系
+
+本件是候选门 M4-b(收件人纯函数网格,部分)、M4-c(提醒与每日汇总纯函数部分)、门 20(新模块无 I/O)的纯函数层实现。HTTP/真库层(M4-a outbox、M4-d 调度单实例、M4-e 清单可见性隔离写授权、M4-f socket、M4-g 新表面复用已武装的门)全部要等 PR-3a/3b/3c 落地才能计分——本件不声称通过任何门。
