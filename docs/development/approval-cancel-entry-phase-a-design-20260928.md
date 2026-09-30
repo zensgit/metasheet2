@@ -1131,6 +1131,7 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
   - 任何授权谓词;
   - 发起开关;
   - DDL、前端、P-8 登记表。
+  - 实测:`git diff --stat fc684dceeb -- plugins/ apps/ packages/core-backend/src/db/` 为空。整个分支只改 3 个文件:本 MD、`ApprovalProductService.ts`(+38 行,全在上述分支及其注释)、ENTRY 测试文件。
 
 ### 13.4 码的选择(实现者选择,待 owner 登记)
 
@@ -1187,6 +1188,11 @@ owner 选项「(ii) Reuse approval notices (Recommended)」的说明原文为 �
 ### 13.7 读数(本地一次性库,PostgreSQL 15.17)
 
 - ENTRY 整文件(`EXPECT_DB=1`):**65/65**,即原 62 条 + 新 3 条。
+- 撤销轮真库尾部 9 个文件,按 CI 同序在新迁移的一次性库上一次跑完(`EXPECT_DB=1`):**227/227**,零跳过。9 个文件为 lock-order census、creation、redemption、seat-guards、attendance-fk-migration、outlet-guards、node-timeout-effect、seed-template-visibility、attendance-entry;其中含 REDEEM 与既有 C-3 用例(`expired` / `blocked` 收口、判据 IV)。
+- TODOGATE(`vitest.todo-center-pending-gate.config.ts`,`EXPECT_DB=1`):**27/27**。
+- PROBE(`tests/harness/approval-cancel-round-dormancy-probe.ts`):
+  - 正控 `DORMANCY_PROBE_CONTROL=self`:到达 1,退出码 0;
+  - 实跑 `none`:撤销轮路由恰 5 条且全在白名单,白名单外 0,缺失 0,触发路由 967 条,到达 0,退出码 0。
 - 撤销轮单测 11 个文件:**101/101**。包括 U-DORM、ci-wiring、插件镜像常量、席位臂围栏、端口各单测。
 - 前端 `cancelRoundEntry*` 8 个文件:**115/115**,零前端改动。
 - core-backend `tsc --noEmit`:退出码 **0**。
