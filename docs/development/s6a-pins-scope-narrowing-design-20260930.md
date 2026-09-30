@@ -15,7 +15,7 @@
 | 需改已 ratify 锁 | 否(§4) |
 | 未决 | V6(必需检查 `stock-prep PowerShell 5.1 acceptance` 由新 workflow 满足)只能在 Draft PR 上实测;若不绑定,补救是 owner 改分支保护,**不是**锁改动 |
 
-## 1. 改动(C1–C4、C6–C7 六个代码提交 + C5 / C8 两个文档提交)
+## 1. 改动(C1–C4、C6–C7 六个代码提交 + C5 / C8 / C9 三个文档提交)
 
 | 提交 | 内容 | 钉 |
 |---|---|---|
@@ -27,6 +27,7 @@
 | C6 | 门审 P2:新文件加入 Integration Guard 守护名册与 `on.push.paths`(契约要求二者集合相等);provenance 测试新增 `s6aPowershell51ExecutorIsIntegrationGuarded`(路径取自清单条目 `s6aPowershell51Workflow`,不抄写) | 0 |
 | C7 | 门审 NIT:清单理由注释与解耦用例头注释改为精确表述(`plugin-tests.yml` 不跑任何被钉测试体;其 core-backend vitest 步会收集两个被钉的 `.db.test.ts`,但该处无 `DATABASE_URL`,二者注册为 skipped);重算钉 | 1 个叶子 |
 | C8 | 本文按门审意见更新(§0–§3、§5–§8) | 0 |
+| C9 | 本文:§2.5 冻结清单摘要补到终值;§5 回归读数标明所在树,补 C6 后重跑的 workflow 枚举守卫 | 0 |
 
 ## 2. 证明范围:前后对照
 
@@ -88,7 +89,7 @@
 
 ### 2.5 不受影响的
 - 已发布冻结包(`stock-prep-s6a-postgres17-validation.yml` 的 `PACKAGE_PROVENANCE_MANIFEST_DIGEST_PIN`):该 workflow 用**包内**的 provenance 模块与包内 pins 校验,与仓内清单变更无关。
-- `frozenManifestDigest` 随 pins.json 变化(`e9b93a54…` → `4f2681e6…`,C1),与任何一次重钉相同;下一次出包照常输出新摘要。
+- `frozenManifestDigest` 随 pins.json 变化(`e9b93a54…` → `4f2681e6…`,C1;→ `b6a2270c…`,C7,即本分支终值),与任何一次重钉相同;下一次出包照常输出新摘要。
 - 出包 / 实体机校验脚本(`multitable-onprem-package-verify.sh`、`multitable-onprem-package-build.sh`、S6-A 验收 runner)不引用证据 id。
 
 ## 3. 未覆盖项 / 残留
@@ -144,9 +145,9 @@ V8 读数(`printf '<路径>\0' | node scripts/ops/integration-guard-classify.mjs
 | V8-e | 执行器改名为 `stock-prep-ps51.yml`,清单条目、测试常量、pins 都照改并重算,唯独不补守护名册 | provenance 测试在新断言处红(其前各用例都过);契约 63/64(「名册条目须存在」用例红,因旧路径已不存在) |
 | V8-f | 叶子级重算 | C6 移动 0 个叶子 |
 
-C6 / C7 之后的回归(树 `e6f218a583`):plugin-integration-core 全链 235/235;sealed-export `.test.cjs` 33/33;`integration-guard-required-wiring-contract` 64/64;V5 两条契约测试 2/2、38/38。
+C6 / C7 之后的回归(树 `e6f218a583`,C8 之后代码不变;依赖软链同下,未运行任何安装命令):plugin-integration-core 全链 235/235;sealed-export `.test.cjs` 33/33;`integration-guard-required-wiring-contract` 64/64;V5 两条契约测试 2/2、38/38。C6 改了 `integration-guard.yml` 的文本,因此在该树上重跑了读 / 枚举 `.github/workflows/` 的守卫:`attendance-w4c2-ci-wiring` 262/262、`multitable-onprem-package-no-node-modules` 14/14、`multitable-role-cascade-witness` 52 过 / 18 skipped(opt-in 真库 golden,未设 `ROLE_CASCADE_WITNESS_DB_GOLDENS=1`)、`ssh-hostkey-pin-family-contract` 12/12、`approval-ci-coverage-enumeration`(vitest)385/385。
 
-其他回归(最终树 `d70039e563`;依赖以软链指向主检出的 node_modules,未运行任何安装命令):
+其他回归(C4 树 `d70039e563`,C6 之前;依赖以软链指向主检出的 node_modules,未运行任何安装命令):
 
 | 范围 | 读数 |
 |---|---|
