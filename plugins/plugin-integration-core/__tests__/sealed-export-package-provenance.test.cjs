@@ -490,8 +490,10 @@ async function s6aPowershell51ExecutorIsIntegrationGuarded() {
   )
 }
 
-// plugin-tests.yml executes no pinned file and is not a provenance input: editing it (a comment,
-// a new run-list step) or deleting it moves no pin and keeps the frozen manifest digest.
+// plugin-tests.yml runs no pinned test body (its core-backend vitest step collects the two pinned
+// `.db.test.ts` files, which register as skipped with no DATABASE_URL set there) and is not a
+// provenance input: editing it (a comment, a new run-list step) or deleting it moves no pin and
+// keeps the frozen manifest digest.
 async function pluginTestsWorkflowIsNotAProvenanceInput() {
   const everyPinnedPath = [
     ...PINNED_MIGRATIONS,
