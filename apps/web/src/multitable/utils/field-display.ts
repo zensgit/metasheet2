@@ -14,6 +14,8 @@ import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
 import {
   businessTodayKey,
+  calendarDayFromText,
+  formatBusinessTimestamp,
   formatDateTimeInZone,
   getBusinessTimezone,
   parseDateTimeInput,
@@ -21,11 +23,38 @@ import {
 } from './business-timezone'
 import { getLookupTargetField } from './lookup-target-fields'
 
+// Text that carries a time of day (`2026-09-18T16:00:00.000Z`, `2026-09-18 08:00`): an instant, not a day as
+// written. A bare day (`2026-09-18`, `2026/9/18`, `2026年9月18日`) has none.
+const DATE_TIME_TEXT_RE = /[T\s]\d{1,2}:\d{2}/
+
+/**
+ * R61 上机观察 2026-09-30 (客户反馈 #4c follow-up): a `date` cell is a calendar day and is shown as `YYYY-MM-DD`
+ * — the same spelling as the day half of a `dateTime` cell — never the browser locale's month name
+ * (`18 Sept 2026` under zh-CN, `Sep 18, 2026` under en-US). Two stored shapes exist: a day as written (the
+ * `<input type="date">` editor stores `YYYY-MM-DD`) keeps that day; an instant (the PLM refresh writes ISO
+ * instants into the managed table's date columns) is the day it falls on in the business timezone, so every
+ * viewer sees the same day. `null` when the value is empty or names no day (callers keep their own fallback).
+ */
+export function formatDateOnlyValue(value: unknown): string | null {
+  if (value === null || value === undefined || value === '') return null
+  const text = typeof value === 'string' ? value.trim() : value
+  if (typeof text === 'string' && !DATE_TIME_TEXT_RE.test(text)) {
+    const day = calendarDayFromText(text)
+    if (day) return day
+  }
+  // A spelling the business-timezone parser refuses but `Date.parse` accepts (`9/18/2026 16:00`) still names a
+  // day: keep it as written rather than echoing the raw text. A value outside the `Date` range (a stray epoch
+  // like 1e20) must not throw out of a cell renderer — it names no day.
+  try {
+    return formatBusinessTimestamp(text, { precision: 'day' }) ?? (typeof text === 'string' ? calendarDayFromText(text) : null)
+  } catch {
+    return null
+  }
+}
+
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  return formatDateOnlyValue(value) ?? String(value)
 }
 
 // 客户反馈 2026-09-24 #4c: date-times are shown AND parsed in ONE business timezone, fixed
@@ -93,12 +122,14 @@ export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null 
 export function lookupDateTimeTexts(field: Pick<MetaField, 'type'> & { id?: string }, value: unknown): string[] | null {
   if (field.type !== 'lookup') return null
   const target = getLookupTargetField(field.id)
-  if (!target || !isDateTimeLikeFieldType(target.type)) return null
-  const zone = dateTimeFieldTimezone(target)
+  if (!target) return null
   const items = Array.isArray(value) ? value : [value]
-  return items
-    .filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
-    .map((item) => formatDateTimeInZone(item, zone) ?? String(item))
+  const present = items.filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
+  // A looked-up `date` column shows the same `YYYY-MM-DD` its own cells show (formatDateOnlyValue).
+  if (target.type === 'date') return present.map((item) => formatDateOnlyValue(item) ?? String(item))
+  if (!isDateTimeLikeFieldType(target.type)) return null
+  const zone = dateTimeFieldTimezone(target)
+  return present.map((item) => formatDateTimeInZone(item, zone) ?? String(item))
 }
 
 /**
@@ -112,6 +143,8 @@ export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'> &
     const texts = lookupDateTimeTexts(field, value)
     return texts && texts.length > 0 ? texts.join('; ') : null
   }
+  // A `date` cell exports / groups as the `YYYY-MM-DD` it shows — not the raw stored instant.
+  if (field.type === 'date') return formatDateOnlyValue(value)
   if (!isDateTimeLikeFieldType(field.type)) return null
   if (value === null || value === undefined || value === '') return null
   return formatDateTimeInZone(value, dateTimeFieldTimezone(field))
