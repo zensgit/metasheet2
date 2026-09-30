@@ -427,12 +427,34 @@ describeIfDatabase("Lock-5 L5-B — add-sign modes: B-2 identity pin, B-1 doors,
     expect((await activeSeats(inst.id, 'approval_a')).map((seat) => seat.assigneeId)).toEqual([f.ids.p])
     expect(await instanceRow(inst.id)).toEqual(before)
 
+    // An `after` add_sign with an out-of-enum aggregation is a 400 at the route (not flattened to a
+    // default), and nothing is written.
+    const badAggregation = await act(f.tokens.p, inst.id, {
+      action: 'add_sign', targetUserIds: [f.ids.addee], addSignMode: 'after', addSignAggregation: 'bogus',
+    })
+    expect(badAggregation.status, await badAggregation.clone().text()).toBe(400)
+    expect(((await badAggregation.json()) as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR')
+    expect(await auditRows(inst.id)).toEqual([])
+    expect(await instanceRow(inst.id)).toEqual(before)
+
     // POSITIVE CONTROL (value-selected): the SAME request with the key ABSENT is today's default.
     const absent = await act(f.tokens.p, inst.id, { action: 'add_sign', targetUserIds: [f.ids.addee] })
     expect(absent.status, await absent.clone().text()).toBe(200)
     const rows = await auditRows(inst.id)
     expect(rows.map((row) => row.action)).toEqual(['add_sign'])
     expect(rows[0].metadata?.addSignMode).toBe('parallel')
+
+    // `parallel` does not read `addSignAggregation` (OD-L5-5(a): ABSENT for parallel): the same junk
+    // value that is a 400 on `after` is ignored here, exactly as before this slice, and the audit
+    // row keeps the pre-slice shape.
+    const parallelWithJunk = await act(f.tokens.p, inst.id, {
+      action: 'add_sign', targetUserIds: [f.ids.addee2], addSignMode: 'parallel', addSignAggregation: 'bogus',
+    })
+    expect(parallelWithJunk.status, await parallelWithJunk.clone().text()).toBe(200)
+    const rowsAfterParallel = await auditRows(inst.id)
+    expect(rowsAfterParallel.map((row) => row.action)).toEqual(['add_sign', 'add_sign'])
+    expect(rowsAfterParallel[1].metadata).toMatchObject({ nodeKey: 'approval_a', addSignMode: 'parallel', addedUserIds: [f.ids.addee2] })
+    expect(rowsAfterParallel[1].metadata).not.toHaveProperty('addSignAggregation')
   })
 
   it('B-1 (SERVICE door): a direct dispatch with an unknown mode is refused 400 by the service itself, and an unknown aggregation too', async () => {

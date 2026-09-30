@@ -3892,16 +3892,22 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         )
       }
       const addSignMode = isApprovalAddSignMode(rawAddSignMode) ? rawAddSignMode : undefined
-      // Lock-5 OD-L5-5(a) / gate B-5: the appended round's aggregation, forwarded only when it is one
-      // of the two ratified values; any other present value on an `add_sign` is a 400. Whether it is
-      // REQUIRED (after-mode, two or more addees) is the service's call, which sees the resolved mode.
+      // Lock-5 OD-L5-5(a) / gate B-5: the appended round's aggregation is read ONLY for an `after`
+      // add_sign — there a present value must be one of the two ratified values (400 otherwise, never
+      // flattened to a default), and whether it is REQUIRED (two or more addees) is the service's
+      // call. For `before` / `parallel` / an absent mode the key is neither validated nor forwarded,
+      // exactly as before this slice (OD-L5-5(a): ABSENT for parallel), so those requests are
+      // unchanged whatever else the body carries.
       const rawAddSignAggregation: unknown = req.body?.addSignAggregation
-      if (action === 'add_sign' && rawAddSignAggregation !== undefined && !isApprovalAddSignAggregation(rawAddSignAggregation)) {
+      const readsAddSignAggregation = action === 'add_sign' && addSignMode === 'after'
+      if (readsAddSignAggregation && rawAddSignAggregation !== undefined && !isApprovalAddSignAggregation(rawAddSignAggregation)) {
         return res.status(400).json({
           error: { code: 'VALIDATION_ERROR', message: 'addSignAggregation must be all or any' },
         })
       }
-      const addSignAggregation = isApprovalAddSignAggregation(rawAddSignAggregation) ? rawAddSignAggregation : undefined
+      const addSignAggregation = readsAddSignAggregation && isApprovalAddSignAggregation(rawAddSignAggregation)
+        ? rawAddSignAggregation
+        : undefined
       // P1-B reduce_sign: assignee_id of the add-signed row to remove.
       const targetAssignmentUserId = typeof req.body?.targetAssignmentUserId === 'string'
         ? req.body.targetAssignmentUserId.trim()
