@@ -3555,8 +3555,14 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           roundId: string
         }
 
-        /** A pending round whose ORIGINAL leave has since been cancelled through the direct channel. */
-        async function pendingRoundOverDirectlyCancelledLeave(label: string): Promise<DirectlyCancelledRound> {
+        /**
+         * A pending round whose ORIGINAL leave has since been cancelled through the direct channel.
+         * `beforeLaunch` runs on the approved original document before the round is launched.
+         */
+        async function pendingRoundOverDirectlyCancelledLeave(
+          label: string,
+          options: { beforeLaunch?: (documentId: string) => Promise<void> } = {},
+        ): Promise<DirectlyCancelledRound> {
           const admin = `g4p3a-${label}-adm-${TS}`
           await seedLoginUser(admin, { roles: ['admin'], admin: true })
           const leaveTypeId = await compTimeLeaveTypeId(await loginToken(admin))
@@ -3594,6 +3600,7 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
           expect(original.rows[0].status).toBe('approved')
           const documentId = original.rows[0].approval_instance_id
           createdApprovalIds.add(documentId)
+          await options.beforeLaunch?.(documentId)
 
           const launch = await http('POST', entryPath(requestId), employeeToken, {})
           expect(launch.status, launch.text).toBe(201)
@@ -3820,6 +3827,32 @@ describeIfDatabase('cancel-round product entry phase A — attendance-side route
             [fixture.documentId],
           )
           expect(aged.rowCount).toBe(1)
+          const before = await leaveBusinessState(fixture)
+          const decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
+          expect(decided.status, decided.text).toBe(200)
+          expect(decided.json.data).toMatchObject({ outcome: 'blocked', status: 'cancellation_blocked' })
+          expect(await leaveBusinessState(fixture)).toEqual(before)
+          await expectClosedAsSystemBlocked(fixture)
+        })
+
+        it('ordering: an original with no §2-G2 anchor (the REDEEM suite\'s legacy/bridge fixture shape) that is then cancelled directly still closes as blocked with this code — never the retryable 409 CANCEL_ROUND_WINDOW_ANCHOR_MISSING, which no retry could clear', async () => {
+          const fixture = await pendingRoundOverDirectlyCancelledLeave('anc', {
+            beforeLaunch: async (documentId) => {
+              // The REDEEM suite's anchor erase, verbatim: the approved transition on the document's
+              // own audit trail is rewritten while its status stays `approved`, so the round launches.
+              const erased = await pool().query(
+                `UPDATE approval_records SET to_status = 'pending'
+                  WHERE instance_id = $1 AND to_status = 'approved'`,
+                [documentId],
+              )
+              expect(erased.rowCount).toBe(1)
+            },
+          })
+          const anchors = await pool().query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count FROM approval_records WHERE instance_id = $1 AND to_status = 'approved'`,
+            [fixture.documentId],
+          )
+          expect(anchors.rows[0].count).toBe('0')
           const before = await leaveBusinessState(fixture)
           const decided = await http('POST', actionsPath(fixture.requestId), fixture.approverToken, { action: 'approve' })
           expect(decided.status, decided.text).toBe(200)
