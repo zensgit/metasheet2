@@ -205,7 +205,7 @@
             :id="`drawer_field_${field.id}`"
             class="meta-record-drawer__input"
             type="date"
-            :value="controlValue(field.id) ?? ''"
+            :value="formatDateOnlyValue(controlValue(field.id)) ?? ''"
             :aria-invalid="fieldAriaInvalid(field.id)"
             :aria-describedby="fieldAriaDescribedBy(field.id)"
             @change="emitPatch(field.id, ($event.target as HTMLInputElement).value)"
@@ -447,6 +447,7 @@ import {
 import { aiRetryCountdown, aiShortcutErrorMessage } from '../utils/meta-api-error-labels'
 import type { AiShortcutState } from '../composables/useAiShortcut'
 import {
+  formatDateOnlyValue,
   locationAddressValue,
   locationValueFromAddress,
 } from '../utils/field-display'

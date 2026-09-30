@@ -111,3 +111,126 @@ backend_override_environment_lines() {
     echo "      TASKS_ENABLED: \"true\""
   fi
 }
+
+# Rehearsal restore: clone-only function search_path shim (see action_migrate_rehearse in
+# attendance-staging-window-runner-remote.sh). The candidate list comes from the source DB's
+# catalog; these two helpers never let catalog text shape SQL beyond one exact line format.
+#
+# rehearsal_shim_candidates_sql
+#   The read-only candidate query run against the SOURCE DB: public-schema sql/plpgsql functions
+#   that are not extension members and do not already pin a search_path (a pinned one is left
+#   untouched). Kept here as one literal so the test pins it byte for byte.
+rehearsal_shim_candidates_sql() {
+  printf '%s' 'SELECT pg_catalog.quote_ident(n.nspname) || '\''.'\'' || pg_catalog.quote_ident(p.proname) || '\''('\'' || pg_catalog.pg_get_function_identity_arguments(p.oid) || '\'')'\'' FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace JOIN pg_catalog.pg_language l ON l.oid = p.prolang WHERE n.nspname = '\''public'\'' AND p.prokind = '\''f'\'' AND l.lanname IN ('\''sql'\'', '\''plpgsql'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid OPERATOR(pg_catalog.=) '\''pg_catalog.pg_proc'\''::pg_catalog.regclass AND d.objid = p.oid AND d.deptype = '\''e'\'') AND NOT EXISTS (SELECT 1 FROM pg_catalog.unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE '\''search_path=%'\'') ORDER BY 1;'
+}
+
+# rehearsal_shim_parity_sql
+#   md5 over every public function's (signature, proconfig), aggregated in a fixed order (an
+#   aggregate's `ORDER BY 1` would sort by the constant 1, not the first column). Run against the
+#   source and the clone
+#   after the RESET: equal digests prove the clone starts the rehearsal migration from the source's
+#   exact function configuration.
+rehearsal_shim_parity_sql() {
+  printf '%s' 'SELECT md5(coalesce(string_agg(p.oid::pg_catalog.regprocedure::text || '\''|'\'' || coalesce(pg_catalog.array_to_string(p.proconfig, '\'','\''), '\''-'\''), '\'';'\'' ORDER BY p.oid::pg_catalog.regprocedure::text COLLATE "C"), '\'''\'')) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = '\''public'\'';'
+}
+
+# rehearsal_shim_validate_signatures <file>
+#   Prints the number of non-empty lines. Returns 1 (printing nothing) if any line is not a
+#   plain `public.<snake_case_name>(<identity arguments>)` signature — fail closed rather than
+#   build an ALTER statement from an unexpected shape.
+rehearsal_shim_validate_signatures() {
+  local file="$1" line count=0
+  # POSIX bracket expression: `]` must come first to be literal; backslash is literal inside.
+  local re='^public\.[a-z_][a-z0-9_]*\([]A-Za-z0-9_ ,."[]*\)$'
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ $re ]] || return 1
+    count=$((count + 1))
+  done < "$file"
+  echo "$count"
+}
+
+# rehearsal_shim_sql <set|reset> <file>
+#   One `ALTER FUNCTION <signature> SET search_path = pg_catalog, public;` (or `RESET
+#   search_path;`) per signature. Call only on a list rehearsal_shim_validate_signatures accepted.
+rehearsal_shim_sql() {
+  local mode="$1" file="$2" line clause
+  case "$mode" in
+    set) clause="SET search_path = pg_catalog, public" ;;
+    reset) clause="RESET search_path" ;;
+    *) return 1 ;;
+  esac
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    printf 'ALTER FUNCTION %s %s;\n' "$line" "$clause"
+  done < "$file"
+}
+
+# Owner-ruled staging migration exclusions (owner 2026-09-29: A-3 stays off staging until the
+# owner approves applying it; "Add owner-ruled exclude"). These are the ONLY names that ever
+# reach migrate.js as MIGRATION_EXCLUDE on the staging runner; an inherited MIGRATION_EXCLUDE is
+# still a hazard that aborts. Removing an entry is a separate owner-ruled change, made together
+# with applying that migration. Each migration lists the tables it would create; the runner
+# proves they are still absent before and after every migration step.
+STAGING_OWNER_EXCLUDED_MIGRATIONS=(
+  zzzz20260919090000_create_approval_template_group_backfill_batches
+)
+STAGING_OWNER_EXCLUDED_TABLES=(
+  approval_template_group_backfill_batches
+  approval_template_group_backfill_batch_groups
+  approval_template_group_backfill_batch_links
+)
+
+# staging_owner_excluded_names
+#   One excluded migration name per line (nothing for an empty list). Returns 1, printing
+#   nothing, if any name is not a plain [A-Za-z0-9_] migration basename.
+staging_owner_excluded_names() {
+  local name re='^[A-Za-z0-9_]+$' out=""
+  for name in ${STAGING_OWNER_EXCLUDED_MIGRATIONS[@]+"${STAGING_OWNER_EXCLUDED_MIGRATIONS[@]}"}; do
+    [[ "$name" =~ $re ]] || return 1
+    out="${out}${name}"$'\n'
+  done
+  printf '%s' "$out"
+}
+
+# staging_owner_exclude_csv
+#   The MIGRATION_EXCLUDE value (comma-separated, empty for an empty list). Same validation.
+staging_owner_exclude_csv() {
+  local names
+  names="$(staging_owner_excluded_names)" || return 1
+  printf '%s' "$names" | tr '\n' ',' | sed 's/,$//'
+}
+
+# staging_owner_excluded_tables_present_sql
+#   SQL returning how many of the owner-excluded tables exist (must be 0). Returns 1 if a table
+#   name is not a plain lower-case identifier.
+staging_owner_excluded_tables_present_sql() {
+  local table re='^[a-z_][a-z0-9_]*$' values=""
+  for table in ${STAGING_OWNER_EXCLUDED_TABLES[@]+"${STAGING_OWNER_EXCLUDED_TABLES[@]}"}; do
+    [[ "$table" =~ $re ]] || return 1
+    values="${values}${values:+, }('public.${table}')"
+  done
+  if [[ -z "$values" ]]; then
+    printf '%s' 'SELECT 0;'
+    return 0
+  fi
+  printf 'SELECT count(*) FROM (VALUES %s) AS t(n) WHERE pg_catalog.to_regclass(t.n) IS NOT NULL;' "$values"
+}
+
+# owner_excluded_only_pending <migrate --list output file>
+#   Exit 0 when the listed Pending count is nonzero AND every pending name is an owner-excluded
+#   migration (the pending set is exactly what the owner ruled to keep unapplied); exit 1
+#   otherwise (nothing pending, any other name pending, or an unreadable list). Prints nothing.
+#   Used only to explain a strict pending=0 refusal accurately — it never turns one into a pass.
+owner_excluded_only_pending() {
+  local file="$1" count names name listed=0
+  count="$(sed -n 's/^Pending: \([0-9][0-9]*\)$/\1/p' "$file" | tail -n 1)"
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]] || return 1
+  names="$(staging_owner_excluded_names)" || return 1
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    grep -qxF -- "$name" <<< "$names" || return 1
+    listed=$((listed + 1))
+  done < <(sed -n 's/^  - \(.*\)$/\1/p' "$file")
+  [[ "$listed" == "$count" ]]
+}

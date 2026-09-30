@@ -215,3 +215,58 @@ describe('dateTime field UI', () => {
     container.remove()
   })
 })
+
+// R61 上机观察 2026-09-30: a `date` cell shows `YYYY-MM-DD` (never `18 Sept 2026`), and the date editor
+// pre-fills from a stored instant instead of leaving `<input type="date">` blank.
+describe('date-only field UI shows YYYY-MM-DD', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('renders a date cell as YYYY-MM-DD for a day as written and for an instant', async () => {
+    const cases: Array<[string, string]> = [
+      ['2026-09-18', '2026-09-18'],
+      ['2026-09-17T16:00:00.000Z', '2026-09-18'],
+    ]
+    for (const [value, expected] of cases) {
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const app = createApp({
+        render() {
+          return h(MetaCellRenderer, { field: { id: 'fld_date', name: 'Due', type: 'date' }, value })
+        },
+      })
+      app.mount(container)
+      await flushUi()
+      const text = container.textContent?.trim() ?? ''
+      expect(text).toContain(expected)
+      expect(text).not.toMatch(/Sep|Sept|九月/)
+      app.unmount()
+      container.remove()
+    }
+  })
+
+  it('pre-fills the date editor from an instant with the business-timezone day', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp({
+      render() {
+        return h(MetaCellEditor, {
+          field: { id: 'fld_date', name: 'Due', type: 'date' },
+          modelValue: '2026-09-17T16:00:00.000Z',
+          'onUpdate:modelValue': vi.fn(),
+          onConfirm: vi.fn(),
+          onCancel: vi.fn(),
+          onOpenLinkPicker: vi.fn(),
+        })
+      },
+    })
+    app.mount(container)
+    await flushUi()
+    const input = container.querySelector('input[type="date"]') as HTMLInputElement | null
+    expect(input).not.toBeNull()
+    expect(input!.value).toBe('2026-09-18')
+    app.unmount()
+    container.remove()
+  })
+})
