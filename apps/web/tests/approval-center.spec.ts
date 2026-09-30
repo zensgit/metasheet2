@@ -1514,6 +1514,61 @@ describe('ApprovalCenterView', () => {
       expect(exportNotice()).toBeNull()
     })
 
+    it('an export still in flight when the list moves to another feed saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      let rejectExport: (reason: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve, reject) => {
+        resolveExport = resolve
+        rejectExport = reject
+      }))
+      await mountView()
+
+      // Success half: export on 待我处理, switch to 抄送我的 before the server answers.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-cc"]')!.click()
+      await flushUi()
+      expect(loadCcSpy).toHaveBeenCalledTimes(1)
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      // The file matches the click-time feed, so it is still handed to the browser...
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      // ...but its result line does not appear under the 抄送我的 list.
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+
+      // Failure half: export on 抄送我的, switch to 我发起的, then the request fails.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-mine"]')!.click()
+      await flushUi()
+      expect(loadMineSpy).toHaveBeenCalledTimes(1)
+      rejectExport(new MockApprovalApiError('degraded', 503, 'APPROVAL_EXPORT_DEGRADED'))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('an export still in flight across a reload of the SAME feed keeps its result line', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+
+      exportButton()!.click()
+      await flushUi()
+      // Enter on the (still empty) search box reloads the list with the same tab and filters.
+      const pendingLoadsBefore = loadPendingSpy.mock.calls.length
+      container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+        .dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy.mock.calls.length).toBe(pendingLoadsBefore + 1)
+
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()!.textContent?.trim()).toBe('Exported 3 rows.')
+    })
+
     it('source tripwire: the view builds no CSV and no Blob of its own', async () => {
       const fs = await import('node:fs')
       const path = await import('node:path')
