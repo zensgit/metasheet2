@@ -389,7 +389,7 @@ function scalar(sql) {
 function createFixture({ dropTable } = {}) {
   const schema = `a1census_fixture_${Math.random().toString(36).slice(2, 8)}`
   exec(`CREATE SCHEMA "${schema}"`)
-  const r = psql(['-v', 'ON_ERROR_STOP=1', '-q', '-c', `SET search_path = "${schema}"`, '-f', path.join(HERE, 'fixture.sql')])
+  const r = psql(['-v', 'ON_ERROR_STOP=1', '-q', '-c', `SET search_path = "${schema}"`, '-f', path.join(HERE, '__fixtures__', 'fixture.sql')])
   if (r.status !== 0) {
     exec(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
     throw new Error(`fixture load failed: ${r.stderr}`)

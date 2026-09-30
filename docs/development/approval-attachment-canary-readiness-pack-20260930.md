@@ -9,7 +9,7 @@
 
 | 提交 | 内容 |
 |---|---|
-| `dae353d72d` | `scripts/ops/approval-attachment-canary-census-20260930/`:顶层 attachment 字段只读普查(`_preamble.sql` 只读会话契约 + `01-top-level-attachment-census.sql`)与自检 `verify/`(`census-pack.test.mjs` + `fixture.sql`) |
+| `dae353d72d` | `scripts/ops/approval-attachment-canary-census-20260930/`:顶层 attachment 字段只读普查(`_preamble.sql` 只读会话契约 + `01-top-level-attachment-census.sql`)与自检 `verify/`(`census-pack.test.mjs` + `__fixtures__/fixture.sql`;夹具放在 `__fixtures__/` 下,仓内写入点扫描器按测试数据对待) |
 | `e6064b0c8c` | 把该包接入既有独立车道 `.github/workflows/ops-sql-pack-verify.yml`:两处触发路径、hermetic 矩阵、postgres:16 执行证明矩阵。`scripts/ops/ops-sql-pack-verify-wiring.test.mjs` 加入该包,并新增「两个矩阵都恰好列出 PACKS」的钉子。未碰 `plugin-tests.yml`,未新建必需检查 |
 | `829980c6ff` | `docs/development/approval-attachment-canary-runbook-20260930.md`:主闸 ON 前置顺序、前置核对单(逐项 file:line)、(a)(b) 两路 UAT 剧本 |
 | `57e5565a0b`、`bc66ca2a9e` | 本文件(设计与验证说明)及另两包自检读数 |

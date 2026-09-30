@@ -1,5 +1,8 @@
 -- ============================================================================
 -- fixture.sql — SYNTHETIC schema + rows for the top-level attachment census.
+-- Kept under __fixtures__/ so repo-wide write-site scanners (e.g. the attendance
+-- W4C-0 DML inventory) treat these synthetic INSERTs as test data, like
+-- scripts/ops/__fixtures__/approval-s1-evidence-replay-gate-fixture.sql.
 -- ============================================================================
 -- Loaded by census-pack.test.mjs into a throwaway `a1census_fixture_*` schema
 -- (search_path pinned by the harness). Only the columns the census reads, with
