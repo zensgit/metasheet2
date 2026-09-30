@@ -74,8 +74,8 @@ const SCHEDULED_REMIND_OFFSET_MS = 30 * 60 * 1000
 /** All-day branch local time-of-day (lock §4.4: "18:00"). */
 const ALL_DAY_REMIND_TIME_OF_DAY = '18:00'
 
-// ASSUMPTION(task-d, gate default D6, already in `task-b`/lock territory — restated here because
-// this is where the arithmetic actually runs): the scheduled branch is PURE instant arithmetic
+// ASSUMPTION(task-d): [D6] (already in `task-b`/lock territory — restated here because this is
+// where the arithmetic actually runs) the scheduled branch is PURE instant arithmetic
 // (`dueAt − 30min`); a `due_time` in `00:00`-`00:29` rolling the reminder onto the PREVIOUS calendar
 // day is a straightforward RESULT of that arithmetic, not a separate branch, and DST is not handled
 // specially (the subtraction is on the UTC instant, which is DST-agnostic by construction).

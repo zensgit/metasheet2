@@ -21,14 +21,13 @@ export const TASK_PAGE_LIMIT_MAX = 100
 export const TASK_PAGE_LIMIT_DEFAULT = 100
 export const TASK_PAGE_OFFSET_DEFAULT = 0
 
-/**
- * D9: the stable ORDER BY every M4 list/pagination endpoint must share — `updated_at` ties are
- * broken by `id` (both DESC), so offset-based paging never skips or duplicates a row across pages
- * even when two rows share the same `updated_at`. M2's `/api/tasks` today only orders by
- * `updated_at DESC` (no tiebreaker) — D9: "offset 分页需要它,M2 现在只有 updated_at DESC" — so this
- * is a required addition for the endpoints R15 has M4 retrofit, not a new invention for greenfield
- * ones only.
- */
+// ASSUMPTION(task-d): [D9] the stable ORDER BY every M4 list/pagination endpoint must share —
+// `updated_at` ties are broken by `id` (both DESC), so offset-based paging never skips or
+// duplicates a row across pages even when two rows share the same `updated_at`. M2's `/api/tasks`
+// today only orders by `updated_at DESC` (no tiebreaker) — D9: "offset 分页需要它,M2 现在只有
+// updated_at DESC" — so this is a required addition for the endpoints R15 has M4 retrofit, not a
+// new invention for greenfield ones only.
+/** See the ASSUMPTION note immediately above. */
 export const TASK_PAGE_SORT_KEY = '(updated_at DESC, id DESC)' as const
 
 export type TaskPageParamsReason = 'invalid_limit' | 'invalid_offset'

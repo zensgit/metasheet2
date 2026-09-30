@@ -28,15 +28,26 @@
 ./node_modules/.bin/vitest run tests/unit/task-pure-no-io.test.ts --reporter=dot
 ```
 
-结果:**5/5 通过**。harness 用 `readdirSync` 自动发现 `src/tasks/*.ts`(现为 12 个文件,含本次新增的 7 个),把每个文件的每个导出函数在 `pg`/连接池被替换成"调用即抛 `TASK_DB_STUB`"的桩之后逐一调用一遍——没有任何新模块的导出触达该桩,证明新代码在模块顶层和调用路径上都没有 I/O。
+结果:**5/5 通过**。harness 用 `readdirSync` 自动发现 `src/tasks/*.ts`(现为 16 个文件 = 任务 B/C 遗留的 9 个 + 本次新增的 7 个),把每个文件的每个导出函数在 `pg`/连接池被替换成"调用即抛 `TASK_DB_STUB`"的桩之后逐一调用一遍——没有任何新模块的导出触达该桩,证明新代码在模块顶层和调用路径上都没有 I/O。
 
 ### 2.3 类型检查
 
+CI 实际跑的类型检查链:根 `package.json` 的 `type-check` 脚本是 `pnpm -r type-check`,对 `core-backend` 落到它自己的 `type-check` 脚本 —— `tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json`(`.github/workflows/plugin-tests.yml` 的 "Run type checking" 步骤,只在 `matrix.node-version == '20.x'` 跑,即 `pnpm type-check`)。两条 tsc 命令用的 `include`/`exclude`(`packages/core-backend/tsconfig.json` 与 `scripts/tsconfig.recovery-archive-acceptance.json`,后者只是在前者基础上多 `include` 几个 `.mts` 脚本)**都排除 `**/*.test.ts`**——也就是说 CI 的这条链路本身从不对任意 `*.test.ts` 文件跑类型检查,不只是本次新增的这几个。
+
 ```
 ./node_modules/.bin/tsc --noEmit
+./node_modules/.bin/tsc -p scripts/tsconfig.recovery-archive-acceptance.json
 ```
 
-结果:**零输出,exit 0**(与任务 B/C 验证记录用的同一条命令 —— `package.json` 里 `type-check` 脚本的第一段)。
+两条命令**都是零输出,exit 0**(与任务 B/C 验证记录用的第一条命令一致;第二条是本次额外核对的、CI 实际会跑的第二段)。
+
+由于 CI 链路本身不覆盖测试文件,额外做了一次范围内的核对:用一个只 `include` 本次新增/改动的 8 个测试文件(`task-lists.test.ts`/`task-groups.test.ts`/`task-reminders.test.ts`/`task-notifications.test.ts`/`task-settings.test.ts`/`task-pagination.test.ts`/`task-realtime.test.ts`/`task-ids.test.ts`)、继承 `tsconfig.json` 其余选项的临时 `tsconfig`(未提交,核对完即删除)单独跑了一次 `tsc`(不出现在最终提交里,`git status` 复核过干净):
+
+```
+./node_modules/.bin/tsc -p <临时 tsconfig,仅 include 上述 8 个测试文件>
+```
+
+结果:**零输出,exit 0**。（未纳入范围:`src/__tests__/*.test.ts` 等 main 上早已存在、CI 本就不检查的测试文件——把它们一并纳入会带出与本次改动无关的既有类型错误,不是本次要核对的对象。）
 
 ### 2.4 core-backend 全量单测
 

@@ -24,10 +24,11 @@
 export const TASK_NOTIFIABLE_EVENTS = ['completed', 'completed_by_any', 'reopened', 'deleted', 'commented'] as const
 export type TaskNotifiableEvent = (typeof TASK_NOTIFIABLE_EVENTS)[number]
 
-/** `true` ⇒ `assignee_added` is NOT a notifiable event by default (R05-opt: "被加负责人收通知" is
- * the pack's own invented design — no corpus source page — and defaults to OFF; owner must name it
- * explicitly to turn it on). This constant exists so a future flip is a one-line, greppable change
- * rather than a silent removal of a line from `TASK_NOTIFIABLE_EVENTS`. */
+// ASSUMPTION(task-d): [R05-opt] `true` ⇒ `assignee_added` is NOT a notifiable event by default
+// ("被加负责人收通知" is the pack's own invented design — no corpus source page — and defaults to
+// OFF; owner must name it explicitly to turn it on).
+/** This constant exists so a future flip is a one-line, greppable change rather than a silent
+ * removal of a line from `TASK_NOTIFIABLE_EVENTS`. */
 export const TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN = false
 
 // ── recipient_role closed set (D13 priority: creator > assignee > follower > list_member) ────────
@@ -35,8 +36,8 @@ export const TASK_NOTIFICATION_ASSIGNEE_ADDED_OPT_IN = false
 export const TASK_NOTIFICATION_RECIPIENT_ROLES = ['creator', 'assignee', 'follower', 'list_member'] as const
 export type TaskNotificationRecipientRole = (typeof TASK_NOTIFICATION_RECIPIENT_ROLES)[number]
 
-/** Priority order, HIGHEST first — a user who holds several roles on the same task is recorded
- * under only the highest-priority one (D13). */
+// ASSUMPTION(task-d): [D13] priority order, HIGHEST first — a user who holds several roles on the
+// same task is recorded under only the highest-priority one.
 const RECIPIENT_ROLE_PRIORITY: readonly TaskNotificationRecipientRole[] = ['creator', 'assignee', 'follower', 'list_member']
 
 export interface TaskNotificationRecipient {
@@ -49,8 +50,8 @@ export interface ResolveNotificationRecipientsInput {
   creatorId: string
   assigneeIds: string[]
   followerIds: string[]
-  /** Union of every member (read/edit/owner) of every list containing this task — INCLUDING
-   * archived lists (D13: "已归档清单也算,因为归档不改变任务侧行为"). */
+  // ASSUMPTION(task-d): [D13] union of every member (read/edit/owner) of every list containing this
+  // task — INCLUDING archived lists ("已归档清单也算,因为归档不改变任务侧行为").
   listMemberIds: string[]
   actorId: string
 }
@@ -110,22 +111,23 @@ export function resolveReminderRecipients(input: {
     .map((a) => a.userId)
 }
 
-/** D13: the reminder AND daily-digest families always record `recipientRole: 'assignee'`, or
- * `'creator'` for a zero-assignee task — never any other value from the four-way set above (they
- * do not go through `resolveNotificationRecipients`'s priority resolution at all). */
+// ASSUMPTION(task-d): [D13] the reminder AND daily-digest families always record
+// `recipientRole: 'assignee'`, or `'creator'` for a zero-assignee task — never any other value
+// from the four-way set above (they do not go through `resolveNotificationRecipients`'s priority
+// resolution at all).
 export function reminderRecipientRole(hasAssignees: boolean): TaskNotificationRecipientRole {
   return hasAssignees ? 'assignee' : 'creator'
 }
 
 // ── List-archive recipients (R05(e): the fourth `source_key` family) ─────────────────────────────
 
-/**
- * R05(e): archiving a list notifies the list's CREATOR (excluding the actor, same as every other
- * family — an owner/editor who archives their OWN created list gets no notification). D13: recorded
- * with `recipientRole: 'list_member'` even though the recipient is specifically the creator — the
- * `task_list_events` recipient-role closed set has no separate "list creator" value, so this is the
- * closest bucket (D13's exact words: "recipient_role='list_member'").
- */
+// ASSUMPTION(task-d): [R05(e)] archiving a list notifies the list's CREATOR (excluding the actor,
+// same as every other family — an owner/editor who archives their OWN created list gets no
+// notification).
+// ASSUMPTION(task-d): [D13] recorded with `recipientRole: 'list_member'` even though the recipient
+// is specifically the creator — the `task_list_events` recipient-role closed set has no separate
+// "list creator" value, so this is the closest bucket (D13's exact words: "recipient_role='list_member'").
+/** See the two ASSUMPTION notes immediately above for the ruling this implements. */
 export function resolveListArchiveNotificationRecipients(input: {
   listCreatorId: string
   actorId: string

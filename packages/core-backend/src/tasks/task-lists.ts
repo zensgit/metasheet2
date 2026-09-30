@@ -72,7 +72,7 @@ export type TaskListAction = (typeof TASK_LIST_ACTIONS)[number]
  * archive it even at `'read'`, per §13-14, without being promoted to a stronger membership role). */
 export type TaskListCtxRole = TaskListMemberRole | 'none'
 
-// ASSUMPTION(task-d): R12(a) "调用者在该清单是 edit 或 owner" is the ONLY explicit ruling-pack text
+// ASSUMPTION(task-d): [R12(a)] "调用者在该清单是 edit 或 owner" is the ONLY explicit ruling-pack text
 // for a list-action ability; `add_item`/`remove_item` below are ruling-derived. `manage_members`,
 // `manage_groups`, and `rename` are this module's OWN CHOICE (not named by any R-number): they
 // follow the same "edit-or-owner" class as `add_item`/`remove_item` because R12 gives list-editor
@@ -228,12 +228,11 @@ export type ApplyRemoveListMemberResult =
   | { ok: true; members: TaskListMemberRow[]; events: TaskListEvent[] }
   | { ok: false; reason: TaskListRemoveMemberReason }
 
-/**
- * Not a member ⇒ noop. R12(b): the list's `created_by` can never be removed (422
- * `created_by_immutable`), regardless of their current role. R12(c): a member currently holding
- * `'owner'` can never be removed directly — `applyTransferOwner` must run first (422
- * `owner_must_transfer`).
- */
+// ASSUMPTION(task-d): [R12(b)] the list's `created_by` can never be removed (422
+// `created_by_immutable`), regardless of their current role.
+// ASSUMPTION(task-d): [R12(c)] a member currently holding `'owner'` can never be removed
+// directly — `applyTransferOwner` must run first (422 `owner_must_transfer`).
+/** Not a member ⇒ noop. */
 export function applyRemoveMember(input: {
   members: TaskListMemberRow[]
   userId: string
@@ -264,11 +263,11 @@ export type ApplyChangeMemberRoleResult =
   | { ok: true; members: TaskListMemberRow[]; events: TaskListEvent[] }
   | { ok: false; reason: TaskListChangeRoleReason }
 
+// ASSUMPTION(task-d): [R12(c)] current role `'owner'` ⇒ `owner_must_transfer` (same rule as
+// `applyRemoveMember`: ownership only moves via `applyTransferOwner`).
 /**
  * Not a member ⇒ `not_found` (this is a change to an EXISTING member, unlike `applyAddMember`'s
- * noop-on-existing shape — there is no row to no-op against). Current role `'owner'` ⇒
- * `owner_must_transfer` (same rule as `applyRemoveMember`: ownership only moves via
- * `applyTransferOwner`). Same role requested ⇒ noop.
+ * noop-on-existing shape — there is no row to no-op against). Same role requested ⇒ noop.
  */
 export function applyChangeMemberRole(input: {
   members: TaskListMemberRow[]

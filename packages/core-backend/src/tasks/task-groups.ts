@@ -12,7 +12,11 @@
  */
 import { normalizeUserText } from './task-ids'
 
-// ── Scope closed set (§13-17 / R11: 锁 `:779` "建议 task_groups.scope='user'", accepted) ─────────
+// ASSUMPTION(task-d): [R11] the `scope` closed set is `list | user` (锁 `:779` "建议
+// task_groups.scope='user'"); R11 is unratified. The exactly-one-default-group-per-scope rule and
+// "delete reassigns to the default group" (see `applyCreateGroup`/`applyDeleteGroup` below) are
+// R11's stated detail rules, not separate rulings.
+// ── Scope closed set (§13-17 / R11) ───────────────────────────────────────────────────────────
 
 export const TASK_GROUP_SCOPES = ['list', 'user'] as const
 export type TaskGroupScope = (typeof TASK_GROUP_SCOPES)[number]
@@ -70,13 +74,14 @@ export type ApplyCreateGroupResult =
   | { ok: true; group: TaskGroupPlan; events: TaskGroupListEvent[] }
   | { ok: false; reason: 'limit' }
 
+// ASSUMPTION(task-d): [R11] new groups are never `isDefault` (the exactly-one-default-group-per-scope
+// invariant is a DDL partial unique index; the default group itself is seeded once, outside this
+// function, when the list/personal scope is created).
 /**
  * `id`/`name` are already-validated inputs (caller generates the id via
  * `generateTaskDomainId('group', random)` in `task-ids.ts`, and validates the name via
- * `validateTaskGroupName` above — this function does not re-derive either). New groups are never
- * `isDefault` (the exactly-one-default-group-per-scope invariant is a DDL partial unique index; the
- * default group itself is seeded once, outside this function, when the list/personal scope is
- * created). Position = `existingCount` (appended at the end). D14: `TASK_GROUPS_PER_SCOPE_SOFT_LIMIT`.
+ * `validateTaskGroupName` above — this function does not re-derive either). Position =
+ * `existingCount` (appended at the end). D14: `TASK_GROUPS_PER_SCOPE_SOFT_LIMIT`.
  */
 export function applyCreateGroup(input: {
   id: string
@@ -117,11 +122,12 @@ export type ApplyDeleteGroupResult =
   | { ok: true; reassignToGroupId: string; events: TaskGroupListEvent[] }
   | { ok: false; reason: TaskGroupDeleteReason }
 
+// ASSUMPTION(task-d): [R11] deleting the scope's own default group is never allowed ⇒ `is_default`;
+// items in a deleted (non-default) group move to `defaultGroupId` — R11's "删组后项回默认组".
 /**
- * `group` absent ⇒ `not_found`. Deleting the scope's own default group is never allowed (there must
- * always be exactly one) ⇒ `is_default`. Otherwise: items in the deleted group move to
- * `defaultGroupId` — "删组后项回默认组" — the caller re-points `task_group_items.group_id`, this
- * function only names the target.
+ * `group` absent ⇒ `not_found`. Otherwise: items in the deleted group move to
+ * `defaultGroupId` — the caller re-points `task_group_items.group_id`, this function only names
+ * the target.
  */
 export function applyDeleteGroup(input: {
   group: TaskGroupRow | undefined

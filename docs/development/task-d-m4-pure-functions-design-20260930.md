@@ -2,7 +2,7 @@
 
 - 分支:`claude/tasks-d-pure`,基于 `origin/main`。只在本 worktree 写**无 I/O 纯函数与单测**;不含 DDL、路由、服务、前端;不合并;不启用任何 flag。
 - 授权:调用方指示「起任务 D(只做纯函数)」,先例为任务 B(`docs/development/task-b-pure-functions-design-20260926.md`)与任务 C(`docs/development/task-c-m3-pure-functions-design-20260928.md`),同样只做 `packages/core-backend/src/tasks/` 下的无 I/O 模块与单测。
-- 设计来源:M4 裁决包 v2(私有工作件,未提交入库)§3.1 的任务 D 模块表,以及它所引用的 R01–R23 裁决行、N1/N2 窄问、§3.4 D1–D14 闸方默认值;任务功能线设计锁 `docs/development/task-feature-design-lock-20260917.md` §4、§4.4、§6、§13。
+- 设计来源:M4 裁决包 v2(闸方 PROPOSED 建议,未入库、未经 owner ratify)§3.1 的任务 D 模块表,以及它所引用的 R01–R23 裁决行、N1/N2 窄问、§3.4 D1–D14 闸方默认值;任务功能线设计锁 `docs/development/task-feature-design-lock-20260917.md` §4、§4.4、§6、§13。
 - **裁决状态**:M4 裁决包 v2 是闸方 PROPOSED 建议,**owner 尚未 ratify**。本设计按裁决包的「推荐值」实现,每一处依赖未裁决值的地方,源码里都有一条 `// ASSUMPTION(task-d): R<nn> …` 或 `[D<nn>]` 注释,命名对应的裁决编号 —— owner 改裁决时,`grep -rn 'ASSUMPTION(task-d)' src/tasks/` 就能找到全部要改的点。
 
 ## 1. 范围
@@ -126,6 +126,7 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 - **R01**(M4 退出门集合)、**R03**(日期写入 API/PATCH 路由 + `remind_at` 列)、**R04**(详情路由角色解析)、**R09/R10/R13/R18/R19/R20/R21/R22**:全部是路由、DDL、前端或纯流程性裁决,不产生任何任务 D 纯函数,留给对应的后端/前端 PR。
 - **R08**(follower 能力冲突 `{follower, list-reader}`):裁决包标注为「事实已落 main」——`task-access.ts` 的 `TASK_ROLE_ABILITY` 早已按建议值实现(任务 B),本次不需要任何改动。
 - **staging 真投递**(post-merge owner 步骤):不适用于本切片。
+- **`isInDailyDigest`(TS)与 `buildTaskDailyDigestCondition`(SQL)的双形对拍**:裁决包候选门 M4-c 明确要求这两份文本在真库上对拍(与门 19 的 `taskMatchesView`/SQL 臂对拍同一手法)。本切片只保证两者各自的单测覆盖(见验证记录),**没有**、也不可能在无 I/O 的纯函数切片里做双形对拍——这需要真实 Postgres 连接跑 `buildTaskDailyDigestCondition` 产出的 SQL 并与 `isInDailyDigest` 的 TS 判定逐行比对,留给 PR-3a 的真库测试。
 
 ## 7. 与门表的关系
 

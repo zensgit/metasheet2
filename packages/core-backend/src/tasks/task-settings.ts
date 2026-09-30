@@ -35,12 +35,13 @@ export function parseBadgeScope(raw: unknown): ParseBadgeScopeResult {
   return { ok: false, reason: 'invalid_badge_scope' }
 }
 
+// ASSUMPTION(task-d): [D5] `badge_scope === 'off'` ⇒ `null`, and the CALLER short-circuits
+// (`/pending-count` returns `{count:0, badgeScope:'off'}` without querying `task_assignees`/`tasks`
+// at all — D5 says so explicitly: "不查库").
 /**
- * D5: `badge_scope === 'off'` ⇒ `null`, and the CALLER short-circuits (`/pending-count` returns
- * `{count:0, badgeScope:'off'}` without querying `task_assignees`/`tasks` at all — D5 says so
- * explicitly: "不查库"). `'overdue'`/`'overdue_or_today'` map 1:1 onto `task-access.ts`'s
- * `TaskPendingScope` (they are literal string supersets of each other's values, by design — badge
- * scope is a SUBSET of pending scope, `'all_open'` is pending-only and never a badge value, §13-4).
+ * `'overdue'`/`'overdue_or_today'` map 1:1 onto `task-access.ts`'s `TaskPendingScope` (they are
+ * literal string supersets of each other's values, by design — badge scope is a SUBSET of pending
+ * scope, `'all_open'` is pending-only and never a badge value, §13-4).
  */
 export function pendingScopeForBadge(scope: TaskBadgeScope): TaskPendingScope | null {
   if (scope === 'off') return null
@@ -48,14 +49,17 @@ export function pendingScopeForBadge(scope: TaskBadgeScope): TaskPendingScope | 
   throw new TypeError(`pendingScopeForBadge: unknown scope "${String(scope)}"`)
 }
 
+// ASSUMPTION(task-d): [R02] the whole `task_user_settings` row shape (all four fields below, and
+// therefore the table itself) is R02's recommended value — R02 is unratified (锁 `:750`: "表本身是
+// 建议"). `timeZone` specifically is R02④: `daily_reminder_enabled=false OR time_zone IS NOT NULL`
+// is the DDL CHECK `parseSettingsPatch` below enforces at the application layer.
 // ── Whole-settings-row patch (R02) ────────────────────────────────────────────────────────────
 
 export interface TaskUserSettings {
   badgeScope: TaskBadgeScope
   dailyReminderEnabled: boolean
   defaultRemindPolicy: TaskRemindPolicy
-  /** Regular (canonical) IANA name, or `null` (R02③: `daily_reminder_enabled=false OR time_zone
-   * IS NOT NULL` is the DDL CHECK this validator enforces at the application layer). */
+  /** Regular (canonical) IANA name, or `null`. */
   timeZone: string | null
 }
 
@@ -85,11 +89,13 @@ export type ParseSettingsPatchResult =
 // mentions `timeZone`. Only `undefined` means "not present in the patch, keep current value" — an
 // explicit `timeZone: null` in the patch clears the zone (and will trip the CHECK if
 // `dailyReminderEnabled` ends up `true`).
+// ASSUMPTION(task-d): [D7] `timeZone` is normalized via `task-dates.ts`'s
+// `validateViewerTimeZoneHeader` so a WRITTEN zone is normalized THE SAME WAY a READ viewer-tz
+// header is — "写入 time_zone 时只落规范名".
 /**
  * Merges `patch` onto `current` field-by-field (each field validated independently — closed sets
- * via `parseBadgeScope`/`parseRemindPolicy`, `timeZone` via `task-dates.ts`'s
- * `validateViewerTimeZoneHeader` so a written zone is normalized THE SAME WAY a read viewer-tz
- * header is, D7), then enforces the daily-reminder-needs-a-zone invariant on the MERGED result.
+ * via `parseBadgeScope`/`parseRemindPolicy`), then enforces the daily-reminder-needs-a-zone
+ * invariant on the MERGED result.
  */
 export function parseSettingsPatch(patch: TaskUserSettingsPatch, current: TaskUserSettings): ParseSettingsPatchResult {
   let badgeScope = current.badgeScope
