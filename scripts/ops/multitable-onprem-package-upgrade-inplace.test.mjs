@@ -42,6 +42,9 @@ import { fileURLToPath } from 'node:url'
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const scriptPath = path.join(repoRoot, 'scripts/ops/multitable-onprem-package-upgrade-inplace.ps1')
 const workflowPath = path.join(repoRoot, '.github/workflows/plugin-tests.yml')
+// The one Windows job (stock-prep-powershell51) lives in its own workflow file, which the
+// sealed-export provenance pins whole; the ubuntu `test` job stays in plugin-tests.yml.
+const windowsWorkflowPath = path.join(repoRoot, '.github/workflows/stock-prep-powershell51.yml')
 const runbookPath = path.join(repoRoot, 'docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md')
 const scriptSource = fs.readFileSync(scriptPath, 'utf8')
 
@@ -471,7 +474,8 @@ test('CI wiring: this test file is actually invoked by the required `test` job (
 // behind the fallback's daemon check, the task-scheduler folder semantics, and
 // Windows PowerShell 5.1's native-stderr behaviour (the R59 incident itself). The
 // ubuntu `test` job cannot reach any of it. The one Windows job, stock-prep-powershell51
-// (windows-latest), runs scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
+// (windows-latest; .github/workflows/stock-prep-powershell51.yml), runs
+// scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 // under BOTH Windows PowerShell 5.1 and pwsh 7; that file first runs the co-hosted
 // runner below with its own host shell, which runs THIS file with
 // UPGRADE_INPLACE_TEST_SHELL pointed at that same shell. (The runner lives outside
@@ -620,9 +624,11 @@ function psCodeLines(text) {
 }
 
 test('CI wiring (Windows lanes): stock-prep-powershell51 -> the S6-A ACL suite under 5.1 AND pwsh 7 -> the co-hosted runner -> this file, under that same shell', () => {
-  const workflow = fs.readFileSync(workflowPath, 'utf8')
-  const winJobMatch = workflow.match(/\n {2}stock-prep-powershell51:\n[\s\S]*?(?=\n {2}\S)/)
-  assert.ok(winJobMatch, 'the stock-prep-powershell51 job must exist in plugin-tests.yml')
+  const workflow = fs.readFileSync(windowsWorkflowPath, 'utf8')
+  // The job is the last one in its file, so its block may also end at end of input
+  // (no `m` flag, so `$` matches only there).
+  const winJobMatch = workflow.match(/\n {2}stock-prep-powershell51:\n[\s\S]*?(?=\n {2}\S|\n*$)/)
+  assert.ok(winJobMatch, 'the stock-prep-powershell51 job must exist in stock-prep-powershell51.yml')
   const winJob = winJobMatch[0]
   // The job itself: runs on windows-latest, and nothing at job level can skip it or
   // make its failure non-blocking (if, continue-on-error, needs, strategy, env, ...).

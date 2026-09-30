@@ -143,6 +143,13 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   // (see the workflow) runs the contract regardless, whose Pin re-asserts plugin-tests.yml still
   // carries the invocation — see the contract test file for the full two-point account.
   '.github/workflows/plugin-tests.yml',
+  // S6-A PowerShell 5.1 executor (2026-09-30): the `stock-prep-powershell51` job moved byte-for-byte
+  // out of plugin-tests.yml (guarded, above) into its own workflow file, which is pinned whole as
+  // sealed-export provenance evidence `s6aPowershell51Workflow`. Listed here so a change to it keeps
+  // the trigger it had while it lived in plugin-tests.yml: this guard runs the plugin-integration-core
+  // chain, including the provenance live compare. sealed-export-package-provenance.test.cjs asserts
+  // this entry stays in place (derived from the pinned roster, not a copy of the path).
+  '.github/workflows/stock-prep-powershell51.yml',
 ])
 
 /**
