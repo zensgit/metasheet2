@@ -1,6 +1,6 @@
 # s6a pins 范围收窄:S6-A PowerShell 5.1 执行器独立成 workflow 并整文件钉(设计 + 验证)
 
-- 日期:2026-09-30;分支 `chore/s6a-pins-narrow-workflow-scope`(仅本地);基线 `fc684dceeb`(main,#6132 之后)
+- 日期:2026-09-30;分支 `chore/s6a-pins-narrow-workflow-scope`(Draft PR #6187);基线 `fc684dceeb`(main,#6132 之后)
 - 依据:owner 2026-09-30 原话「按你给的「收益 ÷ 成本 顺序来执行」」,指向排序第 ③ 项「根治 s6a pins 串行瓶颈(须 sealed-export 线门审)」;决策单 D-13 的选项 (b)。
 - 性质:**Draft PR 候选**。选型来自一份只读选项分析(私有记录),那是分析者建议,**不是授权**。合并须 owner 点名 + sealed-export 线门审。本文不改任何已 ratify 锁的正文(§4)。
 
@@ -10,10 +10,10 @@
 |---|---|
 | 做了什么 | 把 `plugin-tests.yml` 的 `stock-prep-powershell51` job **逐字节原样**搬到新文件 `.github/workflows/stock-prep-powershell51.yml`;证据清单 `PINNED_EVIDENCE_FILES` 用 `s6aPowershell51Workflow`(新文件,**整文件** sha256)替换 `pluginTestsWorkflow`(`plugin-tests.yml`);清单仍是 10 条 |
 | 证明力 | 对被证明对象(S6-A PS 5.1 证据执行器)**不削弱**:每一类篡改在新文件上仍令 live 比对红(§2.2,11 类用例 + 删除)。留在 `plugin-tests.yml` 里的内容所对应的篡改,**原本就不在证明范围内**(§2.3,附代码证据与演练读数) |
-| 必需检查里的触发 | `plugin-tests.yml` 是必需检查 `integration-guard` 的守护路径;新文件自 C6 起同样列入守护名册(`scripts/ops/integration-guard-guarded-paths.mjs` 与 `integration-guard.yml` 的 `on.push.paths`),改它照旧在该必需检查里跑含 live 比对的 plugin-integration-core 链;provenance 测试断言这一条(§2.2、§5 V8)。同类既有残留:见私有记录 |
+| 必需检查里的触发 | `plugin-tests.yml` 是必需检查 `integration-guard` 的守护路径;新文件自 C6 起同样列入守护名册(`scripts/ops/integration-guard-guarded-paths.mjs` 与 `integration-guard.yml` 的 `on.push.paths`),改它照旧在该必需检查里跑含 live 比对的 plugin-integration-core 链;provenance 测试断言这一条(§2.2、§5 V8)。其余见私有记录 |
 | 钉的移动 | C1 只动 4 个叶子(§5 V3);其后 C2 / C4 两次改 `plugin-tests.yml`、C3 / C6 改测试与守护名册,钉都是 0 移动;C7 纯注释只动 `modules.s5["sealed-export-package-provenance.cjs"]` 1 个叶子 |
 | 需改已 ratify 锁 | 否(§4) |
-| 未决 | V6(必需检查 `stock-prep PowerShell 5.1 acceptance` 由新 workflow 满足)只能在 Draft PR 上实测;若不绑定,补救是 owner 改分支保护,**不是**锁改动 |
+| V6 | 已在 Draft PR #6187 上实测:必需检查 `stock-prep PowerShell 5.1 acceptance` 由新 workflow 报告并通过(§5);分支保护无需改动 |
 
 ## 1. 改动(C1–C4、C6–C7 六个代码提交 + C5 / C8 / C9 三个文档提交)
 
@@ -54,7 +54,7 @@
 - 每个用例:锚点必须恰好出现一次;篡改后 `verifySealedExportPackageProvenance` 抛 `SEALED_EXPORT_INTERNAL_ERROR`,**且** `computePackageProvenancePinSet(root).evidenceFiles.s6aPowershell51Workflow` 与冻结值不同(即 live 比对红);还原后再校验为绿(正控,证明红来自该篡改)。
 - 证明单元是整文件而不是文件内的 job 区段:YAML 映射键序自由,`jobs:` 之后的顶层 `permissions` / `env` / `defaults` 仍作用于每个 job(T3 用例专测这一点)。
 - 清单断言(`positivePackagePin`):`s6aPowershell51Workflow` 指向新文件,且新文件确实调用被钉的 `s6aAcceptancePs51Test` 并紧跟退出码检查。
-- 在哪个必需检查里被发现(C6,门审 P2):之前,`plugin-tests.yml` 在 Integration Guard 守护名册里,改它令必需的 `integration-guard` 跑 plugin-integration-core 链(含本 live 比对)。之后,新文件自 C6 起同样在名册与 `on.push.paths` 里(与之前持平);`s6aPowershell51ExecutorIsIntegrationGuarded` 以清单条目的路径调用 `classify()` 断言为 `true`,所以把该条从名册删掉、或把清单条目改指别的路径而不补名册,都会令 provenance 测试红(§5 V8 演练)。同类既有残留:见私有记录。
+- 在哪个必需检查里被发现(C6,门审 P2):之前,`plugin-tests.yml` 在 Integration Guard 守护名册里,改它令必需的 `integration-guard` 跑 plugin-integration-core 链(含本 live 比对)。之后,新文件自 C6 起同样在名册与 `on.push.paths` 里(与之前持平);`s6aPowershell51ExecutorIsIntegrationGuarded` 以清单条目的路径调用 `classify()` 断言为 `true`,所以把该条从名册删掉、或把清单条目改指别的路径而不补名册,都会令 provenance 测试红(§5 V8 演练)。其余见私有记录。
 - 测试自身的效力(对**模块**做变异,每次都重算钉,确保红是本测试的):去掉证据字节校验、清单改回钉 `plugin-tests.yml`、清单额外再钉 `plugin-tests.yml`,三者都令 provenance 测试红。
 
 ### 2.3 留在 `plugin-tests.yml` 里的内容(不再被钉)
@@ -72,7 +72,7 @@
 #### 2.3.1 S3 / S4 步的篡改演练(在工作树上改 `plugin-tests.yml`,跑对应结构守卫,`cp` 还原并核 sha)
 
 - 结构守卫拦得住(红)的四类,S3 与 S4 各自实测:被测路径换成别的文件、被测路径改名、步骤 `if:` 翻到 18.x、去掉 `DATABASE_URL`。
-- 另有若干步骤级编辑类:在基线上会动 `pluginTestsWorkflow` 钉,本改动之后不再动钉,结构守卫也不拦。逐项读数见私有记录。
+- 步骤级编辑的逐项读数:见私有记录。
 - 这些编辑所能达成的结果(S3 / S4 真库证明不再有效)今天就能通过改**未被钉**的被测文件达成而不动任何钉(见上表第一行与 V4-c),所以它们不在证明保证内。列入 §3 未覆盖项。
 
 ### 2.4 被钉文件的执行器普查(`fc684dceeb`,按文件名在 `.github/workflows/*.yml` 里 grep,再区分 `paths:` 行与执行行)
@@ -94,13 +94,13 @@
 
 ## 3. 未覆盖项 / 残留
 
-1. **S3 / S4 真库步上的若干步骤级编辑类**:之后不再动钉,结构守卫也不拦(§2.3.1;逐项见私有记录)。原本就不在证明范围内(被测文件未被钉)。可选加强方向见私有记录,须单独门审,本 PR 不做。
+1. **S3 / S4 真库步**:`plugin-tests.yml` 不再是 provenance 输入(§2.3、§2.3.1)。原本就不在证明范围内(被测文件未被钉)。其余见私有记录,本 PR 不做。
 2. **必需检查的归属**:本改动不改变既有状况,细节见私有记录。
-3. **V6 未实测**:见 §5。
+3. **V6 / V7**:读数见 §5。
 4. **PS 5.1 本身未在本地跑**(只有 Windows runner 能跑);本地跑了读该 job 的两条契约测试(node 与 pwsh 7)。
 5. **本 PR 不治的**:`pluginHttpRoutes`(pins.json 最热的键)是随包出货的运行时文件,钉它是证明核心,不能照搬本方案;`plugin-tests.yml` 自身的文本冲突仍在。
 6. 新文件未加 `permissions: contents: read`,为保持与原 job 头部逐字节可比;可另提。
-7. **Integration Guard 触发**(门审 P2):C1–C5 之间新文件不在守护名册;C6 起与基线持平(§2.2、§5 V8)。同类既有残留:见私有记录,本 PR 不做。
+7. **Integration Guard 触发**(门审 P2):C1–C5 之间新文件不在守护名册;C6 起与基线持平(§2.2、§5 V8)。其余见私有记录。
 8. **部署就绪脚本不再汇总 PS 5.1 结果**(门审 P3,只记录不改):`scripts/ops/integration-erp-plm-deploy-readiness.mjs` 的 `REQUIRED_MAIN_WORKFLOWS` 按 workflow 名字取 `Plugin System Tests` 在所选 main 提交上的结论;拆分后 PS 5.1 job 失败不再令该 run 失败。该条目的 `purpose` 文本从未列出 PS 5.1,原覆盖是附带的。不改的理由:该脚本属部署 / 发布线(由 `docker-publish-guard.yml` 与其测试夹具守着),加一条必需 workflow 要连带改夹具,超出本 PR 范围。现状:新 workflow 的 `on:` 与 `plugin-tests.yml` 逐字节相同,在同一批 main 提交上运行;`stock-prep PowerShell 5.1 acceptance` 仍是 main 分支保护的必需 context(2026-09-30 只读 `gh api` 核对,13 个必需 context 之一,app 15368)。把 `Stock-prep PowerShell 5.1 acceptance` 加入 `REQUIRED_MAIN_WORKFLOWS` 作为后续单独一张。
 9. **过时注释**(门审 NIT,只记录不改):约 35 个 `approval-realdb-*.yml` 头注释、`packages/core-backend/vitest.config.ts`、`approval-ci-coverage-enumeration.test.ts`、`approval-cancel-round-ci-wiring.test.ts` 里仍写着「`plugin-tests.yml` 是 s6a sha256 钉的 provenance 输入」。错在保守方向(照做只会多一次 0 差异的重算)。不在本 PR 扫:一次改几十个 workflow 会扩大本 PR 要缩小的冲突面;留作单独的纯文档清扫。
 10. **提交尾注**(门审 NIT):C1–C5 缺 `Claude-Session` 尾注(身份均为 noreply,合规)。本轮约束「新提交、不 amend」,故不改;C6 起的提交带该尾注。squash 合并时可在合并信息里统一。
@@ -120,8 +120,8 @@
 | V3 | 钉的叶子级差异(66 个叶子) | C1:恰好 4 个 —— `evidenceFiles.pluginTestsWorkflow`(删)、`evidenceFiles.s6aPowershell51Workflow`(增)、`evidenceFiles.s5EvidenceWorkflow`、`modules.s5["sealed-export-package-provenance.cjs"]`;C2 / C3 / C4 / C6:0;C7:恰好 1 个 —— `modules.s5["sealed-export-package-provenance.cjs"]`(纯注释;冻结清单摘要 `4f2681e6…` → `b6a2270c…`) |
 | V4 | 解耦演练(工作树上改、跑、`cp` 还原、核 sha) | 见下 |
 | V5 | 读该 job 的契约测试 | `multitable-onprem-package-upgrade-inplace.test.mjs` 两条 CI wiring 用例 2/2(完整套件 79/79);`stock-preparation-rca-window.tests.ps1`(pwsh 7)38/38 |
-| V6 | 必需 context 由新 workflow 满足 | **未测**(须 Draft PR);不绑定则停,补救是 owner 改分支保护 |
-| V7 | 必需 context 全绿 | **未测**(须 Draft PR) |
+| V6 | 必需 context 由新 workflow 满足 | **成立**(Draft PR #6187,head `dde90945f5`):该 context 由 workflow「Stock-prep PowerShell 5.1 acceptance」(`pull_request`,run 36707082295)报告 success |
+| V7 | 必需 context 全绿 | head `dde90945f5`:**13/13 pass**(2026-09-30 20:03 +0800 读)。本行所在提交只改文档;其后的 head 以 PR 检查页为准 |
 | V8 | 新文件是 Integration Guard 守护路径(C6) | 见下 |
 
 V4 读数(每项改后跑 provenance 测试 + 叶子级重算,随后 `cp` 还原并核对与 HEAD blob 相同):
