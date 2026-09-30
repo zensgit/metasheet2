@@ -1418,6 +1418,9 @@ describe('ApprovalDetailView — instance consistency', () => {
   // -------------------------------------------------------------------------
   function myTurnInstance(id: string): any {
     return instance(id, {
+      // The uploader renders on the server-resolved field (together with the pipeline flag), not on
+      // the client's `isMyTurn` mirror — so this is what makes the input PRESENT in these rows.
+      canAttachProcessEvidence: true,
       assignments: [{
         assigneeId: 'user_99',
         type: 'user',
@@ -1430,8 +1433,8 @@ describe('ApprovalDetailView — instance consistency', () => {
 
   /**
    * The input, asserted PRESENT before its `disabled` is read. A vanished input (the `v-if` on
-   * `attachmentPipelineEnabled && isMyTurn` stops rendering it) must never be able to read as a
-   * refused one — that is the shape in which a three-state gate assertion goes vacuous.
+   * `attachmentPipelineEnabled && canAttachProcessEvidence` stops rendering it) must never be able
+   * to read as a refused one — that is the shape in which a three-state gate assertion goes vacuous.
    */
   function presentAttachmentInput(state: string): HTMLInputElement {
     const input = q(container!, 'approval-comment-attachment-input') as HTMLInputElement | null

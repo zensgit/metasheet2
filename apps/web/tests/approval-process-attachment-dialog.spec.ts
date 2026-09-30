@@ -5,10 +5,14 @@ import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from
 /**
  * Lock-9 OD-L9-10(a) FE slice — ApprovalDetailView 评论 (comment) action dialog:
  *
- *   1. Affordance gating: `attachmentPipelineEnabled && isMyTurn`, deliberately NOT `canAct` (the
- *      coarse `approvals:act` scope grant). Both directions are proven non-vacuous: `isMyTurn`
- *      true with `canAct` FALSE still shows the uploader; `isMyTurn` false with `canAct` TRUE still
- *      hides it.
+ *   1. Affordance gating: `attachmentPipelineEnabled && canAttachProcessEvidence` — the pipeline
+ *      flag AND the server-resolved, viewer-scoped DTO field. Deliberately NOT `canAct` (the coarse
+ *      `approvals:act` scope grant) and no longer the client-side `isMyTurn` mirror, which matches
+ *      user-typed seats only and so hid the uploader from every role-seated approver. Each of the
+ *      three alternatives is separated from the field in BOTH directions: field true with `canAct`
+ *      FALSE and `isMyTurn` FALSE (a role seat) shows it; field false / absent with `canAct` TRUE
+ *      and `isMyTurn` TRUE hides it. `isMyTurn` keeps driving the 「等待你处理」 cue, asserted
+ *      alongside so the two cannot be confused.
  *   2. Staged upload / remove through the process-attachment client
  *      (`uploadApprovalProcessAttachmentsAtomic` / `deleteApprovalAttachment`), never the
  *      form-field `templateId`/`fieldId` client.
@@ -240,6 +244,12 @@ function baseInstance(overrides: Record<string, unknown> = {}): any {
 }
 
 const MY_TURN_ASSIGNMENTS = [{ id: 'asn_1', isActive: true, type: 'user', assigneeId: 'user_me', nodeKey: 'node_1', sourceStep: 1, metadata: {} }]
+// A ROLE-typed seat at the current node: the viewer's standing comes from a role they hold, so no
+// assignment names them and the client-side `isMyTurn` mirror (user seats only) is false.
+const ROLE_SEAT_ASSIGNMENTS = [{ id: 'asn_role', isActive: true, type: 'role', assigneeId: 'finance', nodeKey: 'node_1', sourceStep: 1, metadata: {} }]
+// What the uploader-lifecycle suites mount: a user-seated approver the server says may attach. The
+// uploader renders on `canAttachProcessEvidence`; the assignment is here for the rest of the view.
+const SEATED = { assignments: MY_TURN_ASSIGNMENTS, canAttachProcessEvidence: true }
 
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
@@ -349,43 +359,114 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
   }
 
   // -------------------------------------------------------------------------
-  // 1. Affordance gating — attachmentPipelineEnabled && isMyTurn, NOT canAct
+  // 1. Affordance gating — attachmentPipelineEnabled && canAttachProcessEvidence (the server's
+  //    answer), NOT canAct and NOT the client-side isMyTurn mirror
   // -------------------------------------------------------------------------
   describe('affordance gating', () => {
-    it('shows the uploader when isMyTurn is true even though canAct is FALSE (gate is not canAct)', async () => {
+    function uploader(): Element | null {
+      return commentDialog().querySelector('[data-testid="approval-comment-attachment-upload"]')
+    }
+
+    /** Mounts, opens the 评论 dialog, returns the page's markup, and unmounts again. */
+    async function renderedHtml(flag: boolean, overrides: Record<string, unknown>): Promise<string> {
+      approvalAttachmentsFlag = flag
+      mockCurrentUserId.value = 'user_me'
+      mockActiveApproval.value = baseInstance(overrides)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      const html = container!.innerHTML
+      app!.unmount()
+      app = null
+      container!.innerHTML = ''
+      return html
+    }
+
+    it('shows the uploader to a ROLE-seated approver: field true, isMyTurn FALSE (no user seat names them), canAct FALSE', async () => {
       approvalAttachmentsFlag = true
       mockCurrentUserId.value = 'user_me'
-      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ assignments: ROLE_SEAT_ASSIGNMENTS, canAttachProcessEvidence: true })
       mockCanAct.value = false
       await mountView()
       openCommentDialog()
       await flushUi()
 
-      expect(commentDialog().querySelector('[data-testid="approval-comment-attachment-upload"]')).toBeTruthy()
+      expect(uploader()).toBeTruthy()
+      // The cue is the client mirror's, and the mirror does not see a role seat — which is exactly
+      // why the uploader no longer hangs off it.
+      expect(q(container!, 'approval-my-turn-badge')).toBeNull()
     })
 
-    it('hides the uploader when isMyTurn is false even though canAct is TRUE (same pair, reversed)', async () => {
+    it('hides the uploader when the field is FALSE even though isMyTurn is TRUE and canAct is TRUE; the 等待你处理 cue still renders', async () => {
       approvalAttachmentsFlag = true
-      mockCurrentUserId.value = 'user_someone_else' // assignment below is for 'user_me', not me
+      mockCurrentUserId.value = 'user_me'
+      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS, canAttachProcessEvidence: false })
+      mockCanAct.value = true
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+
+      expect(uploader()).toBeNull()
+      expect(q(container!, 'approval-my-turn-badge')).toBeTruthy()
+    })
+
+    it('hides the uploader when the field is ABSENT (a backend that does not compute it) even though isMyTurn is TRUE', async () => {
+      approvalAttachmentsFlag = true
+      mockCurrentUserId.value = 'user_me'
       mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
       mockCanAct.value = true
       await mountView()
       openCommentDialog()
       await flushUi()
 
-      expect(commentDialog().querySelector('[data-testid="approval-comment-attachment-upload"]')).toBeNull()
+      expect(mockActiveApproval.value).not.toHaveProperty('canAttachProcessEvidence')
+      expect(uploader()).toBeNull()
+      expect(q(container!, 'approval-my-turn-badge')).toBeTruthy()
     })
 
-    it('hides the uploader when the pipeline flag is OFF regardless of isMyTurn — dialog otherwise byte-identical', async () => {
-      approvalAttachmentsFlag = false
+    it('shows the uploader and the cue together for a user-seated approver the server says may attach', async () => {
+      approvalAttachmentsFlag = true
       mockCurrentUserId.value = 'user_me'
-      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance(SEATED)
       await mountView()
       openCommentDialog()
       await flushUi()
 
-      expect(commentDialog().querySelector('[data-testid="approval-comment-attachment-upload"]')).toBeNull()
+      expect(uploader()).toBeTruthy()
+      expect(q(container!, 'approval-my-turn-badge')).toBeTruthy()
+    })
+
+    it('hides the uploader when the pipeline flag is OFF whatever the field says — dialog otherwise intact', async () => {
+      approvalAttachmentsFlag = false
+      mockCurrentUserId.value = 'user_me'
+      mockActiveApproval.value = baseInstance(SEATED)
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+
+      expect(uploader()).toBeNull()
       expect(commentDialog().querySelector('[data-testid="approval-comment-submit"]')).toBeTruthy()
+    })
+
+    it('flag OFF: the whole rendered view is byte-identical whether the field is true, false or absent', async () => {
+      // The flag conjunct comes first, so with the pipeline OFF the new field must not be able to
+      // move a single byte of the page — for a user seat and for a role seat alike.
+      for (const assignments of [MY_TURN_ASSIGNMENTS, ROLE_SEAT_ASSIGNMENTS]) {
+        const absent = await renderedHtml(false, { assignments })
+        expect(absent.length).toBeGreaterThan(500) // a real page, not an empty mount
+        expect(absent).toContain('approval-comment-submit')
+        expect(await renderedHtml(false, { assignments, canAttachProcessEvidence: true })).toBe(absent)
+        expect(await renderedHtml(false, { assignments, canAttachProcessEvidence: false })).toBe(absent)
+      }
+    })
+
+    it('positive control for the comparison above: with the flag ON the same two renders DO differ', async () => {
+      // Without this, the byte-equality case would also pass if the field were simply never read.
+      const withoutField = await renderedHtml(true, { assignments: ROLE_SEAT_ASSIGNMENTS })
+      const withField = await renderedHtml(true, { assignments: ROLE_SEAT_ASSIGNMENTS, canAttachProcessEvidence: true })
+      expect(withField).not.toBe(withoutField)
+      expect(withField).toContain('approval-comment-attachment-upload')
+      expect(withoutField).not.toContain('approval-comment-attachment-upload')
     })
   })
 
@@ -396,7 +477,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
     beforeEach(() => {
       approvalAttachmentsFlag = true
       mockCurrentUserId.value = 'user_me'
-      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance(SEATED)
     })
 
     it('a picked file uploads through the PROCESS client with (files, instanceId) — never templateId/fieldId', async () => {
@@ -565,7 +646,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
     beforeEach(() => {
       approvalAttachmentsFlag = true
       mockCurrentUserId.value = 'user_me'
-      mockActiveApproval.value = baseInstance({ assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance(SEATED)
     })
 
     function deferred<T>() {
@@ -726,7 +807,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       expect(uploadAtomicSpy).not.toHaveBeenCalled()
       expect(commentDialog().textContent).not.toContain('wrong-instance.pdf')
 
-      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', ...SEATED })
       await flushUi()
       expect(commentAttachmentInput().disabled).toBe(false)
     })
@@ -737,7 +818,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       await mountView()
 
       mockRouteId.value = 'apv_2'
-      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', ...SEATED })
       await flushUi()
       openCommentDialog()
       await flushUi()
@@ -748,7 +829,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       expect(commentAttachmentInput().disabled).toBe(true)
       expect(submitButton.disabled).toBe(true)
 
-      mockActiveApproval.value = baseInstance({ id: 'apv_1', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_1', ...SEATED })
       await flushUi()
       pending.resolve([{ id: 'att_same_generation_stale', sizeBytes: 1 }])
       await flushUi()
@@ -756,7 +837,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_same_generation_stale')
       expect(commentDialog().textContent).not.toContain('same-generation-stale.pdf')
 
-      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', ...SEATED })
       await flushUi()
       expect(commentAttachmentInput().disabled).toBe(false)
       expect(submitButton.disabled).toBe(false)
@@ -794,7 +875,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       await pickFiles([new File(['x'], 'old-instance.pdf', { type: 'application/pdf' })])
 
       mockRouteId.value = 'apv_2'
-      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', ...SEATED })
       await flushUi()
 
       uploadAtomicSpy.mockReturnValueOnce(second.promise)
@@ -830,7 +911,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       await pickFiles([new File(['x'], 'old-fail.pdf', { type: 'application/pdf' })])
 
       mockRouteId.value = 'apv_2'
-      mockActiveApproval.value = baseInstance({ id: 'apv_2', assignments: MY_TURN_ASSIGNMENTS })
+      mockActiveApproval.value = baseInstance({ id: 'apv_2', ...SEATED })
       await flushUi()
 
       uploadAtomicSpy.mockReturnValueOnce(second.promise)

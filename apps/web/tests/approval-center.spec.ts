@@ -13,6 +13,7 @@ import {
   type App as VueApp,
   type Slot,
 } from 'vue'
+import { NETWORK_UNREACHABLE_COPY } from '../src/utils/networkErrors'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -1286,6 +1287,12 @@ describe('ApprovalCenterView', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-testid="approval-created-range-filter"]')!.click()
       await flushUi()
+      // The status dropdown carries no test id; it is the one select offering 已通过.
+      expect(container!.querySelectorAll('select option[value="approved"]')).toHaveLength(1)
+      const statusSelect = container!.querySelector<HTMLOptionElement>('select option[value="approved"]')!.closest('select')!
+      statusSelect.value = 'approved'
+      statusSelect.dispatchEvent(new Event('change'))
+      await flushUi()
 
       await clickExport()
 
@@ -1294,7 +1301,7 @@ describe('ApprovalCenterView', () => {
       expect(exportQuery).toEqual({
         tab: 'pending',
         search: undefined,
-        status: undefined,
+        status: 'approved',
         sourceSystem: 'platform',
         templateId: 'tpl-7',
         createdFrom: '2026-05-01T00:00:00Z',
@@ -1309,6 +1316,9 @@ describe('ApprovalCenterView', () => {
       const { page, pageSize, ...listFilters } = lastListQuery
       expect(page).toBe(1)
       expect(pageSize).toBe(10)
+      // Pinned on its own: `toEqual` below ignores keys whose value is `undefined`, so it alone
+      // would not notice a status that reached neither request.
+      expect(listFilters.status).toBe('approved')
       const { tab, ...exportFilters } = exportQuery
       expect(tab).toBe('pending')
       expect(exportFilters).toEqual(listFilters)
@@ -1481,6 +1491,26 @@ describe('ApprovalCenterView', () => {
       expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
     })
 
+    it('a refused export with no response at all (network unreachable) shows the shared no-response copy, in the UI locale', async () => {
+      await mountView()
+
+      // Shape the API client throws when fetch gets no HTTP response (utils/networkErrors).
+      exportApprovalsCsvSpy.mockRejectedValueOnce(Object.assign(new Error('offline'), { code: 'NETWORK_UNAVAILABLE', status: 0 }))
+      await clickExport()
+
+      expect(exportNotice()!.getAttribute('data-export-outcome')).toBe('failed')
+      expect(exportNotice()!.getAttribute('role')).toBe('alert')
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.en)
+      expect(CJK_RE.test(exportNotice()!.textContent ?? '')).toBe(false)
+      expect(createObjectUrlSpy).not.toHaveBeenCalled()
+      expect(clickedAnchors).toEqual([])
+      expect(elErrorSpy).not.toHaveBeenCalled()
+
+      await setLocale('zh-CN')
+      await flushUi()
+      expect(exportNotice()!.textContent?.trim()).toBe(NETWORK_UNREACHABLE_COPY.zh)
+    })
+
     it('while an export is in flight the button is busy and a second click does not start another', async () => {
       let resolveExport: (value: unknown) => void = () => {}
       exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
@@ -1515,6 +1545,94 @@ describe('ApprovalCenterView', () => {
       container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-cc"]')!.click()
       await flushUi()
       expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight when the list moves to another feed saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      let rejectExport: (reason: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve, reject) => {
+        resolveExport = resolve
+        rejectExport = reject
+      }))
+      await mountView()
+
+      // Success half: export on 待我处理, switch to 抄送我的 before the server answers.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-cc"]')!.click()
+      await flushUi()
+      expect(loadCcSpy).toHaveBeenCalledTimes(1)
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      // The file matches the click-time feed, so it is still handed to the browser...
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      // ...but its result line does not appear under the 抄送我的 list.
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+
+      // Failure half: export on 抄送我的, switch to 我发起的, then the request fails.
+      exportButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="test-switch-tab-mine"]')!.click()
+      await flushUi()
+      expect(loadMineSpy).toHaveBeenCalledTimes(1)
+      rejectExport(new MockApprovalApiError('degraded', 503, 'APPROVAL_EXPORT_DEGRADED'))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+      expect(exportButton()!.disabled).toBe(false)
+      expect(exportApprovalsCsvSpy).toHaveBeenCalledTimes(2)
+    })
+
+    it('an export still in flight across a FILTER change saves its file but posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      changeSelect('approval-source-filter', 'platform')
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ sourceSystem: 'platform' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(createObjectUrlSpy).toHaveBeenCalledTimes(1)
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight across a SUBMITTED search posts no result line on the new list', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+      exportButton()!.click()
+      await flushUi()
+      const search = container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+      search.value = 'PO-2026'
+      search.dispatchEvent(new Event('input'))
+      await flushUi()
+      search.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy).toHaveBeenLastCalledWith(expect.objectContaining({ search: 'PO-2026' }))
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()).toBeNull()
+    })
+
+    it('an export still in flight across a reload of the SAME feed keeps its result line', async () => {
+      let resolveExport: (value: unknown) => void = () => {}
+      exportApprovalsCsvSpy.mockImplementation(() => new Promise((resolve) => { resolveExport = resolve }))
+      await mountView()
+
+      exportButton()!.click()
+      await flushUi()
+      // Enter on the (still empty) search box reloads the list with the same tab and filters.
+      const pendingLoadsBefore = loadPendingSpy.mock.calls.length
+      container!.querySelector<HTMLInputElement>('[data-testid="approval-search-input"]')!
+        .dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter' }))
+      await flushUi()
+      expect(loadPendingSpy.mock.calls.length).toBe(pendingLoadsBefore + 1)
+
+      resolveExport(exportResult({ rowCount: 3 }))
+      await flushUi(6)
+      expect(exportNotice()!.textContent?.trim()).toBe('Exported 3 rows.')
     })
 
     it('source tripwire: the view builds no CSV and no Blob of its own', async () => {

@@ -1513,12 +1513,17 @@ async function handleExportCsv(): Promise<void> {
   if (exporting.value || !filters || filters.sourceSystem === 'plm') return
   exporting.value = true
   exportOutcome.value = null
+  // The result line describes the feed this click exported. If the list moved to another feed
+  // while the request was in flight, `loadCurrentTab()` has already dropped the line and replaced
+  // the snapshot object, so the late result is not posted under a list it does not describe. The
+  // file itself is still saved: it is exactly what was asked for at click time.
+  const stillSameFeed = () => appliedListFilters.value === filters
   try {
     const result = await exportApprovalsCsv(filters)
     saveExportFile(result.blob, result.fileName)
-    exportOutcome.value = exportOutcomeOf(result)
+    if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
   } catch (error) {
-    exportOutcome.value = exportFailureOf(error)
+    if (stillSameFeed()) exportOutcome.value = exportFailureOf(error)
   } finally {
     exporting.value = false
   }
@@ -1562,12 +1567,14 @@ function loadCurrentTab() {
   // F3-E1: the export button reads this snapshot, so it exports what THIS load asked for. A result
   // notice describes one export of one feed; once the feed on screen is a different one (another
   // tab or filter set — a page change is not), the notice would describe a file the list no longer
-  // matches, so it is dropped.
+  // matches, so it is dropped. The snapshot object is replaced only in that case, so its identity
+  // changes exactly when the feed does — `handleExportCsv` relies on that to tell whether a late
+  // result still belongs to the list on screen (a page change or same-feed reload keeps it).
   const nextAppliedFilters: ApprovalExportQuery = { ...filters, tab: activeTab.value }
   if (JSON.stringify(nextAppliedFilters) !== JSON.stringify(appliedListFilters.value)) {
     exportOutcome.value = null
+    appliedListFilters.value = nextAppliedFilters
   }
-  appliedListFilters.value = nextAppliedFilters
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
     case 'mine': store.loadMine(query); break

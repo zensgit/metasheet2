@@ -34,7 +34,11 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..', '..')
 const workflowPath = join(repoRoot, '.github', 'workflows', 'ops-sql-pack-verify.yml')
 
-const PACKS = ['readonly-inventory-20260916', 'live-id-fk-validate-20260920']
+const PACKS = [
+  'readonly-inventory-20260916',
+  'live-id-fk-validate-20260920',
+  'approval-attachment-canary-census-20260930',
+]
 
 function repoRelative(absolutePath) {
   return relative(repoRoot, absolutePath).split(sep).join('/')
@@ -196,7 +200,7 @@ test('the drift check bites: deleting the migration path entry from the yml text
     !pathsMatch(mutatedWorkflow.on.push.paths, migrationPath),
     'removing the entry must un-match push.paths',
   )
-  // ...and the two directory globs the rest of each pack still lives under must be unaffected by
+  // ...and the directory globs the rest of each pack still lives under must be unaffected by
   // the mutation, so this isn't accidentally deleting more than the one line it targets.
   for (const packName of PACKS) {
     const probe = `scripts/ops/${packName}/verify/anything.test.mjs`
@@ -205,11 +209,20 @@ test('the drift check bites: deleting the migration path entry from the yml text
   }
 })
 
-test('both packs still keep their own directory glob in both trigger path lists', () => {
+test('every pack keeps its own directory glob in both trigger path lists', () => {
   const workflow = loadWorkflow()
   for (const packName of PACKS) {
     const pattern = `scripts/ops/${packName}/**`
     assert.ok(workflow.on.pull_request.paths.includes(pattern), `pull_request.paths must list ${pattern}`)
     assert.ok(workflow.on.push.paths.includes(pattern), `push.paths must list ${pattern}`)
+  }
+})
+
+test('every pack is in both job matrices (hermetic and execution-proof)', () => {
+  const workflow = loadWorkflow()
+  for (const job of ['hermetic', 'execution-proof']) {
+    const packs = workflow.jobs[job]?.strategy?.matrix?.pack
+    assert.ok(Array.isArray(packs), `jobs.${job}.strategy.matrix.pack must be a list`)
+    assert.deepEqual([...packs].sort(), [...PACKS].sort(), `jobs.${job} matrix must list exactly PACKS`)
   }
 })
