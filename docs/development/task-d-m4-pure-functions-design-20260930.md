@@ -28,7 +28,9 @@
 
 ### 2.1 `task-lists.ts`
 
-清单角色闭集 `read | edit | owner`(`TASK_LIST_MEMBER_ROLES`)。`toTaskListMemberships` 把这套角色桥接到 `task-access.ts` 已经存在的 `TaskListMembership`(`read→'reader'`,`edit`/`owner`→`'editor'`)——这是清单侧角色表与任务级角色表之间**唯一**的桥接函数,不再另开第三套角色枚举。
+清单角色闭集 `read | edit | owner`(`TASK_LIST_MEMBER_ROLES`)。`toTaskListMemberships` 把这套角色桥接到 `task-access.ts` 已经存在的 `TaskListMembership`(`read→'reader'`,`edit`/`owner`→`'editor'`)——这是清单侧角色表与任务级角色表之间**唯一**的桥接函数,不再另开第三套角色枚举。**独立复核 item 2 修复**:遇到闭集之外的 `role`(DB CHECK 本该挡住、但万一没挡住的脏数据)不再落入 `edit`/`owner` 分支之外的隐式 `'editor'` 默认值——显式三分支判断,闭集外一律 `throw TypeError`(同 `canListAction` 的 fail-closed-by-throwing 风格;不是丢弃该行)。
+
+**独立复核 item 1 修复**:`applyAddMember`/`applyChangeMemberRole` 的 `role` 参数只有编译期类型保证(`TaskListMemberAssignableRole`),没有运行时保证——一个绕过 TS 的调用方(典型地是未做校验就透传的 HTTP `req.body.role`)可以把任何值传进来。两个函数入口新增运行时闭集校验(复用同一个 `parseTaskListMemberRole`,不是两套平行逻辑),`'owner'`(闭集内但不可指派)和任何非法字符串/非字符串一律 422 `invalid_role`,且这个校验排在所有其它检查**之前**(结构性输入校验优先于业务状态判断)。新导出 `parseTaskListMemberRole(raw: unknown)` 给路由边界单独用。
 
 `canListAction(ctx, action)` 是一张 `角色 × 动作` 真相表(闭集 9 个动作:`view/rename/archive/unarchive/manage_members/transfer_owner/add_item/remove_item/manage_groups`),`archive`/`unarchive` 额外接受 `ctx.isCreator` 覆盖(锁 §13-14,已定:归档权 = `created_by ∪ edit/owner`)。
 
@@ -40,7 +42,9 @@
 
 ### 2.2 `task-groups.ts`
 
-`scope` 闭集 `list | user`(R11,已接受)。`applyCreateGroup`/`applyRenameGroup`/`applyDeleteGroup`(删组后项回默认组,不可删默认组)/`applyMoveItem`(整数重排,同一事务内全量重算目标组的 position)。
+`scope` 闭集 `list | user`(R11,已接受)。`applyCreateGroup`/`applyRenameGroup`/`applyDeleteGroup`(删组后项回默认组,不可删默认组)/`applyMoveItem`(整数重排,同一事务内全量重算目标组的 position)。**独立复核 item 9 修复**:`scope` 参数同样只有编译期保证;四个 `apply*` 函数入口现在都先跑 `assertValidTaskGroupScope`(闭集外 `throw TypeError`,不静默按 `'user'` 或 `'list'` 兜底——兜成任一边都会错误地決定要不要写 `task_list_events`)。
+
+`arraysEqual`(`applyMoveItem` 的同组同序判定)的长度检查:`previous` 是 `next` 的严格前缀(`next` 更长)时,若删掉长度检查,`.every()` 只会遍历较短数组的下标、逐个比对都通过,从而误判"没变化"——这是长度检查唯一真正防住的方向(`previous` 更长的方向 `.every()` 自己就会因为多出的元素比对失败,长度检查在那个方向是多余的)。
 
 D2 的「个人分组的移动不写事件」被本模块推广到**全部** `task_list_events`(`group_created`/`group_renamed`/`group_deleted`):这三个事件都需要 `listId`,而 `user` scope 的个人分组没有所属清单,所以这个推广是形状上唯一说得通的读法,已在源码注释里标出。
 
@@ -48,13 +52,13 @@ D2 的「个人分组的移动不写事件」被本模块推广到**全部** `ta
 
 `parseRemindPolicy` 实现 R02③ 的闭集 `{"mode":"default"}` / `{"mode":"none"}`,缺行/缺值按 default 处理,其余一律 422。
 
-`computeDefaultRemindAt` 是锁 §4.4(**已定**算法)的实现:定时分支纯瞬时算术 `due_at − 30min`;全天分支**先** `isValidIanaTimeZone` 校验再调用 `computeDateReminderOccurrence(dueDate, {timeOfDay:'18:00', offsetDays:0, timezone}, {floating:true})`(`automation-date-reminder.ts:241`,锁 `:140`/`:253` 指名复用)——校验失败直接抛错,不像 `computeDateReminderOccurrence` 自身那样静默退化为 UTC。
+`computeDefaultRemindAt` 是锁 §4.4(**已定**算法)的实现:定时分支纯瞬时算术 `due_at − 30min`;全天分支**先**(独立复核 item 10 修复)`assertValidCalendarDateString` 严格校验 `dueDate` 是合法真实的 `YYYY-MM-DD`、**再** `isValidIanaTimeZone` 校验、**再**调用 `computeDateReminderOccurrence(dueDate, {timeOfDay:'18:00', offsetDays:0, timezone}, {floating:true})`(`automation-date-reminder.ts:241`,锁 `:140`/`:253` 指名复用)——任一校验失败都直接抛错,不像 `computeDateReminderOccurrence` 自身那样对两者都静默兜底(`new Date(String(dateValue))` 对 `'2026-02-30'` 不报错地滚成 3 月 2 日,对 `'2026-3-8'` 这种非规范拼写也直接放行——独立复核实测确认过这两个具体案例,而不是理论推测)。`assertValidCalendarDateString` 与 `task-dates.ts` 私有的 `parseIsoDate` 逻辑一致,但没有跨模块导入它(沿用本模块树"小共享 helper 就地保留"的既有写法,同 `task-lists.ts`/`task-groups.ts` 的名称校验函数)。
 
-`shouldEnqueueReminder`(写入时门槛,R06)与 `isTaskReminderDue`(扫描期门槛,R06:直接调用 `isDateReminderDue`,窗口常量 `TASK_REMINDER_SCAN_WINDOW_MS = 2` 小时)是两个独立的时间门槛,分别对应写入时刻与 tick 扫描时刻。`isReminderSkippedByTaskState` 是到点时的任务状态短路(已完成或已软删 ⇒ `skipped`)。
+`shouldEnqueueReminder`(写入时门槛,R06)与 `isTaskReminderDue`(扫描期门槛,R06:直接调用 `isDateReminderDue`,窗口常量 `TASK_REMINDER_SCAN_WINDOW_MS = 2` 小时,已在单测里字面量钉死)是两个独立的时间门槛,分别对应写入时刻与 tick 扫描时刻。`isReminderSkippedByTaskState` 是到点时的任务状态短路,现在有三条跳过判据(**独立复核 item 3 新增第三条**,措辞由协调方转述、未回查原始裁决包文本):①已完成或②已软删(原有两条)③**这条投递排队时锁定的 `remind_at` 值,与任务当前的 `remind_at` 不一致(含任务当前 `remind_at` 已变 `null` 的情况)**——到点前任务的截止时间被改过、或提醒策略被关掉,旧的排队投递不能再按旧时间发。函数签名从 `(task)` 改为 `(task, deliveryRemindAt)`。
 
 四族 `source_key` 构造器(`buildTaskReminderSourceKey`/`buildTaskDailyDigestSourceKey`/`buildTaskEventSourceKey`/`buildTaskListEventSourceKey`)沿用仓库里唯一的现成先例(`UnscheduledReminderService.ts` 的 `<prefix>:<id>:recipient:<uid>:channel:<ch>` 形)。
 
-`isInDailyDigest`(TS)与 `buildTaskDailyDigestCondition`(SQL,由 `buildTaskScopeCondition({view:'assigned'})` 派生,不自建角色臂)实现 R07 的每日汇总内容:「已逾期的任务与今明两天将截止的未完成任务」。
+`isInDailyDigest`(TS)与 `buildTaskDailyDigestCondition`(SQL,由 `buildTaskScopeCondition({view:'assigned'})` 派生,不自建角色臂)实现 R07 的每日汇总内容:「已逾期的任务与今明两天将截止的未完成任务」。**独立复核 item 5 修复**:`buildTaskDailyDigestCondition` 的 SQL 现在有一条全文字面量 pin 测试(同 `task-access.test.ts` 给 `buildTaskPendingCondition` 做的那种),把全天分支的 `+1` 与定时分支的 `+2` 日期偏移、以及完整的 `NOT EXISTS (... completed_at IS NOT NULL)` 子句都钉死成一个精确字符串,而不只是 `toContain` 式的子串断言。**独立复核 item 4 修复**:`isInDailyDigest` 新增三个能真正区分「用了 `viewerTz`」还是「用错成 `task.timeZone`」的判别用例(此前一版的"task.timeZone 无关"用例对两种实现给出同一结果,验证不出任何东西,已重做)——全天分支 UTC/Shanghai 结果相反的同一实例、定时分支 `dueAt` 恰好落在 UTC 与 Shanghai 两边"后天零点"边界之间的用例、以及 `task.timeZone` 与 `viewerTz` 显式不一致时只有 `viewerTz` 能决定结果的用例;三处都配了源码级 mutation 抽查(把 `viewerToday(now, viewerTz)`/`viewerNextMidnight(now, viewerTz)` 改成读 `task.timeZone`)确认会变红。
 
 ### 2.4 `task-notifications.ts`
 
@@ -64,9 +68,13 @@ D13 的触发闭集(`completed`/`completed_by_any`/`reopened`/`deleted`/`comment
 
 `parseBadgeScope`/`pendingScopeForBadge` 实现锁 §13-4(已定方向)+ D5(`'off'` 时调用方短路,不查库)。`parseSettingsPatch` 是整行 `task_user_settings` 的合并校验器。**`timeZone` 是独立于 `badgeScope`/`dailyReminderEnabled`/`defaultRemindPolicy` 的另一条裁决**:M4 裁决包 v2 §0.1 把它从 R02④ 明确移到了 R07(「原④『加 time_zone 列』移到 R07,因为只有每日汇总用它」)——对合并后的结果强制的是 **R07** 的 CHECK(`daily_reminder_enabled=false OR time_zone IS NOT NULL`),不是 R02 的。`timeZone` 的写入复用 `task-dates.ts` 的 `validateViewerTimeZoneHeader` 做规范化(D7:写入时只落规范名)。
 
+**独立复核 item 8 修复**:`parseBadgeScope`/`parseRemindPolicy` 把 `null` 值当"缺省用默认"处理(R02③,见下)——这对**读一行既有记录**是对的(列真是 `NULL` 就是从没设置过,该退默认值),但对**PATCH 里的显式 `null`** 是错的:一个 PATCH 唯一的"别碰这个字段"写法是**键缺失**(`undefined`),显式传 `badgeScope: null`/`defaultRemindPolicy: null` 没有定义过"清空重置成默认"的语义,`parseSettingsPatch` 现在会在调用 `parseBadgeScope`/`parseRemindPolicy` **之前**先挡下显式 `null`,422 掉(`invalid_badge_scope`/`invalid_policy`)而不是悄悄把字段重置成默认值。这条规则刻意不套用到 `timeZone` 身上——`timeZone: null` 早就有明确定义的 PATCH 语义(清空时区),两者不是同一回事。
+
 ### 2.6 `task-pagination.ts`
 
 R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认值会让第 51–100 行对「从不传 `limit`」的调用方静默消失)。`limit` 1..100、`offset ≥ 0`,越界一律 422,不静默夹取。`TASK_PAGE_SORT_KEY`(D9)是 `(updated_at DESC, id DESC)` 稳定排序键常量。
+
+**独立复核 item 11 修复(实测确认的真 bug)**:数字分支原先用 `Number.isInteger`,对 `1e300` 返回 `true`(没有小数部分,但远超 `Number.MAX_SAFE_INTEGER`,是任何真实行数/偏移量场景下都不可能出现的值)——修复前 `parsePageParams({ offset: 1e300 })` 实测返回 `{ ok: true, params: { offset: 1e+300 } }`,`offset` 又没有上界检查(不像 `limit` 有),这个值会原样传给下游 SQL 的 `OFFSET` 绑定。字符串分支已经在用 `Number.isSafeInteger`,数字分支现在改用同一个函数,两分支从此一致。同时把字符串分支的正则从 `^\d+$` 收紧为 `^(0|[1-9]\d*)$`——原正则会接受 `"007"`/`"00"` 这类带前导零的拼写并悄悄解析成 `7`/`0`,与文档字面用的"canonical"一词矛盾;收紧后 `"0"` 本身仍被接受,只拒绝非规范拼写。
 
 ### 2.7 `task-realtime.ts`
 
@@ -99,12 +107,17 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 | R12(c) | `task-lists.ts` `applyRemoveMember`/`applyChangeMemberRole` | 当前 `owner` 不可直接移除/改角色 | 422 `owner_must_transfer` |
 | R12(d) | `task-lists.ts` `applyTransferOwner` | 目标必须已是成员;原 owner 降为 `edit`(不是 `read`) | 「目标必须已是成员」是本模块在 R12(d) 原文之上的保守读法 |
 | D14 | `task-lists.ts` | 清单成员 ≤100,单任务所属清单 ≤10,清单名 ≤100 码点 | 软限额,可逆常量 |
+| — (own choice, 独立复核 item 1) | `task-lists.ts` `applyAddMember`/`applyChangeMemberRole`/新导出 `parseTaskListMemberRole` | `role` 参数运行时闭集校验(`'owner'`/未知字符串/非字符串 ⇒ 422 `invalid_role`),排在所有其它检查之前 | `role` 的编译期类型不是运行时保证;三处共用同一 `parseTaskListMemberRole`,不是三套平行逻辑 |
+| — (own choice, 独立复核 item 2) | `task-lists.ts` `toTaskListMemberships` | 闭集外的 `role` 值 `throw TypeError`,不丢弃该行、也不默认成 `'editor'` | 同 `canListAction` 的 fail-closed-by-throwing 风格;可逆为丢弃该行 |
 | R11 | `task-groups.ts` | `scope='list'\|'user'`,删组后项回默认组,不可删默认组 | |
 | D14 | `task-groups.ts` | 每 scope 分组 ≤50,分组名 ≤100 码点 | |
 | D2(推广) | `task-groups.ts` | `group_created`/`group_renamed`/`group_deleted` 只在 `scope==='list'` 时产生 | D2 原文只点名了「分组移动」;本模块把同一条理由(个人分组没有 `listId`)推广到创建/改名/删除 |
-| R02③(推广) | `task-reminders.ts` `parseRemindPolicy` | `null`/`undefined` **值**(不只是缺行)按 default 处理 | 原文只写「缺行」;推广到「缺值」 |
-| R06 | `task-reminders.ts` | 扫描窗口 `W=2` 小时(`TASK_REMINDER_SCAN_WINDOW_MS`) | 单点常量,要求 ≥ 调度间隔(由 PR-3b 保证) |
-| R06 | `task-reminders.ts` `isReminderSkippedByTaskState` | 已完成或已软删 ⇒ skipped | |
+| — (own choice, 独立复核 item 9) | `task-groups.ts` 四个 `apply*` 函数 | `scope` 运行时闭集校验,闭集外 `throw TypeError` | 同上,`scope` 的编译期类型不是运行时保证 |
+| R02③(推广) | `task-reminders.ts` `parseRemindPolicy` | `null`/`undefined` **值**(不只是缺行)按 default 处理 —— **仅限"读一行既有记录"语境**;`task-settings.ts` `parseSettingsPatch` 的 PATCH 语境里显式 `null` 不会到达这个函数,而是在更上层直接 422(见下一条) | 原文只写「缺行」;推广到「缺值」,但只在读语境下 |
+| — (own choice, 独立复核 item 8) | `task-settings.ts` `parseSettingsPatch` | PATCH 体里显式 `badgeScope: null`/`defaultRemindPolicy: null` ⇒ 422(不是"重置成默认") | PATCH 唯一的"别碰"写法是键缺失(`undefined`);不影响 `timeZone: null`(那个有独立定义的"清空"语义) |
+| — (own choice, 独立复核 item 10, 修复实测确认的真 bug) | `task-reminders.ts` `computeDefaultRemindAt`(全天分支) | 调用 `computeDateReminderOccurrence` **之前**先严格校验 `dueDate` 是真实存在的 `YYYY-MM-DD` 日期,失败 `throw RangeError` | 实测 `new Date('2026-02-30')` 静默滚成 3-02,`new Date('2026-3-8')` 静默接受非规范拼写——`computeDateReminderOccurrence` 自身两者都不挡;镜像 `task-dates.ts` 私有 `parseIsoDate` 的逻辑,不跨模块导入 |
+| R06 | `task-reminders.ts` | 扫描窗口 `W=2` 小时(`TASK_REMINDER_SCAN_WINDOW_MS`),单测已字面量钉死 | 单点常量,要求 ≥ 调度间隔(由 PR-3b 保证) |
+| R06 | `task-reminders.ts` `isReminderSkippedByTaskState` | 已完成或已软删 ⇒ skipped;**独立复核新增第三条**:排队时的 `remind_at` 与任务当前 `remind_at` 不一致(含当前为 `null`)⇒ skipped | 第三条措辞由协调方转述,未回查原始裁决包文本(裁决包文件已删除);签名从 `(task)` 改为 `(task, deliveryRemindAt)` |
 | R05/R06/R07(推广) | `task-reminders.ts` 四个 `source_key` 构造器 | `<prefix>:<id>:recipient:<uid>:channel:<ch>` | 裁决包只给了每族的前缀;内部形状取自仓库里唯一的现成先例(`UnscheduledReminderService.ts`) |
 | R07 | `task-reminders.ts` `isInDailyDigest`/`buildTaskDailyDigestCondition` | 逾期 ∪ (今天或明天截止);今天/明天用查看者(收件人)时区 | 源码注释记录了"逾期"这一支在逻辑上被第二支吸收的事实 |
 | D13 | `task-notifications.ts` | 触发闭集 5 值,`recipient_role` 优先级 creator>assignee>follower>list_member | `attachment_added` 留 P2 |
@@ -116,6 +129,7 @@ R15(**v2 修订**:默认 `limit` 改为 100,不是 v1 的 50 —— v1 的默认
 | D7 | `task-settings.ts` `parseSettingsPatch` | 写入 `timeZone` 复用 `validateViewerTimeZoneHeader` 规范化 | |
 | R15(v2) | `task-pagination.ts` | `limit` 默认 **100**(v2 把 v1 的 50 改正) | v1 的 50 会让第 51–100 行静默消失 |
 | D9 | `task-pagination.ts` `TASK_PAGE_SORT_KEY` | `(updated_at DESC, id DESC)` | |
+| — (own choice, 独立复核 item 11, 修复实测确认的真 bug) | `task-pagination.ts` `toStrictNonNegativeInteger` | 数字分支改用 `Number.isSafeInteger`(原为 `Number.isInteger`);字符串分支正则收紧为 `^(0\|[1-9]\d*)$`(原为 `^\d+$`,接受前导零) | 实测 `parsePageParams({offset:1e300})` 修复前返回 `ok:true`;`offset` 无上界检查,是唯一能证伪这条修复的用例(`limit:1e300` 本来就会被上界挡住) |
 | R16 | `task-realtime.ts` `countsUpdateRecipients` | 写入前后负责人集合的并集 | 关注人不在收件人内 |
 
 ## 6. 明确推迟(不在本切片)
