@@ -1,7 +1,8 @@
 /** Test-only public-route witness for the owned local backup driver. */
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { hash } from 'bcryptjs'
 
 import type { RecoveryArchiveRestoreJobQuery, RecoveryArchiveRestoreJobTransaction } from '../src/multitable/recovery-archive-restore-jobs'
 import type { RecoveryArchivePreviewRuntime } from '../src/multitable/recovery-archive-preview'
@@ -23,12 +24,14 @@ interface Identity {
 export async function createAndCaptureManualFixture(input: {
   readonly runtime: Runtime
   readonly archive: RecoveryArchivePreviewRuntime
-  readonly baseId: string
+  readonly workspaceId: string
   readonly prefix: string
   readonly attachmentPath: string
   readonly keyId: string
 }): Promise<{
   readonly actorId: string
+  readonly password: string
+  readonly baseId: string
   readonly sheetId: string
   readonly fieldId: string
   readonly attachmentFieldId: string
@@ -38,6 +41,8 @@ export async function createAndCaptureManualFixture(input: {
   readonly generationId: string
 }> {
   const actorId = randomUUID()
+  const password = randomBytes(24).toString('hex')
+  const baseId = `${input.prefix}_manual_base`
   const sheetId = `${input.prefix}_manual_sheet`
   const fieldId = `${input.prefix}_manual_field`
   const attachmentFieldId = `${input.prefix}_manual_attachment_field`
@@ -45,13 +50,21 @@ export async function createAndCaptureManualFixture(input: {
   const recordId = `${input.prefix}_manual_record`
   const attachmentBytes = Buffer.from('synthetic-backup-attachment')
   await input.runtime.query(
-    `INSERT INTO public.users (id, password_hash, permissions)
-     VALUES ($1, 'synthetic-not-a-password', $2::jsonb)`,
-    [actorId, JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'])],
+    `INSERT INTO public.users
+      (id, email, name, password_hash, role, permissions, is_active, activation_status,
+       local_password_set, must_change_password)
+     VALUES ($1, $2, 'Synthetic manual backup', $3, 'admin', $4::jsonb, true, 'activated', true, false)`,
+    [actorId, `${actorId}@example.test`, await hash(password, 10),
+      JSON.stringify(['multitable:read', 'multitable:write', 'multitable:share', 'multitable:manage-schema'])],
+  )
+  await input.runtime.query(
+    `INSERT INTO public.meta_bases (id, name, workspace_id, owner_id)
+     VALUES ($1, 'Synthetic manual backup', $2, $3)`,
+    [baseId, input.workspaceId, actorId],
   )
   await input.runtime.query(
     `INSERT INTO public.meta_sheets (id, base_id, name) VALUES ($1, $2, 'Synthetic manual backup')`,
-    [sheetId, input.baseId],
+    [sheetId, baseId],
   )
   await input.runtime.query(
     `INSERT INTO public.meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
@@ -90,7 +103,8 @@ export async function createAndCaptureManualFixture(input: {
   const generationId = await captureLocalManualArchive({
     runtime: input.runtime, archive: input.archive, identity: { sheetId, actorId }, keyId: input.keyId,
   })
-  return { actorId, sheetId, fieldId, attachmentFieldId, attachmentId, recordId, attachmentBytes, generationId }
+  return { actorId, password, baseId, sheetId, fieldId, attachmentFieldId,
+    attachmentId, recordId, attachmentBytes, generationId }
 }
 
 export async function captureLocalManualArchive(input: {
@@ -122,99 +136,99 @@ export async function captureLocalManualArchive(input: {
   })
 }
 
-export async function restoreImportedManualArchive(input: {
-  readonly runtime: Runtime
-  readonly archive: RecoveryArchivePreviewRuntime
+interface ManualRestoreInput {
+  readonly runtime: Pick<Runtime, 'query'>
   readonly identity: Identity
-  readonly keyId: string
   readonly generationId: string
   readonly recordId: string
   readonly fieldId: string
   readonly attachmentFieldId: string
   readonly attachmentId: string
-}): Promise<void> {
-  await withRoute(input, async (base, headers) => {
-    const route = `${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive`
-    const response = await fetch(`${route}/catalog/${input.generationId}`, { headers })
-    assert.equal(response.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_CATALOG_FAILED')
-    const body = await response.json() as { ok?: boolean; data?: { generationId?: string } }
-    assert.equal(body.ok, true)
-    assert.equal(body.data?.generationId, input.generationId)
+}
 
-    const before = await input.runtime.query(
-      `SELECT data, version FROM public.meta_records WHERE id=$1 AND sheet_id=$2`,
-      [input.recordId, input.identity.sheetId],
-    )
-    const capturedData = { [input.fieldId]: 'captured', [input.attachmentFieldId]: [input.attachmentId] }
-    assert.deepEqual(before.rows, [{ data: capturedData, version: 1 }])
-    const priorRestores = await input.runtime.query(
-      `SELECT count(*)::int AS count FROM public.meta_record_revisions
-        WHERE record_id=$1 AND source='restore'`, [input.recordId],
-    )
-    await input.runtime.query(
-      `UPDATE public.meta_records
-          SET data=jsonb_set(jsonb_set(data, ARRAY[$2::text], to_jsonb('edited'::text)),
-                             ARRAY[$3::text], '[]'::jsonb), version=version+1
-        WHERE id=$1 AND sheet_id=$4`,
-      [input.recordId, input.fieldId, input.attachmentFieldId, input.identity.sheetId],
-    )
+export async function restoreImportedManualArchiveOverHttp(
+  input: ManualRestoreInput, base: string, headers: Record<string, string>,
+): Promise<void> {
+  const route = `${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive`
+  const response = await fetch(`${route}/catalog/${input.generationId}`, { headers })
+  assert.equal(response.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_CATALOG_FAILED')
+  const body = await response.json() as { ok?: boolean; data?: { generationId?: string } }
+  assert.equal(body.ok, true)
+  assert.equal(body.data?.generationId, input.generationId)
 
-    const scope = { kind: 'whole_sheet' }
-    const preview = await fetch(`${route}/preview`, {
-      method: 'POST', headers,
-      body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope }),
-    })
-    assert.equal(preview.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_PREVIEW_FAILED')
-    const previewBody = await preview.json() as { ok?: boolean; data?: {
-      generationId?: string; executable?: boolean; blockedReason?: string | null; previewIdentity?: string
-      summary?: { effectiveWriteCount?: number; reverts?: Array<{ recordId: string; fieldIds: string[] }> }
-    } }
-    assert.equal(previewBody.ok, true)
-    assert.equal(previewBody.data?.generationId, input.generationId)
-    if (previewBody.data?.executable !== true) {
-      const blocked = previewBody.data?.blockedReason
-      if (typeof blocked === 'string' && /^[a-z_]+$/.test(blocked)) {
-        throw new Error(`RECOVERY_LOCAL_BACKUP_MANUAL_${blocked.toUpperCase()}`)
-      }
-    }
-    assert.equal(previewBody.data?.executable, true)
-    assert.equal(previewBody.data?.blockedReason, null)
-    assert.equal(previewBody.data?.summary?.reverts?.length, 1)
-    assert.equal(previewBody.data?.summary?.reverts?.[0]?.recordId, input.recordId)
-    assert.deepEqual(previewBody.data?.summary?.reverts?.[0]?.fieldIds?.slice().sort(),
-      [input.fieldId, input.attachmentFieldId].sort())
-    assert.equal(previewBody.data?.summary?.effectiveWriteCount, 1)
-    assert.equal(typeof previewBody.data?.previewIdentity, 'string')
-    assert.deepEqual((await input.runtime.query(
-      `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
-    )).rows, [{ data: { ...capturedData, [input.fieldId]: 'edited', [input.attachmentFieldId]: [] }, version: 2 }])
+  const before = await input.runtime.query(
+    `SELECT data, version FROM public.meta_records WHERE id=$1 AND sheet_id=$2`,
+    [input.recordId, input.identity.sheetId],
+  )
+  const capturedData = { [input.fieldId]: 'captured', [input.attachmentFieldId]: [input.attachmentId] }
+  assert.deepEqual(before.rows, [{ data: capturedData, version: 1 }])
+  const priorRestores = await input.runtime.query(
+    `SELECT count(*)::int AS count FROM public.meta_record_revisions
+      WHERE record_id=$1 AND source='restore'`, [input.recordId],
+  )
+  await input.runtime.query(
+    `UPDATE public.meta_records
+        SET data=jsonb_set(jsonb_set(data, ARRAY[$2::text], to_jsonb('edited'::text)),
+                           ARRAY[$3::text], '[]'::jsonb), version=version+1
+      WHERE id=$1 AND sheet_id=$4`,
+    [input.recordId, input.fieldId, input.attachmentFieldId, input.identity.sheetId],
+  )
 
-    const executeBody = JSON.stringify({ previewIdentity: previewBody.data!.previewIdentity, scope })
-    const applied = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
-    assert.equal(applied.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_EXECUTE_FAILED')
-    const appliedBody = await applied.json() as { ok?: boolean; data?: {
-      revertedCount?: number; resurrectedCount?: number; deletedCount?: number
-    } }
-    assert.equal(appliedBody.ok, true)
-    assert.equal(appliedBody.data?.revertedCount, 1)
-    assert.equal(appliedBody.data?.resurrectedCount, 0)
-    assert.equal(appliedBody.data?.deletedCount, 0)
-    const after = (await input.runtime.query(
-      `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
-    )).rows
-    assert.deepEqual(after, [{ data: capturedData, version: 3 }])
-    const restoreCount = await input.runtime.query(
-      `SELECT count(*)::int AS count FROM public.meta_record_revisions
-        WHERE record_id=$1 AND source='restore'`, [input.recordId],
-    )
-    assert.equal((restoreCount.rows[0] as { count?: number } | undefined)?.count,
-      Number((priorRestores.rows[0] as { count?: number } | undefined)?.count) + 1)
-    const replay = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
-    assert.equal(replay.status, 409)
-    assert.deepEqual((await input.runtime.query(
-      `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
-    )).rows, after)
+  const scope = { kind: 'whole_sheet' }
+  const preview = await fetch(`${route}/preview`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope }),
   })
+  assert.equal(preview.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_PREVIEW_FAILED')
+  const previewBody = await preview.json() as { ok?: boolean; data?: {
+    generationId?: string; executable?: boolean; blockedReason?: string | null; previewIdentity?: string
+    summary?: { effectiveWriteCount?: number; reverts?: Array<{ recordId: string; fieldIds: string[] }> }
+  } }
+  assert.equal(previewBody.ok, true)
+  assert.equal(previewBody.data?.generationId, input.generationId)
+  if (previewBody.data?.executable !== true) {
+    const blocked = previewBody.data?.blockedReason
+    if (typeof blocked === 'string' && /^[a-z_]+$/.test(blocked)) {
+      throw new Error(`RECOVERY_LOCAL_BACKUP_MANUAL_${blocked.toUpperCase()}`)
+    }
+  }
+  assert.equal(previewBody.data?.executable, true)
+  assert.equal(previewBody.data?.blockedReason, null)
+  assert.equal(previewBody.data?.summary?.reverts?.length, 1)
+  assert.equal(previewBody.data?.summary?.reverts?.[0]?.recordId, input.recordId)
+  assert.deepEqual(previewBody.data?.summary?.reverts?.[0]?.fieldIds?.slice().sort(),
+    [input.fieldId, input.attachmentFieldId].sort())
+  assert.equal(previewBody.data?.summary?.effectiveWriteCount, 1)
+  assert.equal(typeof previewBody.data?.previewIdentity, 'string')
+  assert.deepEqual((await input.runtime.query(
+    `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
+  )).rows, [{ data: { ...capturedData, [input.fieldId]: 'edited', [input.attachmentFieldId]: [] }, version: 2 }])
+
+  const executeBody = JSON.stringify({ previewIdentity: previewBody.data!.previewIdentity, scope })
+  const applied = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
+  assert.equal(applied.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_EXECUTE_FAILED')
+  const appliedBody = await applied.json() as { ok?: boolean; data?: {
+    revertedCount?: number; resurrectedCount?: number; deletedCount?: number
+  } }
+  assert.equal(appliedBody.ok, true)
+  assert.equal(appliedBody.data?.revertedCount, 1)
+  assert.equal(appliedBody.data?.resurrectedCount, 0)
+  assert.equal(appliedBody.data?.deletedCount, 0)
+  const after = (await input.runtime.query(
+    `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
+  )).rows
+  assert.deepEqual(after, [{ data: capturedData, version: 3 }])
+  const restoreCount = await input.runtime.query(
+    `SELECT count(*)::int AS count FROM public.meta_record_revisions
+      WHERE record_id=$1 AND source='restore'`, [input.recordId],
+  )
+  assert.equal((restoreCount.rows[0] as { count?: number } | undefined)?.count,
+    Number((priorRestores.rows[0] as { count?: number } | undefined)?.count) + 1)
+  const replay = await fetch(`${route}/execute`, { method: 'POST', headers, body: executeBody })
+  assert.equal(replay.status, 409)
+  assert.deepEqual((await input.runtime.query(
+    `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
+  )).rows, after)
 }
 
 async function withRoute<T>(input: {

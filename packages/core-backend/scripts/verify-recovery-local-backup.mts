@@ -248,14 +248,14 @@ async function main(): Promise<Record<string, unknown>> {
       expectedNonceSections: RECOVERY_ARCHIVE_V1_SECTION_NAMES,
     })
     const manual = await createAndCaptureManualFixture({
-      runtime: sourceRuntime, baseId: fixture.fixture.baseId, prefix,
+      runtime: sourceRuntime, workspaceId: fixture.fixture.workspaceId, prefix,
       attachmentPath: sourceAttachmentPath,
       archive: { keyCustody: sourceAdmission, objectStore: sourceProvider, transactionDepth: sourceRuntime.depth },
       keyId: sourceAdmission.keyId,
     })
     assert.notEqual(manual.generationId, fixture.fixture.generationId)
     const sourceCapturedAuthority = await loadAuthority(sourceRuntime, {
-      workspaceId: fixture.fixture.workspaceId, baseId: fixture.fixture.baseId,
+      workspaceId: fixture.fixture.workspaceId, baseId: manual.baseId,
       sheetId: manual.sheetId, generationId: manual.generationId,
     })
     assert.deepEqual((await sourceRuntime.query(
@@ -349,7 +349,7 @@ async function main(): Promise<Record<string, unknown>> {
     assert.notEqual(targetAdmission.keyId, fixture.archivedKeyId)
     const capturedAuthority = await loadAuthority(targetRuntime, {
       workspaceId: fixture.fixture.workspaceId,
-      baseId: fixture.fixture.baseId,
+      baseId: manual.baseId,
       sheetId: manual.sheetId,
       generationId: manual.generationId,
     })
@@ -403,20 +403,6 @@ async function main(): Promise<Record<string, unknown>> {
       [manual.sheetId],
     )).rows, manualEffectsBeforeRefusals)
     await assertPathMissing(targetAttachmentPath)
-    await runManualTargetChild({
-      databaseName: names.target,
-      local: {
-        archivePath: targetArchive, custodyPath: targetCustody, custodyId, storeId,
-        receipt: rotatedReceipt, recoverySecret: Uint8Array.from(recoverySecret),
-      },
-      identity: { sheetId: manual.sheetId, actorId: manual.actorId },
-      generationId: manual.generationId,
-      recordId: manual.recordId,
-      fieldId: manual.fieldId,
-      attachmentFieldId: manual.attachmentFieldId,
-      attachmentId: manual.attachmentId,
-      attachmentBytes: Uint8Array.from(manual.attachmentBytes),
-    }, targetUrl)
 
     await runFailClosedNegatives({
       runtime: targetRuntime,
@@ -510,6 +496,23 @@ async function main(): Promise<Record<string, unknown>> {
     }])
     assert.equal(await exactOnceRecordCount(targetRuntime.query, fixture.fixture.sheetId), recoveryLocalBackupRecordCount())
 
+    await assertPathMissing(targetAttachmentPath)
+    await runManualTargetChild({
+      databaseName: names.target,
+      local: {
+        archivePath: targetArchive, custodyPath: targetCustody, custodyId, storeId,
+        receipt: rotatedReceipt, recoverySecret: Uint8Array.from(recoverySecret),
+      },
+      identity: { sheetId: manual.sheetId, actorId: manual.actorId },
+      password: manual.password,
+      generationId: manual.generationId,
+      recordId: manual.recordId,
+      fieldId: manual.fieldId,
+      attachmentFieldId: manual.attachmentFieldId,
+      attachmentId: manual.attachmentId,
+      attachmentBytes: Uint8Array.from(manual.attachmentBytes),
+    }, targetUrl)
+
     const finalNonces = await readNonceTuples(targetRuntime.query, fixture.fixture.generationId)
     assert.deepEqual(finalNonces, sourceNonces)
     result = {
@@ -526,6 +529,9 @@ async function main(): Promise<Record<string, unknown>> {
         attachmentBytesRecovered: true,
         sourceUnavailableBeforeRestore: true,
         freshTargetProcess: true,
+        officialTargetLauncher: true,
+        lockedUntilOperatorUnlock: true,
+        gracefulStopWithNoListener: true,
       },
       writerBlockReleased: true,
       derivedEffectsDrained: recoveryLocalBackupRecordCount(),
@@ -821,6 +827,7 @@ async function runManualTargetChild(input: {
     readonly recoverySecret: Uint8Array
   }
   readonly identity: { readonly sheetId: string; readonly actorId: string }
+  readonly password: string
   readonly generationId: string
   readonly recordId: string
   readonly fieldId: string
@@ -850,7 +857,7 @@ async function runManualTargetChild(input: {
   children.add(child)
   try {
     await new Promise<void>((resolvePromise, reject) => {
-      const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 120_000)
+      const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 240_000)
       const finish = (work: () => void) => {
         clearTimeout(timer)
         work()
@@ -921,6 +928,9 @@ async function runWorker(
         if (message.kind === 'read-object') {
           finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_PARENT_OBJECT_RPC_REFUSED')))
         } else if (message.kind === 'error') {
+          if (/^(?:RECOVERY_ARCHIVE_[A-Z_]+|archive_process_[a-z_]+)$/.test(message.code)) {
+            console.log(JSON.stringify({ phase: input.phase, workerCode: message.code }))
+          }
           finish(() => reject(new Error(message.code)))
         } else {
           finish(() => resolvePromise(message))
