@@ -630,7 +630,8 @@ jobs:
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
-          # ACL layers self-report SKIP. The real-icacls coverage lives in stock-prep-powershell51.
+          # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
+          # job, now in .github/workflows/stock-prep-powershell51.yml.
           ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
       - name: Setup pnpm
@@ -1635,11 +1636,13 @@ jobs:
         # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were
         # promoted here from a standalone (non-required) `approval-realdb-cancel-round.yml` lane,
         # which is DELETED in the same commit — per the #5095 precedent
-        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1), this is the
-        # one legitimate-touch case for the s6a `pluginTestsWorkflow` pin: the digest below was
-        # recomputed via `computePackageProvenancePinSet(repoRoot)` in the same commit that made
-        # this edit, and verified to be the only key that moved. Keeping both lanes would have run
-        # the same seven files twice per PR for no additional coverage.
+        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1). At the time
+        # this file was the s6a `pluginTestsWorkflow` provenance pin, so that commit recomputed it
+        # via `computePackageProvenancePinSet(repoRoot)`. Since
+        # docs/development/s6a-pins-scope-narrowing-design-20260930.md this file is no longer a
+        # provenance input (the pinned executor is .github/workflows/stock-prep-powershell51.yml),
+        # so run-list edits here need no pin recompute. Keeping both lanes would have run the same
+        # seven files twice per PR for no additional coverage.
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
