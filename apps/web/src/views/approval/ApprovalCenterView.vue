@@ -1471,6 +1471,7 @@ const exportNotice = computed<{ kind: ApprovalExportOutcome['kind']; tone: 'succ
       return { kind: outcome.kind, tone: 'error', text }
     }
   }
+  return null
 })
 
 function exportOutcomeOf(result: ApprovalCsvExportResult): ApprovalExportOutcome {
