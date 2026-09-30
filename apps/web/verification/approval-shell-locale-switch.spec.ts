@@ -26,7 +26,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const HARNESS = '/verification/approval-shell-locale-switch-harness.html'
-const CJK = /[　-〿一-鿿＀-￯]/
+const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
 const ROW_ID = 'apv_f81_row'
 const DETAIL_ID = 'apv_f81_detail'
 
