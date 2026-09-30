@@ -67,6 +67,7 @@
             <input v-model="withData" type="checkbox" :disabled="submitting" data-testid="copy-sheet-with-data" />
             <span data-testid="copy-sheet-with-data-label">{{ withDataLabel }}</span>
           </label>
+          <p v-if="structureLabel" class="meta-copy-sheet__hint" data-testid="copy-sheet-structure">{{ structureLabel }}</p>
 
           <div class="meta-copy-sheet__row">
             <span class="meta-copy-sheet__label">{{ l('copySheet.permissionLabel') }}</span>
@@ -121,6 +122,7 @@ import {
   copySheetLabel,
   copySheetOverLimitText,
   copySheetViewFilterDropText,
+  copySheetStructureLabel,
   copySheetWithDataLabel,
   type MetaCopySheetLabelKey,
 } from '../utils/meta-copy-sheet-labels'
@@ -257,6 +259,14 @@ const withDataLabel = computed(() => copySheetWithDataLabel(withDataRowCount.val
 
 // The plan whose disclosures are shown: the with-data probe when it answered, else the structure-only one.
 const shownPlan = computed(() => dryRun.value ?? structureRun.value)
+
+// 「复制结构：N 列、V 个视图」 — from whichever probe answered (both carry the structure counts); the
+// column count prefers the columns actually built (mirror columns are not) over the source's field count.
+const structureLabel = computed<string | null>(() => {
+  const plan = shownPlan.value
+  if (!plan) return null
+  return copySheetStructureLabel(plan.builtFieldCount ?? plan.fieldCount, plan.viewCount, isZh.value)
+})
 
 type DisclosureLine = { key: string; kind: string; text: string }
 

@@ -27,6 +27,11 @@
 #                    hmr5). Not part of the bundle §7 fixed-format `stamps` residue-sweep — it
 #                    proves and reports its own zero-residue instead (see action_smoke below).
 #   status         — read-only snapshot (containers, health, settings, pending migrations)
+#   (owner exclusions) migrate and deploy's inline migrate pass exactly the owner-ruled
+#                    STAGING_OWNER_EXCLUDED_MIGRATIONS list (attendance-window-runner-pipeline.lib.sh)
+#                    as MIGRATION_EXCLUDE, subtract it from the in-play set, and prove before
+#                    and after each migration step that those migrations are unapplied and
+#                    their tables absent (owner 2026-09-29: A-3 off staging until approved).
 #   migrate        — backup + clone-rehearsal + apply, per
 #                    docs/operations/staging-migration-alignment-runbook.md and
 #                    docs/development/staging-migration-alignment-runbook-verification-20260519.md.
@@ -508,12 +513,17 @@ target_migrate_exec() {
   # use: this runner never invokes --reset (ALLOW_DB_RESET is only read by `migrate.ts --reset`);
   # MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL is documented "never a normal deploy switch"
   # (migration-provider.ts); MIGRATION_EXCLUDE changes are owner-ruled, separate-PR material
-  # (staging audit 20260519:132, precedent #4228), never a runner default.
+  # (staging audit 20260519:132, precedent #4228) — so the value forced here is exactly the
+  # owner-ruled list committed in the lib (STAGING_OWNER_EXCLUDED_MIGRATIONS), never anything a
+  # caller or the container passes in.
+  local owner_exclude
+  owner_exclude="$(staging_owner_exclude_csv)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
   docker run --rm --pull=never \
     --network "container:${BACKEND_CONTAINER}" \
     --env-file "$TARGET_MIGRATION_ENV_FILE" \
     ${env_flags[@]+"${env_flags[@]}"} \
-    -e "MIGRATION_EXCLUDE=" \
+    -e "MIGRATION_EXCLUDE=${owner_exclude}" \
     -e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \
     -e "ALLOW_DB_RESET=false" \
     "$TARGET_MIGRATION_IMAGE" "$@"
@@ -599,7 +609,44 @@ compute_in_play_migrations() {
   [[ -s "${OUTPUT_DIR}/migration-applied-before.txt" ]] \
     || fail "psql read of kysely_migration returned zero applied names for a live staging DB — refusing to treat the entire migration universe as in-play"
   comm -23 "${OUTPUT_DIR}/migration-name-universe.txt" "${OUTPUT_DIR}/migration-applied-before.txt" \
+    > "${OUTPUT_DIR}/migration-in-play-before-owner-exclusions.txt"
+  # Owner-ruled exclusions are not applied by this run, so they are not in play either;
+  # assert_owner_exclusions_hold proves separately that they stay unapplied.
+  staging_owner_excluded_names | sort -u > "${OUTPUT_DIR}/migration-owner-excluded.txt" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  comm -23 "${OUTPUT_DIR}/migration-in-play-before-owner-exclusions.txt" "${OUTPUT_DIR}/migration-owner-excluded.txt" \
     > "${OUTPUT_DIR}/migration-in-play.txt"
+}
+
+assert_owner_exclusions_hold() {
+  # assert_owner_exclusions_hold <pg-user> <db-name> <phase>
+  # Proves, on <db-name>, that every owner-excluded migration is still UNAPPLIED (a name already
+  # in kysely_migration means the exclusion is stale and would break the provider/ledger
+  # agreement) and that none of the owner-excluded tables exists. Read-only.
+  local pg_user="$1" db="$2" phase="$3" applied names name sql present
+  local out="${OUTPUT_DIR}/owner-exclusions-${phase}.txt"
+  names="$(staging_owner_excluded_names)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  sql="$(staging_owner_excluded_tables_present_sql)" \
+    || fail "the owner-ruled excluded-table list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  applied="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
+    -c "SELECT name FROM kysely_migration ORDER BY name;")" \
+    || fail "owner exclusions (${phase}): could not read kysely_migration on ${db}"
+  : > "$out"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    if grep -qxF -- "$name" <<< "$applied"; then
+      fail "owner exclusions (${phase}): ${name} is already applied on ${db} — the exclusion is stale; remove it in the same owner-ruled change that applies it"
+    fi
+    echo "migration=${name} applied=no" >> "$out"
+  done <<< "$names"
+  present="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$db" -tA -v ON_ERROR_STOP=1 \
+    -c "$sql" | tr -d '[:space:]')" \
+    || fail "owner exclusions (${phase}): could not check the excluded tables on ${db}"
+  [[ "$present" == "0" ]] \
+    || fail "owner exclusions (${phase}): ${present:-<unreadable>} owner-excluded table(s) exist on ${db} — STOP; the excluded migration (or an equivalent) has run"
+  echo "excluded_tables_present=0" >> "$out"
+  log "owner exclusions hold (${phase}) on ${db}: excluded migration(s) unapplied, excluded table(s) absent"
 }
 
 assert_applied_counts_agree() {
@@ -985,7 +1032,16 @@ action_deploy() {
   # image's own /app/scripts copy so its file scan matches the deployed migration set.
   prepare_container_runner
   assert_deploy_migrate_env_safe
-  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
+  # Owner-ruled exclusions: the only MIGRATION_EXCLUDE value deploy's inline migrate ever sees
+  # (the container's own env is still required to carry none, above).
+  local owner_exclude deploy_pg_user deploy_pg_db deploy_db
+  owner_exclude="$(staging_owner_exclude_csv)" \
+    || fail "the owner-ruled migration exclusion list failed validation (attendance-window-runner-pipeline.lib.sh)"
+  read -r deploy_pg_user deploy_pg_db <<< "$(resolve_postgres_creds)"
+  deploy_db="$(dsn_database_name "$(resolve_backend_database_url)")"
+  [[ -n "$deploy_db" ]] || fail "could not resolve the staging DB name for the owner-exclusion checks"
+  assert_owner_exclusions_hold "$deploy_pg_user" "$deploy_db" deploy-before
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
   docker cp "${OUTPUT_DIR}/migrate-list-before.txt" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migrate-list-before.txt"
   staging_exec node /app/scripts/ops/staging-migration-alignment-report.mjs \
     --migrate-list-file "${CONTAINER_RUNNER_DIR}/migrate-list-before.txt" \
@@ -996,10 +1052,11 @@ action_deploy() {
     fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
   fi
 
-  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
-  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
+  staging_exec_env "MIGRATION_EXCLUDE=${owner_exclude}" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/migrate-list-after.txt" \
     || fail "migrations did not end at pending=0 (see migrate-list-after.txt)"
+  assert_owner_exclusions_hold "$deploy_pg_user" "$deploy_db" deploy-after
 
   auth_round_trip
   snapshot_staging_ps
@@ -1010,6 +1067,9 @@ action_deploy() {
     echo "set_window_env=${SET_WINDOW_ENV}"
     echo "force_recreate=${FORCE_RECREATE}"
     echo "tasks_enabled=${TASKS_WINDOW_ENABLED}"
+    echo "owner_excluded_migrations=${owner_exclude}"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-deploy-after.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
     echo "backend_image=${backend_image}"
     echo "web_image=${web_image}"
     echo "result=ok"
@@ -1669,6 +1729,12 @@ action_status() {
     echo "action=status"
     echo "live_commit=${live_commit:-unreachable}"
     grep '^override_shape=' "${OUTPUT_DIR}/override-shape.txt" 2>/dev/null || echo "override_shape=unrecorded"
+    # The status list is unscoped on purpose (it reports the whole ledger); these lines say which
+    # pending entries are owner-ruled exclusions rather than drift.
+    echo "owner_excluded_migrations=$(staging_owner_exclude_csv 2>/dev/null || echo '<invalid list>')"
+    if [[ -s "${OUTPUT_DIR}/migrate-list.txt" ]] && owner_excluded_only_pending "${OUTPUT_DIR}/migrate-list.txt"; then
+      echo "pending_is_owner_excluded_only=yes"
+    fi
     echo "status_rc=${status_rc}"
   } > "${OUTPUT_DIR}/summary.txt"
   return "$status_rc"
@@ -2046,6 +2112,7 @@ action_migrate_rehearse() {
     | tee "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt" \
     || fail "rehearsal migrate run did not leave the rehearsal DB at pending=0 (see rehearsal-migrate-list-after.txt); staging DB was NOT touched, stopping per the runbook"
+  assert_owner_exclusions_hold "$REHEARSAL_PG_USER" "$REHEARSAL_DB" rehearsal
 
   log "rehearsal: green — dropping ${REHEARSAL_DB} and the in-container dump copy"
   cleanup_rehearsal
@@ -2095,6 +2162,7 @@ action_migrate_apply() {
   # added since, without maintaining a second hand-written name list.
   log "apply: confirming $(wc -l < "${OUTPUT_DIR}/migration-in-play.txt" | tr -d '[:space:]') in-play migration(s) by name"
   confirm_in_play_migrations "${OUTPUT_DIR}/migration-in-play.txt"
+  assert_owner_exclusions_hold "$MIGRATE_BACKUP_PG_USER" "$real_db" after-apply
 
   log "apply OK: staging migrate ended at pending=0"
 }
@@ -2117,6 +2185,7 @@ action_migrate() {
   # repeats this resolution and remains the first retentive step.
   read -r MIGRATE_BACKUP_PG_USER MIGRATE_BACKUP_PG_DB <<< "$(resolve_postgres_creds)"
   action_migrate_read_only_prechecks
+  assert_owner_exclusions_hold "$MIGRATE_BACKUP_PG_USER" "$MIGRATE_BACKUP_PG_DB" before
   action_migrate_backup
   action_migrate_rehearse
   trap cleanup_target_migration_runtime EXIT
@@ -2146,6 +2215,9 @@ action_migrate() {
     echo "apply_result=ok"
     echo "target_pending_after=0"
     echo "076_create_integration_stock_prep_pack_installs.sql=applied"
+    echo "owner_excluded_migrations=$(staging_owner_exclude_csv)"
+    grep -qx 'excluded_tables_present=0' "${OUTPUT_DIR}/owner-exclusions-after-apply.txt" 2>/dev/null \
+      && echo "owner_excluded_tables_absent=yes" || echo "owner_excluded_tables_absent=unverified"
     echo "rollout_shadow_flags=OFF"
     echo "application_deployed=no"
     echo "result=ok"
@@ -3014,8 +3086,16 @@ action_soak_seed() {
   # --- manifest-attestation preflight: verify BEFORE attesting -------------------------
   prepare_container_runner
   staging_exec node "$MIGRATE_JS" --list < /dev/null > "${OUTPUT_DIR}/seed-migrate-list.txt" 2>&1
-  grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt" \
-    || fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  # Strict on purpose: the manifests attest pendingMigrations=0 over the WHOLE ledger. An
+  # owner-ruled exclusion (STAGING_OWNER_EXCLUDED_MIGRATIONS) leaves a migration pending by
+  # design, which this gate must not paper over; it only names that cause so the operator is not
+  # sent to a migrate that cannot clear it. Scoping the attestation is an owner decision.
+  if ! grep -q '^Pending: 0$' "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+    if owner_excluded_only_pending "${OUTPUT_DIR}/seed-migrate-list.txt"; then
+      fail "staging's only pending migration(s) are owner-ruled exclusions ($(staging_owner_exclude_csv)) — the transition manifests attest pendingMigrations=0 over the whole ledger, so soak-seed cannot attest until the owner lifts the exclusion or rules that the attestation may be scoped (action=migrate will not change this)"
+    fi
+    fail "staging has pending migrations — the transition manifests attest pendingMigrations=0 and this runner will not attest what it has not verified (run action=migrate first)"
+  fi
   curl -fsS --max-time 10 "$STAGING_WEB_HEALTH_URL" | grep -q '"ok":true' \
     || fail "staging /api/health is not ok — the transition manifests attest serviceHealthy=true"
   local worker_env

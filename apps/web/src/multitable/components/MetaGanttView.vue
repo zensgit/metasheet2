@@ -147,7 +147,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaField, MetaGanttViewConfig, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
-import { dateTimeExportText, formatFieldDisplay, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeExportText, formatFieldDisplay, viewDateOnlyDayUtcMs, viewDayZone, viewTodayKey } from '../utils/field-display'
 import { dateTimeValueToUtcMs, dayKeyInZone } from '../utils/business-timezone'
 import { isSelfTableLinkField, resolveGanttViewConfig } from '../utils/view-config'
 import { managerLabel } from '../utils/meta-manager-labels'
@@ -243,26 +243,32 @@ const groupableFields = computed(() => props.fields.filter((field) => ['select',
 const dependencyFields = computed(() => props.fields.filter((field) => isSelfTableLinkField(field, props.sheetId)))
 const canResizeTasks = computed(() => Boolean(props.canEdit && startFieldId.value && endFieldId.value && startFieldId.value !== endFieldId.value))
 // 客户反馈 2026-09-24 #4c follow-up: a date-time start / end field is put onto days in its field / business
-// timezone (the day its cell shows), not the UTC day; a `date` field (floating day) keeps the UTC-day math.
-const startDayZone = computed(() => viewDayZone(props.fields.find((field) => field.id === startFieldId.value)))
-const endDayZone = computed(() => viewDayZone(props.fields.find((field) => field.id === endFieldId.value)))
+// timezone (the day its cell shows), not the UTC day. #6181: a `date` field is put on the day ITS cell shows
+// (a day as written keeps it; a stored instant takes its business-timezone day), placed at UTC midnight of that
+// day (viewDateOnlyDayUtcMs) — so the UTC-day read-back below is that day, not the UTC day of the instant.
+const startField = computed(() => props.fields.find((field) => field.id === startFieldId.value))
+const endField = computed(() => props.fields.find((field) => field.id === endFieldId.value))
+const startDayZone = computed(() => viewDayZone(startField.value))
+const endDayZone = computed(() => viewDayZone(endField.value))
 
-function parseDate(value: unknown, zone: string | null = null): Date | null {
+function parseDate(value: unknown, zone: string | null = null, field?: MetaField): Date | null {
   if (!value) return null
   // A date-time value is read in its zone (a zone-less legacy string is a business wall clock, never a
   // browser-local read); text the grammar cannot read falls back to the old parse rather than vanishing.
   const zonedMs = zone ? dateTimeValueToUtcMs(value, zone) : null
   if (zonedMs !== null) return new Date(zonedMs)
+  const dayMs = viewDateOnlyDayUtcMs(field, value)
+  if (dayMs !== null) return new Date(dayMs)
   const date = new Date(String(value))
   return Number.isNaN(date.getTime()) ? null : date
 }
 
 function parseStart(record: MetaRecord): Date | null {
-  return parseDate(record.data[startFieldId.value], startDayZone.value)
+  return parseDate(record.data[startFieldId.value], startDayZone.value, startField.value)
 }
 
 function parseEnd(record: MetaRecord): Date | null {
-  return parseDate(record.data[endFieldId.value], endDayZone.value)
+  return parseDate(record.data[endFieldId.value], endDayZone.value, endField.value)
 }
 
 function displayTitle(record: MetaRecord): string {
@@ -429,7 +435,10 @@ function activeTaskRange(task: ScheduledTask) {
   }
 }
 
-/** `YYYY-MM-DD` of an instant: the business day for a date-time field, the UTC day otherwise (unchanged). */
+/**
+ * `YYYY-MM-DD` of an axis position: the business day for a date-time field; otherwise the UTC day — for a `date`
+ * field that is the day its cell shows, because its bars sit at UTC midnight of that day (viewDateOnlyDayUtcMs).
+ */
 function isoDateFromMs(timestamp: number, zone: string | null = null): string {
   if (zone) return dayKeyInZone(timestamp, zone)
   return new Date(timestamp).toISOString().slice(0, 10)
@@ -557,8 +566,8 @@ function onResizeEnd() {
     return
   }
   // The moved edge is written as the day the handle lands on in the SAME frame the bar is drawn in: a date-time
-  // field's zone day (read back as that day's 00:00 there), a `date` field's UTC day. Days are compared with
-  // the day the edge showed before.
+  // field's zone day (read back as that day's 00:00 there), a `date` field's day in its UTC-midnight day frame.
+  // Days are compared with the day the edge showed before.
   const startDay = isoDateFromMs(state.nextStartMs, startDayZone.value)
   const endDay = isoDateFromMs(state.nextEndMs, endDayZone.value)
   const startMoved = startDay !== isoDateFromMs(state.originalStartMs, startDayZone.value)

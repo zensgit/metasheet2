@@ -6552,6 +6552,37 @@ function getUserLabel(req, fallback) {
   return fallback
 }
 
+// The authenticated caller's role claims, read exactly as core's `resolveApprovalActorRoles` reads
+// them (the `req.user.role` singular claim, trimmed, unioned with the string entries of the
+// `req.user.roles` array claim, deduplicated). Used ONLY for the cancel-round entry's post-action
+// count push, so the caller's pushed todo / approval count is computed on the same viewer the
+// caller's own count read resolves; it is not an authorization input.
+function getActorRoleClaims(req) {
+  const user = req.user
+  const role = typeof user?.role === 'string' && user.role.trim().length > 0 ? [user.role.trim()] : []
+  const roles = Array.isArray(user?.roles)
+    ? user.roles.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return Array.from(new Set([...role, ...roles]))
+}
+
+// The authenticated caller's permission claims, read exactly as core's
+// `resolveApprovalActorPermissions` reads them (the string entries of `req.user.permissions` unioned
+// with those of `req.user.perms`, trimmed, blanks dropped, deduplicated). Used ONLY for the
+// cancel-round entry's post-action count push, so a caller whose pending items include a
+// permission-queue seat is pushed the same count their own count read resolves; it is not an
+// authorization input.
+function getActorPermissionClaims(req) {
+  const user = req.user
+  const permissions = Array.isArray(user?.permissions)
+    ? user.permissions.filter((entry) => typeof entry === 'string')
+    : []
+  const perms = Array.isArray(user?.perms)
+    ? user.perms.filter((entry) => typeof entry === 'string')
+    : []
+  return Array.from(new Set([...permissions, ...perms].map((entry) => entry.trim()).filter(Boolean)))
+}
+
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for']
   const header = Array.isArray(forwarded) ? forwarded[0] : forwarded
@@ -16535,6 +16566,14 @@ function isAttendanceReportSyncScheduledTriggerRuntimeEnabled() {
 // branches are exercisable in a single process.
 function isAttendanceReportFieldCatalogSeedEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
+}
+
+// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the
+// launch endpoint `POST /api/attendance/requests/:id/cancel-round` stays OFF until phase D acceptance
+// passes. Default OFF; gates ONLY the launch — every other cancel-round route is unaffected. Read at
+// call time, never at module load, so both branches are exercisable in a single process.
+function isAttendanceCancelRoundEntryEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)
 }
 
 function confidenceRank(value) {
@@ -36999,6 +37038,523 @@ module.exports = {
         }
       })
     )
+
+    // ── Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记」 2026-09-28),
+    //    phase A: the attendance-side cancel-round entry (P-1 Q1′ = (i): launch behind
+    //    `attendance:write`, read progress behind `attendance:read`); A2 (owner 2026-09-29,
+    //    「Attendance-side + OFF flag (Recommended)」): approver approve / reject behind
+    //    `attendance:approve`, the requester's withdraw behind `attendance:write`, and a default-OFF
+    //    flag (`ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`) on the launch only.
+    //
+    // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」): the approver's 「cancellations
+    // waiting for me」 list, `GET /api/attendance/cancel-rounds/pending`, behind `attendance:approve`,
+    // listing only the viewer's own live seats — the seat verdict is the port's, i.e. the decision
+    // door's own predicate on the role claims the actions route dispatches with, and the document gate
+    // is the actions route's own (`toCancelRoundRequest` below).
+    //
+    // The routes reach core ONLY through `context.services.approvalCancelRoundEntry`, which core
+    // injects into this plugin alone. No port (or a port missing any of its six methods) ⇒ none of
+    // the routes is registered (fail-closed: no entry rather than a half-wired one).
+    //
+    // VISIBILITY is lock I7 — `canReadApprovalInstance` on the request's ORIGINAL approval instance
+    // (P-4: the predicate sits on the original document, never a second one). A viewer who fails it,
+    // an unknown id, a request with no approval instance, and a request that is not a LEAVE all get
+    // the SAME 404 body.
+    //
+    // LEAVE ONLY: the entry is the leave-cancellation entry (§15.1 「原请假单」; phase 1 ships only the
+    // leave suite). It scopes to `request_type === 'leave'` — together with P-1 (a) below this is the
+    // same `approvedLeave` predicate the W4 cancel adapter applies (`status === 'approved' &&
+    // request_type === 'leave'`), so a round is never opened on a document the W4 redemption would
+    // refuse AT LAUNCH TIME. It cannot cover a change to the request after launch (for example the
+    // existing direct-cancel route cancelling the leave while the round is pending); that case is
+    // recorded as owner merge/deploy input in the phase A design MD. The refusal SHAPE (the
+    // not-found body, no new code) is a provisional implementation choice pending an owner/gate
+    // pick — see the same MD.
+    //
+    // LAUNCH preconditions are P-1 (a)/(b)/(c) on the attendance request row, answered with the P-8
+    // registered codes, and then the dedicated creation path re-checks them on the approval instance
+    // under its own row lock (the authoritative half). Refusals from that path are passed through as
+    // (status, code, message) only.
+    const cancelRoundEntryPort = context?.services?.approvalCancelRoundEntry ?? null
+    if (
+      cancelRoundEntryPort
+      && typeof cancelRoundEntryPort.canReadDocument === 'function'
+      && typeof cancelRoundEntryPort.readRoundSummary === 'function'
+      && typeof cancelRoundEntryPort.launch === 'function'
+      && typeof cancelRoundEntryPort.decide === 'function'
+      && typeof cancelRoundEntryPort.withdraw === 'function'
+      && typeof cancelRoundEntryPort.listSeatedPendingRounds === 'function'
+    ) {
+      const respondCancelRoundRequestNotFound = (res) => {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+      }
+
+      // LEAVE ONLY + an approval instance to key on, over a request row already read org-scoped. The
+      // ONE document gate: the single-row loader below (every per-request cancel-round route) and the
+      // C2 list's batch read both pass their rows through it.
+      const toCancelRoundRequest = (row) => {
+        if (!row || !row.approval_instance_id) return null
+        if (row.request_type !== 'leave') return null
+        return {
+          requestId: String(row.id),
+          userId: row.user_id,
+          status: row.status,
+          documentInstanceId: String(row.approval_instance_id),
+        }
+      }
+
+      // Org scope + the document gate above. Shared by every per-request cancel-round route.
+      const loadCancelRoundRequestRow = async (requestId, orgId) => {
+        const rows = await db.query(
+          'SELECT id, user_id, status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
+          [requestId, orgId]
+        )
+        return toCancelRoundRequest(rows[0])
+      }
+
+      // The row above, visible to the viewer by lock I7 on the ORIGINAL document (summary, launch,
+      // withdraw). The approver route does not add this: see its own comment.
+      const loadCancelRoundRequestForViewer = async (requestId, orgId, viewerId) => {
+        const request = await loadCancelRoundRequestRow(requestId, orgId)
+        if (!request) return null
+        const readable = await cancelRoundEntryPort.canReadDocument(viewerId, request.documentInstanceId)
+        if (!readable) return null
+        return request
+      }
+
+      // A refusal from the port carries (status, code, message) only; anything malformed is a 500.
+      const respondCancelRoundPortRefusal = (res, result, fallbackMessage) => {
+        const status = Number.isInteger(result?.status) && result.status >= 400 && result.status <= 599
+          ? result.status
+          : 500
+        res.status(status).json({
+          ok: false,
+          error: {
+            code: typeof result?.code === 'string' ? result.code : 'INTERNAL_ERROR',
+            message: typeof result?.message === 'string' ? result.message : fallbackMessage,
+          },
+        })
+      }
+
+      // Owner 2026-09-29 14:3x 「Minimal action response (Recommended)」: an approve / reject / withdraw
+      // success names the round acted on and where it now stands — `{ requestId, roundId, outcome,
+      // status }` and nothing else. The round summary is served ONLY by the summary route, behind lock
+      // I7; the approver route has no I7 in front of its seat check, so it must not hand the summary
+      // back. Fields are copied one by one so nothing else the port returns can ride along.
+      const respondCancelRoundActionOutcome = (res, requestId, round) => {
+        if (!round || typeof round.roundId !== 'string' || typeof round.outcome !== 'string' || typeof round.status !== 'string') {
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to act on cancellation' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: { requestId, roundId: round.roundId, outcome: round.outcome, status: round.status },
+        })
+      }
+
+      const cancelRoundLaunchBodySchema = z.object({
+        reason: z.string().max(2000).optional().nullable(),
+      })
+
+      // The summary also carries `entryEnabled` (owner 2026-09-29 14:3x, 「Summary exposes entryEnabled
+      // (Recommended)」): the GLOBAL state of the launch flag and nothing per user, so the client can
+      // tell 「entry switched off」 apart from 「this document cannot be cancelled」 — the OFF launch itself
+      // answers the not-found body and cannot say which. The launch's 201 carries the same field so the
+      // two bodies keep one shape.
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:read', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            const summary = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            res.json({
+              ok: true,
+              data: { requestId: request.requestId, ...summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round summary failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load cancellation' } })
+          }
+        })
+      )
+
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:write', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          // A2 default-OFF launch flag, checked before any read or write. OFF answers with the entry's
+          // own not-found body — the same bytes as a never-existing id — rather than a new
+          // feature-disabled code (P-8: no code before it is registered; see the design MD §A2).
+          if (!isAttendanceCancelRoundEntryEnabled()) {
+            respondCancelRoundRequestNotFound(res)
+            return
+          }
+          const parsed = cancelRoundLaunchBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          const reason = typeof parsed.data.reason === 'string' && parsed.data.reason.trim().length > 0
+            ? parsed.data.reason.trim()
+            : null
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            // P-1 (a) — only an approved leave can be cancelled.
+            if (request.status !== 'approved') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+                  message: 'A cancel round can only be started for an approved document',
+                },
+              })
+              return
+            }
+            // P-1 (b) / lock:157 — only the original requester; a participant who may READ the
+            // document (approver, admin, delegate, proxy submitter) may not launch.
+            if (request.userId !== viewerId) {
+              res.status(403).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_REQUESTER_ONLY',
+                  message: 'Only the original requester may start a cancel round for this document',
+                },
+              })
+              return
+            }
+            // P-1 (c) / I3 — at most one in-flight round; the creation path's partial unique index
+            // remains the authoritative backstop for the concurrent case.
+            const current = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            if (current && current.round && current.round.outcome === 'pending') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_ALREADY_PENDING',
+                  message: 'This document already has a cancel round in progress',
+                },
+              })
+              return
+            }
+            const result = await cancelRoundEntryPort.launch(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+              },
+              { reason }
+            )
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to start cancellation')
+              return
+            }
+            res.status(201).json({
+              ok: true,
+              data: { requestId: request.requestId, ...result.summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round launch failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to start cancellation' } })
+          }
+        })
+      )
+
+      // `expectedRoundId` (optional; phase D D2): the round the caller has on screen. When present and
+      // it is not the document's latest round, the port refuses before dispatching anything (409, the
+      // engine's existing INVALID_STATUS_TRANSITION) — so a caller acting from a list never acts on a
+      // round other than the one listed, and needs no read of the document to know that.
+      const cancelRoundDecisionBodySchema = z.object({
+        action: z.enum(['approve', 'reject']),
+        comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
+      })
+      const cancelRoundWithdrawBodySchema = z.object({
+        comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
+      })
+      const normalizeCancelRoundComment = (value) =>
+        typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+      const normalizeCancelRoundExpectedRoundId = (value) =>
+        typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+
+      // A2 — an approver's approve / reject on the document's latest cancel round. The seat is the
+      // authority: the port hands the action, AS the caller, to the same service entry
+      // `POST /api/approvals/:id/actions` uses, where the seat check, the §2-G3 seat rules and the §9-9
+      // action set run unchanged. Like that route, this one adds no document-visibility predicate in
+      // front of the seat check, so a holder of `attendance:approve` without a seat receives the
+      // service's existing refusal. Only the two verbs the owner named are accepted here; every other
+      // verb is a 400 before any lookup (the service's own §9-9 gate still stands behind it).
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round/actions',
+        withPermission('attendance:approve', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          const parsed = cancelRoundDecisionBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round action payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestRow(requestId, getOrgId(req))
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            const result = await cancelRoundEntryPort.decide(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+                ip: req.ip ?? null,
+                userAgent: req.get('user-agent') ?? null,
+              },
+              {
+                action: parsed.data.action,
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
+            )
+            if (result && result.ok === false && result.noRound === true) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to act on cancellation')
+              return
+            }
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round action failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to act on cancellation' } })
+          }
+        })
+      )
+
+      // A2 — the requester withdraws the pending cancellation: the engine's `revoke` on the round's own
+      // instance, through the same service entry, whose revoke gate (allowRevoke → requester → status →
+      // window) decides. Visibility is lock I7 on the ORIGINAL document, as for the summary and the
+      // launch; then only the leave's own user may withdraw (lock:157 仅原 requester — the same rule the
+      // launch applies), answered with the engine's own revoke-refusal code and message.
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round/withdraw',
+        withPermission('attendance:write', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          const parsed = cancelRoundWithdrawBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round withdraw payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (request.userId !== viewerId) {
+              res.status(403).json({
+                ok: false,
+                error: {
+                  code: 'APPROVAL_REVOKE_FORBIDDEN',
+                  message: 'Only the requester can revoke this approval',
+                },
+              })
+              return
+            }
+            const result = await cancelRoundEntryPort.withdraw(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+                ip: req.ip ?? null,
+                userAgent: req.get('user-agent') ?? null,
+              },
+              {
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
+            )
+            if (result && result.ok === false && result.noRound === true) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to withdraw cancellation')
+              return
+            }
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round withdraw failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to withdraw cancellation' } })
+          }
+        })
+      )
+
+      const toCancelRoundIsoOrNull = (value) => {
+        if (value === null || value === undefined) return null
+        const parsed = value instanceof Date ? value : new Date(value)
+        return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+      }
+
+      // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」) — the approver's 「cancellations
+      // waiting for me」: every pending cancel round the caller could approve / reject RIGHT NOW on
+      // `POST …/cancel-round/actions`, and nothing else.
+      //   - Guard: `attendance:approve`, the actions route's own guard (no grant-policy change).
+      //   - Seat: the port's `listSeatedPendingRounds` — the decision door's own predicate over the
+      //     round's active assignments, with the role claims the actions route dispatches with. A holder
+      //     of `attendance:approve` without a seat gets an EMPTY list (200), not a refusal.
+      //   - Document: org scope + `toCancelRoundRequest`, the actions route's own gate (no I7, like the
+      //     actions route: the seat is the authority). A round whose request row is in another org, is
+      //     not a leave, or has no approval instance is not listed — the actions route answers it 404.
+      //   - Fields: the round, the leave it cancels (type, start, end) and the leave owner's directory
+      //     name — the same directory `name` this plugin's other `attendance:approve`-reachable reads
+      //     join from `users`, never the original document's requester snapshot (`null` when absent).
+      //     No delivery data, no other seat holder, no status field (every item is pending by
+      //     construction).
+      //   - Paging: the plugin's `parsePagination` (default 50, max 200), newest launch first;
+      //     `total` counts every listed round.
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/cancel-rounds/pending',
+        withPermission('attendance:approve', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const { pageSize, offset } = parsePagination(req.query)
+          try {
+            const seated = await cancelRoundEntryPort.listSeatedPendingRounds(viewerId)
+            if (!Array.isArray(seated)) {
+              throw new Error('cancel-round pending list: the port answered a non-array')
+            }
+            const documentIds = Array.from(new Set(
+              seated
+                .map((round) => round?.documentInstanceId)
+                .filter((id) => typeof id === 'string' && id.length > 0)
+            ))
+            const requestByDocument = new Map()
+            if (documentIds.length > 0) {
+              const rows = await db.query(
+                `SELECT ar.id, ar.user_id, ar.status, ar.request_type, ar.approval_instance_id,
+                        ar.requested_in_at, ar.requested_out_at, u.name AS requester_name
+                   FROM attendance_requests ar
+                   LEFT JOIN users u ON u.id = ar.user_id
+                  WHERE ar.org_id = $1
+                    AND ar.approval_instance_id = ANY($2::text[])
+                  ORDER BY ar.id`,
+                [getOrgId(req), documentIds]
+              )
+              for (const row of rows) {
+                const request = toCancelRoundRequest(row)
+                // One request per document: the lowest id, the same pick the todo center's cancel-round
+                // deep link makes when two request rows share one approval instance.
+                if (!request || requestByDocument.has(request.documentInstanceId)) continue
+                requestByDocument.set(request.documentInstanceId, { request, row })
+              }
+            }
+            const listed = []
+            const seenRounds = new Set()
+            for (const round of seated) {
+              if (!round || typeof round.roundId !== 'string' || seenRounds.has(round.roundId)) continue
+              const match = requestByDocument.get(round.documentInstanceId)
+              if (!match) continue
+              seenRounds.add(round.roundId)
+              const requesterName = typeof match.row.requester_name === 'string' && match.row.requester_name.trim().length > 0
+                ? match.row.requester_name
+                : null
+              listed.push({
+                requestId: match.request.requestId,
+                roundId: round.roundId,
+                engineInstanceId: String(round.engineInstanceId),
+                requesterUserId: match.request.userId,
+                requesterName,
+                requestType: match.row.request_type,
+                startAt: toCancelRoundIsoOrNull(match.row.requested_in_at),
+                endAt: toCancelRoundIsoOrNull(match.row.requested_out_at),
+                launchedAt: typeof round.launchedAt === 'string' ? round.launchedAt : null,
+              })
+            }
+            res.json({ ok: true, data: { items: listed.slice(offset, offset + pageSize), total: listed.length } })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round pending list failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list cancellations' } })
+          }
+        })
+      )
+    }
 
     context.api.http.addRoute(
       'POST',

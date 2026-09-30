@@ -34,6 +34,10 @@ export interface PendingItem {
   /** Domain-specific: true when the viewer's own action would be accepted right now. Absent for a
    *  source that has no such notion (lock §5 判据 C′). */
   actionable?: boolean
+  /** Domain-specific: the approval source's `approval_instances.workflow_key` (`null` when unset), so
+   *  a sub-type is picked by key, never by title prefix — 撤销锁增补 P-11 (b), landed on the todo-center
+   *  lock's §3 `PendingItem` (RATIFY 追记 2026-09-28). Absent for a source that has no such notion. */
+  workflowKey?: string | null
 }
 
 export interface TodoItemsResponse {
