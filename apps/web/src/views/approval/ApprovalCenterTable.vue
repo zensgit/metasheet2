@@ -181,7 +181,8 @@ function rowClassName({ row }: { row: UnifiedApprovalDTO; rowIndex: number }): s
 
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN')
+  // O-8 / F8-1: same date locale rule as ApprovalDetailView's formatDate.
+  return new Date(dateStr).toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 // B1-03: 已等待 aging severity class — shared by the 已等待 column above.

@@ -1108,7 +1108,7 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
     { file: 'src/approvals/useApprovalListFieldSummary.ts' },
     { file: 'src/views/approval/ApprovalCardDecisionView.vue', ternary: 1 },
     { file: 'src/views/approval/ApprovalCenterDetailPane.vue', ternary: 4 },
-    { file: 'src/views/approval/ApprovalCenterTable.vue', ternary: 1 },
+    { file: 'src/views/approval/ApprovalCenterTable.vue', ternary: 2 },
     // ifZhBlock = `tabEmptyText` (pinned separately above) and the CSV-export `exportCopy`.
     { file: 'src/views/approval/ApprovalCenterView.vue', ternary: 14, ifZhBlock: 2 },
     { file: 'src/views/approval/ApprovalCommentsPanel.vue', ternary: 3 },
@@ -1131,7 +1131,7 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
         { line: '附件上传功能即将支持，请先在其他字段中注明附件信息。', count: 1 },
       ],
     },
-    { file: 'src/views/approval/MyDelegationView.vue', ternary: 1 },
+    { file: 'src/views/approval/MyDelegationView.vue', ternary: 2 },
     { file: 'src/views/approval/approvalCardDecisionLabels.ts', zhTable: 1 },
     { file: 'src/views/approval/approvalCenterLabels.ts', zhTable: 3 },
     { file: 'src/views/approval/approvalDetailLabels.ts', zhTable: 3 },

@@ -115,7 +115,8 @@ const form = reactive<OwnDelegationForm>({
 
 function fmt(iso: string): string {
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+  // O-8 / F8-1: the shell locale, not the browser default (same rule as ApprovalDetailView).
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(isZh.value ? 'zh-CN' : 'en-US')
 }
 
 // member-display-identity (2026-08-19): this self-service view is reachable by ANY authenticated
