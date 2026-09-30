@@ -1283,6 +1283,12 @@ describe('ApprovalCenterView', () => {
       await flushUi()
       container!.querySelector<HTMLButtonElement>('[data-testid="approval-created-range-filter"]')!.click()
       await flushUi()
+      // The status dropdown carries no test id; it is the one select offering 已通过.
+      expect(container!.querySelectorAll('select option[value="approved"]')).toHaveLength(1)
+      const statusSelect = container!.querySelector<HTMLOptionElement>('select option[value="approved"]')!.closest('select')!
+      statusSelect.value = 'approved'
+      statusSelect.dispatchEvent(new Event('change'))
+      await flushUi()
 
       await clickExport()
 
@@ -1291,7 +1297,7 @@ describe('ApprovalCenterView', () => {
       expect(exportQuery).toEqual({
         tab: 'pending',
         search: undefined,
-        status: undefined,
+        status: 'approved',
         sourceSystem: 'platform',
         templateId: 'tpl-7',
         createdFrom: '2026-05-01T00:00:00Z',
@@ -1306,6 +1312,9 @@ describe('ApprovalCenterView', () => {
       const { page, pageSize, ...listFilters } = lastListQuery
       expect(page).toBe(1)
       expect(pageSize).toBe(10)
+      // Pinned on its own: `toEqual` below ignores keys whose value is `undefined`, so it alone
+      // would not notice a status that reached neither request.
+      expect(listFilters.status).toBe('approved')
       const { tab, ...exportFilters } = exportQuery
       expect(tab).toBe('pending')
       expect(exportFilters).toEqual(listFilters)
