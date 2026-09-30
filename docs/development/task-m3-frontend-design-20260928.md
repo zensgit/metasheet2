@@ -19,7 +19,7 @@
 | `setParent(id, parentId)` | `PATCH /:id/parent` | `{id,parentId,depth}` | 404 not_found；422 `INVALID_PARENT`/`DEPTH_EXCEEDED` → validation；422 `ORG_MISSING` → org_missing |
 | `addAssignee(id,userId)` | `POST /:id/assignees` | `{id,status,completionMode,assignees}` | 422 `INVALID_ASSIGNEES`/`LIMIT` |
 | `removeAssignee(id,userId)` | `DELETE /:id/assignees/:userId` | 同上 | 404/403 |
-| `setCompletionMode(id,mode)` | `PATCH /:id/completion-mode` | 同上 | 422 `INVALID_COMPLETION_MODE` |
+| `setCompletionMode(id,mode)` | `PATCH /:id/completion-mode` | 同上 | 422 `INVALID_MODE` |
 | `addFollower`/`removeFollower` | `POST`/`DELETE /:id/followers[/:userId]` | `{id,followers}` | 422 `INVALID_ASSIGNEES`/`LIMIT` |
 | `leaveTask(id)` | `POST /:id/leave` | `{id,followers}` | 404（非 follower） |
 | `listComments(id)` | `GET /:id/comments` | `{items:[Comment]}` | 404/403（无 org_missing，同 `getTask`） |

@@ -85,6 +85,13 @@ export interface TaskDetail {
   /** Optional: whether the viewer may leave (stop following) this task, when the backend provides
    *  it. When present it is the only input for showing the Leave control. */
   canLeave?: boolean
+  /** Optional row-level abilities (backend contract §3.2). When present, `false` hides the
+   *  matching controls; when absent (an older body) the controls stay visible and the server's
+   *  own check remains the only gate. `canEdit` covers membership, completion mode and parent;
+   *  `canComment` covers posting, and editing or deleting one's own comment. */
+  canEdit?: boolean
+  canDelete?: boolean
+  canComment?: boolean
 }
 
 /** `getTask`'s result kinds — deliberately NOT `BaseResultKind`: `GET /api/tasks/:id` has no
@@ -232,8 +239,8 @@ function isTaskChild(value: unknown): value is TaskChild {
  *
  *  The three M3 tree fields (`parentId`/`depth`/`children`) are a GROUP: a body with none of them is
  *  the M2 shape (today's backend) and parses as a root task with no visible children; a body with
- *  any of them must carry all three, each with the right type. The optional `followers`/`canLeave`
- *  are validated only when present. */
+ *  any of them must carry all three, each with the right type. The optional `followers`/`canLeave`/
+ *  `canEdit`/`canDelete`/`canComment` are validated only when present. */
 function parseTaskDetail(value: unknown): TaskDetail | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
@@ -290,6 +297,11 @@ function parseTaskDetail(value: unknown): TaskDetail | null {
   if (record.canLeave !== undefined) {
     if (typeof record.canLeave !== 'boolean') return null
     detail.canLeave = record.canLeave
+  }
+  for (const flag of ['canEdit', 'canDelete', 'canComment'] as const) {
+    if (record[flag] === undefined) continue
+    if (typeof record[flag] !== 'boolean') return null
+    detail[flag] = record[flag]
   }
   return detail
 }
@@ -585,7 +597,7 @@ export async function removeAssignee(id: string, userId: string): Promise<Member
   return membershipCall(response)
 }
 
-/** `PATCH /api/tasks/:id/completion-mode` — `INVALID_COMPLETION_MODE` for anything other than
+/** `PATCH /api/tasks/:id/completion-mode` — `INVALID_MODE` for anything other than
  *  `'all'`/`'any'` per §3.4. Same mode as current is a `noop`, still 200. */
 export async function setCompletionMode(id: string, completionMode: CompletionMode): Promise<MembershipResult> {
   if (!isPathSafeSegment(id)) return { kind: 'not_found' }
@@ -712,15 +724,24 @@ function isComment(value: unknown): value is Comment {
  *  only failure the contract names is a plain 404 (not visible / not found / another org — never
  *  distinguished). No `org_missing`, no `validation`, no `conflict`. */
 export type ListCommentsResult =
-  | { kind: 'ok'; items: Comment[] }
+  | { kind: 'ok'; items: Comment[]; total: number }
   | { kind: 'not_found' }
   | { kind: 'forbidden' }
   | { kind: 'error'; status?: number }
 
-export async function listComments(id: string): Promise<ListCommentsResult> {
+/** The server's page size cap for comments (§3.6: `limit` 1..100, default 100). */
+export const COMMENTS_PAGE_LIMIT = 100
+/** Upper bound on pages one `listComments` call reads. A thread longer than
+ *  `COMMENTS_PAGE_LIMIT * COMMENTS_MAX_PAGES` resolves with `items.length < total`, which the
+ *  caller must surface rather than present the partial list as the whole thread. */
+export const COMMENTS_MAX_PAGES = 20
+
+async function fetchCommentsPage(id: string, offset: number): Promise<ListCommentsResult> {
   let response: Response
   try {
-    response = await apiFetch(`/api/tasks/${encodeURIComponent(id)}/comments`)
+    response = await apiFetch(
+      `/api/tasks/${encodeURIComponent(id)}/comments?limit=${COMMENTS_PAGE_LIMIT}&offset=${offset}`,
+    )
   } catch {
     return { kind: 'error', status: 0 }
   }
@@ -730,9 +751,29 @@ export async function listComments(id: string): Promise<ListCommentsResult> {
 
   const body = await safeJson(response)
   if (!body || typeof body !== 'object') return { kind: 'error', status: response.status }
-  const items = (body as Record<string, unknown>).items
-  if (Array.isArray(items) && items.every(isComment)) return { kind: 'ok', items }
-  return { kind: 'error', status: response.status }
+  const { items, total } = body as Record<string, unknown>
+  if (!Array.isArray(items) || !items.every(isComment)) return { kind: 'error', status: response.status }
+  if (typeof total !== 'number' || !Number.isInteger(total) || total < 0) {
+    return { kind: 'error', status: response.status }
+  }
+  return { kind: 'ok', items, total }
+}
+
+/** `GET /api/tasks/:id/comments`. The server pages this read (oldest first, 100 per page), so one
+ *  request is only the OLDEST page: this reads page after page until it holds `total` comments.
+ *  Any page failing fails the whole read — a partial thread is never returned as `ok` except at
+ *  the `COMMENTS_MAX_PAGES` bound, where `items.length < total` says so. */
+export async function listComments(id: string): Promise<ListCommentsResult> {
+  const items: Comment[] = []
+  let total = 0
+  for (let page = 0; page < COMMENTS_MAX_PAGES; page += 1) {
+    const result = await fetchCommentsPage(id, items.length)
+    if (result.kind !== 'ok') return result
+    items.push(...result.items)
+    total = result.total
+    if (result.items.length === 0 || items.length >= total) break
+  }
+  return { kind: 'ok', items, total: Math.max(total, items.length) }
 }
 
 export type CommentActionResult = { kind: 'ok'; comment: Comment } | WriteFailure

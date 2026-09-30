@@ -48,6 +48,7 @@
                   {{ assignee.completedAt ? `已完成于 ${formatViewerInstant(assignee.completedAt)}` : '未完成' }}
                 </span>
                 <button
+                  v-if="canEditTask"
                   type="button"
                   data-testid="tasks-detail-assignee-remove"
                   :disabled="detailActionPending"
@@ -56,7 +57,7 @@
               </li>
             </ul>
 
-            <form class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
+            <form v-if="canEditTask" class="tasks-view__add-assignee" data-testid="tasks-detail-add-assignee-form" @submit.prevent="onAddAssignee">
               <input
                 v-model="newAssigneeId"
                 type="text"
@@ -70,7 +71,7 @@
               >添加负责人</button>
             </form>
 
-            <label class="tasks-view__completion-mode-switch">
+            <label v-if="canEditTask" class="tasks-view__completion-mode-switch">
               切换完成模式：
               <select
                 data-testid="tasks-detail-completion-mode-select"
@@ -128,7 +129,7 @@
                 class="tasks-view__message"
                 data-testid="tasks-detail-children-empty"
               >暂无子任务</p>
-              <form class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
+              <form v-if="canEditTask" class="tasks-view__set-parent" data-testid="tasks-detail-set-parent-form" @submit.prevent="onSetParent">
                 <input
                   v-model="parentInput"
                   type="text"
@@ -142,7 +143,7 @@
                 >设置父任务</button>
               </form>
               <button
-                v-if="detailResult.task.parentId"
+                v-if="canEditTask && detailResult.task.parentId"
                 type="button"
                 data-testid="tasks-detail-make-independent"
                 :disabled="detailActionPending"
@@ -161,6 +162,7 @@
                 <li v-for="followerId in followersState" :key="followerId" data-testid="tasks-detail-follower">
                   <span>{{ followerId }}</span>
                   <button
+                    v-if="canEditTask"
                     type="button"
                     data-testid="tasks-detail-follower-remove"
                     :disabled="detailActionPending"
@@ -171,7 +173,7 @@
               <p v-else class="tasks-view__message" data-testid="tasks-detail-followers-unknown">
                 关注人列表在有变更后才会显示
               </p>
-              <form class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
+              <form v-if="canEditTask" class="tasks-view__add-follower" data-testid="tasks-detail-add-follower-form" @submit.prevent="onAddFollower">
                 <input
                   v-model="newFollowerId"
                   type="text"
@@ -208,7 +210,12 @@
                 data-testid="tasks-detail-comments-error"
                 role="alert"
               >加载评论失败，请稍后重试</p>
-              <ul v-else data-testid="tasks-detail-comments-list">
+              <p
+                v-if="commentsResult.kind === 'ok' && commentsTruncated"
+                class="tasks-view__message"
+                data-testid="tasks-detail-comments-truncated"
+              >评论较多，仅显示最早的 {{ commentsResult.items.length }} 条</p>
+              <ul v-if="commentsResult.kind === 'ok'" data-testid="tasks-detail-comments-list">
                 <li v-for="comment in commentsResult.items" :key="comment.id" data-testid="tasks-detail-comment">
                   <template v-if="editingCommentId === comment.id">
                     <textarea v-model="editingCommentBody" data-testid="tasks-detail-comment-edit-input"></textarea>
@@ -246,7 +253,7 @@
                   </template>
                 </li>
               </ul>
-              <form class="tasks-view__create-comment" data-testid="tasks-detail-comment-form" @submit.prevent="onCreateComment">
+              <form v-if="canCommentTask" class="tasks-view__create-comment" data-testid="tasks-detail-comment-form" @submit.prevent="onCreateComment">
                 <textarea v-model="newCommentBody" data-testid="tasks-detail-comment-input"></textarea>
                 <button type="submit" data-testid="tasks-detail-comment-submit" :disabled="detailActionPending">发表评论</button>
               </form>
@@ -257,7 +264,7 @@
 
             <!-- M3 §3.7: delete, with an INLINE confirm step (no window.confirm — see the M3
                  frontend design doc). -->
-            <section class="tasks-view__delete-task" data-testid="tasks-detail-delete-section">
+            <section v-if="canDeleteTask" class="tasks-view__delete-task" data-testid="tasks-detail-delete-section">
               <button
                 v-if="!deleteConfirmVisible"
                 type="button"
@@ -520,7 +527,7 @@ const CODE_MESSAGES: Record<string, string> = {
   DEPTH_EXCEEDED: '任务层级已达上限',
   INVALID_ASSIGNEES: '无效的用户',
   LIMIT: '人数已达上限',
-  INVALID_COMPLETION_MODE: '无效的完成模式',
+  INVALID_MODE: '无效的完成模式',
   COMMENT_BLANK: '评论内容不能为空',
   COMMENT_TOO_LONG: '评论内容过长',
   HAS_CHILDREN: '请先删除子任务',
@@ -557,6 +564,17 @@ const canLeaveCurrentTask = computed(() => {
 const newFollowerId = ref('')
 const followerError = ref<string | null>(null)
 
+// Row-level abilities from the detail body (contract §3.2). `false` hides the controls the server
+// would answer with its uniform 404; an absent flag (an older body) leaves them visible, and the
+// server's own check stays the only gate. Hiding is a courtesy, never the enforcement.
+function detailAbility(flag: 'canEdit' | 'canDelete' | 'canComment'): boolean {
+  const state = detailResult.value
+  return state.kind === 'ok' && state.task[flag] !== false
+}
+const canEditTask = computed(() => detailAbility('canEdit'))
+const canDeleteTask = computed(() => detailAbility('canDelete'))
+const canCommentTask = computed(() => detailAbility('canComment'))
+
 // Comments. Own its own render state and its own out-of-order-resolution generation — a stale
 // `listComments` response must not paint over a NEWER task's comments (or the current task's
 // freshly-empty state after a fast re-entry), the same discipline `detailGeneration` applies to
@@ -567,6 +585,9 @@ type CommentsRenderState =
   | { kind: 'ok'; items: Comment[] }
   | { kind: 'error' }
 const commentsResult = ref<CommentsRenderState>({ kind: 'loading' })
+// `true` when the last load stopped at the client's page bound with more comments on the server —
+// the list is then the OLDEST part of the thread and the template says so.
+const commentsTruncated = ref(false)
 let commentsGeneration = 0
 const newCommentBody = ref('')
 const commentError = ref<string | null>(null)
@@ -602,6 +623,7 @@ async function ensureCurrentUser(): Promise<void> {
 
 function canEditOwnComment(comment: Comment): boolean {
   if (comment.deleted) return false
+  if (!canCommentTask.value) return false
   if (currentUserStatus.value === 'pending') return false
   if (currentUserStatus.value === 'unavailable') return true
   return comment.authorId === currentUserId.value
@@ -680,9 +702,11 @@ async function loadComments(id: string): Promise<void> {
   commentsGeneration += 1
   const mine = commentsGeneration
   commentsResult.value = { kind: 'loading' }
+  commentsTruncated.value = false
   const result = await listComments(id)
   if (mine !== commentsGeneration) return
   commentsResult.value = result.kind === 'ok' ? { kind: 'ok', items: result.items } : { kind: 'error' }
+  commentsTruncated.value = result.kind === 'ok' && result.items.length < result.total
 }
 
 /** Entry point for landing on `/tasks/:id` — used by the `taskId` watch and `onMounted`, NOT by
@@ -1304,6 +1328,7 @@ watch(taskId, (id) => {
   editingCommentBody.value = ''
   editCommentError.value = null
   commentsResult.value = { kind: 'loading' }
+  commentsTruncated.value = false
   deleteConfirmVisible.value = false
   deleteError.value = null
   if (id) {

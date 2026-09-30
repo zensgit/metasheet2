@@ -34,6 +34,8 @@ import {
   getTask,
   isPathSafeSegment,
   leaveTask,
+  COMMENTS_MAX_PAGES,
+  COMMENTS_PAGE_LIMIT,
   listComments,
   removeAssignee,
   removeFollower,
@@ -241,9 +243,9 @@ describe('setCompletionMode', () => {
     expect(result).toEqual({ kind: 'ok', task: membershipBody })
   })
 
-  it('resolves validation INVALID_COMPLETION_MODE for a 422 with that code', async () => {
-    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_COMPLETION_MODE' } }))
-    await expect(setCompletionMode('t1', 'all')).resolves.toEqual({ kind: 'validation', code: 'INVALID_COMPLETION_MODE' })
+  it('resolves validation INVALID_MODE for a 422 with that code', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_MODE' } }))
+    await expect(setCompletionMode('t1', 'all')).resolves.toEqual({ kind: 'validation', code: 'INVALID_MODE' })
   })
 
   it('resolves org_missing for a 422 with error.code ORG_MISSING', async () => {
@@ -327,22 +329,93 @@ describe('listComments', () => {
     createdAt: '2026-09-28T00:00:00.000Z',
   }
 
-  it('GETs /api/tasks/:id/comments and resolves ok with items', async () => {
-    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [commentBody] }))
+  it('GETs /api/tasks/:id/comments with an explicit page and resolves ok with items and total', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [commentBody], total: 1 }))
     const result = await listComments('t1')
-    expect(lastCall()[0]).toBe('/api/tasks/t1/comments')
-    expect(result).toEqual({ kind: 'ok', items: [commentBody] })
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+    expect(lastCall()[0]).toBe('/api/tasks/t1/comments?limit=100&offset=0')
+    expect(result).toEqual({ kind: 'ok', items: [commentBody], total: 1 })
   })
 
   it('resolves ok with an empty items array', async () => {
-    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [] }))
-    await expect(listComments('t1')).resolves.toEqual({ kind: 'ok', items: [] })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await expect(listComments('t1')).resolves.toEqual({ kind: 'ok', items: [], total: 0 })
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
   })
 
   it('resolves ok with a tombstone (deleted: true, body: null)', async () => {
     const tombstone = { ...commentBody, deleted: true, body: null }
-    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [tombstone] }))
-    await expect(listComments('t1')).resolves.toEqual({ kind: 'ok', items: [tombstone] })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [tombstone], total: 1 }))
+    await expect(listComments('t1')).resolves.toEqual({ kind: 'ok', items: [tombstone], total: 1 })
+  })
+
+  const page = (from: number, count: number) =>
+    Array.from({ length: count }, (_unused, index) => ({ ...commentBody, id: `c${from + index}` }))
+
+  it('reads every page: 250 comments take three requests at offsets 0, 100, 200, in server order', async () => {
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 100), total: 250 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(100, 100), total: 250 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(200, 50), total: 250 }))
+    const result = await listComments('t1')
+    expect(h.apiFetch.mock.calls.map((call) => call[0])).toEqual([
+      '/api/tasks/t1/comments?limit=100&offset=0',
+      '/api/tasks/t1/comments?limit=100&offset=100',
+      '/api/tasks/t1/comments?limit=100&offset=200',
+    ])
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.total).toBe(250)
+    expect(result.items.map((item) => item.id)).toEqual(page(0, 250).map((item) => item.id))
+  })
+
+  it('exactly 100 comments is one request (no empty trailing page)', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: page(0, 100), total: 100 }))
+    const result = await listComments('t1')
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ kind: 'ok', total: 100 })
+  })
+
+  it('a later page failing fails the whole read — never a partial thread as ok', async () => {
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 100), total: 150 }))
+      .mockResolvedValueOnce(jsonResponse(500, null))
+    await expect(listComments('t1')).resolves.toEqual({ kind: 'error', status: 500 })
+  })
+
+  it('an empty page before total is reached stops the loop and reports the shortfall', async () => {
+    h.apiFetch
+      .mockResolvedValueOnce(jsonResponse(200, { items: page(0, 100), total: 150 }))
+      .mockResolvedValueOnce(jsonResponse(200, { items: [], total: 150 }))
+    const result = await listComments('t1')
+    expect(h.apiFetch).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({ kind: 'ok', total: 150 })
+    if (result.kind === 'ok') expect(result.items).toHaveLength(100)
+  })
+
+  it('stops at COMMENTS_MAX_PAGES and reports items.length < total', async () => {
+    let served = 0
+    h.apiFetch.mockImplementation(async () => {
+      const body = { items: page(served, COMMENTS_PAGE_LIMIT), total: 1_000_000 }
+      served += COMMENTS_PAGE_LIMIT
+      return jsonResponse(200, body)
+    })
+    const result = await listComments('t1')
+    expect(h.apiFetch).toHaveBeenCalledTimes(COMMENTS_MAX_PAGES)
+    expect(result.kind).toBe('ok')
+    if (result.kind !== 'ok') return
+    expect(result.items).toHaveLength(COMMENTS_PAGE_LIMIT * COMMENTS_MAX_PAGES)
+    expect(result.total).toBe(1_000_000)
+  })
+
+  it.each([
+    ['total missing', { items: [] }],
+    ['total not a number', { items: [], total: '0' }],
+    ['total negative', { items: [], total: -1 }],
+    ['total fractional', { items: [], total: 1.5 }],
+  ])('resolves error for a 200 whose page envelope is malformed: %s', async (_label, body) => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, body))
+    await expect(listComments('t1')).resolves.toEqual({ kind: 'error', status: 200 })
   })
 
   it('resolves not_found for a 404 (no org_missing kind for this READ — mirrors getTask)', async () => {
@@ -367,12 +440,12 @@ describe('listComments', () => {
     ['missing authorId', () => { const b = { ...commentBody } as Record<string, unknown>; delete b.authorId; return b }],
     ['createdAt wrong type', () => ({ ...commentBody, createdAt: 123 })],
   ])('resolves error for a malformed comment row: %s', async (_label, build) => {
-    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [build()] }))
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [build()], total: 1 }))
     await expect(listComments('t1')).resolves.toEqual({ kind: 'error', status: 200 })
   })
 
   it('resolves error for a 200 with items not an array', async () => {
-    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: 'nope' }))
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: 'nope', total: 0 }))
     await expect(listComments('t1')).resolves.toEqual({ kind: 'error', status: 200 })
   })
 })
@@ -640,6 +713,9 @@ describe('getTask — M3 detail fields', () => {
     ['followers is not an array', m3Body({ followers: 'u1' })],
     ['followers carries a non-string', m3Body({ followers: ['u1', 2] })],
     ['canLeave is not a boolean', m3Body({ canLeave: 'yes' })],
+    ['canEdit is not a boolean', m3Body({ canEdit: 1 })],
+    ['canDelete is not a boolean', m3Body({ canDelete: 'no' })],
+    ['canComment is not a boolean', m3Body({ canComment: null })],
   ])('resolves error for a 200 whose body is malformed: %s', async (_label, body) => {
     h.apiFetch.mockResolvedValue(jsonResponse(200, body))
     await expect(getTask('t1')).resolves.toEqual({ kind: 'error', status: 200 })
@@ -649,6 +725,20 @@ describe('getTask — M3 detail fields', () => {
     const body = m3Body({ followers: ['u5', 'viewer1'], canLeave: true })
     h.apiFetch.mockResolvedValue(jsonResponse(200, body))
     await expect(getTask('t1')).resolves.toEqual({ kind: 'ok', task: body })
+  })
+
+  it('carries the optional row abilities through when present, and leaves them absent otherwise', async () => {
+    const body = m3Body({ canEdit: false, canDelete: false, canComment: true })
+    h.apiFetch.mockResolvedValue(jsonResponse(200, body))
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'ok', task: body })
+
+    h.apiFetch.mockResolvedValue(jsonResponse(200, m3Body({})))
+    const bare = await getTask('t1')
+    expect(bare.kind).toBe('ok')
+    if (bare.kind !== 'ok') return
+    expect('canEdit' in bare.task).toBe(false)
+    expect('canDelete' in bare.task).toBe(false)
+    expect('canComment' in bare.task).toBe(false)
   })
 })
 
@@ -694,7 +784,7 @@ describe('path segments are URI-encoded in every M3 wrapper', () => {
     ['removeFollower task id', () => removeFollower(R, 'u1'), `/api/tasks/${E}/followers/u1`],
     ['removeFollower user id', () => removeFollower('t1', R), `/api/tasks/t1/followers/${E}`],
     ['leaveTask task id', () => leaveTask(R), `/api/tasks/${E}/leave`],
-    ['listComments task id', () => listComments(R), `/api/tasks/${E}/comments`],
+    ['listComments task id', () => listComments(R), `/api/tasks/${E}/comments?limit=100&offset=0`],
     ['createComment task id', () => createComment(R, 'x'), `/api/tasks/${E}/comments`],
     ['editComment task id', () => editComment(R, 'c1', 'x'), `/api/tasks/${E}/comments/c1`],
     ['editComment comment id', () => editComment('t1', R, 'x'), `/api/tasks/t1/comments/${E}`],

@@ -200,7 +200,7 @@ beforeEach(() => {
   h_.completeTask.mockReset()
   h_.reopenTask.mockReset()
   h_.notifyTasksChanged.mockReset()
-  h_.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
+  h_.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
   h_.getCurrentUserId.mockReset().mockResolvedValue(null)
   h_.setParent.mockReset()
   h_.addAssignee.mockReset()
@@ -474,8 +474,8 @@ describe('TasksView detail — assignees and completion mode', () => {
     expect(shown(el, 'tasks-detail-membership-error')?.textContent).toBe('无效的用户')
   })
 
-  it('shows the exact 无效的完成模式 message for an INVALID_COMPLETION_MODE validation', async () => {
-    h_.setCompletionMode.mockResolvedValue({ kind: 'validation', code: 'INVALID_COMPLETION_MODE' })
+  it('shows the exact 无效的完成模式 message for an INVALID_MODE validation', async () => {
+    h_.setCompletionMode.mockResolvedValue({ kind: 'validation', code: 'INVALID_MODE' })
     const el = await mountAt('/tasks/t1')
 
     const select = shown(el, 'tasks-detail-completion-mode-select') as HTMLSelectElement
@@ -984,6 +984,90 @@ function clickOn(el: HTMLElement, testid: string): void {
 function submitForm(el: HTMLElement, testid: string): void {
   ;(shown(el, testid) as HTMLFormElement).dispatchEvent(new Event('submit', { cancelable: true }))
 }
+
+describe('TasksView detail — row abilities from the detail body (contract §3.2)', () => {
+  const EDIT_CONTROLS = [
+    'tasks-detail-assignee-remove',
+    'tasks-detail-add-assignee-form',
+    'tasks-detail-completion-mode-select',
+    'tasks-detail-set-parent-form',
+    'tasks-detail-make-independent',
+    'tasks-detail-follower-remove',
+    'tasks-detail-add-follower-form',
+  ]
+  const COMMENT_CONTROLS = ['tasks-detail-comment-form', 'tasks-detail-comment-edit', 'tasks-detail-comment-delete']
+  const DELETE_CONTROLS = ['tasks-detail-delete-section', 'tasks-detail-delete']
+
+  async function mountWith(flags: Record<string, boolean>): Promise<HTMLElement> {
+    h_.getCurrentUserId.mockResolvedValue('viewer1')
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: {
+        ...taskDetail({ parentId: 'p1', depth: 1, assignees: [{ userId: 'u2', completedAt: null }] }),
+        followers: ['u5'],
+        ...flags,
+      },
+    })
+    h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1', authorId: 'viewer1' })], total: 1 })
+    return mountAt('/tasks/t1')
+  }
+
+  it('control: with no ability flags in the body every control renders (older body)', async () => {
+    const el = await mountWith({})
+    for (const testid of [...EDIT_CONTROLS, ...COMMENT_CONTROLS, ...DELETE_CONTROLS]) {
+      expect(shown(el, testid), testid).toBeTruthy()
+    }
+  })
+
+  it('control: all three flags true renders every control', async () => {
+    const el = await mountWith({ canEdit: true, canDelete: true, canComment: true })
+    for (const testid of [...EDIT_CONTROLS, ...COMMENT_CONTROLS, ...DELETE_CONTROLS]) {
+      expect(shown(el, testid), testid).toBeTruthy()
+    }
+  })
+
+  it('canEdit: false hides membership, completion-mode and parent controls only', async () => {
+    const el = await mountWith({ canEdit: false, canDelete: true, canComment: true })
+    for (const testid of EDIT_CONTROLS) expect(shown(el, testid), testid).toBeNull()
+    for (const testid of [...COMMENT_CONTROLS, ...DELETE_CONTROLS]) expect(shown(el, testid), testid).toBeTruthy()
+    // The read-only content stays: the assignee row, the follower row and the parent link.
+    expect(shownAll(el, 'tasks-detail-assignee').length).toBeGreaterThan(0)
+    expect(shownAll(el, 'tasks-detail-follower')).toHaveLength(1)
+    expect(shown(el, 'tasks-detail-parent')).toBeTruthy()
+  })
+
+  it('canDelete: false hides the delete section only', async () => {
+    const el = await mountWith({ canEdit: true, canDelete: false, canComment: true })
+    for (const testid of DELETE_CONTROLS) expect(shown(el, testid), testid).toBeNull()
+    for (const testid of [...EDIT_CONTROLS, ...COMMENT_CONTROLS]) expect(shown(el, testid), testid).toBeTruthy()
+  })
+
+  it('canComment: false hides the composer and own-comment edit/delete, and keeps the thread readable', async () => {
+    const el = await mountWith({ canEdit: true, canDelete: true, canComment: false })
+    for (const testid of COMMENT_CONTROLS) expect(shown(el, testid), testid).toBeNull()
+    for (const testid of [...EDIT_CONTROLS, ...DELETE_CONTROLS]) expect(shown(el, testid), testid).toBeTruthy()
+    expect(shownAll(el, 'tasks-detail-comment')).toHaveLength(1)
+  })
+})
+
+describe('TasksView detail — a comment thread longer than the client reads', () => {
+  it('says so when the loaded items are fewer than total', async () => {
+    h_.listComments.mockResolvedValue({
+      kind: 'ok',
+      items: [comment({ id: 'c1' }), comment({ id: 'c2' })],
+      total: 5,
+    })
+    const el = await mountAt('/tasks/t1')
+    expect(shownAll(el, 'tasks-detail-comment')).toHaveLength(2)
+    expect(shown(el, 'tasks-detail-comments-truncated')?.textContent).toContain('2')
+  })
+
+  it('shows no hint when the whole thread was loaded', async () => {
+    h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1' })], total: 1 })
+    const el = await mountAt('/tasks/t1')
+    expect(shown(el, 'tasks-detail-comments-truncated')).toBeNull()
+  })
+})
 
 describe('TasksView detail — Leave and followers from the detail body', () => {
   it('shows Leave when the detail body says canLeave: true, with no follower write first', async () => {
