@@ -56,7 +56,7 @@
 | 前端全量 vitest | `apps/web` 516 文件中 515 过、1 败(`multitable-automation-rule-editor.spec.ts`,与本片无关);该文件单独重跑 185/185 过。`18c3cb0646` 与最终头之间 `apps/web/src`、`apps/web/tests` 零差异 | `18c3cb0646` / 重跑 `bc7657b22f` |
 | 浏览器(真 Chromium,本片自起 Vite) | `verification/approval-member-action-dialog.spec.ts` 8/8,其中 F4-S1 用例在 1440×960 与 1024×768 各一次:默认并加签;后加签说明含「同一节点上开始新一轮审批」「不会插入新的审批节点」,飞书语义只以否定句出现,无「前加签」;单人不出现聚合选项;请求体为 `{action:'add_sign', targetUserIds:[…], addSignMode:'after'}`(无聚合键);新 409 内联显示中文固定文案、无「请重试」、无错误 toast、对话框不关、无横向溢出;切回并加签后提交并关闭。该用例里的 409 是 harness 模拟的:它包住 store 的 `executeAction`,对 `after` 请求抛出与服务端该 409 相同形状的错误(`ApprovalApiError`,同 code),不经过真实服务端;真实服务端的 409 由上面的真库行覆盖 | `bc7657b22f` |
 | 考勤 DML 普查工具 | `attendance-w4c0-dml-inventory-collector.test.mjs` 60/60 | `bc7657b22f` |
-| 公开文本 | 全部提交信息与本片新增 / 改动文本对私有短语表逐提交检查 0 命中 | 全部 |
+| 公开文本 | 全部提交信息与本片新增 / 改动文本逐提交做公开文本检查,0 命中 | 全部 |
 
 浏览器用例首次在 `f33ba8a085` 上跑时两条红,均已处理:(i)该机端口上已有另一份检出的 Vite 服务,配置在非 CI 下会复用它,测到的是旧代码 ⇒ 以 `CI=1` 重跑,由本片自起服务;(ii)Element Plus 单选的圆点盖住原生 input,`locator.check()` 被拦 ⇒ `bc7657b22f` 改为点可见标签(与成员实际操作一致),仍按无障碍 radio 角色断言选中态。
 
@@ -78,6 +78,7 @@
 - **多人会签未轮完时前端不预判**:对话框不根据详情数据预先禁用「后加签」(那等于在前端另写一套轮次完成判定),而是在说明文字里写明「不能完成本轮时不可用」,服务端 409 时在对话框内联给出固定中英文案、保留对话框以便改用并加签。
 - **语言**:`memberActionFailure` 新增可选参数 `isZh`,缺省为中文;对话框里的文案取 `ADD_SIGN_PLACEMENT_COPY.zh`。F8-1 locale 接入时按键选语言即可。本片没有做其它本地化。
 - **两行审计的意见**:执行人的意见同时写在 `approve` 与 `add_sign` 两行上(与并加签把意见写在 `add_sign` 行一致),时间线上会出现两次。
+- **【偏离已 ratify 文本,须 owner 知悉】`addSignAggregation` 只在 `after` 模式读取**:Lock-5 OD-L5-5 (a) 原文要求两人及以上的加签在 `before` / `after` 两种模式下都在动作时提供 `all | any`;本片只在 `after` 模式读取该键,`before` 与 `parallel` 不读。理由:任务要求 `before` 与 `parallel` 行为逐字节不变,且 B-2 已钉住 `before` 当前与 `parallel` 行为相同(前加签尚无独立运行时)。若以后实现前加签的独立运行时,应同时按 OD-L5-5 (a) 读取该键。
 - **服务门 400 的 details**:服务层的 `APPROVAL_ADD_SIGN_MODE_INVALID` 带 `{ nodeKey, operation }`(与同文件其它按节点的拒绝同形,不含人员或取值);路由门的同码 400 不带 details。
 
 ## 6. 未跑项
