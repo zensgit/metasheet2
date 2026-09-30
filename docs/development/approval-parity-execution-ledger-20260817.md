@@ -156,18 +156,25 @@ Initial values are policy assertions, not live-environment observations. Fill en
 during an authorized UAT or rollout.
 
 **2026-09-30 extension (F2-M2).** Five columns were appended (Env var, Resolver, Payload key, Truth rule,
-Owning line) and eleven rows were added; every `path:line` in the table was re-read at `main@cffd5dacbc`.
+Owning line) and eleven rows were added; every `path:line` in this section was re-read at `main@cffd5dacbc`.
 Of the six pre-existing rows only **Code default** was re-verified. Their Staging observed, Production
 observed, Enable authorization and Rollback verified cells are left exactly as found. Canvas V2 therefore
 shows a backend default of ON next to Enable authorization NO: the ON default came from a code change
 (#5169 `5966ec8e87`, 2026-08-26), not from an environment enablement recorded here. Rows owned by another
 line carry `—` in those four columns because this ledger does not track them.
 
+- **Paths**: a bare `.md` name sits in `docs/development/`; a path that starts with `packages/`,
+  `plugins/`, `apps/` or `scripts/` is repo-relative; any other path is relative to
+  `packages/core-backend/src/`. A bare `:NNN` in a cell repeats the path cited just before it in that
+  cell.
 - **Code default**: the value with the env var unset. Where the web client has its own pre-session
   fallback (`apps/web/src/stores/featureFlags.ts:79-92`, used until the session probe answers), both
-  values are written.
-- **Resolver**: the function that turns the raw env value into the flag. Paths are relative to
-  `packages/core-backend/src/` unless they start with `plugins/` or `apps/`.
+  values are written. After the probe, `resolveFeatures` (`apps/web/src/stores/featureFlags.ts:328-427`)
+  still resolves each `approval*` key, `attendanceGroupEffectivePolicyPanel` and `elearning` to `false`
+  when the session answer does not carry it or the probe fails, unless a local override supplies a
+  boolean (overrides are read only in dev builds or with `VITE_ALLOW_FEATURE_OVERRIDE`,
+  `apps/web/src/stores/featureFlags.ts:131-134`).
+- **Resolver**: the function that turns the raw env value into the flag.
 - **Payload key**: the key of the session `features` object returned by `buildFeaturePayload`
   (`routes/auth.ts:284-318`), written as one backticked name. A cell that starts with `—` means the
   capability is not surfaced there. The guard
@@ -197,9 +204,9 @@ line carry `—` in those four columns because this ledger does not track them.
 | Attendance admin | derived per session, not an env flag | — | — | — | — | — | `routes/auth.ts:287` | `attendanceAdmin` | admin role, or the `attendance:admin` permission | attendance |
 | Attendance import | derived per session, not an env flag | — | — | — | — | — | `routes/auth.ts:288` | `attendanceImport` | attendance admin (row above), or the `attendance:write` permission | attendance |
 | Workflow | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:81`) | — | — | — | — | `WORKFLOW_ENABLED` | `config/flags.ts:48` `FEATURE_FLAGS.workflowEnabled`; read at `routes/auth.ts:289` | `workflow` | exact literal `true` only; evaluated once at module load, not per request | workflow |
-| PLM | backend ON unless the product mode is attendance; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:84`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:18-25` `isPlmEnabled` (parser `config/product-mode.ts:3-10`); read at `routes/auth.ts:290` | `plm` | product mode normalised to `attendance` ⇒ OFF; otherwise `ENABLE_PLM` trimmed + lowercased: `1`, `true`, `yes`, `on`, `enabled` ⇒ ON; `0`, `false`, `no`, `off`, `disabled` ⇒ OFF; unset or anything else ⇒ ON | PLM / product mode |
-| Product mode | `platform`; web pre-session fallback `platform` (`apps/web/src/stores/featureFlags.ts:91`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:34-43` `resolveEffectiveProductMode` (normaliser `config/product-mode.ts:12-16`); read at `routes/auth.ts:291` | `mode` | not a boolean: `platform`, `attendance` or `plm-workbench`; unknown values ⇒ `platform`; `plm-workbench` with PLM off ⇒ `platform` | platform |
-| Attendance group effective-policy panel (W6-3) | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:89`) | — | — | — | — | `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED`, `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ORGS` | `attendance/w6-group-effective-policy-panel-flag.ts:52-59` `isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1` (master `:31-35`, allowlist `:38-45`); emitted at `routes/auth.ts:312` with the session `tenantId` | `attendanceGroupEffectivePolicyPanel` | master: trim + lowercase, then equals `true`; AND the session tenant id exactly matches one comma-separated, trimmed allowlist entry (`*` is not a wildcard) | attendance |
+| PLM | backend ON unless the product mode is attendance; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:84`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:18-25` `isPlmEnabled` (parser `config/product-mode.ts:3-10`); read at `routes/auth.ts:290` | `plm` | `PRODUCT_MODE` exactly `attendance` or `attendance-focused` (no trim, case-sensitive) ⇒ OFF; otherwise `ENABLE_PLM` trimmed + lowercased: `1`, `true`, `yes`, `on`, `enabled` ⇒ ON; `0`, `false`, `no`, `off`, `disabled` ⇒ OFF; unset or anything else ⇒ ON | PLM / product mode |
+| Product mode | `platform`; web pre-session fallback `platform` (`apps/web/src/stores/featureFlags.ts:91`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:34-43` `resolveEffectiveProductMode` (normaliser `config/product-mode.ts:12-16`); read at `routes/auth.ts:291` | `mode` | not a boolean; `PRODUCT_MODE` is matched exactly (no trim, case-sensitive): `attendance` or `attendance-focused` ⇒ `attendance`; `plm-workbench`, `plmWorkbench` or `plm-focused` ⇒ `plm-workbench`; unset or anything else ⇒ `platform`; `plm-workbench` with PLM off ⇒ `platform` | platform |
+| Attendance group effective-policy panel (W6-3) | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:89`) | — | — | — | — | `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED`, `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ORGS` | `attendance/w6-group-effective-policy-panel-flag.ts:52-59` `isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1` (master `:31-35`, allowlist `:38-45`); emitted at `routes/auth.ts:312` with the session `tenantId` | `attendanceGroupEffectivePolicyPanel` | master: trim + lowercase, then equals `true`; AND the session tenant id, trimmed, is non-empty (missing or empty ⇒ OFF, `:57-58`) and exactly matches one comma-separated, trimmed allowlist entry (`*` is not a wildcard) | attendance |
 | E-learning | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:90`) | — | — | — | — | `ELEARNING_ENABLED` | `elearning/feature-flags.ts:35-37` `isElearningEnabled`, via `elearning/feature-flags.ts:28-33`; emitted at `routes/auth.ts:315` | `elearning` | exact literal `true` only | e-learning |
 
 ## 8. Closeout rule
