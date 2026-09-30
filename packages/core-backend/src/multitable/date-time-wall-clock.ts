@@ -161,6 +161,35 @@ export function formatDateTimeValue(value: unknown, timeZone: string): string | 
   return ms === null ? null : formatDateTimeWallClock(ms, timeZone)
 }
 
+// Beyond this an epoch-ms is not a representable `Date` and `Intl` throws (`RangeError`) formatting it.
+const MAX_EPOCH_MS = 8.64e15
+
+/**
+ * #6181: `YYYY-MM-DD` of a STORED `date` (date-only) value — the day the grid shows it on (the web's
+ * field-display.ts `formatDateOnlyValue`, #6178):
+ *
+ *   - a day as written — no time part: `2026-09-18`, `2026/9/18`, `2026年9月18日` — keeps that day, no zone math;
+ *   - an instant — `2026-09-17T16:00:00.000Z`, a zone-less `2026-09-18 08:00` (a wall clock in `timeZone`), an
+ *     epoch number, a Date — is the day it falls on in `timeZone` (`2026-09-18` in Asia/Shanghai), never the
+ *     UTC day of the instant.
+ *
+ * `null` when the value names no day (junk, an impossible date, an unrepresentable epoch) — the caller keeps its
+ * raw projection.
+ */
+export function formatDateOnlyValue(value: unknown, timeZone: string): string | null {
+  if (typeof value === 'string') {
+    const wall = WALL_CLOCK_RE.exec(normalizeDateTimeText(value))
+    if (wall && wall[5] === undefined) {
+      const parts = { year: Number(wall[1]), month: Number(wall[3]), day: Number(wall[4]), hour: 0, minute: 0, second: 0 }
+      return isValidWallClockParts(parts) ? `${pad(parts.year, 4)}-${pad(parts.month)}-${pad(parts.day)}` : null
+    }
+  }
+  const ms = dateTimeValueToUtcMs(value, timeZone)
+  if (ms === null || !(Math.abs(ms) <= MAX_EPOCH_MS)) return null
+  const p = getZonedParts(ms, timeZone)
+  return `${pad(p.year, 4)}-${pad(p.month)}-${pad(p.day)}`
+}
+
 /**
  * Filter comparison key of a date-time: the instant floored to the MINUTE, matching the displayed
  * `HH:mm` — a cell stored as 09:00:30 `is` the filter value 09:00 the user can see. `null` when the value
