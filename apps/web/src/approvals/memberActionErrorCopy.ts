@@ -32,6 +32,8 @@
  * `submitAction` already ships and which the lock's X-1 discipline keeps values-free at the source.
  */
 
+import { ADD_SIGN_AFTER_ROUND_INCOMPLETE_CODE, ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE } from './addSignHonestyCopy'
+
 /** The 409 the §2.1 dispatch choke raises for a policy-forbidden member operation. */
 export const NODE_OPERATION_DISABLED_CODE = 'APPROVAL_NODE_OPERATION_DISABLED'
 
@@ -63,11 +65,22 @@ function errorCode(error: unknown): string | undefined {
  * Classify a failed member action.
  *
  * `fallback` is the caller's existing generic copy, used only when the error carries neither a
- * recognised code nor a message — so a non-`Error` throw never renders a blank toast.
+ * recognised code nor a message — so a non-`Error` throw never renders a blank toast. `isZh` picks
+ * the language of the fixed honest strings (F4-S1 ships both; the shell is zh today, so it defaults
+ * to zh until the locale wiring passes it explicitly).
+ *
+ * F4-S1: the after-sign refusal (`APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE`, owner disposition (1))
+ * is NOT a policy denial — it is round-state, not template configuration — so the dialog stays open
+ * with the honest inline copy and the member can switch to 并加签. The server's own message is
+ * English and internal; the fixed bilingual copy replaces it.
  */
-export function memberActionFailure(error: unknown, fallback: string): MemberActionFailure {
-  if (errorCode(error) === NODE_OPERATION_DISABLED_CODE) {
+export function memberActionFailure(error: unknown, fallback: string, isZh = true): MemberActionFailure {
+  const code = errorCode(error)
+  if (code === NODE_OPERATION_DISABLED_CODE) {
     return { message: NODE_OPERATION_DISABLED_MESSAGE, isPolicyDenial: true }
+  }
+  if (code === ADD_SIGN_AFTER_ROUND_INCOMPLETE_CODE) {
+    return { message: isZh ? ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE.zh : ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE.en, isPolicyDenial: false }
   }
   const message = error instanceof Error && error.message ? error.message : fallback
   return { message, isPolicyDenial: false }

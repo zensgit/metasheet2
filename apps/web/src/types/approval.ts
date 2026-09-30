@@ -607,8 +607,13 @@ export interface ApprovalActionRequest {
   targetNodeKey?: string
   /** P1-B add_sign — approver user IDs to pull into the current node as co-signers. */
   targetUserIds?: string[]
-  /** P1-B add_sign — `parallel` (default) or `before`. */
-  addSignMode?: 'before' | 'parallel'
+  /**
+   * P1-B add_sign — `parallel` (default) or `before`; Lock-5 L5-B (F4-S1) adds `after` (后加签):
+   * the actor's seat is consumed as an approval and the addees open a fresh round at the SAME node.
+   */
+  addSignMode?: 'before' | 'parallel' | 'after'
+  /** Lock-5 OD-L5-5(a) — required with `after` and two or more `targetUserIds`; governs their round. */
+  addSignAggregation?: 'all' | 'any'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
   /**

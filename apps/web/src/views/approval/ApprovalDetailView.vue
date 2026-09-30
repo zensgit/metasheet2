@@ -872,16 +872,45 @@
             @select="onAddSignUserSelected"
           />
         </el-form-item>
-        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio is RETIRED. Its
+        <!-- Lock-5 gate B-2 (`'before'` honesty): the two-arm `加签方式` radio was RETIRED. Its
              `前加签` arm claimed corpus C-3 semantics (insert a node BEFORE this one and come back
              to it) that no shipped path implements — §0.1: both modes seat co-signers at the CURRENT
              node in the SAME epoch, so outside a parallel region the arms were byte-identical (now
              pinned by a real-DB test). A radio whose arms cannot be told apart is a fake switch, so
-             the arm is removed rather than relabelled and the surface states what add-sign really
-             does. The wire contract is unchanged: this client sends `'parallel'`, and the server
-             still accepts `'before'` from any other client. -->
-        <el-form-item label="加签方式">
-          <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
+             that arm stays gone. The server still accepts `'before'` from any other client.
+             F4-S1 (Lock-5 L5-B, OD-L5-4(b) + owner disposition (1)): the choice returns with TWO
+             arms that really differ — 并加签 (`'parallel'`, the default) and 后加签 (`'after'`,
+             a fresh round at the SAME node after this seat's approval). Each arm carries the copy
+             that states what the server does; neither claims corpus 后加签 (当前节点自动通过并流转到
+             新增节点). -->
+        <el-form-item :label="ADD_SIGN_PLACEMENT_COPY.zh.fieldLabel">
+          <el-radio-group v-model="addSignPlacement" data-testid="approval-add-sign-placement">
+            <el-radio value="parallel" data-testid="approval-add-sign-placement-parallel">{{ ADD_SIGN_PLACEMENT_COPY.zh.parallelLabel }}</el-radio>
+            <el-radio value="after" data-testid="approval-add-sign-placement-after">{{ ADD_SIGN_PLACEMENT_COPY.zh.afterLabel }}</el-radio>
+          </el-radio-group>
+          <span
+            v-if="addSignPlacement === 'after'"
+            class="approval-detail__hint"
+            data-testid="approval-add-sign-after-hint"
+          >{{ ADD_SIGN_PLACEMENT_COPY.zh.afterHint }}</span>
+          <span
+            v-else
+            class="approval-detail__hint"
+            data-testid="approval-add-sign-mode-hint"
+          >{{ ADD_SIGN_MODE_HINT }}</span>
+        </el-form-item>
+        <!-- OD-L5-5(a) / gate B-5: only 后加签 with two or more addees needs an aggregation for the
+             appended round; a single addee completes it either way, and 并加签 inherits the node's
+             own mode (today's behaviour), so the control renders ONLY when it governs something. -->
+        <el-form-item
+          v-if="addSignAggregationRequired"
+          :label="ADD_SIGN_PLACEMENT_COPY.zh.aggregationLabel"
+        >
+          <el-radio-group v-model="addSignAggregation" data-testid="approval-add-sign-aggregation">
+            <el-radio value="all" data-testid="approval-add-sign-aggregation-all">{{ ADD_SIGN_PLACEMENT_COPY.zh.aggregationAll }}</el-radio>
+            <el-radio value="any" data-testid="approval-add-sign-aggregation-any">{{ ADD_SIGN_PLACEMENT_COPY.zh.aggregationAny }}</el-radio>
+          </el-radio-group>
+          <span class="approval-detail__hint" data-testid="approval-add-sign-aggregation-hint">{{ ADD_SIGN_PLACEMENT_COPY.zh.aggregationHint }}</span>
         </el-form-item>
         <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel">
           <el-input
@@ -1177,7 +1206,13 @@ import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
-import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
+import {
+  ADD_SIGN_MODE_HINT,
+  ADD_SIGN_PLACEMENT_COPY,
+  CLIENT_ADD_SIGN_MODE,
+  type ClientAddSignAggregation,
+  type ClientAddSignPlacement,
+} from '../../approvals/addSignHonestyCopy'
 import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
 import { MEMBER_ACTION_DIALOG_GRAMMAR, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
 import StatusTag from '../../components/status/StatusTag.vue'
@@ -2018,9 +2053,15 @@ const addSignUserIds = ref<string[]>([])
 // lookup, populated from the picker's richer `select` event).
 const addSignPickerValue = ref<string | null>(null)
 const addSignUserLabels = ref<Record<string, string>>({})
-// Lock-5 B-2: the mode is no longer user-selectable (the retired radio's two arms were
-// byte-identical outside a parallel region). It stays in the SUBMIT PAYLOAD, pinned to the one
-// semantic we implement, so the wire contract is unchanged for the server and for replay.
+// Lock-5 B-2 retired the `前加签` arm (byte-identical to `并加签` outside a parallel region).
+// F4-S1 (L5-B, OD-L5-4(b)) adds the one arm that genuinely differs — `'after'` — so the placement
+// is user-selectable again, defaulting to the shipped `'parallel'` (`CLIENT_ADD_SIGN_MODE`), and
+// the aggregation for the appended round is asked only when it governs something (≥2 addees).
+const addSignPlacement = ref<ClientAddSignPlacement>(CLIENT_ADD_SIGN_MODE)
+const addSignAggregation = ref<ClientAddSignAggregation>('all')
+const addSignAggregationRequired = computed(
+  () => addSignPlacement.value === 'after' && addSignUserIds.value.length >= 2,
+)
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
 
@@ -2740,6 +2781,8 @@ function openAddSignDialog() {
   addSignUserIds.value = []
   addSignUserLabels.value = {}
   addSignPickerValue.value = null
+  addSignPlacement.value = CLIENT_ADD_SIGN_MODE
+  addSignAggregation.value = 'all'
   actionComment.value = ''
   actionDialogError.value = null
   addSignDialogVisible.value = true
@@ -2785,7 +2828,10 @@ async function submitAddSign() {
       action: 'add_sign',
       comment: actionComment.value || undefined,
       targetUserIds: addSignUserIds.value,
-      addSignMode: CLIENT_ADD_SIGN_MODE,
+      addSignMode: addSignPlacement.value,
+      // OD-L5-5(a): sent only when it governs the appended round; never for 并加签 (the server
+      // ignores it there, and omitting it keeps that request byte-identical to before F4-S1).
+      ...(addSignAggregationRequired.value ? { addSignAggregation: addSignAggregation.value } : {}),
     })
     if (stillActingOn(id)) {
       ElMessage.success('已成功加签')
