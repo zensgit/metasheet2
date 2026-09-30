@@ -2,7 +2,7 @@
 
 - **范围**:只改测试夹具 `packages/core-backend/tests/integration/elearning-batch-assignment.db.test.ts`(+25 行,零删除)。零产品代码;不调任何超时 / 预算;10,000 上界断言不变;不动 `.github/workflows/*`;不动 `elearning-scope-access.db.test.ts`。
 - **状态**:实现与验证完成,待门审;合并需 owner 点名。本文的判断不是授权。
-- **证据标签**:【重取】= 续做轮(21:32–21:50)在 Mac mini 上新建的一次性库里重新跑出;【上次】= 被额度中断的上一轮跑出,本轮未重取;【CI】= GitHub Actions 日志,本轮重读;【转述】= 出自此前的独立验证,本轮未重做。
+- **证据标签**:【重取】= 续做轮(21:32–21:53)在 Mac mini 上新建的一次性库里重新跑出;【上次】= 被额度中断的上一轮跑出,本轮未重取;【CI】= GitHub Actions 日志,本轮重读;【转述】= 出自此前的独立验证,本轮未重做。
 
 ## 1. 根因(一句)
 
@@ -49,8 +49,8 @@
 
 ### 3.3 整文件与同步骤文件【重取】
 
-- 整文件(5 条用例)从断言过的危险态 `0/572`、`0/327` 起跑:5/5 通过,10,000 用例 755 ms。
-- 同步骤 41 个 elearning 文件,清单取自 `plugin-tests.yml` 该步,与 workflow 同一条命令行、一个 vitest 进程。每轮用全新库,autovacuum 保持默认,两臂交替各 2 次:
+- 整文件(5 条用例)从断言过的危险态 `0/572`、`0/327` 起跑:5/5 通过,10,000 用例 755 ms;在 `973527de01`(测试文件 blob 相同)上再跑一次:5/5,576 ms。
+- 同步骤 41 个 elearning 文件,清单取自 `plugin-tests.yml` 该步,与 workflow 同一配置(`vitest.integration.config.ts`)与文件清单、一个 vitest 进程(本地直接调用 `node_modules/.bin/vitest`,另加 `--no-cache` 与 json 报告器)。每轮用全新库,autovacuum 保持默认,两臂交替各 2 次:
 
 | 臂 | 结果 | 10,000 用例(ms) | 该文件执行位次 |
 |---|---|---|---|
@@ -85,12 +85,12 @@
 - 剩下的只有 autovacuum。
 
 **autovacuum,两个方向。** 【重取】
-- **夹具先持锁**:先把两表设成立即到期(阈值 0)。持有者执行 `ANALYZE` 后保持 140 s,期间 autovacuum 两次经过(21:42:51、21:43:51),两张表都记 `skipping vacuum of "…" --- lock not available`。这类日志行不带库名,但与本库同期的计数吻合。每 0.2 s 采样一次,本库的 autovacuum worker 被锁挡住的样本为 0。等待两表的未授予锁为 0,`autovacuum_count` 不变。释放后 1 分钟内,两表各被 autovacuum 处理一次。PostgreSQL 12 起,非防回卷的 autovacuum 都带 SKIP_LOCKED,不会排队等锁。
+- **夹具先持锁**:先把两表设成立即到期(阈值 0)。持有者执行 `ANALYZE` 后保持 140 s,期间 autovacuum 两次经过(21:42:51、21:43:51),两张表都记 `skipping vacuum of "…" --- lock not available`。这类日志行不带库名,但与本库同期的计数吻合。每 0.2 s 采样一次,本库的 autovacuum worker 被锁挡住的样本为 0。等待两表的未授予锁为 0,`autovacuum_count` 不变。释放后 1 分钟内,两表各被 autovacuum 处理一次。即非防回卷的 autovacuum 遇锁跳过、不排队(此为观测结论,未对照源码)。
 - **autovacuum 先在表上**:把 worker 人为限速,并让两表都到期。夹具的 `ANALYZE users, user_orgs` 用了 2053 ms,期间处于 `Lock:relation` 等待,阻塞者是该 worker。超过 `deadlock_timeout`(1 s)后,PostgreSQL 先后取消了它在 `users` 与 `user_orgs` 上的任务(日志 `canceling autovacuum task`)。【上次】同一构造 2093 ms。
 
 **结论。**
 - 它不会让任何别的测试或进程多等:同库没有别的请求者会去要同级锁,autovacuum 选择跳过。
-- 反方向有一种新增的、有上界的等待,由夹具自己承担:它的 ANALYZE 恰好撞上 autovacuum 正处理同一张表时,要多等一段,上界约为每表一个 `deadlock_timeout`,预算是 60 s。防回卷 autovacuum 不会被取消,但全新的 CI 库离防回卷阈值(2 亿事务)很远。
+- 反方向有一种新增的、有上界的等待,由夹具自己承担:它的 ANALYZE 恰好撞上 autovacuum 正处理同一张表时,要多等一段,上界约为每表一个 `deadlock_timeout`,预算是 60 s。按 PostgreSQL 文档,防回卷的 autovacuum 不会被自动取消;但全新的 CI 库离默认防回卷阈值(2 亿事务)很远。
 - 同类等待在 main 上已经存在:#6171 加的 ANALYZE,以及各 elearning 文件清理时的 `ALTER TABLE … DISABLE TRIGGER`。【上次】修前臂的整步运行里,`ALTER TABLE elearning_scope_revision_rules DISABLE TRIGGER` 就等了一个 autovacuum worker 至少 0.8 s。
 - 用例超时后的孤儿事务:它本来就持有 `RowExclusiveLock`,多出的这把锁只多挡上表所列的同级请求,测试里没有这类请求。
 
