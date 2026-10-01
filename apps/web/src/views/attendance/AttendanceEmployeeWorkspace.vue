@@ -282,6 +282,13 @@
               {{ item.label }} · {{ item.count }}
             </span>
           </div>
+          <OverviewRangeNotice
+            kind="requests"
+            :note="requestWindowNote ?? ''"
+            :load-more-label="tr('Load older requests', '加载更早申请')"
+            :loading="requestWindowLoading"
+            @load-more="$emit('loadMoreRequests')"
+          />
           <div class="attendance__selfservice-callout" data-selfservice-request-followup>
             <div class="attendance__selfservice-callout-copy">
               <div class="attendance__selfservice-callout-header">
@@ -499,6 +506,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AttendanceEmployeeCommonIcon from './AttendanceEmployeeCommonIcon.vue'
+import OverviewRangeNotice from './OverviewRangeNotice.vue'
 import type { AttendanceOverviewAttentionItem } from './attendanceOverviewPriority'
 import {
   type EmployeeQuickActionIcons,
@@ -596,6 +604,8 @@ const props = defineProps<{
   attentionItem: AttendanceOverviewAttentionItem
   // Tools band: requests
   requestsTotal: number
+  requestWindowNote?: string
+  requestWindowLoading?: boolean
   selfServiceRequestStatusItems: RequestStatusItem[]
   selfServiceRequestFollowup: RequestFollowup
   selfServiceRecentRequests: WorkspaceRequestItem[]
@@ -647,6 +657,7 @@ defineEmits<{
   'update:punchOutdoorNoteDraft': [value: string]
   statusAction: []
   selfServiceAction: [action: WorkspaceSelfServiceActionKey]
+  loadMoreRequests: []
   // W5-1: balance leave-type toggle (payload = closed-set literal; parent validates) +
   // the「查看依据」in-page entry into the self decision-trace section.
   changeBalanceLeaveType: [code: 'annual' | 'comp_time']
