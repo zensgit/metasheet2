@@ -78,6 +78,7 @@ try {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
     NODE_ENV: 'test', METASHEET_ENV_DIR: root, CONFIG_FILE: `${root}/config.json`,
     DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    TEST_DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
     SECRET_PROVIDER: 'env', JWT_SECRET: randomUUID(),
   }
   for (const phase of ['fresh', 'replay']) {
