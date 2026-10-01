@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { describe, expect, it , vi} from 'vitest'
+import { beforeEach, describe, expect, it , vi} from 'vitest'
 import {
   APPROVAL_EXPORT_DEFAULT_FILE_NAME,
   APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
@@ -10,6 +10,7 @@ import {
   normalizeApprovalHistoryEnvelope,
 } from '../src/approvals/api'
 import { collectHistoryAttachmentRefIds } from '../src/approvals/attachmentRefs'
+import { useLocale } from '../src/composables/useLocale'
 
 /**
  * B1-04 (宽恕型错误三件套) — unit coverage for the error-surfacing helper that
@@ -28,6 +29,12 @@ function fakeResponse(status: number, jsonImpl: () => Promise<unknown>): Respons
 }
 
 describe('approvalRequestError', () => {
+  // O-8 / F8-1: the status-coded fallback follows the shell locale; these cases pin its zh-CN
+  // spelling (the English one is covered at the end of this describe).
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+  })
+
   it('surfaces the server error message + code verbatim', async () => {
     const response = fakeResponse(400, async () => ({
       error: { code: 'AMOUNT_MISMATCH', message: '金额合计不一致' },
@@ -93,6 +100,25 @@ describe('approvalRequestError', () => {
     const error = caught as ApprovalApiError
     expect(error.message).toBe('请求失败（422）')
     expect(error.code).toBe('X')
+  })
+
+  it('in English the status-coded fallback is English, while a server message stays verbatim', async () => {
+    useLocale().setLocale('en')
+    let caught: unknown
+    try {
+      await approvalRequestError(fakeResponse(500, async () => ({ ok: false })))
+    } catch (err) {
+      caught = err
+    }
+    expect((caught as ApprovalApiError).message).toBe('Request failed (500)')
+
+    caught = undefined
+    try {
+      await approvalRequestError(fakeResponse(400, async () => ({ error: { code: 'X', message: 'server text' } })))
+    } catch (err) {
+      caught = err
+    }
+    expect((caught as ApprovalApiError).message).toBe('server text')
   })
 })
 

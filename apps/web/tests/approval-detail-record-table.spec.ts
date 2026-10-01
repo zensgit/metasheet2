@@ -19,6 +19,7 @@
  * approvalTemplateGovernance.spec.ts) so the new record table's rows are actually queryable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
@@ -359,6 +360,12 @@ function recordTableRows(container: HTMLElement): HTMLElement[] {
   if (!table) return []
   return Array.from(table.querySelectorAll('[data-testid="approval-detail-record-table-row"]'))
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record table', () => {
   let app: VueApp<Element> | null = null

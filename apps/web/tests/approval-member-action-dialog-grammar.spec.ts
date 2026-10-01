@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, ref, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 /**
  * P5-C-1 — member-action dialog grammar (chrome-only unification).
@@ -58,9 +59,11 @@ vi.mock('../src/approvals/components/ApprovalUserPicker.vue', () => ({
     name: 'ApprovalUserPicker',
     props: ['modelValue', 'placeholder'],
     emits: ['update:modelValue', 'select'],
-    setup(_props: unknown, { emit }: { emit: (e: string, v: unknown) => void }) {
+    setup(props: { placeholder?: string }, { emit }: { emit: (e: string, v: unknown) => void }) {
       return () => h('button', {
         'data-testid': 'stub-user-picker',
+        // O-8 / F8-1: surface the host's placeholder so the English render scan below sees it.
+        'data-placeholder': props.placeholder,
         onClick: () => { emit('update:modelValue', 'user_target'); emit('select', { id: 'user_target', name: 'T' }) },
       }, 'pick')
     },
@@ -250,6 +253,9 @@ describe('P5-C-1 — member-action dialog grammar', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // O-8 / F8-1: ApprovalDetailView now follows the shell locale; this suite's selectors are the
+    // shipped zh-CN copy (C1), so pin zh-CN explicitly rather than relying on jsdom's default.
+    useLocale().setLocale('zh-CN')
     mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
     mockCanAct.value = true
     mockCurrentUserId.value = 'user_1'
@@ -476,4 +482,292 @@ describe('memberActionDialogGrammar (pure module)', () => {
     })
     expect(ACTION_DIALOG_TEST_ID).toBe('approval-action-dialog')
   })
+})
+
+// O-8 / F8-1: the English table — same verbs, same keys, identical testids and row counts (defined
+// once in the module), every copy field present, translated and CJK-free.
+describe('memberActionDialogGrammar — locale tables (O-8 / F8-1)', () => {
+  const CJK = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/
+  it('EN table mirrors the zh-CN table: same testids/rows, translated copy, no CJK', async () => {
+    const mod = await import('../src/approvals/memberActionDialogGrammar')
+    const zh = mod.MEMBER_ACTION_DIALOG_GRAMMAR
+    const en = mod.MEMBER_ACTION_DIALOG_GRAMMAR_EN
+    const verbs = Object.keys(zh).sort()
+    expect(verbs).toEqual(['add_sign', 'comment', 'reduce_sign', 'return', 'transfer'])
+    expect(Object.keys(en).sort()).toEqual(verbs)
+    for (const verb of verbs as Array<keyof typeof zh>) {
+      expect(en[verb].dialogTestId, verb).toBe(zh[verb].dialogTestId)
+      expect(en[verb].commentRows, verb).toBe(zh[verb].commentRows)
+      for (const key of ['dialogTitle', 'commentLabel', 'commentPlaceholder', 'confirmLabel'] as const) {
+        expect(en[verb][key].trim(), `${verb}.${key} empty`).not.toBe('')
+        expect(en[verb][key], `${verb}.${key} untranslated`).not.toBe(zh[verb][key])
+        expect(en[verb][key], `${verb}.${key} has CJK`).not.toMatch(CJK)
+        expect(zh[verb][key], `${verb}.${key} zh has no CJK`).toMatch(CJK)
+      }
+    }
+    expect(mod.memberActionDialogGrammar(true)).toBe(zh)
+    expect(mod.memberActionDialogGrammar(false)).toBe(en)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalDetailView with each of the
+// five member-action dialogs OPEN. Uses the prop-surfacing element stubs (dialog title/body only
+// while open, form-item labels as text) and ASCII fixtures, so every CJK hit is chrome. Per verb:
+// the dialog is open and shows every copy field of its grammar in English — title, comment label,
+// placeholder, confirm label, and the user-picker placeholder where the dialog has one (positive
+// control: a field a stub failed to surface would fail here, not pass the scan by being absent);
+// nothing else on the page is CJK apart from the named exceptions; and an en -> zh -> en flip
+// restores both. The comments tab is not opened here (its panel is scanned in
+// approval-comments-panel.spec.ts).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalDetailView English render scan with the five member-action dialogs open', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountForScan() {
+    const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
+    for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
+    app.component('ElButton', ElButton)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Rendered CJK this slice does not convert, by verb (source file:line). The quick-phrase chips
+  // are inserted into the comment text as-is, so localising them would change the language of
+  // stored comments — left to the owner, not decided in this slice.
+  const EXCEPTIONS_BY_VERB: Record<string, Array<{ text: string; count: number; source: string }>> = {
+    transfer: [],
+    add_sign: [],
+    reduce_sign: [],
+    return: [],
+    comment: [
+      { text: '已阅', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[0])' },
+      { text: '请尽快处理', count: 1, source: 'apps/web/src/approvals/quickPhrases.ts:15 (QUICK_PHRASES.comment[1])' },
+    ],
+  }
+  // `picker`: the DETAIL_EN / DETAIL_ZH key of the placeholder the view passes to the user picker
+  // inside that dialog (the picker stub above surfaces it as `data-placeholder`).
+  const VERBS = [
+    { verb: 'transfer', open: 'approval-transfer-button', picker: 'transferPickerPlaceholder' },
+    { verb: 'add_sign', open: 'approval-add-sign-button', picker: 'addSignPickerPlaceholder' },
+    { verb: 'reduce_sign', open: 'approval-reduce-sign-button', picker: null },
+    { verb: 'return', open: 'approval-return-button', picker: null },
+    { verb: 'comment', open: 'approval-comment-button', picker: null },
+  ] as const
+
+  // Every copy field of the verb's grammar that the dialog renders, plus the picker placeholder.
+  function expectDialogCopy(text: string, copy: { dialogTitle: string; commentLabel: string; commentPlaceholder: string; confirmLabel: string }, picker: string | null) {
+    expect(text).toContain(copy.dialogTitle)
+    expect(text).toContain(copy.commentLabel)
+    expect(text).toContain(copy.commentPlaceholder)
+    expect(text).toContain(copy.confirmLabel)
+    if (picker) expect(text).toContain(picker)
+  }
+
+  for (const { verb, open, picker } of VERBS) {
+    it(`${verb}: dialog open, English chrome only; en -> zh -> en restores`, async () => {
+      const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+      const grammar = await import('../src/approvals/memberActionDialogGrammar')
+      const labels = await import('../src/views/approval/approvalDetailLabels')
+      const en = grammar.MEMBER_ACTION_DIALOG_GRAMMAR_EN[verb]
+      const zh = grammar.MEMBER_ACTION_DIALOG_GRAMMAR[verb]
+      const enPicker = picker ? labels.DETAIL_EN[picker] : null
+      const zhPicker = picker ? labels.DETAIL_ZH[picker] : null
+      mockActiveApproval.value = baseInstance({
+        title: 'Travel claim',
+        requester: { id: 'user_99', name: 'Requester Nine' },
+        nodeOperations: { ...ALL_ALLOWED },
+        assignments: [
+          { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+          { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: 'Approver Seven' } },
+        ],
+      })
+      await mountForScan()
+      expect(q(container!, en.dialogTestId), 'closed dialogs are not rendered by this stub').toBeNull()
+      ;(q(container!, open) as HTMLButtonElement).click()
+      await flushUi()
+
+      const dialog = q(container!, en.dialogTestId)
+      expect(dialog, `${verb} dialog must be open`).toBeTruthy()
+      expectDialogCopy(renderedTextAndAttributes(dialog!), en, enPicker)
+      expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS_BY_VERB[verb]!, `detail+${verb} (en)`)
+
+      useLocale().setLocale('zh-CN')
+      await flushUi()
+      expectDialogCopy(renderedTextAndAttributes(q(container!, zh.dialogTestId)!), zh, zhPicker)
+      expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+      useLocale().setLocale('en')
+      await flushUi()
+      expectDialogCopy(renderedTextAndAttributes(q(container!, en.dialogTestId)!), en, enPicker)
+      expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS_BY_VERB[verb]!, `detail+${verb} (en again)`)
+    })
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1 (plan R5-5) — the quick-phrase chips write their preset text UNCHANGED, in
+// either shell locale. A chip's text goes into the submitted opinion / comment as-is, so
+// localising the phrases would change the language of what gets stored; that trade-off is left to
+// the owner, and this slice keeps the written text as it was. Pinned for BOTH chip sites of
+// ApprovalDetailView (the approve / reject dialog and the comment dialog), in en and in zh-CN:
+// the chip texts are the literal presets; a click puts the literal into the input; a second click
+// appends after a full-width comma; and the payload the view hands to the approval store's
+// `executeAction` (the store double above) carries exactly the literal. In English each dialog is
+// also scanned with the chips shown: the presets are its only CJK (named exceptions,
+// quickPhrases.ts:13-15).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — quick-phrase chips write the preset text unchanged in both locales', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  let successSpy: { mockRestore: () => void; mock: { calls: unknown[][] } } | null = null
+
+  // The view remembers a submitted chip per user + action in localStorage and lists remembered
+  // phrases first; clear them so every case starts from the preset order.
+  function forgetRememberedPhrases() {
+    for (let i = window.localStorage.length - 1; i >= 0; i -= 1) {
+      const key = window.localStorage.key(i)
+      if (key && key.startsWith('approval-quick-phrases:')) window.localStorage.removeItem(key)
+    }
+  }
+
+  beforeEach(async () => {
+    forgetRememberedPhrases()
+    mockHistory.value = [{ id: 'h1', action: 'approve', metadata: { nodeKey: 'approval_1' } }]
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    const { ElMessage } = await import('element-plus')
+    successSpy = vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    successSpy?.mockRestore()
+    successSpy = null
+    vi.clearAllMocks()
+    forgetRememberedPhrases()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountWithSurfacingStubs() {
+    const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    app = createApp(defineComponent({ setup() { return () => h(ApprovalDetailView as any) } }))
+    for (const [name, component] of Object.entries(surfacingElementStubs())) app.component(name, component)
+    app.component('ElButton', ElButton)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Literal presets (quickPhrases.ts:13-15), not imported: a change to the constant must red here.
+  const CASES = [
+    { action: 'approve', open: 'approval-approve-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['同意', '情况属实', '已核实无误'], line: 13 },
+    { action: 'reject', open: 'approval-reject-button', dialog: 'approval-action-dialog', submit: 'approval-action-dialog-confirm', presets: ['不符合要求', '请补充材料后重新提交'], line: 14 },
+    { action: 'comment', open: 'approval-comment-button', dialog: 'approval-comment-dialog', submit: 'approval-comment-submit', presets: ['已阅', '请尽快处理'], line: 15 },
+  ] as const
+
+  async function dialogTitle(action: 'approve' | 'reject' | 'comment', isZh: boolean): Promise<string> {
+    if (action === 'comment') {
+      const grammar = await import('../src/approvals/memberActionDialogGrammar')
+      return grammar.memberActionDialogGrammar(isZh).comment.dialogTitle
+    }
+    const labels = await import('../src/views/approval/approvalDetailLabels')
+    const table = isZh ? labels.DETAIL_ZH : labels.DETAIL_EN
+    return action === 'approve' ? table.actionDialogApprove : table.actionDialogReject
+  }
+
+  for (const locale of ['en', 'zh-CN'] as const) {
+    for (const { action, open, dialog, submit, presets, line } of CASES) {
+      it(`${action} (${locale}): chips show the presets; click and submit carry them unchanged`, async () => {
+        const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+        useLocale().setLocale(locale)
+        mockActiveApproval.value = baseInstance({
+          title: 'Travel claim',
+          requester: { id: 'user_99', name: 'Requester Nine' },
+          nodeOperations: { ...ALL_ALLOWED },
+          assignments: [
+            { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+            { id: 'as_2', type: 'user', assigneeId: 'user_7', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: 'Approver Seven' } },
+          ],
+        })
+        await mountWithSurfacingStubs()
+        ;(q(container!, open) as HTMLButtonElement).click()
+        await flushUi()
+
+        const root = () => q(container!, dialog) as HTMLElement
+        const chips = () => Array.from(root().querySelectorAll<HTMLElement>('[data-testid^="approval-quick-phrase-"]'))
+        const input = () => root().querySelector('input') as HTMLInputElement
+        expect(root(), `${action} dialog open`).toBeTruthy()
+        expect(renderedTextAndAttributes(root()), 'dialog title in the shell locale').toContain(await dialogTitle(action, locale === 'zh-CN'))
+        expect(chips().map((chip) => chip.textContent?.trim())).toEqual([...presets])
+        if (locale === 'en') {
+          expectNoCjkOutside(
+            renderedTextAndAttributes(container!),
+            presets.map((text) => ({ text, count: 1, source: `apps/web/src/approvals/quickPhrases.ts:${line} (QUICK_PHRASES.${action})` })),
+            `detail+${action} (en)`,
+          )
+        }
+
+        chips()[0]!.click()
+        await flushUi()
+        expect(input().value).toBe(presets[0])
+        chips()[1]!.click()
+        await flushUi()
+        expect(input().value, 'a second chip appends after a full-width comma').toBe(`${presets[0]}，${presets[1]}`)
+
+        // Clear the input, pick the first chip again and submit it.
+        input().value = ''
+        input().dispatchEvent(new Event('input', { bubbles: true }))
+        await flushUi()
+        chips()[0]!.click()
+        await flushUi()
+        expect(input().value).toBe(presets[0])
+        ;(q(container!, submit) as HTMLButtonElement).click()
+        await flushUi(12)
+
+        expect(q(container!, 'approval-action-dialog-error'), 'no dialog error').toBeNull()
+        expect(successSpy!.mock.calls.length, 'success toast shown (the submit succeeded)').toBe(1)
+        expect(executeActionSpy).toHaveBeenCalledTimes(1)
+        expect(executeActionSpy).toHaveBeenLastCalledWith('apv_1', { action, comment: presets[0] })
+      })
+    }
+  }
 })

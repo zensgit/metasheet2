@@ -3,10 +3,12 @@
  *
  * Pure, Element-Plus-free helpers so "how long has this been waiting" is unit-testable
  * independent of the views that render it (`ApprovalCenterView`'s 待我处理/我发起的 tabs,
- * `ApprovalMobileList`'s card date line, `ApprovalDetailView`'s pending chip). The wording is
- * intentionally Chinese-only (not routed through `useLocale()`) — approval views use inline
- * Chinese by convention, and half-translating a label around an always-Chinese duration
- * ("Waited 3 天") would read worse than staying fully Chinese.
+ * `ApprovalMobileList`'s card date line, `ApprovalDetailView`'s pending chip).
+ *
+ * O-8 / F8-1: the wording now follows the shell locale through a REQUIRED `isZh` argument (every
+ * caller reads it from `useLocale()`). The earlier Chinese-only rule existed to avoid a
+ * half-translated phrase ("Waited 3 天"); `waitingPhrase` below builds the WHOLE phrase in one
+ * locale, so the label and the duration can no longer disagree.
  */
 
 const HOUR_MS = 60 * 60 * 1000
@@ -25,16 +27,28 @@ function elapsedMs(createdAt: string, now: Date): number | null {
 }
 
 /**
- * Human-readable "已等待" duration: '刚刚' under an hour, whole hours (rounded down) from an
- * hour up to a day, whole days (rounded down) from a day onward. An invalid/unparseable
+ * Human-readable "已等待" duration: '刚刚' / '< 1 hour' under an hour, whole hours (rounded down)
+ * from an hour up to a day, whole days (rounded down) from a day onward. An invalid/unparseable
  * `createdAt` renders as '' so callers can `v-if` it away.
  */
-export function formatRelativeWait(createdAt: string, now: Date = new Date()): string {
+export function formatRelativeWait(createdAt: string, isZh: boolean, now: Date = new Date()): string {
   const elapsed = elapsedMs(createdAt, now)
   if (elapsed === null) return ''
-  if (elapsed < HOUR_MS) return '刚刚'
-  if (elapsed < DAY_MS) return `${Math.floor(elapsed / HOUR_MS)} 小时`
-  return `${Math.floor(elapsed / DAY_MS)} 天`
+  if (elapsed < HOUR_MS) return isZh ? '刚刚' : '< 1 hour'
+  if (elapsed < DAY_MS) {
+    const hours = Math.floor(elapsed / HOUR_MS)
+    return isZh ? `${hours} 小时` : `${hours} ${hours === 1 ? 'hour' : 'hours'}`
+  }
+  const days = Math.floor(elapsed / DAY_MS)
+  return isZh ? `${days} 天` : `${days} ${days === 1 ? 'day' : 'days'}`
+}
+
+/**
+ * The whole "已等待 N" phrase in ONE locale — the label and the duration always come from the same
+ * `isZh`, so the page can never render "Waited 3 天". `duration` is a `formatRelativeWait` result.
+ */
+export function waitingPhrase(duration: string, isZh: boolean): string {
+  return isZh ? `已等待 ${duration}` : `Waiting ${duration}`
 }
 
 /** Aging severity band for coloring the 已等待 signal. */
