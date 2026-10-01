@@ -113,6 +113,7 @@ metasheet/
   packages/core-backend/migrations/
   plugins/plugin-attendance/
   plugins/plugin-integration-core/
+  plugins/plugin-elearning/
   scripts/ops/
     multitable-onprem-bootstrap-admin.ps1
     multitable-onprem-apply-package.sh
@@ -138,6 +139,7 @@ Current plugin policy:
 
 - ships `plugin-attendance` alongside the core app
 - ships `plugin-integration-core` so K3 WISE setup and `/api/integration/*` routes work in packaged deployments
+- ships `plugin-elearning` (learning center / cloud classroom) switched off: its `activate()` returns before registering any route or job unless `ELEARNING_ENABLED` is exactly `true`, and no package default sets that flag; with the flag off, global administrators still see its card in the app catalog
 - does not restrict the app shell to `/attendance`
 
 ## Customer delivery checklist
