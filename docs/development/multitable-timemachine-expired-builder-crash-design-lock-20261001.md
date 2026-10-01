@@ -1,6 +1,6 @@
 # Time Machine expired builder and process crash prerequisite
 
-Status: bounded existing D1/D2b/D7 residual implementation; Draft/HOLD. Main baseline `48ae5025a5f899de02efd511e7b7e2f2646049ce`; prerequisite PR #6195 head `e9d9095844d5cd112feaa60e00a75fb92738ab30` (runtime `dcd57c9c7af95605042138f24e1b418484f279da`). Its CI correction is separate and remains required.
+Status: bounded existing D1/D2b/D7 residual implementation; Draft/HOLD. Current main baseline `ef9eb2d86cf4cbef7327036368f92ca3eb0f53d3`; prerequisite PR #6195 head `9d1d589ea0da7aad79e5482fc29a41e5db69026f` (runtime `dcd57c9c7af95605042138f24e1b418484f279da`) plus standalone APFS PR #6199 head `240f108271d2972572a0ccea87bdf53e8c2e3529` (runtime `d2bc43765620c6b7e753f4c0152a8c6b943f1152`). Their own CI remains separately required. The local prerequisite merge retains main private-database drain and all source/CI unions; no GitHub merge is authorized.
 
 ## Source-grounded gap
 
@@ -17,7 +17,7 @@ Use the existing separate abandoned cleanup claim to advance owner/fence and its
 - Kill a real builder child after complete durable pre-PUT registration and successful LOCAL PUT, before the corresponding database receipt. Confirm active/incomplete state, source pins and provider bytes; wait for actual expiry, terminalize explicitly, claim with a newer cleanup fence and complete cleanup in a fresh process. Hot history remains intact and no prune runs.
 - Kill a real cleaner after durable provider absence confirmation but before its database terminal receipt. Confirm sealed staging and retained source pins, then let a fresh process claim after actual expiry and reconcile the same persisted operation UUID, namespace and binding. Release source pins only after every object has a terminal receipt; key references and nonce reservations remain unchanged.
 - Cover live-lease refusal, within-lease prepared retry/finalize positive, renewal/concurrent terminalization, tenant/scope/source-vector/owner/fence negatives, and stale builder/cleaner zero receipt/finalize/pin writes. Include namespace restart positive, ambiguous status retention and IO depth zero.
-- Mutation-check exact expiry/CAS and terminal receipt admission. Preserve cache-disabled focused/neighbor commands, realDB zero-skip census, child PID/barrier/kill/exit evidence and exact source correspondence. Existing required selectors and migration replay entries take the union.
+- Mutation-check exact expiry/CAS and terminal receipt admission. Preserve cache-disabled focused/neighbor commands, realDB zero-skip census, child PID/barrier/kill/exit evidence and exact source correspondence. Existing required selectors and migration replay entries take the union. Prefer the already-required D2b realDB file for actual crash cases; no production crash hook. A stacked Draft may use explicit exact-head backend workflow dispatch, but this is not substituted for main-required PR checks or merge-window CI. Preserve source parent correspondence and do not add unrelated workflow triggers.
 
 ## Boundaries
 
