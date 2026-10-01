@@ -357,6 +357,7 @@ async function truncateOwnedState(): Promise<void> {
     'meta_recovery_token_burns',
     'meta_recovery_archive_jobs',
     'meta_recovery_archive_legal_holds',
+    'meta_recovery_archive_object_deletions',
     'meta_recovery_archive_objects',
     'meta_recovery_archive_snapshot_reservations',
     'meta_recovery_archive_section_bootstrap_markers',

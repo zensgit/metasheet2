@@ -47,6 +47,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
 ]
@@ -195,6 +196,27 @@ test('archive roster contract rejects dropping D5 restore jobs from the union', 
     assert.match(String(error.message), /no duplicates or extras/)
     return true
   })
+})
+
+test('archive roster contract rejects dropping expired-object admission from either placement', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const droppedWorkflow = workflow.replace(
+    '            tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts \\\n',
+    '',
+  )
+  const droppedConfig = config.replace(
+    "      'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(droppedWorkflow, workflow, 'expired-object admission whole-file removal mutation must apply')
+  assert.notEqual(droppedConfig, config, 'expired-object admission exclusion removal mutation must apply')
+  for (const [changedConfig, changedWorkflow] of [[config, droppedWorkflow], [droppedConfig, workflow]]) {
+    assert.throws(() => assertD2ArchiveWiring(changedConfig, changedWorkflow), (error) => {
+      assert.match(String(error.message), /no duplicates or extras/)
+      return true
+    })
+  }
 })
 
 test('archive roster contract rejects dropping D4 reconstruction from the union', () => {
