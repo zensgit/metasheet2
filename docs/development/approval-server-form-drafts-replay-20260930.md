@@ -12,7 +12,7 @@
 | `92cd83ebdd` | 重放 `4686893308`:同一组件实例的防抖保存串成 promise 链,按发出顺序执行;签名在防抖触发时快照。 |
 | `8a86958e81` | Q9 ④:迁移改名为 `zzzz20261001120000_create_approval_form_drafts.ts`(内容不变,100% 重命名),排在 main 最新迁移 `zzzz20260927121000_add_multitable_install_ledger_intent_kind` 之后;同步 workflow 的两处 `paths:` 与一处注释、bootstrap helper 的两处注释;`APPROVAL_SCHEMA_BOOTSTRAP_VERSION` 改标为 `20261001-f3d1-approval-form-drafts`(bootstrap DDL 不变,只让标记日期与改名后的迁移一致),其单测文本钉同步。 |
 | `0b03117a19` | Q9 ⑤:真库套件维持「独立、路径过滤、非必需」的 workflow,`vitest.config.ts` 与该 workflow 里「是否提升为必需属 owner 待裁」的注释改记裁决值;web spec 按仓内两点规则把 `serverFormDraft` 登记进 `run-required-web-tests.sh`(按大小写不敏感排序的位置)并用 `--write` 重生成 `.tokens`。不碰 `plugin-tests.yml`。 |
-| `8dfb8eb4e6` | 本说明的首版(只加这一个文件)。门审 r1 修复轮的三个提交与本说明的更新见 §6。 |
+| `8dfb8eb4e6` | 本说明的首版(只加这一个文件)。门审 r1 修复轮的提交与本说明的更新见 §6。 |
 
 **提交信息更正**:`c3d2af8507` 的提交信息写「including the nine added after #5703 branched」,不准确。实际是:#5703 分叉后 main 在该行新增 **7** 个 token(`approvalTemplateCenterSections`、`approvalTemplateGroupsClient`、`ApprovalTemplateGroupsPanel`、`SessionOrgSwitcher.spec.ts`、`todoApi`、`TodoCenterView`、`todoCountsRealtime`);另有 **2** 个(`categoryCandidateInput`、`templateDetailI18n`)在分叉点就在,但 #5703 的第二个 `run:` 行漏掉了。「9」是 main 行相对 #5703 实际生效行(YAML 重复键取后一个)多出的个数。解法本身不受影响(main 侧整行保留);本分支已有的提交不改写,以本节为准。
 
@@ -81,7 +81,7 @@
 
 ### 3.3 变异(每次改一处、跑、`cp` 还原、`cmp` 相同且工作树干净)
 
-本表是 `0b03117a19` 上的读数。修复轮之后:M4 的读数见 §6.2,M5 / M6 / C1–C3 / S1 在代码终态上的复跑见 §6.4。
+本表是 `0b03117a19` 上的读数。修复轮之后:M4 的读数见 §6.2,M5 / M6 / C1–C3 / S1 在 `cf1419e3ed` 上的复跑见 §6.4。
 
 | # | 变异 | 结果 |
 |---|---|---|
@@ -184,7 +184,7 @@
 
 ## 5. 本说明与代码终态的关系
 
-本说明的首版在 `8dfb8eb4e6` 单独提交,当时代码、workflow、测试与清单文件停在 `0b03117a19`,§3 是那时的读数。门审 r1 修复轮又加了 `0c0d35ec27`、`67506ca76c`、`cf1419e3ed` 三个提交,**代码终态变为 `cf1419e3ed`**;本说明随后在一个只改本文件的提交里更新(§1 末行、§3 抬头、§3.3 抬头、§4 检查单、本节与 §6)。代码终态的读数见 §6.5。
+本说明的首版在 `8dfb8eb4e6` 单独提交,当时代码、workflow、测试与清单文件停在 `0b03117a19`,§3 是那时的读数。门审 r1 修复轮又加了 `0c0d35ec27`、`67506ca76c`、`cf1419e3ed` 三个提交,随后加了一个只改服务层注释的 `0f8afc01df`,**代码终态为 `0f8afc01df`**。本说明在 `9630c8e16e` 与其后一个提交里更新,两次都只改本文件(§1 末行、§3 抬头、§3.3 抬头、§4 检查单、本节与 §6)。代码终态的读数见 §6.5。
 
 ## 6. 门审 r1 修复轮(2026-10-01)
 
@@ -195,7 +195,9 @@
 | `0c0d35ec27` | P2-1:四条草稿路由上的 `rbacGuard('approvals', 'write')` 没有测试 | `approval-rbac-boundary.test.ts` 把 `approvalFormDraftsRouter()` 单独挂到一个 app 上,对只有 `approvals:read` 的用户,列表 GET、单条 GET、PUT、DELETE 各一条用例断言 403,另加一条 `approvals:write` 用户四条路由都进入 handler 的正控。真库套件 A 组加同形负例:只读 token 的四条路由读数必须是 `[403, 403, 403, 403]`,该用户 0 行;同一用户换写 token 后 PUT 200。只改测试。 |
 | `67506ca76c` | NIT-1:路由遮蔽要靠 TypeError 才红 | A 组跨用户用例在读列表 body 之前先断言 `status` 为 200。只改测试。 |
 | `cf1419e3ed` | P3-1:请求被数据库自己拒绝时落成 500;服务层「绝不会」的注释不成立 | 服务层新增导出函数 `mapApprovalFormDraftStorageError`:`23514` 且约束为 `approval_fd_payload_bounds` → `ApprovalFormDraftTooLargeError`(413);SQLSTATE `22P05` / `22P02` / `22021` → `ApprovalFormDraftValidationError`(400);其余原样返回。路由的 `handleDraftError` 先调用它,四条路由都生效;其它失败仍是 values-free 500。服务层文件头与迁移 docblock 改成如实表述:服务层量的是 `JSON.stringify` 的字节数,CHECK 量的是 jsonb 文本输出,后者更大,所以过了服务层的请求仍可能被 CHECK 拒。迁移文件只改注释,DDL 逐字节不变(§6.3)。真库套件新增「storage refusals」组 7 条 HTTP 用例。`approval_fd_signature_bounds` 有意不映射:两层数的都是同一段文本的 UTF-8 字节,且服务层阈值更低,请求到不了这条 CHECK;它若真被触发,说明阈值配置错了,500 才是对的。 |
-| 本说明的这次更新 | P3-2、NIT-2、NIT-3 | 只改本文件:§4 加合并前检查单两条;本节记修复轮读数,含 NIT-3 要求补跑的变异及其断言原文。 |
+| `9630c8e16e` | P3-2、NIT-2、NIT-3 | 只改本文件:§4 加合并前检查单两条;本节记修复轮读数,含 NIT-3 要求补跑的变异及其断言原文。 |
+| `0f8afc01df` | `cf1419e3ed` 留下的注释矛盾 | `APPROVAL_FORM_DRAFT_SIGNATURE_LIMITS` 的注释原说服务层阈值低于 CHECK 是因为两层「重新序列化不保证逐字节相同」,并指向载荷上限的注释;那是 jsonb 的情形。改为如实表述:`signature` 是 text 列,两层数的是同一段 UTF-8 字节,服务层阈值更低,总是先触发,余量只是 headroom;`mapApprovalFormDraftStorageError` 不映射 `approval_fd_signature_bounds` 正是依据这一点。只改注释:`git diff -U0 cf1419e3ed 0f8afc01df` 只有一个 hunk(`@@ -110,5 +110,7 @@`),改动行全是 ` *` 注释行;去掉注释行后新旧文件逐字节相同(`cmp`,433 行)。 |
+| 本说明的这次更新 | — | 只改本文件:把代码终态改记为 `0f8afc01df`(§1 末行、§5、本表、§6.4 / §6.5 抬头)。 |
 
 读数环境同 §3:另一台机器(macOS arm64),Node 20.20.2,pnpm 10.16.1,PostgreSQL 16.15。工作树是真实的 `pnpm install --frozen-lockfile`(不是软链)。用一个一次性库(库名含 `q9_fix1` 与日期),每轮开跑前断言 `current_database()`,`DATABASE_URL` 指向它。变异一律先备份,再改、跑、还原,还原后 `cmp` 相同且 `git status` 干净。读数取于 2026-10-01 10:0x–10:2x(UTC+8)。
 
@@ -255,7 +257,7 @@
 
 迁移文件只改了注释:`git diff` 只有 docblock 里的一个 hunk(`@@ -43,3 +43,4 @@`,docblock 在第 78 / 79 行结束);从 `import` 到文件尾的 28 行新旧逐字节相同(`cmp`),两个 `sql` 模板体的 md5 也相同。
 
-### 6.4 NIT-3:补跑门审 r1 没有复跑的变异(代码终态 `cf1419e3ed`)
+### 6.4 NIT-3:补跑门审 r1 没有复跑的变异(在 `cf1419e3ed` 上跑;`0f8afc01df` 只改注释)
 
 | 变异 | 结果与断言原文 |
 |---|---|
@@ -268,12 +270,14 @@
 
 计数与 §3.3 在 `0b03117a19` 上的读数一致(M5 除外:§3.3 记 FIX 6 红 1 条,P3-D 那次是绿,原因见上)。每次还原后 `cmp` 相同、工作树干净。
 
-### 6.5 代码终态 `cf1419e3ed` 的读数
+### 6.5 代码终态的读数
+
+真库套件、单测与 core-backend `type-check` 在代码终态 `0f8afc01df` 上重跑;前端三个 spec 与 token 清单取自 `cf1419e3ed`(`0f8afc01df` 只改了一个后端文件的注释,不碰前端与清单)。
 
 - 真库套件(workflow 原命令 `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/approval-form-drafts.db.test.ts --reporter=verbose`,`EXPECT_DB=1`):**34 / 34**,`[FIX 6] max row count observed across 25 rounds x 4-way concurrency: 20 (cap N=20)`。
 - 单测:`approval-rbac-boundary`、签名一致性、bootstrap 钉 3 个文件 **63 / 63**。
 - 前端三个 spec **81 / 81**(修复轮不改前端)。
-- core-backend `type-check`(`tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json`)退出 0。
+- core-backend `type-check`(`tsc --noEmit && tsc -p scripts/tsconfig.recovery-archive-acceptance.json`)退出 0(`cf1419e3ed` 与 `0f8afc01df` 各跑一次)。
 - `node scripts/ops/required-web-lane-token-manifest.mjs --check`:退出 0,546 个 token,`MANIFEST MATCHES`。
 - 远端 main 仍是 `ef9eb2d86c`(2026-10-01 只读核对);它的迁移目录按 `LC_ALL=C` 排序的最后一支仍是 `zzzz20260927121000_add_multitable_install_ledger_intent_kind.ts`,本片迁移仍排在它之后。
 
