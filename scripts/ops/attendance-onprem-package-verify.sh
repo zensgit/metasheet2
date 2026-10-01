@@ -298,6 +298,8 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/package.json"
+  "packages/mssql-readonly-utils/package.json"
+  "packages/mssql-readonly-utils/index.cjs"
   "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"
   "packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql"
   "packages/core-backend/src/db/migrations/zzzz20260318123000_formalize_meta_comments.ts"
