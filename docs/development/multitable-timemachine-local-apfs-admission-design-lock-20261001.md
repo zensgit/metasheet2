@@ -1,6 +1,6 @@
 # Time Machine LOCAL APFS admission repair
 
-Status: bounded repair of existing local filesystem admission; Draft/HOLD. Prerequisite PR #6195 head `9d1d589ea0da7aad79e5482fc29a41e5db69026f`; current main `ef9eb2d86cf4cbef7327036368f92ca3eb0f53d3`. Main's private-database drain increment has no conflicting merge-tree entries. No actual staging is authorized by this lock.
+Status: bounded repair of existing local filesystem admission; Draft/HOLD. Standalone repair based on current main `ef9eb2d86cf4cbef7327036368f92ca3eb0f53d3`, including its private-database drain increment. This repair has no dependency on PR #6195 or the abandoned-object cleanup protocol. No actual staging is authorized by this lock.
 
 ## Reproduced defect
 
