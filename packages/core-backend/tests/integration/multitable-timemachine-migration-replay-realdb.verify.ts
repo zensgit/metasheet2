@@ -34,6 +34,7 @@ import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
+import * as expiredObjectAdmission from '../../src/db/migrations/zzzz20261001130000_add_archive_expired_object_admission'
 import * as abandonedBindings from '../../src/db/migrations/zzzz20261001120000_add_archive_abandoned_object_bindings'
 import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 import * as retypeConvertTombstoneReason from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
@@ -239,6 +240,13 @@ const MIGRATIONS: NamedMigration[] = [
       down: (db) => db.transaction().execute(abandonedBindings.down),
     },
   },
+  {
+    name: 'zzzz20261001130000_add_archive_expired_object_admission',
+    module: {
+      up: (db) => db.transaction().execute(expiredObjectAdmission.up),
+      down: (db) => db.transaction().execute(expiredObjectAdmission.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -277,6 +285,7 @@ const TOUCHED_RELATIONS = [
   'meta_recovery_archive_section_bootstrap_markers',
   'meta_recovery_archive_keys',
   'meta_recovery_archive_objects',
+  'meta_recovery_archive_object_deletions',
   'meta_recovery_archive_legal_holds',
   'meta_recovery_archive_nonce_reservations',
   'meta_recovery_archive_jobs',
@@ -310,6 +319,7 @@ const OWNED_RELATIONS = [
   'meta_recovery_archive_section_bootstrap_markers',
   'meta_recovery_archive_keys',
   'meta_recovery_archive_objects',
+  'meta_recovery_archive_object_deletions',
   'meta_recovery_archive_legal_holds',
   'meta_recovery_archive_nonce_reservations',
   'meta_recovery_archive_jobs',
@@ -560,6 +570,11 @@ const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
 ]
 
 const OWNED_FUNCTIONS = [
+  'meta_recovery_archive_deletion_complete',
+  'meta_recovery_archive_object_deletion_check',
+  'meta_recovery_archive_object_deletion_guard',
+  'meta_recovery_archive_object_deletion_command',
+  'meta_recovery_archive_object_deletion_hold_cancel',
   'meta_recovery_archive_manual_request_guard',
   'meta_recovery_archive_attachment_stage_guard',
   'meta_recovery_archive_prepared_capture_guard',
@@ -660,6 +675,9 @@ const ARCHIVE_RESTORE_JOB_TRIGGERS = [
   'trg_meta_recovery_archive_sync_receipts_reject_truncate',
 ]
 const OWNED_TRIGGERS = [
+  'trg_archive_object_deletion_guard',
+  'trg_archive_object_deletion_truncate_guard',
+  'trg_archive_object_deletion_hold_cancel',
   'trg_mrapc_row',
   'trg_mrapc_truncate',
   ...OPERATION_TRIGGERS,

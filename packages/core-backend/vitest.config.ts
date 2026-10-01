@@ -1494,6 +1494,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
