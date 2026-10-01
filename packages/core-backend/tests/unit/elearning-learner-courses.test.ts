@@ -1043,8 +1043,8 @@ describe('elearning audience catalog scan statement timeout (#6175)', () => {
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '10000' })).toBe(9000)
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '500' })).toBe(1)
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: 'abc' })).toBe(29000)
-    // parseInt like the pool: unit suffixes and a leading sign read the same here as there.
-    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '15s' })).toBe(14000)
+    // parseInt like the pool: a suffix or a leading sign reads the same here as there ('15s' is 15 ms to the pool, so the ceiling is the 1 ms floor).
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '15s' })).toBe(1)
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '15000ms' })).toBe(14000)
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '+15000' })).toBe(14000)
     expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '-5' })).toBe(29000)
