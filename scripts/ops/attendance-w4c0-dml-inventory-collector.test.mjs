@@ -155,6 +155,36 @@ test('ACP read decisions require each reviewed symbol and exact count', () => {
   }
 })
 
+test('read inventories reject unreviewed scripts and pin approved script sites by count', () => {
+  const unreviewedRelPath = 'scripts/evil.mjs'
+  const reviewedRelPath = 'scripts/attendance/generate-cleanup-sql.cjs'
+  const reviewedContent = fs.readFileSync(path.join(rootDir, reviewedRelPath), 'utf8')
+
+  for (const [scan, classify, entries, table] of [
+    [scanFileForAttendanceRecordReadSites, classifyAttendanceRecordReadSites, ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS, 'attendance_records'],
+    [scanFileForAttendanceCalculationReadSites, classifyAttendanceCalculationReadSites, ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS, 'attendance_record_calculations'],
+  ]) {
+    const unreviewed = scan(
+      unreviewedRelPath,
+      `async function unreviewedScriptRead() { return db.query('SELECT * FROM ${table}') }\n`,
+    )
+    assert.equal(unreviewed.length, 1)
+    assert.equal(classify(unreviewed).unclassified.length, 1)
+
+    const reviewed = scan(reviewedRelPath, reviewedContent)
+    assert.equal(reviewed.length, 1)
+    const decisions = entries.filter(entry => entry.relPath === reviewedRelPath)
+    const exact = classify(reviewed, decisions)
+    assert.ok(decisions.length > 0)
+    assert.deepEqual(exact.unclassified, [])
+    assert.deepEqual(exact.countDrift, [])
+    assert.deepEqual(exact.stale, [])
+
+    const duplicate = classify([...reviewed, reviewed[0]], decisions)
+    assert.equal(duplicate.countDrift.length, 1)
+  }
+})
+
 test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildAttendanceRecordReadCensus(source)
