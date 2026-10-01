@@ -49,6 +49,8 @@ object provider, KMS, customer records or LC retained keys were used.
 | Migration replay UNION | `pnpm exec tsx tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts` | 35 migrations, 1059 catalog objects PASS |
 | New and preexisting replay down injections | Same verifier with `TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER` at new admission or existing writer-state migration | Each expected exit 1, `injected_down_failure`; normal replay afterward PASS |
 | Exact-anchor + D2 archive source CI guards (repo root) | `node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs scripts/ops/multitable-d2-archive-ci-wiring.test.mjs` | 51/51 PASS, 0 skip |
+| Hermetic sealed-export provenance (repo root) | `node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` | exit 0 after one workflow evidence pin correction |
+| Hermetic sealed-export S5 evidence neighbor (repo root) | `node plugins/plugin-integration-core/__tests__/sealed-export-s5-evidence.test.cjs` | exit 0 |
 | Source formatting | `git diff --check` | exit 0 |
 
 Replay fingerprint:
@@ -67,6 +69,18 @@ comparisons remain intact. The final source-guard log and guard source hashes ar
 recorded in `artifacts/tm-dl-admission-20261001/manifest.json`. This source-only
 correction did not alter runtime/migration source or require another database replay.
 This is local Node24 evidence; exact-head Node20 CI is pending publication.
+
+The hermetic provenance check at HEAD `74bc34bb9cdb4c3815b5f3f85e29c1786108677e`
+first exited 1 because its workflow evidence pin predated the new acceptance selector.
+`computePackageProvenancePinSet(repoRoot)` compared all 66 leaves and confirmed the
+sole difference was `evidenceFiles.pluginTestsWorkflow`: `7229213b25c6ddc49bc795e90c8e5697488df22e80339a31f35271d0bb007cf9`
+became the actual workflow SHA-256 `ad257aebcc7ea63a6e6ee4e749fadd069fba7056b5f85b48d2235acb503acd76`.
+The other 65 leaves, including `runtimeFiles.pluginHttpRoutes`, remain exact. Only
+that JSON pin changed; runtime, migration and workflow bytes remain unchanged.
+Both hermetic checks above passed afterward without database/provider work. Original
+failure evidence and before/after comparison, exit and hash receipts are preserved
+under `artifacts/tm-dl-provenance-20261001/`. The new source head still requires its
+own CI evidence; an earlier-head run does not cover this pin correction.
 
 Nine load-bearing mutations each RED: expired state, hold refusal, job refusal,
 complete replacement, row-version CAS, restricted ACL, hold cancellation,
