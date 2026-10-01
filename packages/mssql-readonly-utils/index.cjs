@@ -1,7 +1,97 @@
 'use strict'
 
-const SIMPLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+$/
-const QUALIFIED_IDENTIFIER_PATTERN = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/
+// ── SQL Server identifier safety (G52) ───────────────────────────────────────
+//
+// THE ONE RULE: an identifier NEVER reaches SQL text except through
+// `quoteSqlServerIdentifierPart`, which brackets it and DOUBLES every `]`. Per the T-SQL grammar the
+// closing bracket is the ONLY metacharacter inside `[...]`; doubling it is therefore a TOTAL escape —
+// no quote, semicolon, comment starter, newline or keyword sitting inside a delimited identifier can
+// end the identifier or start a new token. That is why this module can accept non-ASCII object names
+// (中文表名 / a name with spaces — 国内 ERP 二开 everyday reality) without weakening injection defence:
+// the defence was never the character set, it is the escape.
+//
+// Validation and quoting are HALVES OF ONE FUNCTION on purpose. There is no "validate here, quote
+// over there" seam where a value could pass the check and then be emitted by a path that forgot to
+// escape: `assertSqlServerIdentifierPart` is called BY the quoter, and the quoter re-parses its own
+// output (`unquoteBracketToken`) and refuses unless it reads back byte-identical to the input. A
+// missing/incorrect escape is then a THROW, not a crafted statement.
+//
+// WHAT IS ACCEPTED (per dot-separated segment)
+//   • Unicode letters `\p{L}` and combining marks `\p{M}` — every script, so 物料表 / товары / नाम work.
+//   • Unicode digits `\p{N}` and `_`. (Superset of the old `[A-Za-z0-9_]`: nothing that used to be
+//     accepted is now refused on character grounds.)
+//   • Space separators `\p{Zs}` (ordinary space, U+3000, …) anywhere EXCEPT the first/last position.
+//   • A literal `]`. It is admitted because a real object name may contain one and the doubling above
+//     expresses it EXACTLY — and because keeping it admitted is what keeps that escape a live, tested
+//     path instead of dead decoration.
+//
+// WHAT IS REFUSED, AND WHY (all as SQLSERVER_IDENTIFIER_INVALID, `details.reason` says which)
+//   • An empty segment (`a..b`, `dbo.`, ``) — nothing to name.
+//   • > 128 UTF-16 CODE UNITS. SQL Server object names are `sysname` = `nvarchar(128)`, i.e. 128
+//     UCS-2/UTF-16 units — NOT bytes and NOT code points: a supplementary character (𠮷, an emoji)
+//     costs TWO. JavaScript's `String#length` counts exactly those units, so `part.length` is the
+//     server's own unit, not an approximation of it.
+//   • A space separator at the START or END OF A SEGMENT. Read the OUTER TRIM note below before this
+//     one: the rule can only ever fire on a segment boundary INSIDE a qualified name (`dbo. 订单`),
+//     because the whole value has already been trimmed by the time segments exist. An edge space is
+//     invisible in every UI, so an operator cannot tell the name apart from the trimmed one, and SQL
+//     Server's own trailing-blank handling for identifiers is not uniform across contexts.
+//   • `[`. Its only realistic appearance in operator input is a name someone ALREADY bracketed in SSMS
+//     (`[dbo].[订单]`). We cannot tell that apart from a name whose characters really are `[dbo]`, and
+//     guessing would mean shipping a bracket parser — new attack surface for a formatting convenience.
+//     Refusing catches 100% of pre-bracketed input (every such form contains `[`) with an actionable
+//     error. `]` alone cannot be a pre-bracketing artefact, which is why the two differ.
+//   • Everything else, ANYWHERE INSIDE A SEGMENT (again: see OUTER TRIM — at the two outer edges of the
+//     whole value the whitespace-ish members of this list are discarded, not refused): control
+//     characters and newlines (`\p{Cc}`), format/bidi/zero-width characters and BOM (`\p{Cf}`), lone
+//     surrogates (`\p{Cs}`), private-use and unassigned code points, line and paragraph separators
+//     (U+2028/U+2029), and ASCII punctuation — `;` `'` `"` `-` `/` `*` `%` `(` `)` `\` `,` `+` `=` …
+//     They are not refused because they could inject (they could not, see THE ONE RULE) but because
+//     none of them is needed to NAME something, several are invisible or script-spoofing, newlines
+//     break every log line and error message that carries the value, and a narrow set keeps this
+//     adapter's rule consistent with the Postgres/MySQL adapters' own. Admitting one later is a
+//     one-character edit to ALLOWED_PART_CHARACTERS plus a test — deliberately not done speculatively
+//     here.
+//   • `$` falls out of that list, and that is load-bearing rather than incidental: MSSQLAdapter.query
+//     rewrites `$N` placeholders over FINISHED statement text, so a `$1` inside an identifier would be
+//     silently rewritten into `@p0`. Refusing `$` removes the class instead of the instance.
+//   • MORE THAN THREE dot-separated parts. Three (`db.schema.object`) is pre-existing behaviour and
+//     stays: it is cross-DATABASE on the SAME server, bounded by the connection's own login. A FOUR
+//     part name (`server.db.schema.object`) is a LINKED SERVER reference — it leaves the configured
+//     server entirely, under the linked server's credentials, so this data source's read-only
+//     guarantee simply does not reach it. That is a different boundary, and it is closed here.
+//
+// OUTER TRIM — WHAT THIS MODULE DISCARDS RATHER THAN REFUSES.
+// Every rule above is a rule about a SEGMENT, and the whole value goes through `requiredString` ->
+// `optionalString` -> `String#trim()` BEFORE it is split into segments. `trim()` strips JS WhiteSpace
+// AND LineTerminators, which is a wider set than it looks: spaces (including U+3000 and NBSP), tab, LF,
+// CR, U+2028, U+2029 and U+FEFF. So at the two OUTER edges of the whole value those characters are
+// silently DISCARDED, not refused — the rules above do not get to see them:
+//
+//     '订单 ' -> [订单]      'a\n' -> [a]      '\ufefforders' -> [orders]      '  a' -> [a]
+//
+// Characters that are NOT JS whitespace are untouched by the trim and stay refused wherever they sit:
+// '\u0000a' and 'a\u0007' are still refused, and every one of these characters is still refused INSIDE
+// a segment ('a\nb', 'a\ufeffb', 'dbo. 订单').
+//
+// The trim is INHERITED from main — `requiredString` has always done it and `'orders '` has always been
+// accepted — so this is not a widening introduced here. What IS new is that a name with non-ASCII
+// letters or spaces now gets far enough to be trimmed at all (main refused those outright on the
+// character rule), which makes the silent normalisation newly REACHABLE for that class of name. It is
+// left as-is deliberately: refusing an untrimmed value would turn `'orders '`, accepted on main today,
+// into a NEW refusal — a behaviour narrowing nobody has assessed, and not something to slip into a PR
+// whose subject is the opposite direction. The stricter alternative already exists in this repo, if a
+// later PR wants it: `data-source-sql-readonly-source-adapter.cjs`'s `requiredSqlIdentifier` refuses
+// `value !== value.trim()` outright, because there the value is also compared for equality later.
+// The four examples above are pinned as tests ("OUTER TRIM" rows in `identifier-unicode.test.cjs`) so
+// the discard cannot drift unnoticed — the segment-level rule alone does not cover it.
+//
+// KNOWN, DELIBERATE LIMITATION: a segment whose literal name contains a dot is unrepresentable —
+// `a.b` is read as two parts. Making it representable means accepting pre-bracketed input, see `[`.
+const IDENTIFIER_MAX_CODE_UNITS = 128
+const IDENTIFIER_MAX_PARTS = 3
+const ALLOWED_PART_CHARACTERS = /^[\p{L}\p{M}\p{N}_\p{Zs}\]]+$/u
+const EDGE_SPACE_SEPARATOR = /^\p{Zs}|\p{Zs}$/u
 const VALID_TLS_MIN_VERSIONS = Object.freeze(['TLSv1', 'TLSv1.1', 'TLSv1.2', 'TLSv1.3'])
 
 class SqlServerReadonlyHelperError extends Error {
@@ -41,28 +131,153 @@ function coerceBoolean(value, fallback) {
   return fallback
 }
 
-function normalizeIdentifier(value, field = 'identifier') {
-  const normalized = requiredString(value, field, 'SQLSERVER_IDENTIFIER_INVALID')
-  if (!QUALIFIED_IDENTIFIER_PATTERN.test(normalized)) {
-    throw new SqlServerReadonlyHelperError('SQLSERVER_IDENTIFIER_INVALID', `${field} must be a simple identifier`, {
-      field,
-    })
-  }
-  return normalized
+function identifierInvalid(field, reason) {
+  return new SqlServerReadonlyHelperError(
+    'SQLSERVER_IDENTIFIER_INVALID',
+    `${field} is not a usable SQL Server identifier (${reason})`,
+    { field, reason },
+  )
 }
 
-function quoteSqlServerIdentifier(value, field = 'identifier') {
-  return normalizeIdentifier(value, field)
-    .split('.')
-    .map((part) => {
-      if (!SIMPLE_IDENTIFIER_PATTERN.test(part)) {
-        throw new SqlServerReadonlyHelperError('SQLSERVER_IDENTIFIER_INVALID', `${field} must be a simple identifier`, {
-          field,
-        })
+/**
+ * Read ONE bracket-quoted token starting at `start`, exactly the way SQL Server's parser does: the
+ * token ends at the first `]` that is NOT followed by another `]`. Returns `{ value, end }` (the
+ * unescaped name and the index just past the closing bracket) or `null` when the text does not open
+ * with `[` or never closes. This is the mirror image of the quoter, and it is deliberately the SAME
+ * rule the outbound SQL write gate's `scanSqlNoise` applies when it strips bracketed identifiers —
+ * quoter, parser and classifier agree on where an identifier ends, so none of them can be shown a
+ * different statement than the other two.
+ */
+function scanBracketToken(text, start) {
+  if (typeof text !== 'string' || text[start] !== '[') return null
+  let value = ''
+  let i = start + 1
+  while (i < text.length) {
+    if (text[i] === ']') {
+      if (text[i + 1] === ']') {
+        value += ']'
+        i += 2
+        continue
       }
-      return `[${part}]`
-    })
+      return { value, end: i + 1 }
+    }
+    value += text[i]
+    i += 1
+  }
+  return null
+}
+
+/**
+ * The character/length/shape rule for ONE segment. See the block comment at the top of this file for
+ * what it accepts and refuses and why. Throws SQLSERVER_IDENTIFIER_INVALID; returns the segment.
+ */
+function assertSqlServerIdentifierPart(part, field = 'identifier') {
+  if (typeof part !== 'string' || part.length === 0) {
+    throw identifierInvalid(field, 'empty segment')
+  }
+  // UTF-16 code units — `sysname` is `nvarchar(128)`, see the block comment.
+  if (part.length > IDENTIFIER_MAX_CODE_UNITS) {
+    throw identifierInvalid(field, `segment exceeds ${IDENTIFIER_MAX_CODE_UNITS} characters`)
+  }
+  // A MESSAGE guard, not a safety guard, and labelled as such so nobody mistakes it for one: `[` is
+  // already outside ALLOWED_PART_CHARACTERS below, so deleting these three lines still refuses the
+  // input — just with "contains a character outside …", which sends an operator hunting for an
+  // invisible character instead of telling them to drop the brackets they pasted from SSMS.
+  if (part.includes('[')) {
+    throw identifierInvalid(field, 'segment contains "[" — pass the plain object name, not a pre-bracketed one')
+  }
+  if (!ALLOWED_PART_CHARACTERS.test(part)) {
+    throw identifierInvalid(field, 'segment contains a character outside letters/marks/digits/underscore/space')
+  }
+  if (EDGE_SPACE_SEPARATOR.test(part)) {
+    throw identifierInvalid(field, 'segment starts or ends with a space')
+  }
+  return part
+}
+
+/**
+ * Validate AND bracket-quote ONE segment — the single place an identifier becomes SQL text.
+ *
+ * The `]`-doubling is the injection defence (see THE ONE RULE above); the round-trip check below is
+ * its PROOF, evaluated per call on the actual value: if re-reading the produced token with SQL
+ * Server's own end-of-token rule does not give back exactly what went in, the token would mean
+ * something else to the server than it means here, so we refuse instead of emitting it.
+ */
+function quoteSqlServerIdentifierPart(part, field = 'identifier') {
+  const safe = assertSqlServerIdentifierPart(part, field)
+  const quoted = `[${safe.replace(/]/g, ']]')}]`
+  const parsed = scanBracketToken(quoted, 0)
+  if (!parsed || parsed.end !== quoted.length || parsed.value !== safe) {
+    throw identifierInvalid(field, 'segment could not be bracket-quoted losslessly')
+  }
+  return quoted
+}
+
+function splitIdentifierParts(value, field) {
+  // Missing/blank lands on the identifier vocabulary too (`details.reason`), so every refusal from this
+  // module answers the same question — a caller rendering the reason never has to special-case one.
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw identifierInvalid(field, 'missing or empty identifier')
+  }
+  const normalized = requiredString(value, field, 'SQLSERVER_IDENTIFIER_INVALID')
+  const parts = normalized.split('.')
+  if (parts.length > IDENTIFIER_MAX_PARTS) {
+    throw identifierInvalid(field, 'more than three parts — a four-part name targets a LINKED SERVER')
+  }
+  for (const part of parts) assertSqlServerIdentifierPart(part, field)
+  return { normalized, parts }
+}
+
+/**
+ * Assert that a (possibly dot-qualified, at most three-part) identifier passes the rule. Returns
+ * NOTHING, and that is the point.
+ *
+ * Its predecessor `normalizeIdentifier` returned the trimmed ORIGINAL string. Under main's ASCII-only
+ * rule that was harmless BY ACCIDENT: a value that passed `/^[A-Za-z0-9_]+$/` could not contain a
+ * quote, a space, a `]` or a keyword boundary, so bare interpolation of the return value was safe
+ * whether or not the caller knew it. G52 removes that accident — `a]b` and
+ * `a UNION ALL SELECT name FROM sys.objects` now come back verbatim — while the name of the function
+ * still reads as "normalised, therefore safe to use". A void assertion cannot be misread that way and
+ * hands back nothing to interpolate. THE ONE RULE is unchanged: text becomes SQL only through
+ * `quoteSqlServerIdentifier` / `quoteSqlServerIdentifierPart`.
+ *
+ * Safe to change shape rather than to document: there were ZERO production callers repo-wide at the
+ * time (the two `normalizeIdentifier`s in the K3 lane — `k3-wise-sqlserver-executor.cjs` and
+ * `k3-wise-sqlserver-channel.cjs` — are that lane's OWN local functions with their own ASCII patterns,
+ * not this export).
+ */
+function assertSqlServerIdentifier(value, field = 'identifier') {
+  splitIdentifierParts(value, field)
+}
+
+/** Validate + bracket-quote per segment: `dbo.销 售` -> `[dbo].[销 售]`, `a]b` -> `[a]]b]`. */
+function quoteSqlServerIdentifier(value, field = 'identifier') {
+  return splitIdentifierParts(value, field)
+    .parts.map((part) => quoteSqlServerIdentifierPart(part, field))
     .join('.')
+}
+
+/**
+ * Inverse of `quoteSqlServerIdentifier` for a WELL-FORMED bracketed name: `[a]]b].[c]` -> `a]b.c`.
+ * Strict — anything that is not a dot-joined sequence of closed bracket tokens throws. Used by the
+ * quoter's own round-trip proof and by tests; it does not widen anything, since it never produces SQL.
+ */
+function unquoteSqlServerIdentifier(quoted, field = 'identifier') {
+  const text = typeof quoted === 'string' ? quoted : ''
+  const parts = []
+  let i = 0
+  while (i < text.length) {
+    const token = scanBracketToken(text, i)
+    if (!token) throw identifierInvalid(field, 'expected a closed bracket-quoted segment')
+    parts.push(token.value)
+    i = token.end
+    if (i === text.length) break
+    if (text[i] !== '.') throw identifierInvalid(field, 'unexpected text after a bracket-quoted segment')
+    i += 1
+    if (i >= text.length) throw identifierInvalid(field, 'empty segment')
+  }
+  if (parts.length === 0) throw identifierInvalid(field, 'empty identifier')
+  return parts.join('.')
 }
 
 function normalizePort(value, field) {
@@ -371,16 +586,19 @@ function buildSimpleSelectQuery(input = {}) {
 module.exports = {
   SqlServerReadonlyHelperError,
   VALID_TLS_MIN_VERSIONS,
+  assertSqlServerIdentifier,
+  assertSqlServerIdentifierPart,
   buildGenericWhereClause,
   buildLegacyTlsOptions,
   buildSimpleSelectQuery,
   coerceBoolean,
-  normalizeIdentifier,
   normalizeLimit,
   normalizeScalar,
   normalizeTimeout,
   optionalString,
   parseSqlServerEndpoint,
   quoteSqlServerIdentifier,
+  quoteSqlServerIdentifierPart,
   requiredString,
+  unquoteSqlServerIdentifier,
 }

@@ -7,7 +7,7 @@
   "private": true,
   "scripts": {
     "build": "node -c index.cjs",
-    "test": "node __tests__/helper-contract.test.cjs && tsc --noEmit --module commonjs --target ES2022 --moduleResolution node --skipLibCheck __tests__/ts-consumer.ts"
+    "test": "node __tests__/helper-contract.test.cjs && node __tests__/identifier-unicode.test.cjs && tsc --noEmit --module commonjs --target ES2022 --moduleResolution node --skipLibCheck __tests__/ts-consumer.ts"
   },
   "devDependencies": {
     "typescript": "^5.3.3"
