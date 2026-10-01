@@ -1,5 +1,11 @@
 import { reactive, ref, type Ref } from 'vue'
 import { apiFetch as defaultApiFetch } from '../../utils/api'
+import {
+  attendanceAdminListPageParams,
+  beginAttendanceAdminListRequest,
+  createAttendanceAdminListCursor,
+  storeAttendanceAdminListPage,
+} from './attendanceAdminListPage'
 
 type Translate = (en: string, zh: string) => string
 type ConfirmFn = (message: string) => boolean
@@ -227,6 +233,7 @@ export function useAttendanceAdminScheduling({
   const today = new Date()
 
   const rotationRules = ref<AttendanceRotationRule[]>([])
+  const rotationRulesCursor = reactive(createAttendanceAdminListCursor())
   const rotationRuleLoading = ref(false)
   const rotationRuleSaving = ref(false)
   const rotationRuleEditingId = ref<string | null>(null)
@@ -309,22 +316,31 @@ export function useAttendanceAdminScheduling({
     rotationRuleForm.isActive = rule.isActive
   }
 
-  async function loadRotationRules() {
+  async function loadRotationRules(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(rotationRulesCursor, rotationRules.value.length, append)
+    if (page === null) return
     rotationRuleLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/rotation-rules?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
         return
       }
-      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceRotationRule[] }; error?: { message?: string } } | null
+      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceRotationRule[]; total?: unknown }; error?: { message?: string } } | null
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error?.message || tr('Failed to load rotation rules', '加载轮班规则失败'))
       }
       adminForbidden.value = false
-      rotationRules.value = data.data?.items || []
-      if (!rotationAssignmentForm.rotationRuleId && rotationRules.value.length > 0) {
+      rotationRules.value = storeAttendanceAdminListPage(rotationRulesCursor, rotationRules.value, {
+        incoming: data.data?.items || [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
+      if (!append && !rotationAssignmentForm.rotationRuleId && rotationRules.value.length > 0) {
         rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
       }
     } catch (error) {
@@ -419,21 +435,32 @@ export function useAttendanceAdminScheduling({
     rotationAssignmentForm.isActive = item.assignment.isActive
   }
 
-  async function loadRotationAssignments() {
+  const rotationAssignmentsCursor = reactive(createAttendanceAdminListCursor())
+
+  async function loadRotationAssignments(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(rotationAssignmentsCursor, rotationAssignments.value.length, append)
+    if (page === null) return
     rotationAssignmentLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/rotation-assignments?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
         return
       }
-      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceRotationAssignmentItem[] }; error?: { message?: string } } | null
+      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceRotationAssignmentItem[]; total?: unknown }; error?: { message?: string } } | null
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error?.message || tr('Failed to load rotation assignments', '加载轮班分配失败'))
       }
       adminForbidden.value = false
-      rotationAssignments.value = data.data?.items || []
+      rotationAssignments.value = storeAttendanceAdminListPage(rotationAssignmentsCursor, rotationAssignments.value, {
+        incoming: data.data?.items || [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.assignment.id,
+      })
     } catch (error) {
       setStatus(extractErrorMessage(error, tr('Failed to load rotation assignments', '加载轮班分配失败')), 'error')
     } finally {
@@ -539,25 +566,37 @@ export function useAttendanceAdminScheduling({
     shiftForm.workingDays = shift.workingDays.join(',')
   }
 
-  async function loadShifts() {
+  const shiftsCursor = reactive(createAttendanceAdminListCursor())
+
+  async function loadShifts(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(shiftsCursor, shifts.value.length, append)
+    if (page === null) return
     shiftLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/shifts?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
         return
       }
-      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceShift[] }; error?: { message?: string } } | null
+      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceShift[]; total?: unknown }; error?: { message?: string } } | null
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error?.message || tr('Failed to load shifts', '加载班次失败'))
       }
       adminForbidden.value = false
-      shifts.value = (data.data?.items || []).map(item => ({
+      const incoming = (data.data?.items || []).map(item => ({
         ...item,
         isOvernight: Boolean(item.isOvernight),
       }))
-      if (!assignmentForm.shiftId && shifts.value.length > 0) {
+      shifts.value = storeAttendanceAdminListPage(shiftsCursor, shifts.value, {
+        incoming,
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.id,
+      })
+      if (!append && !assignmentForm.shiftId && shifts.value.length > 0) {
         assignmentForm.shiftId = shifts.value[0].id
       }
     } catch (error) {
@@ -669,21 +708,32 @@ export function useAttendanceAdminScheduling({
     assignmentForm.isActive = item.assignment.isActive
   }
 
-  async function loadAssignments() {
+  const assignmentsCursor = reactive(createAttendanceAdminListCursor())
+
+  async function loadAssignments(options: { append?: boolean } = {}) {
+    const append = options.append === true
+    const page = beginAttendanceAdminListRequest(assignmentsCursor, assignments.value.length, append)
+    if (page === null) return
     assignmentLoading.value = true
     try {
-      const query = buildQuery({ orgId: getOrgId() })
+      const query = buildQuery({ orgId: getOrgId(), ...attendanceAdminListPageParams(page) })
       const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
         return
       }
-      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceAssignmentItem[] }; error?: { message?: string } } | null
+      const data = await readJson(response) as { ok?: boolean; data?: { items?: AttendanceAssignmentItem[]; total?: unknown }; error?: { message?: string } } | null
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error?.message || tr('Failed to load assignments', '加载分配失败'))
       }
       adminForbidden.value = false
-      assignments.value = data.data?.items || []
+      assignments.value = storeAttendanceAdminListPage(assignmentsCursor, assignments.value, {
+        incoming: data.data?.items || [],
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.assignment.id,
+      })
     } catch (error) {
       setStatus(extractErrorMessage(error, tr('Failed to load assignments', '加载分配失败')), 'error')
     } finally {
@@ -869,6 +919,7 @@ export function useAttendanceAdminScheduling({
 
   return {
     rotationRules,
+    rotationRulesCursor,
     rotationRuleLoading,
     rotationRuleSaving,
     rotationRuleEditingId,
@@ -876,9 +927,11 @@ export function useAttendanceAdminScheduling({
     resetRotationRuleForm,
     editRotationRule,
     loadRotationRules,
+    loadMoreRotationRules: () => loadRotationRules({ append: true }),
     saveRotationRule,
     deleteRotationRule,
     rotationAssignments,
+    rotationAssignmentsCursor,
     rotationAssignmentLoading,
     rotationAssignmentSaving,
     rotationAssignmentEditingId,
@@ -886,9 +939,11 @@ export function useAttendanceAdminScheduling({
     resetRotationAssignmentForm,
     editRotationAssignment,
     loadRotationAssignments,
+    loadMoreRotationAssignments: () => loadRotationAssignments({ append: true }),
     saveRotationAssignment,
     deleteRotationAssignment,
     shifts,
+    shiftsCursor,
     shiftLoading,
     shiftSaving,
     shiftEditingId,
@@ -896,9 +951,11 @@ export function useAttendanceAdminScheduling({
     resetShiftForm,
     editShift,
     loadShifts,
+    loadMoreShifts: () => loadShifts({ append: true }),
     saveShift,
     deleteShift,
     assignments,
+    assignmentsCursor,
     assignmentLoading,
     assignmentSaving,
     assignmentEditingId,
@@ -906,6 +963,7 @@ export function useAttendanceAdminScheduling({
     resetAssignmentForm,
     editAssignment,
     loadAssignments,
+    loadMoreAssignments: () => loadAssignments({ append: true }),
     saveAssignment,
     deleteAssignment,
     holidays,

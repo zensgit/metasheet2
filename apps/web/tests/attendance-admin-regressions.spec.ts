@@ -1135,8 +1135,8 @@ describe('Attendance admin regressions', () => {
 
     const requestedUrls = vi.mocked(apiFetch).mock.calls.map(call => String(call[0]))
     const overviewReadOnlyCatalogLoads = new Set([
-      '/api/attendance/leave-types?isActive=true',
-      '/api/attendance/overtime-rules?isActive=true',
+      '/api/attendance/leave-types?isActive=true&page=1&pageSize=200',
+      '/api/attendance/overtime-rules?isActive=true&page=1&pageSize=200',
     ])
     const forbiddenAdminLoads = [
       '/api/attendance-admin/',
@@ -1698,7 +1698,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(8)
 
     expect(candidateCalls).toHaveLength(1)
-    expect(candidateCalls[0]).toContain('pageSize=50')
+    expect(candidateCalls[0]).toContain('pageSize=200')
     expect(section!.textContent).toContain('2026-06-10')
     expect(section!.textContent).toContain('2026-06-11')
 
