@@ -1243,6 +1243,10 @@ describe('ApprovalCenterView', () => {
     })
 
     afterEach(async () => {
+      // saveExportFile revokes the object URL in a setTimeout(0). Let that timer fire while the stub is
+      // still installed; restoring first leaves jsdom's URL (which has no revokeObjectURL) to take the
+      // call and vitest records an unhandled TypeError that fails the whole lane (#6207).
+      await new Promise((resolve) => setTimeout(resolve, 0))
       anchorClickSpy.mockRestore()
       ;(URL as { createObjectURL?: unknown }).createObjectURL = originalCreateObjectUrl
       ;(URL as { revokeObjectURL?: unknown }).revokeObjectURL = originalRevokeObjectUrl
