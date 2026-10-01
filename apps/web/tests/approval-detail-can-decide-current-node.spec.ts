@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createPinia, setActivePinia } from 'pinia'
 import { createApp, defineComponent, h, nextTick, reactive, ref, type App as VueApp } from 'vue'
 
@@ -254,6 +255,12 @@ function q(container: HTMLElement, testid: string): HTMLElement | null {
 function renderedDecisionButtons(container: HTMLElement): string[] {
   return DECISION_BUTTONS.filter((testid) => q(container, testid) !== null)
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — canDecideCurrentNode gates the decision verbs', () => {
   let app: VueApp<Element> | null = null

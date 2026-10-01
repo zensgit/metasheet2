@@ -19690,8 +19690,17 @@ paths:
         global elearning administrator authority and active organization
         membership.
 
-        Administrative setup is available independently of the deployment master
-        flag.
+        Follows the deployment master flag: while it is not exact 'true', GET,
+        POST
+
+        and PUT all answer 404 `{ error: feature_disabled }` right after
+
+        authentication, read and write nothing, and do not reveal whether an
+
+        installation exists. Existing installations are kept and apply again
+        once
+
+        the flag is exact 'true'.
       security:
         - bearerAuth: []
       responses:
@@ -19705,6 +19714,9 @@ paths:
           description: Authentication required.
         '403':
           description: Authoritative organization context required.
+        '404':
+          description: Master flag is not exact 'true' (`feature_disabled`); nothing read.
+          $ref: '#/components/responses/ElearningError'
         '503':
           description: Installation authority unavailable; no fallback enablement.
     post:
@@ -19740,6 +19752,11 @@ paths:
           description: Authentication required.
         '403':
           description: Missing organization, administrator authority, or active membership.
+        '404':
+          description: >-
+            Master flag is not exact 'true' (`feature_disabled`); nothing
+            written.
+          $ref: '#/components/responses/ElearningError'
         '503':
           description: Installation authority unavailable.
     put:
@@ -19784,6 +19801,11 @@ paths:
           description: Authentication required.
         '403':
           description: Missing organization, administrator authority, or active membership.
+        '404':
+          description: >-
+            Master flag is not exact 'true' (`feature_disabled`); nothing
+            written.
+          $ref: '#/components/responses/ElearningError'
         '409':
           description: Application not installed.
         '503':
@@ -26686,7 +26708,17 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Version conflict
+          description: >-
+            Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the
+            record changed since `expectedVersion` (carries `serverVersion`).
+            `RECOVERY_IN_PROGRESS`: a recovery holds the sheet.
+            `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write
+            locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this
+            write touches changed type or options while the write was waiting (a
+            field type conversion committed first). Nothing was written; reload
+            the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED`
+            is only returned by a server running with field type conversion and
+            the writer fence both enabled.
           content:
             application/json:
               schema:
@@ -26703,6 +26735,16 @@ paths:
                             type: string
                           serverVersion:
                             type: integer
+              examples:
+                field_schema_changed:
+                  summary: A touched field changed type while the write waited
+                  value:
+                    ok: false
+                    error:
+                      code: FIELD_SCHEMA_CHANGED
+                      message: >-
+                        A field this write touches changed type or options while
+                        the write was waiting; reload and retry
     delete:
       summary: Delete a multitable record
       security:
@@ -26832,7 +26874,17 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Version conflict
+          description: >-
+            Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the
+            record changed since `expectedVersion` (carries `serverVersion`).
+            `RECOVERY_IN_PROGRESS`: a recovery holds the sheet.
+            `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write
+            locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this
+            write touches changed type or options while the write was waiting (a
+            field type conversion committed first). Nothing was written; reload
+            the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED`
+            is only returned by a server running with field type conversion and
+            the writer fence both enabled.
           content:
             application/json:
               schema:
@@ -26849,6 +26901,16 @@ paths:
                             type: string
                           serverVersion:
                             type: integer
+              examples:
+                field_schema_changed:
+                  summary: A touched field changed type while the write waited
+                  value:
+                    ok: false
+                    error:
+                      code: FIELD_SCHEMA_CHANGED
+                      message: >-
+                        A field this write touches changed type or options while
+                        the write was waiting; reload and retry
   /api/multitable/fields/{fieldId}/link-options:
     get:
       summary: List link field options for a multitable field
@@ -27095,7 +27157,17 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Conflict
+          description: >-
+            Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the
+            record changed since `expectedVersion` (carries `serverVersion`).
+            `RECOVERY_IN_PROGRESS`: a recovery holds the sheet.
+            `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write
+            locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this
+            write touches changed type or options while the write was waiting (a
+            field type conversion committed first). Nothing was written; reload
+            the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED`
+            is only returned by a server running with field type conversion and
+            the writer fence both enabled.
           content:
             application/json:
               schema:
@@ -27112,6 +27184,16 @@ paths:
                             type: string
                           serverVersion:
                             type: integer
+              examples:
+                field_schema_changed:
+                  summary: A touched field changed type while the write waited
+                  value:
+                    ok: false
+                    error:
+                      code: FIELD_SCHEMA_CHANGED
+                      message: >-
+                        A field this write touches changed type or options while
+                        the write was waiting; reload and retry
   /api/permissions:
     get:
       summary: List all permissions

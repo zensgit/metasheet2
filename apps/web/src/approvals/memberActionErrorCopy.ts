@@ -41,6 +41,10 @@ export const NODE_OPERATION_DISABLED_CODE = 'APPROVAL_NODE_OPERATION_DISABLED'
  */
 export const NODE_OPERATION_DISABLED_MESSAGE = '该节点已关闭此操作，请联系管理员调整审批表单的操作权限。'
 
+/** O-8 / F8-1: English counterpart — same honesty rule (no "please retry"). */
+export const NODE_OPERATION_DISABLED_MESSAGE_EN =
+  'This operation is turned off for this node. Ask an administrator to change the approval form\'s operation permissions.'
+
 export interface MemberActionFailure {
   /** What to show the member. */
   message: string
@@ -63,11 +67,12 @@ function errorCode(error: unknown): string | undefined {
  * Classify a failed member action.
  *
  * `fallback` is the caller's existing generic copy, used only when the error carries neither a
- * recognised code nor a message — so a non-`Error` throw never renders a blank toast.
+ * recognised code nor a message — so a non-`Error` throw never renders a blank toast. `isZh` (the
+ * shell locale, required) picks the policy-denial copy; `fallback` is already localized by the caller.
  */
-export function memberActionFailure(error: unknown, fallback: string): MemberActionFailure {
+export function memberActionFailure(error: unknown, fallback: string, isZh: boolean): MemberActionFailure {
   if (errorCode(error) === NODE_OPERATION_DISABLED_CODE) {
-    return { message: NODE_OPERATION_DISABLED_MESSAGE, isPolicyDenial: true }
+    return { message: isZh ? NODE_OPERATION_DISABLED_MESSAGE : NODE_OPERATION_DISABLED_MESSAGE_EN, isPolicyDenial: true }
   }
   const message = error instanceof Error && error.message ? error.message : fallback
   return { message, isPolicyDenial: false }

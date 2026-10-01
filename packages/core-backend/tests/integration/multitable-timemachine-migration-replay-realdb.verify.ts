@@ -35,6 +35,7 @@ import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_cr
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
 import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
+import * as retypeConvertTombstoneReason from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -218,6 +219,16 @@ const MIGRATIONS: NamedMigration[] = [
     module: {
       up: (db) => db.transaction().execute(attachmentRestoreStages.up),
       down: (db) => db.transaction().execute(attachmentRestoreStages.down),
+    },
+  },
+  // Field retype convert (ADR multitable-field-retype-first-batch-adr-20260926 §3.6): widens the `reason` CHECK of
+  // meta_field_value_tombstones, a relation this replay OWNS. It must be part of the sequence: the replay drops
+  // and rebuilds that table from its creating migration, which carries the narrower constraint.
+  {
+    name: 'zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert',
+    module: {
+      up: (db) => db.transaction().execute(retypeConvertTombstoneReason.up),
+      down: (db) => db.transaction().execute(retypeConvertTombstoneReason.down),
     },
   },
 ]

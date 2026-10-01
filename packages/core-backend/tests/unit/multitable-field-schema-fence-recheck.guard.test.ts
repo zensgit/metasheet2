@@ -37,6 +37,9 @@
  *    re-exports and `this.` methods (C1-F1); a seam that fences on the caller's connection checks the caller's
  *    continuation too (C1-F2); writes made through callees, followed two levels, must be named in the ledger
  *    (`writesVia`, C1-F4).
+ *  - slice 3b: the body of the entry / seam a holder calls is followed too (`entryWritesVia`, C2-F1) — a holder's
+ *    region starts where the entry call ends, so a write the entry made through a callee was never looked at;
+ *    and the conversion's own two transactions are 免检 on a reason the guard checks (guard E, `lockedFieldRead`).
  */
 import { join } from 'node:path'
 
@@ -44,6 +47,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   checkHelperBeforeFirstWrite,
+  checkLockedFieldReadBeforeFirstDataWrite,
   directRecordDataWritesAfterFence,
   loadCensusSources,
   runFenceHolderCensus,
@@ -74,15 +78,31 @@ type LedgerEntry = {
    * write reached through a helper function reds the guard until it is named here with a reason.
    */
   writesVia?: readonly string[]
+  /**
+   * Slice 3b: this 免检 verdict rests on "the field row is read under a row lock AFTER the fence, before the first
+   * data write". Guard E checks exactly that on the holder's own statements, so the reason is not prose only.
+   */
+  lockedFieldRead?: true
+  /**
+   * C2-F1 (slice 3b): the callees through which the BODY of the entry / seam this site calls writes
+   * `meta_records.data`, as the census finds them (`entry>callee`). Checked for EQUALITY on EVERY entry, whatever
+   * its verdict — a 必接 site's helper sits in the handler, so a write the seam itself makes is outside its reach.
+   */
+  entryWritesVia?: readonly string[]
 }
 
-const MUST = (key: string, row: string, reason: string, helper: LedgerEntry['helper'] = HELPER, count = 1): LedgerEntry =>
+const MUST =(key: string, row: string, reason: string, helper: LedgerEntry['helper'] = HELPER, count = 1): LedgerEntry =>
   ({ key, count, row, verdict: 'must-wire', helper, reason })
 const EXEMPT = (key: string, row: string, reason: string, count = 1): LedgerEntry =>
   ({ key, count, row, verdict: 'exempt', reason })
 const NONWRITER = (key: string, row: string, reason: string, count = 1, regionCheck?: false): LedgerEntry =>
   ({ key, count, row, verdict: 'non-data-writer', reason, ...(regionCheck === false ? { regionCheck } : {}) })
 const VIA = (entry: LedgerEntry, writesVia: readonly string[]): LedgerEntry => ({ ...entry, writesVia })
+const LOCKED_READ = (entry: LedgerEntry): LedgerEntry => ({ ...entry, lockedFieldRead: true })
+const ENTRY_VIA = (entry: LedgerEntry, entryWritesVia: readonly string[]): LedgerEntry => ({ ...entry, entryWritesVia })
+
+const CONVERT_EXECUTE_KEY = 'multitable/field-retype-convert-execute.ts :: executeFieldRetypeConvert :: enterFence'
+const CONVERT_UNDO_KEY = 'multitable/field-retype-convert-execute.ts :: undoFieldRetypeConvert :: enterFence'
 
 const W4C0 = 'runAttendanceResultOperationTransactionV1'
 const W4C0_REASON =
@@ -135,7 +155,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   VIA(EXEMPT('routes/univer-meta.ts :: DELETE /fields/:fieldId :: fenceWriterEntry', '16', 'as above, non-link branch.'), ['dropFieldCascade']),
   EXEMPT('routes/univer-meta.ts :: DELETE /attachments/:attachmentId :: fenceWriterEntry', '17', 'strips an attachment id from an attachment cell (FOR UPDATE, then only removes ids); attachment is an excluded retype type.'),
   EXEMPT('multitable/exact-anchor-recovery-execute.ts :: applyExactAnchorRecoveryAttempt :: acquireCanonicalSheetFencesInOrder', '18', 'exact-anchor recovery re-reads the whole sheet schema after the fence and refuses schema-drift against the token hash — stronger than the helper.'),
-  EXEMPT('multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk', '18 / 29', 'async archive restore chunk: the chunk seam hands a non-literal apply; writes go through applyExactAnchorRecoveryAttempt (row 18 schema hash).'),
+  ENTRY_VIA(EXEMPT('multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk', '18 / 29', 'async archive restore chunk: the chunk seam hands a non-literal apply; writes go through applyExactAnchorRecoveryAttempt (row 18 schema hash). C2-F1: the write sits in the BODY of the entry this site calls — its apply callback calls applyMaterializedExactArchiveRecoveryAsyncChunkInternal, which hands the schema hash of the chunk to applyExactAnchorRecoveryAttempt; a live schema hash that differs refuses the whole chunk (schema-drift).'), ['executeRecoveryArchiveAsyncRestoreChunk>applyMaterializedExactArchiveRecoveryAsyncChunkInternal']),
   EXEMPT('multitable/recovery-archive-restore-jobs.ts :: runRecoveryArchiveRestoreChunkTestOnly :: <no in-tree call>', '29', 'test-only export of the chunk seam; same writes as executeChunk.'),
   EXEMPT('multitable/recovery-archive-restore-jobs.ts :: runRecoveryArchiveRestoreL8ChunkTestOnly :: <no in-tree call>', '29', 'test-only export of the chunk seam; same writes as executeChunk.'),
   EXEMPT('multitable/approval-record-projection-service.ts :: ApprovalRecordProjectionService.reconcile :: fenceWriterEntry', '19', 'approval projection: hard-coded values into a system_kind sheet; convert refuses 422 (system_managed_sheet / approval_projection_sheet).'),
@@ -143,6 +163,10 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   EXEMPT('services/elearning-stats-multitable-projection.ts :: projectElearningStatsToMultitable :: fenceWriterEntry', '19', 'learning-stats projection: system_kind sheet, convert refuses 422.'),
   EXEMPT('routes/univer-meta.ts :: run :: fenceWriterEntry', '20', 'createSeededSheet: every written key is a field id minted in the same transaction.'),
   EXEMPT('multitable/copy-sheet-service.ts :: install :: copyInsideTransaction', '34', 'copy-sheet: writes only the new sheet, created in the same transaction; source fields and records are read after fence(S) (增补 A).'),
+  // Slice 3b — the conversion itself and its whole-column undo. They are the transactions the re-check exists to
+  // protect the OTHER writers from; they carry no field snapshot across the fence. Checked by guard E.
+  LOCKED_READ(EXEMPT(CONVERT_EXECUTE_KEY, 'new (slice 3b execute)', 'the conversion: takes no field snapshot before the fence. After the fence it reads the field row FOR UPDATE, re-checks the type pair on that row, locks every live and recycle-bin row of the sheet, recomputes the plan hash over type + property + every cell and refuses 409 PLAN_DRIFT unless it equals the hash the preview signed; every value written is derived from the cells read under those locks. Writes only the converted field\'s key.')),
+  LOCKED_READ(EXEMPT(CONVERT_UNDO_KEY, 'new (slice 3b undo)', 'whole-column undo: takes no field snapshot before the fence. After the fence it locks the conversion row and its pre-image rows, reads the field row FOR UPDATE and refuses 409 UNDO_PRECONDITION_FAILED unless type and property equal (jsonb) what the conversion wrote; every value written comes from a pre-image row read under the fence, only into cells still equal to the conversion\'s post value. Writes only the converted field\'s key.')),
 
   // ── 非数据写入者 ──────────────────────────────────────────────────────────────────────────────────────
   NONWRITER('index.ts :: refresh :: refreshAttendanceReportProjectionAnchor', '21', 'attendance cleaning authority: locks projection rows, writes attendance_report_projection_anchors only.'),
@@ -308,6 +332,31 @@ function writesViaMismatches(census: Census, ledger: readonly LedgerEntry[]): st
   return out
 }
 
+function entryWritesViaMismatches(census: Census, ledger: readonly LedgerEntry[]): string[] {
+  const out: string[] = []
+  for (const e of ledger) {
+    const found = [...new Set(census.holders.filter((h) => h.key === e.key).flatMap((h) => h.entryWritesVia))].sort()
+    const named = [...(e.entryWritesVia ?? [])].sort()
+    if (JSON.stringify(found) !== JSON.stringify(named)) out.push(`${e.key}: the entry body writes meta_records.data via [${found.join(', ')}], ledger names [${named.join(', ')}]`)
+  }
+  return out
+}
+
+function lockedFieldReadViolations(census: Census, ledger: readonly LedgerEntry[]): string[] {
+  const out: string[] = []
+  for (const e of ledger) {
+    if (e.lockedFieldRead !== true) continue
+    if (e.verdict !== 'exempt') out.push(`${e.key}: lockedFieldRead is a reason for a 免检 verdict only`)
+    const holders = census.holders.filter((x) => x.key === e.key)
+    if (holders.length === 0) out.push(`${e.key}: no such holder`)
+    for (const h of holders) {
+      const verdict = checkLockedFieldReadBeforeFirstDataWrite(h)
+      if (verdict.ok === false) out.push(`${h.key} (line ${h.line}): ${verdict.reason}`)
+    }
+  }
+  return out
+}
+
 // ── the real tree ─────────────────────────────────────────────────────────────────────────────────────
 
 const REAL_SOURCES = loadCensusSources(SRC)
@@ -365,8 +414,31 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
     expect(writesViaMismatches(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
   })
 
+  it('C2-F1. writes made inside the BODY of the entry / seam a site calls, through a callee, are exactly the ledgered `entryWritesVia` — every verdict', () => {
+    expect(entryWritesViaMismatches(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+    // anti-vacuity: the follow-through finds the one entry of the real tree that does write through a callee
+    expect(REAL.holders.filter((h) => h.entryWritesVia.length > 0).map((h) => h.key)).toEqual([
+      'multitable/recovery-archive-restore-worker.ts :: executeChunk :: executeRecoveryArchiveAsyncRestoreChunk',
+    ])
+  })
+
   it('C1-F5. the attachment stage ledger\'s private lockSource (a FOR SHARE row lock, no fence) is not a holder', () => {
     expect(REAL.holders.filter((h) => h.rel === 'multitable/recovery-archive-attachment-stage-ledger.ts')).toEqual([])
+  })
+
+  it('E. slice 3b: the conversion and its undo are 免检 because they read the field row under a lock after the fence — and they do', () => {
+    expect(FENCE_HOLDER_LEDGER.filter((e) => e.lockedFieldRead === true).map((e) => e.key)).toEqual([CONVERT_EXECUTE_KEY, CONVERT_UNDO_KEY])
+    expect(lockedFieldReadViolations(REAL, FENCE_HOLDER_LEDGER)).toEqual([])
+    // Each holder writes meta_records.data with exactly ONE statement of its own, through no callee. The count is
+    // pinned: an exempt verdict covers the writes that were read when it was given, not the next one (C2-F4 —
+    // closed for these two rows; every other exempt row of the ledger still accepts a new direct write).
+    for (const key of [CONVERT_EXECUTE_KEY, CONVERT_UNDO_KEY]) {
+      const holders = REAL.holders.filter((h) => h.key === key)
+      expect(holders, key).toHaveLength(1)
+      expect(directRecordDataWritesAfterFence(holders[0]), key).toHaveLength(1)
+      expect(holders[0].writesVia, key).toEqual([])
+      expect(holders[0].entryWritesVia, key).toEqual([])
+    }
   })
 
   it('D. the probes (seed, no lock) are exactly the ledgered ones', () => {
@@ -689,5 +761,249 @@ describe('fix round — declaration-keyed census (C1-F1, C1-F2, C1-F4, C1-F5)', 
     const key = keysOf(c).find((k) => k.includes('executeSetField'))!
     expect(key).toBe('multitable/wrapper.ts :: Exec.executeSetField :: inSheet')
     expect(nonWriterViolations(c, [NONWRITER(key, '27', 'synthetic')])).toHaveLength(1)
+  })
+})
+
+// ── slice 3b: guard E is falsifiable ─────────────────────────────────────────────────────────────────
+
+describe('slice 3b — guard E (免检 by a locked field read after the fence) on synthetic and patched sources', () => {
+  const FENCE = '  await enterFence(query, sheetId)'
+  const READ = "  const field = await query('SELECT id, type, property FROM meta_fields WHERE id = $1 FOR UPDATE', [fieldId])"
+  const WRITE = "  await query('UPDATE meta_records SET data = jsonb_set(data, ARRAY[$2::text], $3::jsonb, true) WHERE sheet_id = $1', [sheetId, fieldId, field])"
+  const KEY = 'multitable/convert-like.ts :: convertLike :: enterFence'
+  const LEDGER = [LOCKED_READ(EXEMPT(KEY, 'new', 'synthetic'))]
+  const converter = (body: string[]): Census => synthetic(src('multitable/convert-like.ts', [
+    "import { acquireCanonicalSheetFence } from './canonical-sheet-fence'",
+    'async function enterFence(query: Q, sheetId: string) { await acquireCanonicalSheetFence(query, sheetId) }',
+    'export async function convertLike(query: Q, pool: P, sheetId: string, fieldId: string, flag: boolean) {',
+    ...body,
+    '}',
+  ]))
+
+  it('fence → locked field read → data write passes; FOR SHARE is a row lock too', () => {
+    const c = converter([FENCE, READ, WRITE])
+    expect(keysOf(c)).toEqual([KEY])
+    expect(lockedFieldReadViolations(c, LEDGER)).toEqual([])
+    expect(lockedFieldReadViolations(converter([FENCE, READ.replace('FOR UPDATE', 'FOR SHARE'), WRITE]), LEDGER)).toEqual([])
+  })
+
+  it('a field read taken BEFORE the fence is rejected — that is the snapshot the re-check exists for', () => {
+    expect(lockedFieldReadViolations(converter([READ, FENCE, WRITE]), LEDGER)).toEqual([
+      `${KEY} (line 5): the locked meta_fields read is before the fence`,
+    ])
+  })
+
+  it('a field read placed AFTER the first data write is rejected', () => {
+    expect(lockedFieldReadViolations(converter([FENCE, WRITE, READ]), LEDGER)).toEqual([
+      `${KEY} (line 4): the locked meta_fields read is after the first meta_records.data write`,
+    ])
+  })
+
+  it('a field read without a row lock is rejected', () => {
+    expect(lockedFieldReadViolations(converter([FENCE, READ.replace(' FOR UPDATE', ''), WRITE]), LEDGER)).toEqual([
+      `${KEY} (line 4): no locked meta_fields read (SELECT … FROM meta_fields … FOR UPDATE / FOR SHARE) after the fence`,
+    ])
+  })
+
+  it('a field read inside a branch, or inside a nested callback, is rejected — a path could skip it', () => {
+    expect(lockedFieldReadViolations(converter([FENCE, '  let field: unknown', '  if (flag) {', READ.replace('const field =', 'field ='), '  }', WRITE]), LEDGER)).toEqual([
+      `${KEY} (line 4): the locked meta_fields read is not a top-level statement of the fenced function`,
+    ])
+    expect(lockedFieldReadViolations(converter([FENCE, '  const read = async () => {', `  ${READ}`, '  }', WRITE.replace(', field]', ', read]')]), LEDGER)).toEqual([
+      `${KEY} (line 4): the locked meta_fields read is not a top-level statement of the fenced function`,
+    ])
+  })
+
+  it('a field read issued on another connection is rejected — it must be on the fenced query', () => {
+    expect(lockedFieldReadViolations(converter([FENCE, READ.replace('await query(', 'await pool.query('), WRITE]), LEDGER)).toEqual([
+      `${KEY} (line 4): the locked meta_fields read is issued on pool.query instead of the fenced query query`,
+    ])
+  })
+
+  it('a ledger key that names no holder, or the reason on a non-免检 verdict, is rejected', () => {
+    const c = converter([FENCE, READ, WRITE])
+    expect(lockedFieldReadViolations(c, [LOCKED_READ(EXEMPT('multitable/convert-like.ts :: gone :: enterFence', 'new', 'synthetic'))])).toEqual([
+      'multitable/convert-like.ts :: gone :: enterFence: no such holder',
+    ])
+    expect(lockedFieldReadViolations(c, [LOCKED_READ(NONWRITER(KEY, 'new', 'synthetic'))])).toEqual([
+      `${KEY}: lockedFieldRead is a reason for a 免检 verdict only`,
+    ])
+  })
+
+  const TARGET = 'multitable/field-retype-convert-execute.ts'
+  const patched = (anchor: string, replacement: string): Census => {
+    const original = REAL_SOURCES.find((s) => s.rel === TARGET)!.text.replace(/\r\n/g, '\n')
+    expect(original.split(anchor), anchor).toHaveLength(2)
+    return runFenceHolderCensus(REAL_SOURCES.map((s) => (s.rel === TARGET ? { rel: s.rel, text: original.replace(anchor, replacement) } : s)))
+  }
+
+  it('REAL tree, execute: dropping the row lock from the field read reds guard E', () => {
+    const anchor = 'FROM meta_fields WHERE id = $1 FOR UPDATE\','
+    const c = patched(anchor, 'FROM meta_fields WHERE id = $1\',')
+    const violations = lockedFieldReadViolations(c, FENCE_HOLDER_LEDGER)
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toContain(`${CONVERT_EXECUTE_KEY} (line `)
+    expect(violations[0]).toContain('no locked meta_fields read')
+  })
+
+  it('REAL tree, undo: dropping the row lock from the field read reds guard E', () => {
+    const anchor = 'FROM meta_fields WHERE id = $1 FOR UPDATE`,'
+    const c = patched(anchor, 'FROM meta_fields WHERE id = $1`,')
+    const violations = lockedFieldReadViolations(c, FENCE_HOLDER_LEDGER)
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toContain(`${CONVERT_UNDO_KEY} (line `)
+    expect(violations[0]).toContain('no locked meta_fields read')
+  })
+
+  it('REAL tree: a SECOND direct data write in the conversion, after the locked field read, reds the pinned count', () => {
+    const anchor = '  await recordConfigRevision(query, {\n    id: convertRevisionId,'
+    const c = patched(anchor, `  await query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{}, sheetId])\n${anchor}`)
+    const holder = c.holders.find((h) => h.key === CONVERT_EXECUTE_KEY)!
+    // guard E alone would not notice: the locked field read still precedes the FIRST write
+    expect(checkLockedFieldReadBeforeFirstDataWrite(holder)).toEqual({ ok: true })
+    expect(directRecordDataWritesAfterFence(holder)).toHaveLength(2)
+    expect(directRecordDataWritesAfterFence(REAL.holders.find((h) => h.key === CONVERT_EXECUTE_KEY)!)).toHaveLength(1)
+  })
+
+  it('REAL tree: a data write reached through a NEW callee of the conversion reds the writesVia check', () => {
+    const anchor = '  await recordConfigRevision(query, {\n    id: convertRevisionId,'
+    const helper = src('multitable/b3-rewrite.ts', [
+      'export async function b3RewriteCells(query: Q, sheetId: string) {',
+      "  await query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{}, sheetId])",
+      '}',
+    ])
+    const original = REAL_SOURCES.find((s) => s.rel === TARGET)!.text.replace(/\r\n/g, '\n')
+    expect(original.split(anchor)).toHaveLength(2)
+    const text = `import { b3RewriteCells } from './b3-rewrite'\n${original.replace(anchor, `  await b3RewriteCells(query, sheetId)\n${anchor}`)}`
+    const c = runFenceHolderCensus([...REAL_SOURCES.map((s) => (s.rel === TARGET ? { rel: s.rel, text } : s)), helper])
+    expect(writesViaMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([
+      `${CONVERT_EXECUTE_KEY}: writes meta_records.data via [b3RewriteCells], ledger names []`,
+    ])
+  })
+})
+
+// ── slice 3b: C2-F1, the two probes of the slice 3a verdict as standing tests ────────────────────────
+
+describe('slice 3b — C2-F1: a write inside the body of an entry or a seam, through a callee, is followed', () => {
+  const REWRITE = src('multitable/zz-rewrite.ts', [
+    'export async function zzRewriteCells(query: Q, sheetId: string) {',
+    "  await query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{}, sheetId])",
+    '}',
+  ])
+  const IMPORT = "import { zzRewriteCells } from './zz-rewrite'\n"
+  /** The real tree with ONE file edited in memory (anchor must occur exactly once), plus the new writer module. */
+  const patchedReal = (target: string, anchor: string, replacement: string, prefix = ''): Census => {
+    const original = REAL_SOURCES.find((s) => s.rel === target)!.text.replace(/\r\n/g, '\n')
+    expect(original.split(anchor), anchor).toHaveLength(2)
+    const text = `${prefix}${original.replace(anchor, replacement)}`
+    return runFenceHolderCensus([...REAL_SOURCES.map((s) => (s.rel === target ? { rel: s.rel, text } : s)), REWRITE])
+  }
+
+  it('W1a (synthetic): a callee write one level below an ENTRY is named on the holder that calls the entry', () => {
+    const c = synthetic(REWRITE, src('multitable/entry-with-callee.ts', [
+      "import { fenceWriterEntry } from './canonical-sheet-fence'",
+      "import { zzRewriteCells } from './zz-rewrite'",
+      'export async function patchProperty(input: { query: Q; sheetId: string }) {',
+      '  await fenceWriterEntry(input.query, input.sheetId)',
+      '  await zzRewriteCells(input.query, input.sheetId)',
+      '}',
+      'export async function caller(pool: P, sheetId: string) {',
+      '  await pool.transaction(async ({ query }) => { await patchProperty({ query, sheetId }) })',
+      '}',
+    ]))
+    expect(c.entries).toContain('multitable/entry-with-callee.ts#patchProperty')
+    const key = 'multitable/entry-with-callee.ts :: caller :: patchProperty'
+    expect(keysOf(c)).toEqual([key])
+    const holder = c.holders.find((h) => h.key === key)!
+    expect(holder.entryWritesVia).toEqual(['patchProperty>zzRewriteCells'])
+    // the holder's own region has no write and calls no writer: the census had nothing to say here before
+    expect(holder.writesVia).toEqual([])
+    expect(nonWriterViolations(c, [NONWRITER(key, '26', 'synthetic')])).toEqual([])
+    expect(entryWritesViaMismatches(c, [NONWRITER(key, '26', 'synthetic')])).toEqual([
+      `${key}: the entry body writes meta_records.data via [patchProperty>zzRewriteCells], ledger names []`,
+    ])
+    expect(entryWritesViaMismatches(c, [ENTRY_VIA(NONWRITER(key, '26', 'synthetic'), ['patchProperty>zzRewriteCells'])])).toEqual([])
+  })
+
+  it('W1c (synthetic): a callee write AFTER the handler returns, inside a SEAM, is named on its call site — a 必接 site included', () => {
+    const c = synthetic(REWRITE, src('multitable/seam-with-callee.ts', [
+      "import { fenceWriterEntry } from './canonical-sheet-fence'",
+      "import { zzRewriteCells } from './zz-rewrite'",
+      'export class Exec {',
+      '  private async withTx<T>(sheetId: string, handler: (q: Q) => Promise<T>): Promise<T> {',
+      '    return this.pool.transaction(async ({ query }) => {',
+      '      await fenceWriterEntry(query, sheetId)',
+      '      const out = await handler(query)',
+      '      await zzRewriteCells(query, sheetId)',
+      '      return out',
+      '    })',
+      '  }',
+      '  async write(): Promise<void> {',
+      "    await this.withTx('s', async (query) => {",
+      `      await ${HELPER}(query, 's', snapshot, ['f'])`,
+      "      await query('UPDATE meta_records SET data = $1 WHERE id = $2', [])",
+      '    })',
+      '  }',
+      '}',
+    ]))
+    expect(c.seams).toContain('multitable/seam-with-callee.ts#Exec.withTx')
+    const key = 'multitable/seam-with-callee.ts :: Exec.write :: withTx'
+    expect(keysOf(c)).toEqual([key])
+    // guard B is satisfied — the helper is in the handler, before the handler's write — and cannot see the seam's own
+    expect(mustWireViolations(c, [MUST(key, '6', 'synthetic')])).toEqual([])
+    expect(entryWritesViaMismatches(c, [MUST(key, '6', 'synthetic')])).toEqual([
+      `${key}: the entry body writes meta_records.data via [Exec.withTx>zzRewriteCells], ledger names []`,
+    ])
+  })
+
+  const PROVISIONING_ANCHOR = '  await fenceWriterEntry(input.query, sheetId)\n  const existing = await input.query(\n    `SELECT id, sheet_id, name, type, property, "order"\n     FROM meta_fields\n     WHERE sheet_id = $1 AND id = $2`,'
+
+  it('W1a (REAL tree): provisioning.patchObjectFieldProperty calling a new writer after its fence reds the guard — and only this check', () => {
+    const c = patchedReal(
+      'multitable/provisioning.ts',
+      PROVISIONING_ANCHOR,
+      PROVISIONING_ANCHOR.replace('  const existing', '  await zzRewriteCells(input.query, sheetId)\n  const existing'),
+      IMPORT,
+    )
+    const red = entryWritesViaMismatches(c, FENCE_HOLDER_LEDGER)
+    expect(red).toContain('index.ts :: patchObjectFieldProperty :: patchObjectFieldProperty: the entry body writes meta_records.data via [patchObjectFieldProperty>zzRewriteCells], ledger names []')
+    expect(red.every((line) => line.includes('[patchObjectFieldProperty>zzRewriteCells]'))).toBe(true)
+    // every other check stays green: before C2-F1 the census had no way to notice this write
+    expect(c.holders.length).toBe(REAL.holders.length)
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(countMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(writesViaMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(nonWriterViolations(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(mustWireViolations(c, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
+
+  it('W1c (REAL tree): AutomationExecutor.withTransaction calling a new writer after the handler returns reds every one of its call sites', () => {
+    const anchor = '        await fenceWriterEntriesInOrder(query, ids) // L4 fence-first; no-op when the fence flag is OFF\n        return handler(query)\n'
+    const target = 'multitable/automation-executor.ts'
+    const c = patchedReal(
+      target,
+      anchor,
+      anchor.replace('        return handler(query)\n', '        const out = await handler(query)\n        await zzRewriteCells(query, ids[0])\n        return out\n'),
+      IMPORT,
+    )
+    const sites = FENCE_HOLDER_LEDGER.filter((e) => e.key.startsWith(`${target} :: `) && e.key.endsWith(' :: withTransaction'))
+    expect(sites.length).toBeGreaterThanOrEqual(6)
+    expect(sites.some((e) => e.verdict === 'must-wire')).toBe(true)
+    expect(sites.some((e) => e.verdict === 'exempt')).toBe(true)
+    expect(entryWritesViaMismatches(c, FENCE_HOLDER_LEDGER).sort()).toEqual(
+      sites.map((e) => `${e.key}: the entry body writes meta_records.data via [AutomationExecutor.withTransaction>zzRewriteCells], ledger names []`).sort(),
+    )
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(mustWireViolations(c, FENCE_HOLDER_LEDGER)).toEqual([])
+    expect(writesViaMismatches(c, FENCE_HOLDER_LEDGER)).toEqual([])
+  })
+
+  it('W1b (control): the same write made DIRECTLY in the entry makes it a holder of its own — that path was already red', () => {
+    const c = patchedReal(
+      'multitable/provisioning.ts',
+      PROVISIONING_ANCHOR,
+      PROVISIONING_ANCHOR.replace('  const existing', "  await input.query('UPDATE meta_records SET data = data || $1::jsonb WHERE sheet_id = $2', [{}, sheetId])\n  const existing"),
+    )
+    expect(unclassified(c, FENCE_HOLDER_LEDGER)).toContain('multitable/provisioning.ts :: patchObjectFieldProperty :: fenceWriterEntry')
   })
 })

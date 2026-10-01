@@ -1124,6 +1124,12 @@ describe('W1-3 GW7 — durable structural guard: every record write port is enum
         'OUT OF SCOPE — recovery replay writes a whole data document back under a version CAS.',
       'multitable/auto-number-service.ts':
         'OUT OF SCOPE — auto-number backfill (jsonb_set of one system-generated column).',
+      'multitable/field-retype-convert-execute.ts':
+        'OUT OF SCOPE — field retype convert / whole-column undo: a SCHEMA operation (canManageFields + the ' +
+        'full-table-read gate) that rewrites one column from the values already in it, or from its own pre-image. ' +
+        'It carries no request-supplied cell value and does not consult per-subject field WRITE permissions — ' +
+        'the same posture as the PATCH /fields retype and the 4c-1 lossy rewrite in routes/univer-meta.ts. Named ' +
+        'to the owner in the PR; NOT covered by this lock.',
       'multitable/approval-record-projection-service.ts':
         'OUT OF SCOPE — approval projection INSERTs a system-authored row.',
       'services/elearning-stats-multitable-projection.ts':

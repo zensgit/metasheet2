@@ -2,20 +2,20 @@
   <PageShell width="wide">
     <PageHeader
       class="approval-center__header"
-      title="审批中心"
-      subtitle="集中处理待办、跟进我发起的申请，并快速识别超时事项"
+      :title="t.title"
+      :subtitle="t.subtitle"
     >
       <template #meta>
         <span class="approval-center__stat">
-          <span>待办</span>
+          <span>{{ t.statPending }}</span>
           <strong>{{ pendingTotalCount }}</strong>
         </span>
         <span class="approval-center__stat approval-center__stat--unread">
-          <span>未读</span>
+          <span>{{ t.statUnread }}</span>
           <strong>{{ pendingBadgeCount }}</strong>
         </span>
         <span v-if="activeFilterCount > 0" class="approval-center__filter-summary">
-          已启用 {{ activeFilterCount }} 项筛选
+          {{ filterSummaryText }}
         </span>
       </template>
       <template #actions>
@@ -25,16 +25,16 @@
           class="approval-center__create-button"
           @click="router.push({ name: 'approval-template-list' })"
         >
-          发起审批
+          {{ t.create }}
         </el-button>
       </template>
     </PageHeader>
 
-    <section class="approval-center__filters" aria-label="审批筛选">
+    <section class="approval-center__filters" :aria-label="t.filtersLabel">
       <div class="approval-center__filters-primary">
           <el-input
             v-model="searchText"
-            placeholder="搜索标题或审批编号"
+            :placeholder="t.searchPlaceholder"
             clearable
             class="approval-center__toolbar-search"
             data-testid="approval-search-input"
@@ -47,14 +47,14 @@
           </el-input>
           <el-select
             v-model="sourceSystemFilter"
-            placeholder="来源系统"
+            :placeholder="t.sourcePlaceholder"
             class="approval-center__toolbar-select"
             data-testid="approval-source-filter"
             @change="handleSourceSystemChange"
           >
-            <el-option label="全部来源" value="all" />
-            <el-option label="平台审批" value="platform" />
-            <el-option label="PLM 审批" value="plm" />
+            <el-option :label="t.sourceAll" value="all" />
+            <el-option :label="t.sourcePlatform" value="platform" />
+            <el-option :label="t.sourcePlm" value="plm" />
           </el-select>
           <el-button
             class="approval-center__filter-toggle"
@@ -63,7 +63,7 @@
             data-testid="approval-more-filters"
             @click="filtersExpanded = !filtersExpanded"
           >
-            {{ filtersExpanded ? '收起筛选' : '更多筛选' }}
+            {{ filtersExpanded ? t.filtersCollapse : t.filtersExpand }}
             <span v-if="advancedFilterCount > 0" class="approval-center__filter-count">
               {{ advancedFilterCount }}
             </span>
@@ -107,15 +107,15 @@
       <div v-show="filtersExpanded" class="approval-center__filters-advanced">
           <el-select
             v-model="statusFilter"
-            placeholder="状态筛选"
+            :placeholder="t.statusPlaceholder"
             clearable
             class="approval-center__toolbar-select"
             @change="handleSearch"
           >
-            <el-option label="待处理" value="pending" />
-            <el-option label="已通过" value="approved" />
-            <el-option label="已驳回" value="rejected" />
-            <el-option label="已撤回" value="revoked" />
+            <el-option :label="t.statusPending" value="pending" />
+            <el-option :label="t.statusApproved" value="approved" />
+            <el-option :label="t.statusRejected" value="rejected" />
+            <el-option :label="t.statusRevoked" value="revoked" />
           </el-select>
           <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
                filters above — templateId + a created-at window, mirroring the backend's own
@@ -124,7 +124,7 @@
                via the route query (see `applyDeepLinkFilters` below). -->
           <el-select
             v-model="templateFilter"
-            placeholder="表单筛选"
+            :placeholder="t.templatePlaceholder"
             clearable
             filterable
             class="approval-center__toolbar-select approval-center__toolbar-select--wide"
@@ -142,9 +142,9 @@
             v-model="createdRange"
             type="daterange"
             unlink-panels
-            range-separator="至"
-            start-placeholder="发起开始日期"
-            end-placeholder="发起结束日期"
+            :range-separator="t.rangeSeparator"
+            :start-placeholder="t.rangeStartPlaceholder"
+            :end-placeholder="t.rangeEndPlaceholder"
             value-format="YYYY-MM-DD"
             class="approval-center__toolbar-daterange"
             data-testid="approval-created-range-filter"
@@ -157,7 +157,7 @@
             data-testid="approval-clear-filters"
             @click="clearFilters"
           >
-            清空筛选
+            {{ t.clearFilters }}
           </el-button>
       </div>
     </section>
@@ -172,7 +172,7 @@
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="loadCurrentTab">重新加载</el-button>
+        <el-button type="primary" link @click="loadCurrentTab">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -194,10 +194,10 @@
              tab switch (slice 1) plus after 全部标记已读 (slice 2). -->
         <template #label>
           <span class="approval-center__tab-label">
-            <span>待我处理</span>
+            <span>{{ t.tabPending }}</span>
             <el-tooltip
               v-if="pendingBadgeCount > 0"
-              :content="`待办 ${pendingTotalCount} / 其中 ${pendingBadgeCount} 未读`"
+              :content="pendingBadgeTooltip"
               placement="top"
             >
               <el-badge
@@ -223,7 +223,7 @@
           data-testid="approval-new-todo-pill"
           @click="handleNewTodoPillClick"
         >
-          {{ newTodoPill.delta }} 条新待办 · 点击刷新
+          {{ newTodoPillText }}
         </button>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
@@ -238,7 +238,7 @@
             v-if="selectedPending.length > 0"
             class="approval-center__selection-count"
             data-testid="approval-selection-count"
-          >已选 {{ selectedPending.length }} 项</span>
+          >{{ selectionCountText }}</span>
           <el-button
             type="success"
             plain
@@ -247,7 +247,7 @@
             data-testid="approval-batch-approve"
             @click="handleBatchApprove"
           >
-            批量通过
+            {{ t.batchApprove }}
           </el-button>
           <el-button
             type="danger"
@@ -257,7 +257,7 @@
             data-testid="approval-batch-reject"
             @click="openBatchReject"
           >
-            批量驳回
+            {{ t.batchReject }}
           </el-button>
           <el-button
             type="primary"
@@ -267,7 +267,7 @@
             data-testid="approval-mark-all-read"
             @click="handleMarkAllRead"
           >
-            全部标记已读
+            {{ t.markAllRead }}
           </el-button>
         </div>
         <div
@@ -275,13 +275,13 @@
           data-testid="attendance-approval-queue-entry"
         >
           <div class="approval-center__attendance-entry-copy">
-            <strong>考勤审批</strong>
+            <strong>{{ t.attendanceTitle }}</strong>
             <p>
-              补卡、请假、加班审批当前在考勤模块处理，不计入平台/PLM 待办列表。
+              {{ t.attendanceBody }}
             </p>
           </div>
           <el-button type="primary" plain @click="openAttendanceApprovalQueue">
-            待处理考勤审批
+            {{ t.attendanceOpen }}
           </el-button>
         </div>
         <ApprovalMobileList
@@ -318,9 +318,9 @@
           <template #actions="{ row }">
             <template v-if="isRowBatchSelectable(row)">
               <el-popconfirm
-                :title="`确认通过「${row.title}」？`"
-                confirm-button-text="确认"
-                cancel-button-text="取消"
+                :title="inlineApproveConfirmTitle(row.title)"
+                :confirm-button-text="t.confirm"
+                :cancel-button-text="t.cancel"
                 @confirm="handleInlineApprove(row)"
               >
                 <template #reference>
@@ -332,7 +332,7 @@
                     :data-testid="`approval-row-approve-${row.id}`"
                     @click.stop
                   >
-                    通过
+                    {{ t.approve }}
                   </el-button>
                 </template>
               </el-popconfirm>
@@ -343,7 +343,7 @@
                 :data-testid="`approval-row-reject-${row.id}`"
                 @click.stop="openRowReject(row)"
               >
-                驳回
+                {{ t.reject }}
               </el-button>
             </template>
           </template>
@@ -359,7 +359,7 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="我发起的" name="mine">
+      <el-tab-pane :label="t.tabMine" name="mine">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
@@ -387,7 +387,7 @@
                motivates the requester to actually click 催办. -->
           <template #actions="{ row }">
             <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
-              已等待 {{ formatRelativeWait(row.createdAt) }}
+              {{ waitingPhrase(formatRelativeWait(row.createdAt, isZh), isZh) }}
             </span>
             <el-button
               v-if="row.status === 'pending'"
@@ -414,7 +414,7 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="抄送我的" name="cc">
+      <el-tab-pane :label="t.tabCc" name="cc">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
@@ -446,7 +446,7 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="已完成" name="completed">
+      <el-tab-pane :label="t.tabCompleted" name="completed">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.completedApprovals"
@@ -482,7 +482,7 @@
            lookup, distinct from 已完成 (which is scoped to non-pending instances only). Shares the
            same read-only table shape as 抄送我的/已完成 (no selection/wait/actions column: the
            actor already acted, there is nothing left to do here). -->
-      <el-tab-pane label="我已处理" name="processed">
+      <el-tab-pane :label="t.tabProcessed" name="processed">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.processedApprovals"
@@ -536,22 +536,22 @@
          in the manifest rather than aborting the batch). -->
     <el-dialog
       v-model="batchRejectDialogVisible"
-      title="批量驳回"
+      :title="t.batchRejectTitle"
       width="440px"
       data-testid="approval-batch-reject-dialog"
     >
       <p class="approval-center__batch-reject-summary">
-        将驳回所选的 {{ selectedPending.length }} 项审批。
+        {{ batchRejectSummaryText }}
       </p>
       <el-input
         v-model="batchRejectComment"
         type="textarea"
         :rows="3"
-        :placeholder="batchRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
+        :placeholder="batchRejectCommentRequired ? t.rejectReasonRequired : t.rejectOpinionOptional"
         data-testid="approval-batch-reject-comment"
       />
       <template #footer>
-        <el-button data-testid="approval-batch-reject-cancel" @click="batchRejectDialogVisible = false">取消</el-button>
+        <el-button data-testid="approval-batch-reject-cancel" @click="batchRejectDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="danger"
           :loading="batchRunning"
@@ -559,7 +559,7 @@
           data-testid="approval-batch-reject-confirm"
           @click="handleBatchReject"
         >
-          确认驳回
+          {{ t.confirmReject }}
         </el-button>
       </template>
     </el-dialog>
@@ -569,7 +569,7 @@
          dialog's own state so the two flows never cross-contaminate each other's comment/error. -->
     <el-dialog
       v-model="rowRejectDialogVisible"
-      title="驳回审批"
+      :title="t.rowRejectTitle"
       width="440px"
       data-testid="approval-row-reject-dialog"
     >
@@ -583,17 +583,17 @@
         class="approval-center__row-reject-error"
       />
       <p v-if="rowRejectTarget" class="approval-center__row-reject-summary">
-        确认驳回「{{ rowRejectTarget.title }}」？
+        {{ rowRejectSummaryText(rowRejectTarget.title) }}
       </p>
       <el-input
         v-model="rowRejectComment"
         type="textarea"
         :rows="3"
-        :placeholder="rowRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
+        :placeholder="rowRejectCommentRequired ? t.rejectReasonRequired : t.rejectOpinionOptional"
         data-testid="approval-row-reject-comment"
       />
       <template #footer>
-        <el-button data-testid="approval-row-reject-cancel" @click="rowRejectDialogVisible = false">取消</el-button>
+        <el-button data-testid="approval-row-reject-cancel" @click="rowRejectDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="danger"
           :loading="rowRejectSubmitting"
@@ -601,7 +601,7 @@
           data-testid="approval-row-reject-confirm"
           @click="submitRowReject"
         >
-          确认驳回
+          {{ t.confirmReject }}
         </el-button>
       </template>
     </el-dialog>
@@ -611,16 +611,14 @@
          the failed subset (same action + comment) without re-selecting anything. -->
     <el-dialog
       v-model="batchResultDialogVisible"
-      title="批量处理结果"
+      :title="t.batchResultTitle"
       width="480px"
       data-testid="approval-batch-result-dialog"
     >
       <p class="approval-center__batch-result-summary">
         <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
              counted on its own — it is not a failure (the row's own line says to refresh and check). -->
-        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchTrueFailureCount }} 项：</template>
-        <template v-else-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
-        <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
+        {{ batchResultSummaryText }}
       </p>
       <ul class="approval-center__batch-result-list">
         <li
@@ -634,7 +632,7 @@
         </li>
       </ul>
       <template #footer>
-        <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">{{ t.close }}</el-button>
         <!-- 撤销轮: an accepted-but-unconfirmed row is not a failure, so it is never retried; with no true
              failure left the button is disabled. -->
         <el-button
@@ -644,7 +642,7 @@
           data-testid="approval-batch-retry"
           @click="retryBatchFailures"
         >
-          重试失败项
+          {{ t.retryFailed }}
         </el-button>
       </template>
     </el-dialog>
@@ -689,7 +687,8 @@ import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
+import { CENTER_EN, CENTER_ZH } from './approvalCenterLabels'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import ApprovalCenterTable from './ApprovalCenterTable.vue'
 import ApprovalCenterDetailPane from './ApprovalCenterDetailPane.vue'
@@ -787,7 +786,7 @@ const paneController = createDetailPaneController((id: string) => getApproval(id
   if ('approval' in patch) paneApproval.value = patch.approval ?? null
   if (patch.loading !== undefined) paneLoading.value = patch.loading
   if (patch.error !== undefined) paneError.value = patch.error
-})
+}, () => isZh.value)
 
 // Prefers the already-known list row (zero cost, immediate paint); falls back to the fetched
 // detail once available so the pane still renders after the id has paged/filtered off-screen or
@@ -886,6 +885,30 @@ function handleDetailPaneKeydown(event: KeyboardEvent): void {
 // though the mobile-layout path was already correct. Renamed (was `mobileEmptyText`) and reused
 // for both paths — one source, not two copies that can drift again.
 const { isZh } = useLocale()
+// O-8 / F8-1: the rest of this view's chrome reads the same locale through approvalCenterLabels.ts
+// (flat strings) and the small interpolating helpers below (counts / titles).
+const t = computed(() => (isZh.value ? CENTER_ZH : CENTER_EN))
+const filterSummaryText = computed(() => (isZh.value ? `已启用 ${activeFilterCount.value} 项筛选` : `${activeFilterCount.value} filter(s) active`))
+const pendingBadgeTooltip = computed(() => (isZh.value ? `待办 ${pendingTotalCount.value} / 其中 ${pendingBadgeCount.value} 未读` : `${pendingTotalCount.value} to-do / ${pendingBadgeCount.value} unread`))
+const newTodoPillText = computed(() => (isZh.value ? `${newTodoPill.value.delta} 条新待办 · 点击刷新` : `${newTodoPill.value.delta} new to-do(s) · click to refresh`))
+const selectionCountText = computed(() => (isZh.value ? `已选 ${selectedPending.value.length} 项` : `${selectedPending.value.length} selected`))
+const batchRejectSummaryText = computed(() => (isZh.value ? `将驳回所选的 ${selectedPending.value.length} 项审批。` : `The ${selectedPending.value.length} selected approval(s) will be rejected.`))
+function inlineApproveConfirmTitle(title: string | null): string {
+  return isZh.value ? `确认通过「${title}」？` : `Approve "${title}"?`
+}
+function rowRejectSummaryText(title: string | null): string {
+  return isZh.value ? `确认驳回「${title}」？` : `Reject "${title}"?`
+}
+function batchDoneToast(action: 'approve' | 'reject', count: number): string {
+  if (action === 'approve') return isZh.value ? `已通过 ${count} 项` : `Approved ${count} item(s)`
+  return isZh.value ? `已驳回 ${count} 项` : `Rejected ${count} item(s)`
+}
+function urgeRetryAfterToast(minutes: number): string {
+  return isZh.value ? `催办过于频繁，请 ${minutes} 分钟后再试` : `Too many reminders. Try again in ${minutes} min.`
+}
+function markedReadToast(count: number): string {
+  return isZh.value ? `已标记 ${count} 条为已读` : `Marked ${count} as read`
+}
 const tabEmptyText = computed(() => {
   if (isZh.value) {
     return {
@@ -920,7 +943,7 @@ const remindingIds = ref<Set<string>>(new Set())
 const remindedIds = ref<Set<string>>(new Set())
 
 function urgeState(rowId: string) {
-  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value, isZh.value)
 }
 
 // B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
@@ -987,6 +1010,20 @@ const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
 const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
 const batchTrueFailureCount = computed(() => batchFailureRows.value.length - batchUnconfirmedCount.value)
+// O-8 / F8-1: the batch-result summary line, one locale at a time (was three inline templates).
+const batchResultSummaryText = computed(() => {
+  const succeeded = batchSucceededCount.value
+  const unconfirmed = batchUnconfirmedCount.value
+  const failed = batchTrueFailureCount.value
+  const total = batchFailureRows.value.length
+  if (unconfirmed > 0) {
+    return isZh.value
+      ? `成功 ${succeeded} 项，已提交但未能确认 ${unconfirmed} 项，失败 ${failed} 项：`
+      : `${succeeded} succeeded, ${unconfirmed} submitted but not confirmed, ${failed} failed:`
+  }
+  if (succeeded > 0) return isZh.value ? `成功 ${succeeded} 项，失败 ${total} 项：` : `${succeeded} succeeded, ${total} failed:`
+  return isZh.value ? `全部 ${total} 项处理失败：` : `All ${total} item(s) failed:`
+})
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
@@ -1024,7 +1061,7 @@ async function dispatchBatchAndHandleResult(
     // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
     async (id, req) => {
       const row = batchRowSnapshot.get(id)
-      if (!row) throw new Error('操作失败，请刷新后重试')
+      if (!row) throw new Error(t.value.actionFailedRefresh)
       try {
         return await dispatchApprovalDecision(row, req, dispatchAction)
       } catch (error) {
@@ -1035,7 +1072,7 @@ async function dispatchBatchAndHandleResult(
     },
   )
   if (result.failed.length === 0 && carriedUnconfirmed.length === 0) {
-    ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
+    ElMessage.success(batchDoneToast(action, result.succeeded.length))
     batchResultDialogVisible.value = false
     batchFailureRows.value = []
   } else {
@@ -1144,10 +1181,10 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
   inlineApprovingId.value = row.id
   try {
     await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
-    ElMessage.success('审批已通过')
+    ElMessage.success(t.value.toastApproved)
     loadCurrentTab()
   } catch (error) {
-    ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+    ElMessage.error(error instanceof Error && error.message ? error.message : t.value.actionFailedRetry)
     // 撤销轮: the row was not (or could not be confirmed as) the leave's pending round — reload the list.
     if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
@@ -1185,13 +1222,13 @@ async function submitRowReject(): Promise<void> {
   rowRejectError.value = null
   try {
     await dispatchApprovalDecision(target, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' }, dispatchAction)
-    ElMessage.success('审批已驳回')
+    ElMessage.success(t.value.toastRejected)
     rowRejectDialogVisible.value = false
     loadCurrentTab()
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
-    rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+    rowRejectError.value = error instanceof Error && error.message ? error.message : t.value.actionFailedRetry
     if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     rowRejectSubmitting.value = false
@@ -1206,18 +1243,18 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
     const result = await remindApproval(row.id)
     if (result.ok) {
       remindedIds.value.add(row.id)
-      ElMessage.success('已发送催办提醒')
+      ElMessage.success(t.value.urgeSent)
     } else if (result.status === 429) {
       // 429 means the server's hourly window already holds a nudge for this instance+user, so the
       // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.
       remindedIds.value.add(row.id)
       const retry = result.error.retryAfterSeconds
-      ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
+      ElMessage.warning(retry ? urgeRetryAfterToast(Math.ceil(retry / 60)) : t.value.urgeTooFrequent)
     } else {
-      ElMessage.error(result.error.message || '催办失败，请重试')
+      ElMessage.error(result.error.message || t.value.urgeFailed)
     }
   } catch {
-    ElMessage.error('催办失败，请重试')
+    ElMessage.error(t.value.urgeFailed)
   } finally {
     remindingIds.value.delete(row.id)
   }
@@ -1298,11 +1335,11 @@ async function handleMarkAllRead(): Promise<void> {
   try {
     const result = await markAllApprovalsRead(sourceSystemFilter.value)
     ElMessage.success(result.markedCount > 0
-      ? `已标记 ${result.markedCount} 条为已读`
-      : '当前范围内无未读审批')
+      ? markedReadToast(result.markedCount)
+      : t.value.markAllReadNone)
     await refreshPendingBadgeCount()
   } catch {
-    ElMessage.error('标记已读失败，请重试')
+    ElMessage.error(t.value.markAllReadFailed)
   } finally {
     markingAllRead.value = false
   }
@@ -1434,6 +1471,7 @@ const exportNotice = computed<{ kind: ApprovalExportOutcome['kind']; tone: 'succ
       return { kind: outcome.kind, tone: 'error', text }
     }
   }
+  return null
 })
 
 function exportOutcomeOf(result: ApprovalCsvExportResult): ApprovalExportOutcome {

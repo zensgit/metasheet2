@@ -8,6 +8,7 @@
  * templateStore mocked; the real ApprovalDetailView.vue with a broad Element Plus stub set).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
@@ -272,6 +273,12 @@ afterEach(() => {
   app = null
   container = null
   vi.clearAllMocks()
+})
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
 })
 
 describe('ApprovalDetailView — P-2 on a cancel-round instance', () => {
