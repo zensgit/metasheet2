@@ -262,6 +262,15 @@ async function main(): Promise<Record<string, unknown>> {
       'SELECT count(*)::int AS count FROM public.meta_recovery_archives WHERE sheet_id=$1',
       [manual.sheetId],
     )).rows[0] as { count: number }, { count: 1 })
+    const manualSourceNonces = await readNonceTuples(sourceRuntime.query, manual.generationId)
+    const { recoveryArchiveAttachmentNonceIdentity } = require('../src/multitable/recovery-archive-attachment-crypto.ts') as typeof import('../src/multitable/recovery-archive-attachment-crypto')
+    const expectedManualNonceIdentities = [...RECOVERY_ARCHIVE_V1_SECTION_NAMES,
+      recoveryArchiveAttachmentNonceIdentity(manual.attachmentId)].sort()
+    assert.deepEqual(manualSourceNonces.map(row => row.section_name), expectedManualNonceIdentities)
+    assert.equal(manualSourceNonces.length, 11)
+    assert.deepEqual(sourceCapturedAuthority.attachmentObjects?.map(object => object.attachmentId), [manual.attachmentId])
+    assert.equal(sourceCapturedAuthority.attachmentObjects![0].binding.generationId, manual.generationId)
+    assert.equal((await readLiveRows(sourceRuntime.query, manual.sheetId)).length, 5001)
     sourceSession.lock()
     assert.equal(sourceSession.isUnlocked(), false)
 
@@ -354,6 +363,10 @@ async function main(): Promise<Record<string, unknown>> {
       generationId: manual.generationId,
     })
     assert.deepEqual(capturedAuthority.selectedBinding, sourceCapturedAuthority.selectedBinding)
+    assert.deepEqual(capturedAuthority.manifestObject, sourceCapturedAuthority.manifestObject)
+    assert.deepEqual(capturedAuthority.sectionObjects, sourceCapturedAuthority.sectionObjects)
+    assert.deepEqual(capturedAuthority.attachmentObjects, sourceCapturedAuthority.attachmentObjects)
+    assert.deepEqual(await readNonceTuples(targetRuntime.query, manual.generationId), manualSourceNonces)
     assert.deepEqual((await targetRuntime.query(
       'SELECT count(*)::int AS count FROM public.meta_recovery_archives WHERE sheet_id=$1',
       [manual.sheetId],
@@ -368,6 +381,8 @@ async function main(): Promise<Record<string, unknown>> {
       objectStore: targetProvider,
       transactionDepth: targetRuntime.depth,
     })
+    assert.equal(capturedState.records.size, 5001)
+    assert.deepEqual([...capturedState.records.keys()].sort(), [...manual.recordIds].sort())
     const capturedData = capturedState.records.get(manual.recordId)?.data
     assert.deepEqual(Object.keys(capturedData ?? {}).sort(), [manual.fieldId, manual.attachmentFieldId].sort())
     assert.equal(capturedData?.[manual.fieldId], 'captured')
@@ -507,12 +522,14 @@ async function main(): Promise<Record<string, unknown>> {
       password: manual.password,
       generationId: manual.generationId,
       recordId: manual.recordId,
+      recordIds: manual.recordIds,
       fieldId: manual.fieldId,
       attachmentFieldId: manual.attachmentFieldId,
       attachmentId: manual.attachmentId,
       attachmentBytes: Uint8Array.from(manual.attachmentBytes),
     }, targetUrl)
 
+    assert.deepEqual(await readNonceTuples(targetRuntime.query, manual.generationId), manualSourceNonces)
     const finalNonces = await readNonceTuples(targetRuntime.query, fixture.fixture.generationId)
     assert.deepEqual(finalNonces, sourceNonces)
     result = {
@@ -526,6 +543,21 @@ async function main(): Promise<Record<string, unknown>> {
       targetDatabaseIdentityDistinct: true,
       manualCapturedArchive: {
         sameGenerationImportedAndRestored: true,
+        records: 5001,
+        nonceSections: 10,
+        attachmentNonceReservations: 1,
+        totalNonceReservations: 11,
+        operations: 'sync-attachment-selected-fields-then-async-scalar-whole-sheet',
+        chunkCommittedCounts: [5000, 1],
+        sameJobLeaseTakeover: true,
+        higherWorkerFenceSameBlockFence: true,
+        staleWorkerCasWrites: 0,
+        aggregateMembers: 2,
+        exactOnceScalarRestoreRevisions: 5001,
+        separateSyncAttachmentRestoreRevisions: 1,
+        derivedEffectsDrained: 5001,
+        separateOfficialDrainProcess: true,
+        drainDidNotRepeatRestore: true,
         attachmentBytesRecovered: true,
         sourceUnavailableBeforeRestore: true,
         freshTargetProcess: true,
@@ -834,6 +866,7 @@ async function runManualTargetChild(input: {
   readonly password: string
   readonly generationId: string
   readonly recordId: string
+  readonly recordIds: readonly string[]
   readonly fieldId: string
   readonly attachmentFieldId: string
   readonly attachmentId: string
@@ -861,7 +894,7 @@ async function runManualTargetChild(input: {
   children.add(child)
   try {
     return await new Promise<number>((resolvePromise, reject) => {
-      const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 240_000)
+      const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 600_000)
       const finish = (work: () => void) => {
         clearTimeout(timer)
         work()

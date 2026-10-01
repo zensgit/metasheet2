@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 
 import { formSchemaSignature } from '../src/approvals/formDraft'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
@@ -114,6 +115,9 @@ const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 // in this file never sets `?fromInstance=`, so `applyResubmitPrefill` short-circuits before ever
 // calling this, leaving it unused (and unconfigured) for them.
 const getApprovalSpy = vi.fn()
+// O-8 / F8-1 — the English render scan below sets this to return an ASCII route; null (every other
+// test) keeps the real client, so nothing else in this file changes.
+let previewRouteOverride: ((...args: unknown[]) => Promise<unknown>) | null = null
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -121,6 +125,9 @@ vi.mock('../src/approvals/api', async () => {
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
     resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
     getApproval: (...args: unknown[]) => getApprovalSpy(...args),
+    previewApprovalRoute: (...args: unknown[]) => (previewRouteOverride
+      ? previewRouteOverride(...args)
+      : (actual.previewApprovalRoute as (...a: unknown[]) => Promise<unknown>)(...args)),
   }
 })
 
@@ -401,6 +408,12 @@ function formSchemaWithNumberPropsAndAttachment(): FormSchema {
     ],
   }
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalNewView — B2-02 number field props + B2-28 honest attachment disable', () => {
   let app: VueApp<Element> | null = null
@@ -1946,5 +1959,233 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
     expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
     expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalNewView. ASCII template
+// (name, field labels, options, node names) with one field of each member-facing type, a flow
+// preview whose walk passes approval nodes with several assignee-source kinds, a cc node and a
+// condition node with rule, formula and empty branches (assigneeSource.ts / conditionSummary.ts),
+// and a live route preview with a role assignee and an unresolved node (routePreviewSummary.ts).
+// The whole container (text + every attribute value) must carry no CJK outside the named
+// exceptions; then zh-CN shows Chinese and a flip back restores English. The file's shared stubs
+// stay unchanged; this describe registers local variants where a shared stub declares a copy prop
+// but never renders it (input / select / date-picker / input-number placeholder, divider slot,
+// table-column label, table empty slot).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalNewView English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const withPlaceholder = (name: string, tag: 'input' | 'select') => defineComponent({
+    name,
+    props: { modelValue: null as never, placeholder: String, startPlaceholder: String, endPlaceholder: String },
+    emits: ['update:modelValue', 'change'],
+    setup(props, { slots }) {
+      // A string/number model value is surfaced too: some inputs show view-computed text through
+      // it (e.g. the record-link field's read-only display).
+      const shown = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? String(v) : undefined)
+      return () => h(tag, {
+        placeholder: props.placeholder,
+        'data-start-placeholder': props.startPlaceholder,
+        'data-end-placeholder': props.endPlaceholder,
+        'data-model-value': shown(props.modelValue),
+      }, tag === 'select' ? slots.default?.() : undefined)
+    },
+  })
+  const ScanElDivider = defineComponent({
+    name: 'ElDivider',
+    setup(_props, { slots }) {
+      return () => h('div', { 'data-el-divider': 'true' }, slots.default?.())
+    },
+  })
+  const ScanElTable = defineComponent({
+    name: 'ElTable',
+    props: { data: Array },
+    setup(props, { slots }) {
+      return () => h('div', { 'data-el-table': 'true' }, [
+        slots.default?.(),
+        ((props.data as unknown[] | undefined) ?? []).length === 0 ? slots.empty?.() : null,
+      ])
+    },
+  })
+  const ScanElTableColumn = defineComponent({
+    name: 'ElTableColumn',
+    props: { prop: String, label: String, width: [String, Number], align: String },
+    setup(props) {
+      return () => h('span', { 'data-column': props.prop ?? '' }, props.label ?? '')
+    },
+  })
+
+  const asciiSchema: FormSchema = {
+    fields: [
+      { id: 'reason', type: 'text', label: 'Reason', required: true } as FormField,
+      { id: 'notes', type: 'textarea', label: 'Notes' } as FormField,
+      { id: 'amount', type: 'number', label: 'Amount', defaultValue: 1234, props: { currencySymbol: '$', thousandsSeparator: true } } as FormField,
+      { id: 'day', type: 'date', label: 'Day' } as FormField,
+      { id: 'at', type: 'datetime', label: 'Time' } as FormField,
+      { id: 'trip', type: 'date_range', label: 'Trip', defaultValue: { start: '2026-09-01', end: '2026-09-04' }, props: { dateType: 'date', durationLabel: 'Days' } } as FormField,
+      { id: 'slot', type: 'date_range', label: 'Slot', defaultValue: { start: '2026-09-01T09:00:00', end: '2026-09-01T10:30:00' }, props: { dateType: 'date_minute' } } as FormField,
+      { id: 'kind', type: 'select', label: 'Kind', options: [{ label: 'Travel', value: 'travel' }, { label: 'Other', value: 'other' }] } as FormField,
+      { id: 'tags', type: 'multi-select', label: 'Tags', options: [{ label: 'Urgent', value: 'urgent' }] } as FormField,
+      { id: 'owner', type: 'user', label: 'Owner' } as FormField,
+      { id: 'dept', type: 'department', label: 'Department' } as FormField,
+      {
+        id: 'lines',
+        type: 'detail',
+        label: 'Lines',
+        columns: [
+          { id: 'item', type: 'text', label: 'Item' } as FormField,
+          { id: 'cost', type: 'number', label: 'Cost' } as FormField,
+        ],
+      } as FormField,
+      { id: 'linked', type: 'record-link', label: 'Linked record', defaultValue: { recordId: 'rec_1' }, props: { baseId: 'base_1', sheetId: 'sheet_1' } } as FormField,
+      { id: 'proof', type: 'attachment', label: 'Proof' } as FormField,
+    ],
+  }
+
+  const asciiGraph: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', config: {} },
+      { key: 'n1', type: 'approval', name: 'Manager review', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['role_a'] }, { kind: 'direct_manager' }] } },
+      { key: 'n2', type: 'approval', name: 'Finance review', config: { assigneeSources: [{ kind: 'static_user', userIds: ['user_a', 'user_b'] }, { kind: 'dept_head_at_level', level: 2 }] } },
+      { key: 'n3', type: 'approval', name: 'Legacy review', config: { assigneeType: 'user', assigneeIds: ['user_c'] } },
+      { key: 'n4', type: 'cc', name: 'Notify', config: { targetType: 'role', targetIds: ['role_b'] } },
+      {
+        key: 'n5',
+        type: 'condition',
+        name: 'Route by amount',
+        config: {
+          branches: [
+            { edgeKey: 'e-big', rules: [{ fieldId: 'amount', operator: 'gt', value: 5000 }, { fieldId: 'kind', operator: 'in', value: ['travel', 'other'] }], conjunction: 'or' },
+            { edgeKey: 'e-empty', rules: [{ fieldId: 'notes', operator: 'isEmpty' }] },
+            { edgeKey: 'e-formula', rules: [], formula: { expression: 'amount > 1' } },
+          ],
+          defaultEdgeKey: 'e-small',
+        },
+      },
+      { key: 'n6', type: 'approval', name: 'After branch', config: { assigneeSources: [{ kind: 'requester' }] } },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'n1' },
+      { key: 'e2', source: 'n1', target: 'n2' },
+      { key: 'e3', source: 'n2', target: 'n3' },
+      { key: 'e4', source: 'n3', target: 'n4' },
+      { key: 'e5', source: 'n4', target: 'n5' },
+      { key: 'e-big', source: 'n5', target: 'n6' },
+      { key: 'e-empty', source: 'n5', target: 'n6' },
+      { key: 'e-small', source: 'n5', target: 'n6' },
+    ],
+  } as unknown as ApprovalGraph
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    routeQuery = {}
+    submitApprovalSpy.mockReset()
+    loadTemplateSpy.mockClear()
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([])
+    previewRouteOverride = async () => ({
+      route: [
+        { nodeKey: 'n1', nodeLabel: 'Manager review', assignees: [{ id: 'role_a', name: 'Leads', assignmentType: 'role' }, { id: 'user_a', name: 'Ada', assignmentType: 'user' }] },
+        { nodeKey: 'n2', nodeLabel: 'Finance review', assignees: [], resolveError: 'EMPTY_ASSIGNEES' },
+      ],
+      truncated: false,
+    })
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_scan',
+      name: 'Expense claim',
+      description: 'Claim travel costs',
+      formSchema: asciiSchema,
+      approvalGraph: asciiGraph,
+    })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    previewRouteOverride = null
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountForScan() {
+    const { default: ApprovalNewView } = await import('../src/views/approval/ApprovalNewView.vue')
+    app = createApp(defineComponent({ setup: () => () => h(ApprovalNewView as any) }))
+    app.component('ElAlert', ElAlert)
+    app.component('ElButton', ElButton)
+    app.component('ElCard', ElCard)
+    app.component('ElDatePicker', withPlaceholder('ElDatePicker', 'input'))
+    app.component('ElDivider', ScanElDivider)
+    app.component('ElEmpty', ElEmpty)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElIcon', ElIcon)
+    app.component('ElInput', withPlaceholder('ElInput', 'input'))
+    app.component('ElInputNumber', withPlaceholder('ElInputNumber', 'input'))
+    app.component('ElOption', ElOption)
+    app.component('ElSelect', withPlaceholder('ElSelect', 'select'))
+    app.component('ElTable', ScanElTable)
+    app.component('ElTableColumn', ScanElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElUpload', ElUpload)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Rendered CJK this slice does not convert (source file:line). The flag-OFF attachment
+  // placeholder is pinned byte-identical by the B2-28 tests above (outerHTML snapshot) until the
+  // attachment rung retires it; it is the gate-1 named exception for this view as well.
+  const EXCEPTIONS: Array<{ text: string; count: number; source: string }> = [
+    { text: '附件上传功能即将支持，请先在其他字段中注明附件信息。', count: 1, source: 'apps/web/src/views/approval/ApprovalNewView.vue:560 (B2-28 flag-OFF placeholder)' },
+  ]
+
+  const q = (testid: string) => container!.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null
+
+  it('form, flow preview and live route preview render English chrome only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const { RECORD_LINK_SELECTED_GENERIC_EN } = await import('../src/approvals/recordLinkField')
+    await mountForScan()
+
+    const steps = Array.from(container!.querySelectorAll('[data-testid="approval-flow-preview-step"]')).map((el) => el.textContent ?? '')
+    expect(steps.length, 'flow preview walks to the condition node').toBe(5)
+    expect(steps.join(' | ')).toContain('Continues by condition')
+    ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
+    await flushUi()
+    const route = Array.from(container!.querySelectorAll('[data-testid="approval-route-preview-node"]')).map((el) => el.textContent ?? '')
+    expect(route.length, 'route preview rendered').toBe(2)
+    expect(route[0]).toContain('Role: Leads')
+    expect(route[1]).toContain('(approver to be determined)')
+    // Field-level helpers reached the DOM: date-range durations (dateRangeField.ts), the
+    // record-link display (recordLinkField.ts) and the formatted-number caption.
+    const scanned = renderedTextAndAttributes(container!)
+    expect(scanned).toContain('3 days')
+    expect(scanned).toContain('1 h 30 min')
+    expect(scanned).toContain(RECORD_LINK_SELECTED_GENERIC_EN)
+    expect(scanned).toContain('$1,234')
+    expectNoCjkOutside(scanned, EXCEPTIONS, 'new (en)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new (en again)')
+  })
+
+  it('a route preview that fails without a message shows the English fallback (routePreviewController.ts)', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    previewRouteOverride = () => Promise.reject('offline')
+    await mountForScan()
+    ;(q('approval-route-preview-btn') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-route-preview-error')?.textContent?.trim()).toBe('Route preview failed')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'new route-preview error (en)')
   })
 })

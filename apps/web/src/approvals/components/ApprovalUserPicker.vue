@@ -9,7 +9,7 @@
     :remote-method="handleSearch"
     :loading="loading"
     :disabled="disabled"
-    :placeholder="placeholder"
+    :placeholder="effectivePlaceholder"
     data-testid="approval-user-picker"
     style="width: 100%"
     @update:model-value="onSelect"
@@ -45,6 +45,8 @@
 // add-sign "repeated pick" chips) show a friendly label without a second lookup.
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { searchApprovalDirectoryUsers, type ApprovalDirectoryUser } from '../api'
+import { useLocale } from '../../composables/useLocale'
+import { USER_PICKER_EN, USER_PICKER_ZH } from './approvalPickerLabels'
 
 export type ApprovalUserPickerOption = ApprovalDirectoryUser
 
@@ -61,7 +63,7 @@ const props = withDefaults(defineProps<{
   initialOptions?: readonly ApprovalUserPickerOption[]
 }>(), {
   modelValue: null,
-  placeholder: '搜索用户名 / 邮箱 / ID',
+  placeholder: undefined,
   disabled: false,
   multiple: false,
   maxSelections: undefined,
@@ -69,6 +71,10 @@ const props = withDefaults(defineProps<{
   initialOption: null,
   initialOptions: () => [],
 })
+
+// O-8 / F8-1: picker chrome follows the shell locale; a host-supplied placeholder still wins.
+const { isZh } = useLocale()
+const effectivePlaceholder = computed(() => props.placeholder ?? (isZh.value ? USER_PICKER_ZH : USER_PICKER_EN).defaultPlaceholder)
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string | null): void
@@ -107,7 +113,7 @@ const displayOptions = computed<ApprovalUserPickerOption[]>(() => {
 // not a values-free placeholder, and search-by-id still works server-side regardless of what the
 // option TEXT renders as.
 function optionLabel(option: ApprovalUserPickerOption, index: number): string {
-  const primary = option.name?.trim() || `成员 ${index + 1}`
+  const primary = option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
 }

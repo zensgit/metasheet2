@@ -5,6 +5,7 @@
  * 普通行不变,仍走 `dispatchAction`。Stubs follow approval-center.spec.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, Teleport, type App as VueApp, type Slot } from 'vue'
 
 const elSuccessSpy = vi.fn()
@@ -265,6 +266,12 @@ const resultKinds = () =>
   [...container!.querySelectorAll<HTMLElement>('[data-testid="approval-batch-result-dialog"] [data-batch-result-kind]')].map((li) => li.dataset.batchResultKind)
 const attendanceCalls = () =>
   apiFetchMock.mock.calls.filter((c) => String(c[0]).includes('/cancel-round/actions')).map((c) => [c[0], JSON.parse(String((c[1] as RequestInit).body))])
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalCenterView — cancel-round approver path', () => {
   it('inline 通过 on a cancel-round row goes to the attendance route, never dispatchAction', async () => {

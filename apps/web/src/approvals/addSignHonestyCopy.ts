@@ -46,5 +46,14 @@
 export const ADD_SIGN_MODE_HINT =
   '加签人将加入当前审批节点，由该节点原有的会签/或签规则决定何时通过；不会插入新的审批节点，也不会跳过当前节点。'
 
+/** O-8 / F8-1: the same honest statement in English — no 前加签/后加签 claim in either locale. */
+export const ADD_SIGN_MODE_HINT_EN =
+  'Added approvers join the current approval node, and that node\'s existing all-approve / any-approve rule decides when it passes. No new approval node is inserted and the current node is not skipped.'
+
+/** The add-sign hint for the current shell locale. */
+export function addSignModeHint(isZh: boolean): string {
+  return isZh ? ADD_SIGN_MODE_HINT : ADD_SIGN_MODE_HINT_EN
+}
+
 /** The ONLY mode this client sends. The server's accepted set is unchanged (widen-only). */
 export const CLIENT_ADD_SIGN_MODE = 'parallel' as const

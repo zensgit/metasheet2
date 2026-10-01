@@ -1,6 +1,6 @@
 /** Test-only target process: never opens the source database or source roots. */
 import assert from 'node:assert/strict'
-import { fork, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, fork, spawn, type ChildProcess } from 'node:child_process'
 import { writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { connect, createServer } from 'node:net'
@@ -32,6 +32,7 @@ export interface ManualTargetInput {
   readonly password: string
   readonly generationId: string
   readonly recordId: string
+  readonly recordIds: readonly string[]
   readonly fieldId: string
   readonly attachmentFieldId: string
   readonly attachmentId: string
@@ -70,14 +71,15 @@ async function run(input: ManualTargetInput): Promise<number> {
     const appConfig = join(targetRoot, 'application-config.json')
     const recoveryConfig = join(targetRoot, 'recovery-config.json')
     await writeFile(appConfig, '{}\n', { flag: 'wx', mode: 0o600 })
-    await writeFile(recoveryConfig, `${JSON.stringify({
+    const recoveryProfile = {
       archivePath: input.local.archivePath, custodyPath: input.local.custodyPath,
       custodyId: input.local.custodyId, storeId: input.local.storeId,
       maxObjectBytes: 16 * 1024 * 1024, receipt: input.local.receipt,
       auditedReplayHorizonMs: 60_000, asyncResumeHorizonMs: 600_000,
-      workerIntervalMs: 10, leaseMs: 60_000, replayHorizonMs: 60_000,
-      sweepLimit: 100, maxChunksPerRun: 20,
-    })}\n`, { flag: 'wx', mode: 0o600 })
+      workerIntervalMs: 60_000, leaseMs: 60_000, replayHorizonMs: 60_000,
+      sweepLimit: 100, maxChunksPerRun: 1,
+    }
+    await writeFile(recoveryConfig, `${JSON.stringify(recoveryProfile)}\n`, { flag: 'wx', mode: 0o600 })
     const rollbackInput = { databaseName: input.databaseName, identity: input.identity,
       password: input.password, generationId: input.generationId }
     const offBefore = await probeFlagOff(rollbackInput, appConfig, targetRoot)
@@ -96,12 +98,98 @@ async function run(input: ManualTargetInput): Promise<number> {
     assert.equal(login.status, 200, 'RECOVERY_LOCAL_BACKUP_MANUAL_LOGIN_FAILED')
     const loginBody = await login.json() as { data?: { token?: unknown } }
     assert.equal(typeof loginBody.data?.token, 'string')
-    await restoreImportedManualArchiveOverHttp({
+    const jobId = await restoreImportedManualArchiveOverHttp({
       runtime: { query }, identity: input.identity,
-      generationId: input.generationId, recordId: input.recordId,
+      generationId: input.generationId, recordId: input.recordId, recordIds: input.recordIds,
       fieldId: input.fieldId, attachmentFieldId: input.attachmentFieldId,
       attachmentId: input.attachmentId,
     }, origin, { 'content-type': 'application/json', authorization: `Bearer ${loginBody.data.token}` })
+    const first = await waitForJob(query, jobId, row => row.completed_count === '5000')
+    assert.equal(first.state, 'applying')
+    assert.equal(first.archive_generation_id, input.generationId)
+    assert.equal(first.total_count, '5001')
+    assert.equal(first.terminal_operation_id, null)
+    const firstChunks = await readChunks(query, jobId)
+    assert.deepEqual(firstChunks.map(row => [row.chunk_index, row.state, row.committed_count]),
+      [[0, 'committed', '5000'], [1, 'pending', null]])
+    assert.equal(typeof service.pid, 'number')
+    assert.equal(service.exitCode, null)
+    assert.equal(service.signalCode, null)
+    assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'ppid='], { encoding: 'utf8' }).trim()), process.pid)
+    assert.equal(typeof process.getuid, 'function')
+    assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'uid='], { encoding: 'utf8' }).trim()), process.getuid!())
+    const killed = new Promise<NodeJS.Signals | null>(resolve => service!.once('exit', (_code, signal) => resolve(signal)))
+    assert.equal(service.kill('SIGKILL'), true)
+    assert.equal(await killed, 'SIGKILL')
+    service = undefined
+    await waitForNoListener(port)
+    const stopped = await readJob(query, jobId)
+    assert.equal(stopped.completed_count, '5000')
+    assert.equal(stopped.block_fence, first.block_fence)
+    assert.equal(stopped.worker_fence, first.worker_fence)
+    assert.equal(stopped.worker_owner_id, first.worker_owner_id)
+    await assertOrdinaryWriterBlocked(pool, input)
+    // Wait on database time, not a host-clock guess. No lease mutation or HTTP /resume.
+    await waitForJob(query, jobId, row => row.lease_expired === true)
+    service = launch(recoveryConfig, appConfig, targetRoot, port)
+    await waitForLocked(service)
+    assert.equal(await canConnect(port), false)
+    await writePipeSecret(service, input.local.recoverySecret)
+    await waitForListener(port)
+    const takenOver = await waitForJob(query, jobId, row => BigInt(row.worker_fence) > BigInt(stopped.worker_fence))
+    assert.equal(takenOver.state, 'applying')
+    assert.equal(typeof takenOver.worker_owner_id, 'string')
+    assert.notEqual(takenOver.worker_owner_id, null)
+    assert.equal(takenOver.block_fence, stopped.block_fence)
+    assert.notEqual(takenOver.worker_owner_id, stopped.worker_owner_id)
+    assert.equal(takenOver.archive_generation_id, input.generationId)
+    const stale = await query(`UPDATE public.meta_recovery_archive_jobs SET row_version=row_version+1
+      WHERE id=$1::uuid AND state='applying' AND worker_owner_id=$2
+        AND worker_fence=$3::bigint AND block_fence=$4::bigint
+        AND lease_until=$5::timestamptz AND lease_until>clock_timestamp() RETURNING id`,
+      [jobId, stopped.worker_owner_id, stopped.worker_fence, stopped.block_fence, stopped.lease_until])
+    assert.equal(stale.rowCount, 0, 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_CAS_WRITES')
+    const done = await waitForJob(query, jobId, row => row.state === 'done')
+    assert.equal(done.completed_count, '5001')
+    assert.equal(done.block_fence, stopped.block_fence)
+    assert.equal(done.archive_generation_id, input.generationId)
+    const chunks = await readChunks(query, jobId)
+    assert.deepEqual(chunks.map(row => [row.chunk_index, row.state, row.committed_count]),
+      [[0, 'committed', '5000'], [1, 'committed', '1']])
+    assert.deepEqual(chunks[0], firstChunks[0], 'RECOVERY_LOCAL_BACKUP_MANUAL_CHUNK_DOUBLE_APPLY')
+    const members = (await query(`SELECT ordinal, child_operation_id::text AS child_operation_id
+      FROM public.meta_record_history_operation_members WHERE sheet_id=$1 AND parent_operation_id=$2::uuid ORDER BY ordinal`,
+      [input.identity.sheetId, done.terminal_operation_id])).rows
+    assert.deepEqual(members, chunks.map((row, index) => ({ ordinal: index + 1, child_operation_id: row.operation_id })))
+    const terminalOperation = await query(`SELECT operation_kind, component_count FROM public.meta_record_history_operations
+      WHERE sheet_id=$1 AND operation_id=$2::uuid`, [input.identity.sheetId, done.terminal_operation_id])
+    assert.deepEqual(terminalOperation.rows, [{ operation_kind: 'restore_aggregate', component_count: 2 }])
+    assert.equal(chunks.some(row => row.operation_id === done.terminal_operation_id), false)
+    assert.deepEqual((await query('SELECT recovery_writer_state FROM public.meta_sheets WHERE id=$1',
+      [input.identity.sheetId])).rows, [{ recovery_writer_state: null }])
+    await assertRestoredRows(query, input)
+    await stopLauncher(service, true)
+    service = undefined
+    await waitForNoListener(port)
+    // The slow lease/takeover profile is immutable. C drains terminal derived effects only.
+    const drainConfig = join(targetRoot, 'recovery-drain-config.json')
+    await writeFile(drainConfig, `${JSON.stringify({ ...recoveryProfile, workerIntervalMs: 10 })}\n`,
+      { flag: 'wx', mode: 0o600 })
+    service = launch(drainConfig, appConfig, targetRoot, port)
+    await waitForLocked(service)
+    assert.equal(await canConnect(port), false)
+    await writePipeSecret(service, input.local.recoverySecret)
+    await waitForListener(port)
+    await waitForDerivedEffects(query, jobId)
+    assert.deepEqual(await readJob(query, jobId), done, 'RECOVERY_LOCAL_BACKUP_MANUAL_DRAIN_JOB_CHANGED')
+    assert.deepEqual(await readChunks(query, jobId), chunks, 'RECOVERY_LOCAL_BACKUP_MANUAL_DRAIN_CHUNKS_CHANGED')
+    assert.deepEqual((await query(`SELECT ordinal, child_operation_id::text AS child_operation_id
+      FROM public.meta_record_history_operation_members WHERE sheet_id=$1 AND parent_operation_id=$2::uuid ORDER BY ordinal`,
+      [input.identity.sheetId, done.terminal_operation_id])).rows, members)
+    assert.deepEqual((await query(`SELECT operation_kind, component_count FROM public.meta_record_history_operations
+      WHERE sheet_id=$1 AND operation_id=$2::uuid`, [input.identity.sheetId, done.terminal_operation_id])).rows,
+    terminalOperation.rows)
+    await assertRestoredRows(query, input)
     const metadata = await query(
       'SELECT storage_path FROM public.multitable_attachments WHERE id=$1 AND sheet_id=$2',
       [input.attachmentId, input.identity.sheetId],
@@ -127,6 +215,78 @@ async function run(input: ManualTargetInput): Promise<number> {
       await poolManager.close()
     }
   }
+}
+
+interface JobWitness {
+  state: string; total_count: string; completed_count: string; archive_generation_id: string
+  block_fence: string; worker_fence: string; worker_owner_id: string | null; lease_until: Date | string
+  lease_expired: boolean; terminal_operation_id: string | null
+}
+async function readJob(query: RecoveryArchiveRestoreJobQuery, jobId: string): Promise<JobWitness> {
+  const result = await query(`SELECT state,total_count::text,completed_count::text,archive_generation_id::text,
+    block_fence::text,worker_fence::text,worker_owner_id,lease_until,
+    lease_until<=clock_timestamp() AS lease_expired,terminal_operation_id::text
+    FROM public.meta_recovery_archive_jobs WHERE id=$1::uuid`, [jobId])
+  assert.equal(result.rows.length, 1)
+  return result.rows[0] as JobWitness
+}
+async function waitForJob(query: RecoveryArchiveRestoreJobQuery, jobId: string,
+  ready: (row: JobWitness) => boolean): Promise<JobWitness> {
+  const deadline = Date.now() + 180_000
+  while (Date.now() < deadline) {
+    const row = await readJob(query, jobId)
+    if (ready(row)) return row
+    assert.equal(['abandoned_partial', 'cancelled_zero_write', 'paused_retryable'].includes(row.state), false)
+    await delay(25)
+  }
+  throw new Error('RECOVERY_LOCAL_BACKUP_MANUAL_JOB_TIMEOUT')
+}
+async function readChunks(query: RecoveryArchiveRestoreJobQuery, jobId: string) {
+  return (await query(`SELECT chunk_index,state,committed_count::text,operation_id::text
+    FROM public.meta_recovery_archive_job_chunks WHERE job_id=$1::uuid ORDER BY chunk_index`, [jobId])).rows as
+    Array<{ chunk_index: number; state: string; committed_count: string | null; operation_id: string | null }>
+}
+async function assertOrdinaryWriterBlocked(pool: Pool, input: ManualTargetInput): Promise<void> {
+  const { fenceWriterEntry, SheetWriterBlockedError } = require('../src/multitable/canonical-sheet-fence.ts') as typeof import('../src/multitable/canonical-sheet-fence')
+  const client = await pool.connect()
+  let reachedWrite = false
+  try {
+    await client.query('BEGIN')
+    await assert.rejects(async () => {
+      await fenceWriterEntry((text, values) => client.query(text, values), input.identity.sheetId)
+      reachedWrite = true
+      await client.query('UPDATE public.meta_records SET version=version+1 WHERE id=$1', [input.recordIds[0]])
+    }, SheetWriterBlockedError)
+    assert.equal(reachedWrite, false)
+  } finally { await client.query('ROLLBACK'); client.release() }
+}
+async function assertRestoredRows(query: RecoveryArchiveRestoreJobQuery, input: ManualTargetInput): Promise<void> {
+  const rows = (await query(`SELECT r.id,r.data,r.version,
+    (SELECT count(*)::int FROM public.meta_record_revisions v WHERE v.record_id=r.id AND v.source='restore') AS restores
+    FROM public.meta_records r WHERE r.sheet_id=$1 ORDER BY r.id`, [input.identity.sheetId])).rows
+  assert.deepEqual(rows, input.recordIds.map(id => ({ id,
+    data: { [input.fieldId]: 'captured', [input.attachmentFieldId]: id === input.recordId ? [input.attachmentId] : [] },
+    version: id === input.recordId ? 4 : 3, restores: id === input.recordId ? 2 : 1 })))
+}
+async function waitForDerivedEffects(query: RecoveryArchiveRestoreJobQuery, jobId: string): Promise<void> {
+  const deadline = Date.now() + 120_000
+  while (Date.now() < deadline) {
+    const rows = (await query(`SELECT count(*)::int AS total,count(completed_at)::int AS completed
+      FROM public.meta_recovery_archive_derived_effects WHERE job_id=$1::uuid`, [jobId])).rows
+    if ((rows[0] as { completed: number }).completed === 5001) {
+      assert.deepEqual(rows, [{ total: 5001, completed: 5001 }]); return
+    }
+    await delay(50)
+  }
+  throw new Error('RECOVERY_LOCAL_BACKUP_MANUAL_DRAIN_TIMEOUT')
+}
+async function waitForNoListener(port: number): Promise<void> {
+  const deadline = Date.now() + 10_000
+  while (Date.now() < deadline) {
+    if (!(await canConnect(port))) return
+    await delay(25)
+  }
+  throw new Error('RECOVERY_LOCAL_BACKUP_MANUAL_LISTENER_RESIDUE')
 }
 
 function launch(recoveryConfig: string, appConfig: string, targetRoot: string, port: number): ChildProcess {

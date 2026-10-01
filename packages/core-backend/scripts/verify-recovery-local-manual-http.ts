@@ -37,6 +37,7 @@ export async function createAndCaptureManualFixture(input: {
   readonly attachmentFieldId: string
   readonly attachmentId: string
   readonly recordId: string
+  readonly recordIds: readonly string[]
   readonly attachmentBytes: Buffer
   readonly generationId: string
 }> {
@@ -47,7 +48,8 @@ export async function createAndCaptureManualFixture(input: {
   const fieldId = `${input.prefix}_manual_field`
   const attachmentFieldId = `${input.prefix}_manual_attachment_field`
   const attachmentId = `${input.prefix}_manual_attachment`
-  const recordId = `${input.prefix}_manual_record`
+  const recordIds = Array.from({ length: 5001 }, (_, index) => `${input.prefix}_manual_record_${String(index).padStart(5, '0')}`)
+  const recordId = recordIds[2500]
   const attachmentBytes = Buffer.from('synthetic-backup-attachment')
   await input.runtime.query(
     `INSERT INTO public.users
@@ -93,8 +95,10 @@ export async function createAndCaptureManualFixture(input: {
   )
   await input.runtime.query(
     `INSERT INTO public.meta_records (id, sheet_id, data, version, created_by, modified_by)
-     VALUES ($1, $2, jsonb_build_object($3::text, 'captured', $4::text, jsonb_build_array($5::text)), 1, $6, $6)`,
-    [recordId, sheetId, fieldId, attachmentFieldId, attachmentId, actorId],
+     SELECT id, $2, jsonb_build_object($3::text, 'captured', $4::text,
+       CASE WHEN id=$7 THEN jsonb_build_array($5::text) ELSE '[]'::jsonb END), 1, $6, $6
+       FROM unnest($1::text[]) AS fixture(id)`,
+    [recordIds, sheetId, fieldId, attachmentFieldId, attachmentId, actorId, recordId],
   )
   await input.runtime.query(
     `UPDATE public.multitable_attachments SET record_id=$2, field_id=$3 WHERE id=$1`,
@@ -104,7 +108,7 @@ export async function createAndCaptureManualFixture(input: {
     runtime: input.runtime, archive: input.archive, identity: { sheetId, actorId }, keyId: input.keyId,
   })
   return { actorId, password, baseId, sheetId, fieldId, attachmentFieldId,
-    attachmentId, recordId, attachmentBytes, generationId }
+    attachmentId, recordId, recordIds, attachmentBytes, generationId }
 }
 
 export async function captureLocalManualArchive(input: {
@@ -141,6 +145,7 @@ interface ManualRestoreInput {
   readonly identity: Identity
   readonly generationId: string
   readonly recordId: string
+  readonly recordIds: readonly string[]
   readonly fieldId: string
   readonly attachmentFieldId: string
   readonly attachmentId: string
@@ -148,7 +153,7 @@ interface ManualRestoreInput {
 
 export async function restoreImportedManualArchiveOverHttp(
   input: ManualRestoreInput, base: string, headers: Record<string, string>,
-): Promise<void> {
+): Promise<string> {
   const route = `${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive`
   const response = await fetch(`${route}/catalog/${input.generationId}`, { headers })
   assert.equal(response.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_CATALOG_FAILED')
@@ -170,18 +175,18 @@ export async function restoreImportedManualArchiveOverHttp(
     `UPDATE public.meta_records
         SET data=jsonb_set(jsonb_set(data, ARRAY[$2::text], to_jsonb('edited'::text)),
                            ARRAY[$3::text], '[]'::jsonb), version=version+1
-      WHERE id=$1 AND sheet_id=$4`,
-    [input.recordId, input.fieldId, input.attachmentFieldId, input.identity.sheetId],
+      WHERE id=ANY($1::text[]) AND sheet_id=$4`,
+    [input.recordIds, input.fieldId, input.attachmentFieldId, input.identity.sheetId],
   )
 
-  const scope = { kind: 'whole_sheet' }
+  const scope = { kind: 'selected_fields', recordIds: [input.recordId], fieldIds: [input.attachmentFieldId] }
   const preview = await fetch(`${route}/preview`, {
     method: 'POST', headers,
     body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope }),
   })
   assert.equal(preview.status, 200, 'RECOVERY_LOCAL_BACKUP_IMPORTED_MANUAL_PREVIEW_FAILED')
   const previewBody = await preview.json() as { ok?: boolean; data?: {
-    generationId?: string; executable?: boolean; blockedReason?: string | null; previewIdentity?: string
+    generationId?: string; executable?: boolean; blockedReason?: string | null; previewIdentity?: string; executionKind?: string
     summary?: { effectiveWriteCount?: number; reverts?: Array<{ recordId: string; fieldIds: string[] }> }
   } }
   assert.equal(previewBody.ok, true)
@@ -197,7 +202,7 @@ export async function restoreImportedManualArchiveOverHttp(
   assert.equal(previewBody.data?.summary?.reverts?.length, 1)
   assert.equal(previewBody.data?.summary?.reverts?.[0]?.recordId, input.recordId)
   assert.deepEqual(previewBody.data?.summary?.reverts?.[0]?.fieldIds?.slice().sort(),
-    [input.fieldId, input.attachmentFieldId].sort())
+    [input.attachmentFieldId])
   assert.equal(previewBody.data?.summary?.effectiveWriteCount, 1)
   assert.equal(typeof previewBody.data?.previewIdentity, 'string')
   assert.deepEqual((await input.runtime.query(
@@ -217,7 +222,7 @@ export async function restoreImportedManualArchiveOverHttp(
   const after = (await input.runtime.query(
     `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
   )).rows
-  assert.deepEqual(after, [{ data: capturedData, version: 3 }])
+  assert.deepEqual(after, [{ data: { ...capturedData, [input.fieldId]: 'edited' }, version: 3 }])
   const restoreCount = await input.runtime.query(
     `SELECT count(*)::int AS count FROM public.meta_record_revisions
       WHERE record_id=$1 AND source='restore'`, [input.recordId],
@@ -229,6 +234,30 @@ export async function restoreImportedManualArchiveOverHttp(
   assert.deepEqual((await input.runtime.query(
     `SELECT data, version FROM public.meta_records WHERE id=$1`, [input.recordId],
   )).rows, after)
+  // Fresh preview after attachment-only apply preserves every scalar delta.
+  assert.deepEqual((await input.runtime.query(
+    `SELECT count(*)::int AS count FROM public.meta_records
+      WHERE sheet_id=$1 AND data->>$2='edited'`, [input.identity.sheetId, input.fieldId],
+  )).rows, [{ count: 5001 }])
+  const asyncPreview = await fetch(`${route}/preview`, { method: 'POST', headers,
+    body: JSON.stringify({ generationId: input.generationId, mode: 'revert', scope: { kind: 'whole_sheet' } }) })
+  assert.equal(asyncPreview.status, 200)
+  const asyncBody = await asyncPreview.json() as typeof previewBody
+  assert.equal(asyncBody.ok, true)
+  assert.equal(asyncBody.data?.generationId, input.generationId)
+  assert.equal(asyncBody.data?.executable, true)
+  assert.equal(asyncBody.data?.executionKind, 'async')
+  assert.equal(asyncBody.data?.summary?.effectiveWriteCount, 5001)
+  assert.equal(typeof asyncBody.data?.previewIdentity, 'string')
+  const accepted = await fetch(`${base}/api/multitable/sheets/${encodeURIComponent(input.identity.sheetId)}/recovery-archive/jobs/accept`, {
+    method: 'POST', headers, body: JSON.stringify({ previewIdentity: asyncBody.data!.previewIdentity }),
+  })
+  assert.equal(accepted.status, 202)
+  const acceptedBody = await accepted.json() as { ok?: boolean; data?: { jobId?: string; totalCount?: string } }
+  assert.equal(acceptedBody.ok, true)
+  assert.equal(acceptedBody.data?.totalCount, '5001')
+  assert.match(acceptedBody.data?.jobId ?? '', /^[a-f0-9-]{36}$/)
+  return acceptedBody.data!.jobId!
 }
 
 async function withRoute<T>(input: {
