@@ -6,7 +6,10 @@ staging execution or production acceptance. Contract:
 
 ## Source identity and scope
 
-- Current main: `ef9eb2d86cf4cbef7327036368f92ca3eb0f53d3`.
+- Evidence main baseline: `ef9eb2d86cf4cbef7327036368f92ca3eb0f53d3`.
+  Latest observed main is `0386f47fdc9a3e88f38e06c46547389fda42d3d7`; its
+  shared auth/features and required web additions need separate integration
+  validation. Historical runs are not relabeled as that main.
 - Prerequisites: cleanup PR #6195 `9d1d589ea0da7aad79e5482fc29a41e5db69026f`
   and standalone APFS PR #6199 `240f108271d2972572a0ccea87bdf53e8c2e3529`.
   Both remain separate Draft/HOLD candidates; no GitHub merge is performed.
@@ -27,6 +30,11 @@ staging execution or production acceptance. Contract:
   `DATABASE_URL`, to the sanitized neighbor environment. No inherited database
   input is accepted; the child's pre-IPC equality guard remains unchanged.
   Production source, schema and lease/timing policy are byte-identical to `97a`.
+- Standard archive workflow producer repair:
+  `eb66e3f1bc60416ff4684b54a51936f7492b119c`. The existing exact multitable
+  step adds the same explicit test database alias. Its existing parsed CI guard
+  adds equality and target-scoped missing/mismatched alias negatives. All fourteen
+  selectors, helper forwarding, child guard and production bytes remain unchanged.
 
 The explicit operation locks the existing canonical scope and rechecks authority,
 then uses the same exact expired owner/fence/source-vector/scope predicate in its
@@ -50,7 +58,8 @@ default, provider timeout policy or automatic transient-error abandonment is add
 | Types, validation and collection | PASS: backend/explicit touched fixture typing, acceptance config and `pnpm validate:all`; 49 wiring contracts at `f120`. Late-MAC child additionally passes 38 unit, 6 checkpoint wiring contracts and explicit acceptance list-files containing the sibling helper. Existing required D2b whole-file selection collects the crash cases. |
 | Mutations | Exact expiry, owner fence, terminal receipt admission and both census holder regions went RED and were restored at `f120`. An earlier nested census layout produced a retained GREEN mutation; the small existing-style admission layout corrected that blind spot without changing the scanner or exemptions. Ordinary checkpoint's existing seal-guard mutation also ran/restored. No additional late-MAC runtime mutation is claimed. |
 | Owned resource teardown | All retained runs stop only their owned PostgreSQL clusters. Final late-MAC run reports DB/backends 0/0, seven recorded child PIDs gone, three recorded SIGKILL exits, listener gone and owned roots removed. Independent `606f` teardown separately confirms zero clients, children, listener and roots. |
-| Published exact-head backend CI | FAILED at `97a` in both Node 18 and 20: checkpoint step 87 reports 236 PASS / 3 FAIL; late-MAC is not reached and archive step 101 is skipped. New repaired-head dispatch/census remains PENDING. Main-required PR/merge-window CI remains a separate gate until prerequisites are integrated with owner authorization. |
+| Standard archive producer repair | PASS local at `eb66`: Node 20.20.2 / fixed pnpm 10.33.0 / PG 15.17, parsed exact step roster executed once, fourteen files / 312 PASS / zero skipped, D2b 25 and all three real crash markers. Fifty wiring/neighbor tests and `pnpm validate:all` pass; neutering only the alias equality makes its negative RED, restored byte-identically. Source/log/lifecycle review CLEAR. Retained setup failures and dependency-graph qualification below remain applicable. |
+| Published exact-head backend CI | FAILED at `97a` in both Node versions at checkpoint 87; FAILED again at `3fda` on Node 20 archive 101: fourteen files / 309 PASS / 3 FAIL / zero skipped. At `3fda`, checkpoint 87 actually passes nine files / 239 tests; Node 18 completes successfully and intentionally skips archive 101. The standard workflow omitted the test URL although the checkpoint producer was repaired. New workflow-repair publication dispatch remains PENDING. Main-required PR/merge-window CI remains separate. |
 
 The 239-test checkpoint replay and the 62-test focused replay overlap and are not
 added together as a unique-test total. Initial loader/fixture/typing failures and
@@ -105,6 +114,50 @@ retained separately; a scoped teardown supplement removes only those caches and
 the wrapper after rechecking zero processes and all runner/census hashes. The
 owned temporary root is now removed. No extra test replay or success relabeling
 is used to conceal that driver failure.
+
+## Standard archive lane failure and repair
+
+The next dispatch `36806817395`, attempt 1, tested report child
+`3fda6713e2b81da79419da89ad590fc4d2ce26bf`. Complete Node 20 job
+`110192896846` log (7,801,876 bytes / thirty validated ranges) SHA256:
+`84930dfe40a1731a8e54e322425083a663c3aeaf90d821d7b3561a434fe80797`.
+Strict step windows establish checkpoint 87 nine files / 239 PASS / zero skipped,
+genuine late-MAC and all crash/teardown markers; archive 101 fourteen files /
+309 PASS / three FAIL / zero skipped. All failures are the builder, cleaner and
+late-builder `CRASH_CHILD_EARLY_EXIT`. Node 18 job `110192896857` is SUCCESS;
+its archive step is intentionally skipped by the existing Node 20 condition.
+
+The real standard-step environment has the database URL and fail-not-skip marker
+but no test URL. The helper forwards that omission and the child equality guard
+rejects before IPC/Pool. The internal `HARNESS_REQUIRED` is not printed by the
+silent catch; source plus actual environment supports this attribution. The
+`eb66` change fixes that producer and retains strict rejection, rather than
+adding an alias fallback. No timing/lease/default change is made.
+
+The independently audited local fourteen-file run actually passes 312 tests,
+D2b 25, zero skipped; complete log SHA256:
+`903c9eabb611a7bcb782f9d71eede983dc01e68e9d0eec9ef5490de8f3978375`.
+Migrate/drop/stop exit 0; clients, database, seven child PIDs, postmaster, listener,
+and owned PG/temporary/cache roots are zero. This run executes only the archive
+roster, not the official checkpoint or the other standard-step multitable files.
+The fifty-test wiring/neighbor log SHA256 is
+`59a7d394380fe04b3716f44884b2eebf5fc7340606a9f845db35e0bf897eb1ee`;
+the alias-guard RED mutation is retained and restored exactly.
+
+Two setup attempts preceded the sole actual archive roster run. A Node 20 PATH
+selected a Corepack pnpm shim and implicitly relinked only this owned worktree's
+dependencies. Its own lock/workspace edits were preserved then restored to frozen
+source bytes; the prior node_modules graph was not reconstructed. A second probe
+incorrectly required transitive esbuild as a direct dependency and stopped before
+PG creation. The successful attempt fixes the CLI entry and resolves esbuild from
+tsx; it performs no dependency install. These local results do not prove a
+frozen-lock install, GitHub CI or current-main integration. The new exact-head CI
+must install from the unchanged committed lockfile and validate separately.
+
+Evidence: `artifacts/timemachine-expired-builder-ci-3fda671/backend-complete/`,
+`artifacts/tm-archive-ci-alias-repair-20261001/`, and
+`artifacts/tm-archive-ci-alias-repair-eb66e3f/attempt3-fixed-probe/`; the earlier
+setup attempts and implicit-install/restoration diff remain retained alongside.
 
 ## Reproduction and retained evidence
 
