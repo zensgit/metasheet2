@@ -46,16 +46,16 @@ const POSTGRES_STATEMENT_TIMEOUT_MAX_MS = 2_147_483_647
 export function resolveElearningAudienceScanTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
+  const ceiling = resolveElearningAudienceScanTimeoutCeilingMs(env)
+  const fallback = Math.min(ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS, ceiling)
   const raw = env[ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV]
-  if (typeof raw !== 'string') return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
+  if (typeof raw !== 'string') return fallback
   const trimmed = raw.trim()
-  if (!/^[0-9]+$/.test(trimmed)) return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
+  if (!/^[0-9]+$/.test(trimmed)) return fallback
   const parsed = Number(trimmed)
-  if (!Number.isSafeInteger(parsed) || parsed > POSTGRES_STATEMENT_TIMEOUT_MAX_MS) {
-    return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
-  }
+  if (!Number.isSafeInteger(parsed) || parsed > POSTGRES_STATEMENT_TIMEOUT_MAX_MS) return fallback
   if (parsed === 0) return 0
-  return Math.min(parsed, resolveElearningAudienceScanTimeoutCeilingMs(env))
+  return Math.min(parsed, ceiling)
 }
 
 /** Pool client-side query timeout (integration/db/connection-pool.ts, DB_QUERY_TIMEOUT) minus a margin. */
