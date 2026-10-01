@@ -101,6 +101,62 @@ Runtime, migration, workflow and provenance pin bytes are unchanged by this repa
 The repaired source commit requires its own terminal CI; the failed run remains
 preserved as historical evidence.
 
+The fixed census head `146e495e28af46f939e0eaa155ac51ac3bbeb0c3` run
+`36837937036` is terminal failure on both Node18 and Node20. Exact checkout/tree
+and 21-source inventory are verified. Both core windows prove the complete census
+guard 49, schema neighbor 120 and admission unit 23 PASS. Both checkpoint windows
+prove 35-migration replay (1059 objects, fingerprint above), then only three files:
+restore jobs 47 PASS, section causality 40 PASS and claim-anchor 1 PASS/18 FAIL.
+The old `truncateOwnedState` omits the newly referencing deletion-intent table,
+so PostgreSQL rejects its TRUNCATE with `0A000`. This is a fixture cleanup defect;
+the checkpoint 9-file/239-case gate and both later scripts did not complete.
+The archive step 101 is skipped, including admission 22 and D2b 25, and no process
+fault PASS receipt exists in this run. CI reports its owned database/connections
+zero and synthetic cluster removed in both lanes. Complete continuous-206 raw logs
+for six executed jobs, the unallocated skipped coverage job, and every post-87
+step conclusion are sealed under `artifacts/tm-dl-census-fixed-ci-20261001/`.
+
+The bounded repair adds `meta_recovery_archive_object_deletions` to the cleanup
+UNION in six historical fixtures (claim anchor, catalog, coverage binding, object
+receipt authority, stale-pin cleanup and source-pin authority). Existing optional
+relation checks preserve the old-schema paths; both coverage/stale cleanup branches
+are covered. The production FK, migrations, triggers, ACL, runtime and workflow
+remain unchanged, and the passing section-causality source is unchanged.
+
+Fresh owned native PostgreSQL 15/Node24 validation completed after the repair:
+
+| Fixture repair check | Actual result |
+|---|---|
+| Original checkpoint whole files | 9 files, 239 PASS, 0 fail/skip |
+| Separate checkpoint and attachment-stage scripts | 2 SCRIPT executions, each exit 0; checkpoint includes 2 SIGKILL finalize receipts (rollback/committed) plus late-MAC refusal |
+| Consistent historical schema without deletion/prepared tables | 6 whole files, 133 PASS, 0 fail/skip; same-instance existing layer suspend/restore and final audit PASS |
+| Final fresh current archive workflow roster | 15 whole files, 334 PASS, 0 fail/skip; admission 22, D2b 25, all 3 D2b process scenarios with actual exit evidence |
+| Final migration replay | 35 migrations, 1059 objects, fingerprint above PASS |
+| Source CI guards / configured quality | 51 guards PASS; `pnpm validate:all` exit 0 |
+| Hermetic provenance / S5 neighbor | Both exit 0; all workflow/provenance bytes remain exact to 146 |
+
+One selected existing cleanup case intentionally omitted the new child table and
+failed with `0A000` (1 failure, 18 unselected cases). This is a cleanup compatibility
+negative, not a security-guard AssertionError mutation; the original nine security
+mutation results remain separate. The claim-anchor source was restored from saved
+bytes to SHA-256 `7cac169bc25a3b8a6e4a264fa0e7551b6e40ac1dbd14d0ef9063244e6434d07c`,
+and all six repaired fixture hashes remained exact before final fresh acceptance.
+
+The first local archive run's 331 PASS/3 child-start failures are preserved: its owned
+test environment omitted `TEST_DATABASE_URL`, violating the crash fixture's mandatory
+exact pair with `DATABASE_URL`. The private harness was corrected; no source guard was
+changed. An artifact-module callback import failure, an inconsistent admission-only
+rollback attempt and the initial census-parser shape mistake are also retained. The
+positive historical run uses the existing complete layer suspension, not that mixed
+schema. Both owned clusters now have zero connections/temporary roles, dropped test
+databases, stopped postmasters/status 3 and removed directories; private endpoint state
+is removed. Exact source hashes, exits, failed attempts and cleanup are sealed under
+`artifacts/tm-dl-fixture-cleanup-repair-20261001/manifest.json`.
+
+These are local Node24 results. Published head 146's failed CI remains historical;
+repaired bytes require their own root-owned freeze/publication and exact-head CI.
+No commit, push, workflow dispatch, activation or external provider/KMS action was performed.
+
 Nine load-bearing mutations each RED: expired state, hold refusal, job refusal,
 complete replacement, row-version CAS, restricted ACL, hold cancellation,
 READ COMMITTED and exact attachment version. Migration source byte-exact restored
