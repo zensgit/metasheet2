@@ -142,7 +142,7 @@ import {
 } from '../multitable/elearning-projection-constants'
 import { isPluginSystemBaseIdCandidate } from '../multitable/plugin-scope'
 import { APPROVAL_PROJECTION_BASE_ID } from '../multitable/approval-projection-constants'
-import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity, hashFieldRetypeConvertPlan, mintFieldRetypeConvertPreviewIdentity } from '../multitable/restore-preview-identity'
+import { hashPreviewChanges, hashScope, mintRestorePreviewIdentity, mintScopedRestorePreviewIdentity, verifyRestorePreviewIdentity, verifyScopedRestorePreviewIdentity, verifyExactAnchorRecoveryIdentity, mintConfigRestorePreviewIdentity, verifyConfigRestorePreviewIdentity, hashLossSummary, type UncreatePlan, hashUncreatePlan, mintConfigUncreatePreviewIdentity, verifyConfigUncreatePreviewIdentity, type UndeletePlan, hashUndeletePlan, mintConfigUndeletePreviewIdentity, verifyConfigUndeletePreviewIdentity, hashPermissionGrant, mintConfigPermissionRevertPreviewIdentity, verifyConfigPermissionRevertPreviewIdentity, hashFieldRetypeConvertPlan, mintFieldRetypeConvertPreviewIdentity, readFieldRetypeConvertPreviewIdentity } from '../multitable/restore-preview-identity'
 import {
   checkExactAnchorRecoveryTrust,
   enforceSheetRecoverySizeCeiling,
@@ -329,6 +329,7 @@ import { assertLosslessFieldRetype, FieldRetypeNotLosslessError, FIELD_RETYPE_NO
 import {
   canonicalFieldRetypeConvertPlanInput,
   classifyFieldRetypeConvertPair,
+  FIELD_RETYPE_CONVERT_CONFIRM,
   FIELD_RETYPE_CONVERT_DISABLED_CODE,
   FIELD_RETYPE_CONVERT_NOT_SUPPORTED_CODE,
   FIELD_RETYPE_TRUST_REQUIRED_CODE,
@@ -344,6 +345,26 @@ import {
   loadFieldRetypeConvertTrashCells,
   resolveFieldRetypeConvertManagedSheetReason,
 } from '../multitable/field-retype-convert-preview'
+import {
+  checkFieldRetypeConvertClaims,
+  executeFieldRetypeConvert,
+  FIELD_RETYPE_CONFIRM_REQUIRED_CODE,
+  FIELD_RETYPE_UNDO_CONFIRM,
+  fieldRetypeConversionRestoreRefusal,
+  fieldRetypeConvertIdentityInvalid,
+  fieldRetypeConvertNotSupported,
+  isFieldRetypeConversionRevision,
+  revertWritesFieldTypeOrProperty,
+  undoFieldRetypeConvert,
+  type FieldRetypeConvertFailure,
+  type FieldRetypeConvertQuery,
+} from '../multitable/field-retype-convert-execute'
+import {
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE,
+  FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE,
+  judgeFieldRetypeConvertGates,
+  type FieldRetypeConvertGateRefusal,
+} from '../multitable/field-retype-convert-gates'
 import { isLegacyWriteImpliesManageSchemaEnabled } from '../multitable/manage-schema-permission'
 import { apiTokenWriteRateLimit, conditionalPublicRateLimiter, publicFormContextLimiter, publicFormSubmitLimiter } from '../middleware/rate-limiter'
 import { buildOapiAuditContext, oapiWriteAuditBoundary } from '../multitable/oapi-write-audit'
@@ -7492,6 +7513,69 @@ export async function hasFullTableReadAccess(
   return masked.size === scoped.size
 }
 
+/**
+ * 字段类型转换 —— 门 ③ ④ ⑤ 的**应答**。判定在 multitable/field-retype-convert-gates.ts（只此一处），这里只把判定结果
+ * 翻成 HTTP：③ ⇒ 403 FORBIDDEN，④ ⇒ 404（SHEET_DELETED / NOT_FOUND），⑤ ⇒ 403 FULL_TABLE_READ_REQUIRED。
+ * 事务外的拒绝与事务内（数据库重新解析之后）的拒绝都从这里发出，字节相同。
+ */
+function sendFieldRetypeConvertGateRefusal(res: Response, refusal: FieldRetypeConvertGateRefusal): Response {
+  if (refusal.kind === 'forbidden') return sendForbidden(res)
+  if (refusal.kind === 'not_live') return sendSheetNotLive(res, refusal.sheetLiveness)
+  return res.status(403).json({
+    ok: false,
+    error: { code: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_CODE, message: FIELD_RETYPE_FULL_TABLE_READ_REQUIRED_MESSAGE },
+  })
+}
+
+/**
+ * 字段类型转换 —— 三个端点（预览 / 执行 / 撤销）**共用**的门 ③ ④ ⑤。一个函数，三处调用，没有第二份。
+ *
+ * 它自己解析本表的能力与存活，交给 `judgeFieldRetypeConvertGates` 判（③ canManageFields → ④ 存活 → ⑤ canRead **且**
+ * 全表读），不过就**自己应答**并返回 null；调用方只需要 `if (!gate) return`。⑤ 里的 `canRead` 不能省：
+ * `canManageFields` 单凭 `multitable:manage-schema` 即可为真，与读权无关。`hasFullTableReadAccess` 自 #6147 起自己也先查
+ * `canRead`，但门 ⑤ **不依赖**它的内部检查——显式的那一条留作纵深防御，由单测钉住（传入恒真的回调）。
+ *
+ * 凭的是**请求里**的能力（凭证带权限 claim 时不问库）。对预览这就是全部；执行与撤销另在事务内、栅栏之后用
+ * `authorizeFieldRetypeConvertInTransaction` 从数据库重新判一次。
+ */
+async function gateFieldRetypeConvert(
+  req: Request,
+  res: Response,
+  query: QueryFn,
+  sheetId: string,
+): Promise<{ access: ResolvedRequestAccess; capabilities: MultitableCapabilities } | null> {
+  const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
+  const refusal = await judgeFieldRetypeConvertGates({
+    capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, access, capabilities),
+  })
+  if (refusal) {
+    sendFieldRetypeConvertGateRefusal(res, refusal)
+    return null
+  }
+  return { access, capabilities }
+}
+
+/**
+ * 执行 / 撤销事务内的权限复核（ADR 增补 B）：栅栏之后，用**事务自己的** `query`，从数据库重新解析请求者此刻的能力，
+ * 再过同一个判定。能力取「请求 claim ∩ 数据库」（`resolveRecoverySheetAuthority`，与精确锚点恢复同一个解析器）：
+ * 库里已收回的权限不会因为凭证还没过期而留着，凭证里没有的权限也不会因为库里有而多出来。存活同样在事务内重读。
+ */
+async function authorizeFieldRetypeConvertInTransaction(
+  req: Request,
+  query: QueryFn,
+  sheetId: string,
+): Promise<FieldRetypeConvertGateRefusal | null> {
+  const authority = await resolveRecoverySheetAuthority(req, query, sheetId)
+  const sheetLiveness = await loadSheetLiveness(query, sheetId)
+  return judgeFieldRetypeConvertGates({
+    capabilities: authority.capabilities,
+    sheetLiveness,
+    hasFullTableReadAccess: () => hasFullTableReadAccess(req, query, sheetId, authority.access, authority.capabilities),
+  })
+}
+
 /** One APPLIED revert's internal post-commit facts; patch never serializes into HTTP. */
 type AppliedRevertFact = { recordId: string; version: number; fieldIds: string[]; patch: Record<string, unknown>; revisionId: string }
 
@@ -11162,6 +11246,18 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (isFieldRetypeRevert(rev) && process.env.MULTITABLE_ENABLE_FIELD_RETYPE_REVERT !== 'true') {
         return res.status(403).json({ ok: false, error: { code: 'FIELD_RETYPE_REVERT_DISABLED', message: 'field type/property revert is disabled (MULTITABLE_ENABLE_FIELD_RETYPE_REVERT off).' } })
       }
+      // Field type CONVERSION revisions are not revertable from config history (ADR
+      // docs/development/multitable-field-retype-first-batch-adr-20260926.md §3.10). A conversion revision and its
+      // undo revision look exactly like an ordinary PATCH retype here (`update`, changed_keys type + property, both
+      // ends plain scalars), so isSupportedFieldRetypeRevert would open them — but the conversion REWROTE every cell,
+      // and a schema-only revert would flip the field back to text over cells that are still option-shaped, after
+      // which the whole-column undo can never pass its field check and the pre-image is unreachable. Refused BEFORE
+      // any token is minted (the lossy branch and the generic path below both mint one). Only a revision whose
+      // revert would WRITE type or property is looked up: a rename / reorder revert issues no extra statement.
+      if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(pool.query.bind(pool) as FieldRetypeConvertQuery, String(rev.id)))) {
+        const refusal = fieldRetypeConversionRestoreRefusal()
+        return res.status(refusal.status).json({ ok: false, error: { code: refusal.code, message: refusal.message, details: refusal.details } })
+      }
       // ── 4c-1 LOSSY / value-transform retype revert PREVIEW (design-lock #3812; owner-ratified 2026-07-08) ────
       // Second flag, default off, AND requires the base Tier-2 flag (403'd immediately above ⇒ base off = 403 for
       // the whole surface, the "双闸串联" of §2.1). Flag off ⇒ this branch is never entered ⇒ a property-only field
@@ -11517,7 +11613,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           }
           const lossyRevisionId = randomUUID() // pre-generated: the 4c-2 pre-image anchors to THIS revert's revision
           let lossyExecuteSummary: LossSummary = { unchanged: 0, coerced: 0, dropped: 0 }
-          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+          const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string; details?: Record<string, unknown> } | null> => {
             // W0-1 L4cov (fence the config-restore-execute record writes — lossy retype-revert branch). This is
             // the highest-value config-restore fence: `applyLossyRetypeCellRewrite` below rewrites the coerced/
             // dropped cells AND emits one `recordRecordRevision` per changed cell (C5 history completeness), so
@@ -11526,6 +11622,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // guarantee this lane exists to protect. Fence first, then refuse (409 in the outer catch) under an
             // active recovery block. Flag-off ⇒ no-op / byte-identical.
             await fenceWriterEntry(query, sheetId)
+            // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before the 4c-1 rewrite.
+            if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+              return fieldRetypeConversionRestoreRefusal()
+            }
             const fieldRow = await loadLossyRetypeFieldRow(query, rev.entity_id, true)
             if (!fieldRow) return { status: 409, code: 'ENTITY_GONE', message: 'The field no longer exists; cannot restore.' }
             if (fieldRow.sheetId !== sheetId) return { status: 400, code: 'INVALID_REVISION', message: 'field revision entity does not belong to this sheet.' }
@@ -11582,7 +11682,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             lossyExecuteSummary = lossSummary
             return null
           })
-          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+          if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } })
           invalidateFieldCache(sheetId)
           return res.json({ ok: true, data: { restored: { revisionId, entityType: rev.entity_type, entityId: rev.entity_id, changedKeys: rev.changed_keys }, lossSummary: lossyExecuteSummary } })
         }
@@ -11595,11 +11695,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (classify.kind === 'gated' && !isSupportedSheetConfigRevert(rev) && !isSupportedFieldRetypeRevert(rev)) return res.status(422).json({ ok: false, error: { code: 'RESTORE_NOT_SUPPORTED', message: classify.reason ?? 'This config restore is not supported in this slice.' } })
 
       // null = applied; a failure object = a guard tripped (the txn made no write either way).
-      const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
+      const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string; details?: Record<string, unknown> } | null> => {
         // D-H1: generic config-restore (name/order/view/sheet_config applyConfigRevert) was the
         // unfenced sibling of the un-create / undelete / lossy-retype branches above. Fence-before-check
         // before the snapshot read and UPDATE. Flag-off ⇒ no-op / byte-identical.
         await fenceWriterEntry(query, sheetId)
+        // Field type CONVERSION revisions (ADR §3.10): refused inside the transaction, before applyConfigRevert.
+        if (revertWritesFieldTypeOrProperty(rev) && (await isFieldRetypeConversionRevision(query as unknown as FieldRetypeConvertQuery, String(rev.id)))) {
+          return fieldRetypeConversionRestoreRefusal()
+        }
         const snapshot = await loadEntityConfigSnapshot(query, rev)
         if (!snapshot) return { status: 409, code: 'ENTITY_GONE', message: 'The config entity no longer exists; cannot restore.' }
         const preview = computeRevertPreview(rev, snapshot)
@@ -11624,7 +11728,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         })
         return null
       })
-      if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message } })
+      if (failure) return res.status(failure.status).json({ ok: false, error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } })
       // D-6: this Tier-1 (sheet_config)/Tier-2 (field name/order/type/property) revert path applies a real
       // meta_fields UPDATE on success but — unlike the uncreate (:8832) / undelete (:8878) / 4c-1 lossy-retype
       // (:9003) branches above — never invalidated metaFieldCache. loadSheetFields (:4183) is the ONLY loader
@@ -14571,9 +14675,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    *   ③ capabilities.canManageFields（照抄 PATCH）⇒ 否则 403；
    *   ④ sheetLiveness !== 'live' ⇒ 404（sendSheetNotLive）；
    *   ⑤ capabilities.canRead && hasFullTableReadAccess ⇒ 否则整面 403，无 scoped 模式、无 undisclosed 标记。
-   *      `hasFullTableReadAccess` 本身**不看** canRead（只看行级 deny、字段遮罩、公式遮罩）；而 canManageFields 单凭
-   *      `multitable:manage-schema` 即可为真（manage-schema-permission.ts `deriveCanManageFields`），与 canRead 无关
-   *      （access.ts `deriveCapabilities`）。不补 canRead，一个只有改结构权、读不了本表的主体会过全部五门、拿到全部 recordId。
+   *      canManageFields 单凭 `multitable:manage-schema` 即可为真（manage-schema-permission.ts `deriveCanManageFields`），
+   *      与 canRead 无关（access.ts `deriveCapabilities`）；少了 canRead，一个只有改结构权、读不了本表的主体会过全部五门、
+   *      拿到全部 recordId。`hasFullTableReadAccess` 自 #6147 起自己也先查 canRead；门 ⑤ 不依赖它，显式判定留作纵深防御。
    * 之后：范围校验（422，details.reason）→ 规模（live + 本表回收站 > 记录上限 ⇒ 413，不截断）→ 扫描。
    * 响应 values-free：只有计数与 recordId，永不含单元格值或选项文本。
    */
@@ -14630,16 +14734,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
       }
       const sheetId = String(fieldRow.sheet_id ?? '')
-      const { access, capabilities, sheetLiveness } = await resolveSheetCapabilities(req, query, sheetId)
-      // ③ schema authority — the PATCH /fields/:fieldId gate, verbatim.
-      if (!capabilities.canManageFields) return sendForbidden(res)
-      // ④ liveness — a dead sheet keeps its capabilities; the caller must answer 404.
-      if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
-      // ⑤ full-table read — whole-surface 403, no scoped counts, no undisclosed marker. canRead is checked HERE,
-      // explicitly: hasFullTableReadAccess never reads it, and canManageFields holds on multitable:manage-schema alone.
-      if (!capabilities.canRead || !(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
-        return res.status(403).json({ ok: false, error: { code: 'FULL_TABLE_READ_REQUIRED', message: 'A field type conversion requires unrestricted read access to every record and field of this sheet.' } })
-      }
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
 
       // Scope (422, first hit): the pair, then the managed-sheet union (a)-(e).
       const rawType = fieldRow.type
@@ -14684,6 +14783,242 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] field retype preview failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to preview the field type conversion' } })
+    }
+  })
+
+  /**
+   * 字段类型转换（带值迁移）第 3 刀 —— **执行** `POST /fields/:fieldId/retype-execute` 与**整列撤销**
+   * `POST /fields/:fieldId/retype-undo`。
+   * 设计锁：docs/development/multitable-field-retype-first-batch-adr-20260926.md §3。事务半在
+   * multitable/field-retype-convert-execute.ts；这里只有门、HTTP 映射与提交后的失效。
+   *
+   * 两条路由与上面的预览**同五门、同顺序**（① 本 flag ② legacy manage-schema flag ③ canManageFields ④ 表存活
+   * ⑤ canRead && hasFullTableReadAccess），之后依次是：
+   *   托管表并集（422，不需要凭证就能判，所以排在凭证之前——托管表上无论带什么凭证都是 422）
+   *   → 确认串（400 CONFIRM_REQUIRED）
+   *   → 信任门：规范表栅栏未开 ⇒ 409 FIELD_RETYPE_TRUST_REQUIRED（reason writer_fence_disabled）。直接调
+   *     `isWriterFenceEnabled()`，不自写比较
+   *   → （仅执行）凭证认证 + 逐 claim 校验 ⇒ 401 PREVIEW_IDENTITY_INVALID；配对校验 ⇒ 422（目标类型只存在于凭证里）
+   *   → 事务。
+   * 事务之前的每一步都只读、不取任何锁；到不了事务的请求对库零写入。
+   *
+   * `PATCH /fields/:fieldId` 与无损白名单一行不改：`string → select / multiSelect` 在那里照旧 400。
+   * 提交后：字段缓存失效 + 该表全部活动记录的协同文档失效（ADR 增补 C4：不只被改写的记录）。**不做**（与 PATCH 改类型同口径）：公式物化值重算、视图
+   * filter / sort / group 迁移、自动化 `record.updated`、实时推送。
+   */
+  const sendFieldRetypeConvertFailure = (res: Response, failure: FieldRetypeConvertFailure) => res.status(failure.status).json({
+    ok: false,
+    error: {
+      code: failure.code,
+      message: failure.message,
+      ...(failure.details ? { details: failure.details } : {}),
+    },
+  })
+
+  /** ① ②：纯 env，先于任何读库。返回 true = 已应答。 */
+  const refuseFieldRetypeConvertByFlags = (res: Response): boolean => {
+    if (!isFieldRetypeConvertEnabled()) {
+      res.status(403).json({
+        ok: false,
+        error: { code: FIELD_RETYPE_CONVERT_DISABLED_CODE, message: 'Field type conversion is disabled on this deployment.' },
+      })
+      return true
+    }
+    if (isLegacyWriteImpliesManageSchemaEnabled()) {
+      res.status(409).json({
+        ok: false,
+        error: {
+          code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+          message: 'Field type conversion requires the tightened schema-management permission; it is refused while the legacy write-implies-manage-schema transition switch is on.',
+          details: { reason: 'legacy_manage_schema_flag' },
+        },
+      })
+      return true
+    }
+    return false
+  }
+
+  /** 信任门（fail-closed）：栅栏未开则执行 / 撤销一律 409；预览不受影响。返回 true = 已应答。 */
+  const refuseFieldRetypeConvertWithoutFence = (res: Response): boolean => {
+    if (isWriterFenceEnabled()) return false
+    res.status(409).json({
+      ok: false,
+      error: {
+        code: FIELD_RETYPE_TRUST_REQUIRED_CODE,
+        message: 'Field type conversion needs the canonical writer fence, which is not enabled on this deployment. Nothing was written.',
+        details: { reason: 'writer_fence_disabled' },
+      },
+    })
+    return true
+  }
+
+  /** PG 锁类 SQLSTATE ⇒ 409（可重试）。只认 code，不看散文。 */
+  const FIELD_RETYPE_RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(['40P01', '55P03', '40001'])
+
+  const sendFieldRetypeConvertError = (res: Response, err: unknown, label: string): Response => {
+    const writerFenceResponse = sendWriterFenceConflict(res, err)
+    if (writerFenceResponse) return writerFenceResponse
+    if (err instanceof TombstoneCaptureCapExceededError) {
+      return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
+    }
+    const sqlState = (err as { code?: unknown } | null | undefined)?.code
+    if (typeof sqlState === 'string' && FIELD_RETYPE_RETRYABLE_SQLSTATES.has(sqlState)) {
+      return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: 'Another operation on this sheet is in progress; retry shortly.' } })
+    }
+    const hint = getDbNotReadyMessage(err)
+    if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+    // values-free: the error NAME only — a driver message can quote a cell value or an option text.
+    console.error(`[univer-meta] field retype ${label} failed:`, err instanceof Error ? err.name : 'unknown')
+    return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: `Failed to ${label} the field type conversion` } })
+  }
+
+  router.post('/fields/:fieldId/retype-execute', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    if (refuseFieldRetypeConvertByFlags(res)) return
+
+    // `.strict()`: there is no targetType, no property and no force / override key — anything else is refused.
+    const parsed = z.object({ previewToken: z.string().min(1).max(8192), confirm: z.string().max(64).optional() }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      const { access } = gate
+      // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
+
+      // 1 — typed confirm.
+      if (parsed.data.confirm !== FIELD_RETYPE_CONVERT_CONFIRM) {
+        return res.status(400).json({ ok: false, error: { code: FIELD_RETYPE_CONFIRM_REQUIRED_CODE, message: `Type "${FIELD_RETYPE_CONVERT_CONFIRM}" to confirm converting the field type (every cell of the column is rewritten).` } })
+      }
+      // 2 — trust gate.
+      if (refuseFieldRetypeConvertWithoutFence(res)) return
+      // 3 — the token, authenticated, then claim by claim. Nothing is locked yet.
+      const identity = readFieldRetypeConvertPreviewIdentity(parsed.data.previewToken)
+      if (identity.ok === false) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertIdentityInvalid(identity.reason))
+      if (checkFieldRetypeConvertClaims(identity.claims, { fieldId, sheetId, actorId: access.userId })) {
+        return sendFieldRetypeConvertFailure(res, fieldRetypeConvertIdentityInvalid())
+      }
+      const targetType = identity.claims.targetType as FieldRetypeConvertTargetType
+
+      const outcome = await pool.transaction(({ query: txQuery }) => executeFieldRetypeConvert(txQuery as unknown as FieldRetypeConvertQuery, {
+        sheetId,
+        fieldId,
+        actorId: access.userId,
+        historyActorId: getRequestActorId(req),
+        previewToken: parsed.data.previewToken,
+        targetType,
+        mapFieldType,
+        normalizeProperty: normalizeJson,
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
+      }))
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
+
+      const { result } = outcome
+      invalidateFieldCache(sheetId)
+      // every live record of the sheet, not only the rewritten ones: the column changed type for all of them, and an
+      // open collaborative document still holds the cell in its old representation
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype convert')
+      return res.json({
+        ok: true,
+        data: {
+          convertRevisionId: result.convertRevisionId,
+          sheetId: result.sheetId,
+          fieldId: result.fieldId,
+          sourceType: result.sourceType,
+          targetType: result.targetType,
+          recordCount: result.recordCount,
+          cells: result.cells,
+          options: result.options,
+          undo: { confirm: FIELD_RETYPE_UNDO_CONFIRM },
+        },
+      })
+    } catch (err) {
+      return sendFieldRetypeConvertError(res, err, 'execute')
+    }
+  })
+
+  router.post('/fields/:fieldId/retype-undo', async (req: Request, res: Response) => {
+    const fieldId = typeof req.params.fieldId === 'string' ? req.params.fieldId : ''
+    if (!fieldId) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'fieldId is required' } })
+    }
+    if (refuseFieldRetypeConvertByFlags(res)) return
+
+    // `.strict()`: no force, no partial, no record subset — a whole-column undo or nothing.
+    const parsed = z.object({ convertRevisionId: z.string().uuid(), confirm: z.string().max(64).optional() }).strict().safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
+    }
+
+    try {
+      const pool = poolManager.get()
+      const query = pool.query.bind(pool) as QueryFn
+      const fieldRes = await query('SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1', [fieldId])
+      const fieldRow = (fieldRes.rows as Array<{ sheet_id?: unknown }>)[0]
+      if (!fieldRow) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Field not found' } })
+      }
+      const sheetId = String(fieldRow.sheet_id ?? '')
+      // ③ ④ ⑤ — canManageFields, liveness, canRead AND full-table read. ONE definition (gateFieldRetypeConvert),
+      // shared by preview, execute and undo; it answers the refusal itself.
+      const gate = await gateFieldRetypeConvert(req, res, query, sheetId)
+      if (!gate) return
+      // Managed-sheet union (a)-(e): needs no token, so it is answered before one is looked at.
+      const managedReason = await resolveFieldRetypeConvertManagedSheetReason(query, sheetId)
+      if (managedReason) return sendFieldRetypeConvertFailure(res, fieldRetypeConvertNotSupported(managedReason))
+
+      if (parsed.data.confirm !== FIELD_RETYPE_UNDO_CONFIRM) {
+        return res.status(400).json({ ok: false, error: { code: FIELD_RETYPE_CONFIRM_REQUIRED_CODE, message: `Type "${FIELD_RETYPE_UNDO_CONFIRM}" to confirm undoing the field type conversion (every converted cell is restored).` } })
+      }
+      if (refuseFieldRetypeConvertWithoutFence(res)) return
+
+      const outcome = await pool.transaction(({ query: txQuery }) => undoFieldRetypeConvert(txQuery as unknown as FieldRetypeConvertQuery, {
+        sheetId,
+        fieldId,
+        convertRevisionId: parsed.data.convertRevisionId.toLowerCase(),
+        historyActorId: getRequestActorId(req),
+        authorize: (fresh) => authorizeFieldRetypeConvertInTransaction(req, fresh as unknown as QueryFn, sheetId),
+      }))
+      if (outcome.ok === false) {
+        return outcome.gate ? sendFieldRetypeConvertGateRefusal(res, outcome.gate) : sendFieldRetypeConvertFailure(res, outcome.failure)
+      }
+
+      const { result } = outcome
+      invalidateFieldCache(sheetId)
+      await bestEffortYjsInvalidate(result.liveRecordIds, 'field retype undo')
+      return res.json({
+        ok: true,
+        data: {
+          convertRevisionId: result.convertRevisionId,
+          undoRevisionId: result.undoRevisionId,
+          sheetId: result.sheetId,
+          fieldId: result.fieldId,
+          restoredType: result.restoredType,
+          recordCount: result.recordCount,
+          cells: result.cells,
+        },
+      })
+    } catch (err) {
+      return sendFieldRetypeConvertError(res, err, 'undo')
     }
   })
 
@@ -18101,7 +18436,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         // Field retype slice 3a (ADR §3.11 row 5, form submit EDIT + CREATE incl. public forms): the submission
         // was validated against `fieldById`, loaded through the pool before this transaction. Re-read the
         // submitted fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift — one call covers both
-        // branches. No query unless the convert flag is 'true'.
+        // branches. No query unless the conversion flag AND the writer fence are both on.
         await assertFieldSchemaUnchangedAfterFence(query, view.sheetId, fieldById, Object.keys(data))
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.

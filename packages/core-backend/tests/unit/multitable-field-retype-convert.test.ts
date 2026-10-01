@@ -40,14 +40,16 @@ const TRUTH_TABLE = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, '../fixtures/field-retype-truth-table.json'), 'utf8'),
 ) as { excludedTargetTypes: string[]; table: Record<string, string[]> }
 
-const live = (recordId: string, value: unknown, opts: { version?: number; missing?: boolean } = {}): FieldRetypeConvertLiveCell => ({
+const live = (recordId: string, value: unknown, opts: { version?: number; missing?: boolean; notObject?: boolean } = {}): FieldRetypeConvertLiveCell => ({
   recordId,
   version: opts.version ?? 1,
+  dataIsObject: opts.notObject !== true,
   hasKey: opts.missing !== true,
   value: opts.missing === true ? null : value,
 })
-const trash = (recordId: string, value: unknown, opts: { missing?: boolean } = {}): FieldRetypeConvertTrashCell => ({
+const trash = (recordId: string, value: unknown, opts: { missing?: boolean; notObject?: boolean } = {}): FieldRetypeConvertTrashCell => ({
   recordId,
+  dataIsObject: opts.notObject !== true,
   hasKey: opts.missing !== true,
   value: opts.missing === true ? null : value,
 })
@@ -316,6 +318,25 @@ describe('recycle-bin rows with a value block the whole run', () => {
     expect(p.rejections).toEqual([{ reason: 'trashed_rows_with_value', recordCount: 2, recordIds: ['t0', 't2'] }])
   })
 
+  test('a row whose data is not a JSON object rejects the whole run — live or recycle bin, whatever its cell reads as', () => {
+    // the cell of a non-object row READS as empty (missing key); it must not be converted as one
+    const p = plan(
+      [live('r1', 'A'), live('r3', null, { missing: true, notObject: true }), live('r2', 'B', { notObject: true })],
+      [trash('t1', null, { missing: true, notObject: true }), trash('t2', '')],
+    )
+    expect(p.verdict).toBe('rejected')
+    expect(p.cells).toEqual({ empty: 0, converted: 1, rejected: 2 })
+    expect(p.trash).toEqual({ scanned: 2, blocking: 1 })
+    expect(p.rejections).toEqual([{ reason: 'record_data_not_object', recordCount: 3, recordIds: ['r2', 'r3', 't1'] }])
+    // the value of a non-object row never becomes an option
+    expect(p.optionValues).toEqual(['A'])
+    // only `true` passes: a loader that does not SAY the row is an object does not get it treated as one
+    const unsaid = { recordId: 'r9', version: 1, hasKey: true, value: 'A' } as unknown as FieldRetypeConvertLiveCell
+    expect(plan([unsaid]).rejections).toEqual([{ reason: 'record_data_not_object', recordCount: 1, recordIds: ['r9'] }])
+    // and the response stays values-free
+    expect(JSON.stringify(toFieldRetypeConvertPreviewResponse(p, { recordCap: 5000 }))).not.toMatch(/"A"|"B"/)
+  })
+
   test('empty-shaped trash rows do not block', () => {
     const p = plan([live('r1', 'A')], [trash('t1', ''), trash('t2', null), trash('t3', null, { missing: true })])
     expect(p.verdict).toBe('ok')
@@ -450,5 +471,24 @@ describe('planHash — keyed HMAC over the whole plan, stable and drift-sensitiv
     expect(verifyFieldRetypeConvertPreviewIdentity(foreign, claims).reason).toBe('wrong_type')
     const forged = jwt.sign({ type: 'field-retype-convert-preview', ...claims }, 'some-other-secret-0123456789', { algorithm: 'HS256' })
     expect(verifyFieldRetypeConvertPreviewIdentity(forged, claims).reason).toBe('invalid')
+  })
+
+  test('verify: the expired branch and the source-type branch each answer their own reason', () => {
+    const planHash = hashOf()
+    const claims = { sheetId: 'sheet_1', fieldId: 'fld_1', actorId: 'user_1', sourceType: 'string' as const, targetType: 'select' as const, planHash }
+    // expired: validly signed, every claim right, past its window
+    const expired = jwt.sign({ type: 'field-retype-convert-preview', ...claims, exp: Math.floor(Date.now() / 1000) - 5 }, 'secret-alpha-0123456789abcdef', { algorithm: 'HS256' })
+    expect(verifyFieldRetypeConvertPreviewIdentity(expired, claims)).toEqual({ valid: false, reason: 'expired' })
+    // expiry is judged before any claim: an expired token with a wrong claim is still "expired"
+    expect(verifyFieldRetypeConvertPreviewIdentity(expired, { ...claims, fieldId: 'fld_2' }).reason).toBe('expired')
+    // source type: a token signed for another source type is refused on that claim alone
+    const otherSource = jwt.sign({ type: 'field-retype-convert-preview', ...claims, sourceType: 'longText' }, 'secret-alpha-0123456789abcdef', { algorithm: 'HS256', expiresIn: '10m' })
+    expect(verifyFieldRetypeConvertPreviewIdentity(otherSource, claims)).toEqual({ valid: false, reason: 'mismatch_sourceType' })
+    // and it is checked before the target type and the plan hash
+    expect(verifyFieldRetypeConvertPreviewIdentity(otherSource, { ...claims, targetType: 'multiSelect', planHash: 'f'.repeat(64) }).reason).toBe('mismatch_sourceType')
+    // a token with NO sourceType claim is refused too
+    const { sourceType: _dropped, ...withoutSource } = claims
+    const missing = jwt.sign({ type: 'field-retype-convert-preview', ...withoutSource }, 'secret-alpha-0123456789abcdef', { algorithm: 'HS256', expiresIn: '10m' })
+    expect(verifyFieldRetypeConvertPreviewIdentity(missing, claims).reason).toBe('mismatch_sourceType')
   })
 })

@@ -694,6 +694,43 @@ describe('MultitableApiClient', () => {
     expect(error.code).toBe('FORBIDDEN')
   })
 
+  // Field retype slice 3b: the write was refused because its column changed type while it waited on the sheet
+  // fence. The server's message is an English literal; the user reads the client's sentence in their language.
+  it('409 FIELD_SCHEMA_CHANGED: the client sentence replaces the server message, in the client locale; code and status are kept', async () => {
+    const refusal = () => new Response(JSON.stringify({
+      ok: false,
+      error: {
+        code: 'FIELD_SCHEMA_CHANGED',
+        message: 'A field this write touches changed type or options while the write was waiting; reload and retry',
+      },
+    }), { status: 409 })
+    const patch = { sheetId: 'sheet_1', changes: [{ recordId: 'rec_1', fieldId: 'fld_1', value: 'x' }] }
+
+    const zh = await new MultitableApiClient({ isZh: true, fetchFn: vi.fn().mockImplementation(async () => refusal()) })
+      .patchRecords(patch as never).catch((err) => err)
+    expect(zh.message).toBe('这一列刚刚被改成了别的类型，你这次的修改没有保存。请刷新页面后重新修改。')
+    expect([zh.name, zh.status, zh.code]).toEqual(['MultitableApiError', 409, 'FIELD_SCHEMA_CHANGED'])
+
+    const en = await new MultitableApiClient({ isZh: false, fetchFn: vi.fn().mockImplementation(async () => refusal()) })
+      .patchRecords(patch as never).catch((err) => err)
+    expect(en.message).toBe('This column was just changed to another type, so your edit was not saved. Refresh the page and edit again.')
+    expect([en.status, en.code]).toEqual([409, 'FIELD_SCHEMA_CHANGED'])
+  })
+
+  it('409 with any other code keeps the server message — VERSION_CONFLICT and RECOVERY_IN_PROGRESS are untouched', async () => {
+    for (const [code, message] of [
+      ['VERSION_CONFLICT', 'Version conflict for rec_1'],
+      ['RECOVERY_IN_PROGRESS', 'Another recovery operation is in progress on this sheet; retry shortly.'],
+    ]) {
+      const client = new MultitableApiClient({
+        isZh: true,
+        fetchFn: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: false, error: { code, message } }), { status: 409 })),
+      })
+      const error = await client.patchRecords({ sheetId: 'sheet_1', changes: [{ recordId: 'rec_1', fieldId: 'fld_1', value: 'x' }] } as never).catch((err) => err)
+      expect([error.code, error.message]).toEqual([code, message])
+    }
+  })
+
   it('localizes missing field-error messages but preserves field ids', async () => {
     const client = new MultitableApiClient({
       isZh: true,

@@ -4593,6 +4593,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
@@ -4862,15 +4863,12 @@ export class MetaSheetServer {
         // pending flushes FIRST — without that a 200–500ms debounced
         // bridge write would re-materialize the stale Yjs-cached value
         // on top of the just-committed REST change.
-        const yjsInvalidate = async (recordIds: string[]) => {
-          if (recordIds.length === 0) return
-          yjsBridge.cancelPending(recordIds)
-          try {
-            await yjsSyncService.invalidateDocs(recordIds)
-          } finally {
-            yjsWsAdapter.notifyInvalidated(recordIds)
-          }
-        }
+        const yjsInvalidate = createYjsInvalidator({ bridge: yjsBridge, syncService: yjsSyncService, adapter: yjsWsAdapter })
+        // Field retype slice 3b: a realtime edit refused because its column changed type while the flush waited
+        // (409 FIELD_SCHEMA_CHANGED) is no longer dropped in silence — the record's document is invalidated, so
+        // its editors are told with the message they already handle. Inert unless the conversion flag AND the
+        // writer fence are on; every other refusal on the bridge is left as it was.
+        yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))
         recordWriteService.setPostCommitHooks([
           createYjsInvalidationPostCommitHook(yjsInvalidate),
         ])

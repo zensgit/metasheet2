@@ -1048,3 +1048,44 @@ export function verifyFieldRetypeConvertPreviewIdentity(token: string, expected:
   if (payload.planHash !== expected.planHash) return { valid: false, reason: 'plan_drift' }
   return { valid: true }
 }
+
+// ── Field retype CONVERT — the execute side's claim reader (slice 3, ADR §3.3) ─────────────────────────────────────
+// `POST /fields/:fieldId/retype-execute` takes `{ previewToken, confirm }` and nothing else: the target type exists
+// only as a claim inside the token. So execute cannot build the `expected` argument of
+// `verifyFieldRetypeConvertPreviewIdentity` without first reading the token. This reader AUTHENTICATES the token
+// (signature, expiry, `type`) and hands back its claims AS MINTED; it judges none of them. The comparison against the
+// request — fieldId, the field's current sheet, the requester, the first-batch pair — is the caller's
+// (`checkFieldRetypeConvertClaims`, field-retype-convert-execute.ts), one claim at a time, BEFORE a transaction is
+// opened; `verifyFieldRetypeConvertPreviewIdentity` then runs with the re-computed planHash inside the transaction,
+// under the fence. A validly signed token whose claims are not all non-empty strings reads as `invalid`.
+export interface FieldRetypeConvertPreviewIdentityRawClaims {
+  sheetId: string
+  fieldId: string
+  actorId: string
+  sourceType: string
+  targetType: string
+  planHash: string
+}
+
+export type FieldRetypeConvertPreviewIdentityRead =
+  | { ok: true; claims: FieldRetypeConvertPreviewIdentityRawClaims }
+  | { ok: false; reason: 'invalid' | 'expired' | 'wrong_type' }
+
+export function readFieldRetypeConvertPreviewIdentity(token: string): FieldRetypeConvertPreviewIdentityRead {
+  let payload: Record<string, unknown>
+  try {
+    const verified = jwt.verify(token, getSecret(), { algorithms: ['HS256'] })
+    if (!verified || typeof verified !== 'object') return { ok: false, reason: 'invalid' }
+    payload = verified as Record<string, unknown>
+  } catch (e) {
+    return { ok: false, reason: (e as Error)?.name === 'TokenExpiredError' ? 'expired' : 'invalid' }
+  }
+  if (payload.type !== 'field-retype-convert-preview') return { ok: false, reason: 'wrong_type' }
+  const claims: Record<string, string> = {}
+  for (const key of ['sheetId', 'fieldId', 'actorId', 'sourceType', 'targetType', 'planHash'] as const) {
+    const value = payload[key]
+    if (typeof value !== 'string' || value.length === 0) return { ok: false, reason: 'invalid' }
+    claims[key] = value
+  }
+  return { ok: true, claims: claims as unknown as FieldRetypeConvertPreviewIdentityRawClaims }
+}
