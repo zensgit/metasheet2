@@ -82,6 +82,25 @@ failure evidence and before/after comparison, exit and hash receipts are preserv
 under `artifacts/tm-dl-provenance-20261001/`. The new source head still requires its
 own CI evidence; an earlier-head run does not cover this pin correction.
 
+The corrected-head run `36834898093` on `462a89ba8b18ccefab331c948cf22d5af0e4ee4a`
+failed on both Node18 and Node20 at the core-backend step: seven assertions in
+`multitable-field-schema-fence-recheck.guard.test.ts` identified the new module SQL
+holder and its two SQL fence acquirers missing from the structural census. Both
+complete logs prove an assertion failure, not a timeout. Manual/archive acceptance
+and migration replay were skipped, so this run supplies none of their CI counts.
+
+Local whole-file reproduction produced the same seven failures. The repair adds
+the exact non-data-writer holder (the command writes archive intents only) and
+unions `meta_recovery_archive_object_deletion_check` and
+`meta_recovery_archive_object_deletion_command` into the SQL acquirer census.
+The scanner, required writer helpers, post-fence data-write checks and existing
+synthetic negatives are unchanged. The repaired guard and schema-check neighbor
+passed 169/169 tests across two whole files, zero skips. Before/after logs and
+source hashes are retained under `artifacts/tm-dl-fence-census-20261001/`.
+Runtime, migration, workflow and provenance pin bytes are unchanged by this repair.
+The repaired source commit requires its own terminal CI; the failed run remains
+preserved as historical evidence.
+
 Nine load-bearing mutations each RED: expired state, hold refusal, job refusal,
 complete replacement, row-version CAS, restricted ACL, hold cancellation,
 READ COMMITTED and exact attachment version. Migration source byte-exact restored
