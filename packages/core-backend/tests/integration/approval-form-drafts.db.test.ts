@@ -166,8 +166,11 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
       const bodyB = (await getAsB.json()) as { data: { draft: unknown } }
       expect(bodyB.data.draft).toBeNull()
 
-      // B's list is also empty — A's draft never appears in it.
+      // B's list is also empty — A's draft never appears in it. The status is asserted first so a
+      // list request answered by some other route (e.g. registration order changed) fails here on
+      // the assertion itself, not later on a missing `data` field.
       const listAsB = await draftList(tokenB)
+      expect(listAsB.status).toBe(200)
       const listBody = (await listAsB.json()) as { data: { drafts: Array<{ templateId: string }> } }
       expect(listBody.data.drafts.find((d) => d.templateId === templateId)).toBeUndefined()
     })
