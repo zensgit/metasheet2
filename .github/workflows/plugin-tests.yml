@@ -153,6 +153,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
+            scripts/ops/__tests__/stock-preparation-bounded-candidate-probe.ps51.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # S6-A win32 artifact-root ACL + attestation (follow-up 1 of
       # docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md). This is the
