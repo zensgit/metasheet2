@@ -726,8 +726,9 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     )
     await pool.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, 'attendance_request_approval', $6::jsonb)`,
       [requestId, overtimeUserId, workDate, ORG, approvalId, JSON.stringify({ minutes: 60 })],
     )
 
@@ -813,8 +814,9 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
     )
     await pool.query(
       `INSERT INTO attendance_requests
-         (id, user_id, work_date, request_type, status, org_id, approval_instance_id, metadata)
-       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, $6::jsonb)`,
+         (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
+          approval_workflow_key, metadata)
+       VALUES ($1, $2, $3, 'overtime', 'pending', $4, $5, 'attendance_request_approval', $6::jsonb)`,
       [
         requestId,
         overtimeUserId,
@@ -923,8 +925,8 @@ describeDb('AE-1 attendance anomaly result edit (real DB, route-level)', () => {
       await pool.query(
         `INSERT INTO attendance_requests
            (id, user_id, work_date, request_type, status, org_id, approval_instance_id,
-            requested_in_at, requested_out_at, reason, metadata)
-         VALUES ($1, $2, $3, 'time_correction', 'pending', $4, $5, $6, $7, $8, '{}'::jsonb)`,
+            approval_workflow_key, requested_in_at, requested_out_at, reason, metadata)
+         VALUES ($1, $2, $3, 'time_correction', 'pending', $4, $5, 'attendance_request_approval', $6, $7, $8, '{}'::jsonb)`,
         [
           requestId,
           ambiguityUserId,

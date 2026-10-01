@@ -24,8 +24,8 @@
 
 /**
  * @typedef {Object} FlagRule
- * @property {string} kind - 'requires' (dependsOn must ALSO be active) | 'conflicts' (dependsOn/target must NOT be active together)
- * @property {string} id - stable violation id, printed by --strict
+ * @property {string} kind - 'requires' (dependsOn active) | 'requires-exact' (dependsOn equals its activationValue byte-for-byte) | 'conflicts' (target active)
+ * @property {string} id - stable violation id reported by flag status
  * @property {string} description
  */
 
@@ -57,6 +57,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'TRANSITION ONLY, and a REGRESSION while on. Schema management (rename/retype/delete a field, 11 gated routes) was split out of multitable:write into multitable:manage-schema, because an operator who may fill a cell must not be able to delete the column. With this flag true, multitable:write is ALSO accepted for canManageFields -- the old fused behaviour returns. Default OFF is the intended end state; the flag exists only so a deployment can stage granting the new code before tightening.',
     source: 'packages/core-backend/src/multitable/manage-schema-permission.ts',
+  },
+  {
+    key: 'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
+    danger: 'high',
+    purpose:
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. It also gates the fenced writers' post-fence field-schema re-check (ADR §3.11, slice 3a): every record writer that validated a write against a field snapshot taken before the canonical sheet fence re-reads the touched fields FOR SHARE after the fence and refuses 409 FIELD_SCHEMA_CHANGED (automation step fails; approval write-back throws) if a field's type or option set changed while it waited, and a non-scoped derived-value merge whose target is no longer formula/lookup/rollup is skipped. Off: none of those re-reads runs and every writer issues exactly its pre-existing statements. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview; packages/core-backend/src/multitable/field-schema-fence-recheck.ts#isFieldSchemaFenceRecheckEnabled (writer re-check, slice 3a)',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'field-retype-convert-with-legacy-manage-schema',
+        description:
+          'MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT is active while MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA is active — the legacy switch lets multitable:write hold schema authority, below the gate field type conversion requires, so every conversion endpoint refuses 409 FIELD_RETYPE_TRUST_REQUIRED. Field type conversion cannot function in this state.',
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_SHEET_CONFIG_REVERT',
@@ -267,8 +286,15 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      "Time Machine D2a contract flag only: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. This slice has no production caller and does not make archive behavior available. A later D2 caller remains unreachable unless this flag and MULTITABLE_ENABLE_WRITER_FENCE are both exact ON. It intentionally has no retention conflict: D2 is the archive-before-prune handoff, not current retention behavior.",
+      "Time Machine archive runtime gate: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. The dedicated local launcher requires this flag and MULTITABLE_ENABLE_WRITER_FENCE both exact ON, admitted local configuration and FD3 custody unlock before listening. Ordinary server startup without an injected archive composition refuses ON; manual capture also requires explicit policy. This flag has no retention conflict and does not enable prune or retention.",
     source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    rules: [
+      {
+        kind: 'requires-exact',
+        id: 'archive-without-exact-writer-fence',
+        description: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED is active but MULTITABLE_ENABLE_WRITER_FENCE is not exactly true; the archive worker and local launcher refuse this combination.',
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
@@ -611,6 +637,50 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
       'Poll interval for the DingTalk todo-mirror delivery worker\'s setInterval tick (runBatch). Number(process.env...) || 30_000 then Math.max(5_000, ...): an unset/blank/non-numeric value falls back to the 30s default, and any in-range or larger value is honoured verbatim — only a value below 5000 gets clamped up to the 5s floor. No-op unless DINGTALK_TODO_MIRROR_ENABLED is active (the worker is never constructed otherwise).',
     source: 'packages/core-backend/src/index.ts:3948',
   },
+  {
+    key: 'MULTITABLE_BUSINESS_TIMEZONE',
+    type: 'enum',
+    activationValue: "an IANA timezone id, e.g. 'Asia/Shanghai' (trimmed); unset / blank / any id Intl rejects = 'Asia/Shanghai'",
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "客户反馈 2026-09-24 #4c (ruling PR #6074): the instance business timezone multitable date-times are DISPLAYED and PARSED in on the web — never the browser's local zone. Storage is unchanged (UTC instants); only the wall clock a person sees/types changes. Echoed as `businessTimezone` on GET /api/multitable/context and /form-context; a dateTime field's own non-UTC property.timezone still wins. Not a gate: nothing turns on or off, and the default (Asia/Shanghai) is the intended state for a China deployment, so leaving it unset needs no action. An invalid value is logged once (without echoing it) and falls back to the default.",
+    source: 'packages/core-backend/src/multitable/business-timezone.ts#resolveMultitableBusinessTimezone',
+  },
+  {
+    key: 'MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "客户反馈 2026-09-24 #4a: operator switch for the WRITE leg of the managed-table display-name relabel (「把系统表的英文表头改成中文」, stock-prep 数据来源与体检). Default OFF; exact literal 'true' only (no trim, no case folding). Off: the dry run still works (it writes nothing), the plugin route answers 409 MANAGED_TABLE_RELABEL_APPLY_DISABLED, and the host primitive itself refuses the write leg (409 MULTITABLE_RELABEL_APPLY_DISABLED) before any statement — enforced at the one place that writes, not only in the route. On: stock-prep:admin (or platform admin) may rename still-English managed-table columns and sheet names to their template Chinese names, compare-and-set, only after a preview whose planDigest the apply must match. Danger=medium: it renames the customer's production managed tables (field renames are revertible from the config history; sheet renames are recorded but not revertible there), and while an apply runs, record inserts to that sheet wait for it to commit.",
+    source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
+  },
+  {
+    key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
+    type: 'numeric',
+    activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "「复制数据表（含数据）」(design-lock ADR docs/development/multitable-copy-sheet-with-data-adr-20260926.md CS-15 / §7.5): the SYNCHRONOUS copy row cap N. A source sheet with more than N live rows is refused 413 COPY_TOO_LARGE before any write (the S3 async job is the path above N and is not built yet). Number(env) parsed once per request via resolveCopySheetSyncMaxRows: unset/blank/non-integer/<1 fall back to 2000, anything above 50000 is clamped to 50000 (the ADR's absolute ceiling, = XLSX_MAX_ROWS). Not a gate: nothing turns on or off; the default covers the customer table (1239 rows). Raising it lengthens one synchronous transaction that holds the source sheet row lock + every participating sheet fence for its duration.",
+    source: 'packages/core-backend/src/multitable/copy-sheet-limits.ts#resolveCopySheetSyncMaxRows',
+  },
+  {
+    key: 'TASKS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+    source: 'packages/core-backend/src/routes/tasks.ts:35',
+  },
 ])
 
 /** Flat lookup by key, built once. */
@@ -699,22 +769,24 @@ export function isValueRedactedType(spec) {
 }
 
 /**
- * Evaluate every `requires`/`conflicts` rule in the manifest against a flat env-like flag map
+ * Evaluate every `requires`/`requires-exact`/`conflicts` rule in the manifest against a flat env-like flag map
  * (`{ [key]: string | null | undefined }`). Returns a list of violations; empty = no illegal
- * combination present. Uses EXACT per-flag activation (via `isActivated`), never the loose
- * "looks truthy" heuristic, so it cannot be fooled by the R4 footgun in either direction.
+ * combination present. `requires-exact` compares the dependency's raw value with its
+ * activationValue; other rules use per-flag activation via `isActivated`.
  */
 export function evaluateFlagRules(flags) {
   const violations = []
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
     const rules = spec.rules || []
     for (const rule of rules) {
-      if (rule.kind === 'requires') {
+      if (rule.kind === 'requires' || rule.kind === 'requires-exact') {
         const selfOn = isActivated(spec, flags[spec.key])
         if (!selfOn) continue
         const unmet = spec.dependsOn.filter((depKey) => {
           const depSpec = GLOBAL_HISTORY_FLAG_BY_KEY[depKey]
-          return depSpec && !isActivated(depSpec, flags[depKey])
+          return depSpec && (rule.kind === 'requires-exact'
+            ? flags[depKey] !== depSpec.activationValue
+            : !isActivated(depSpec, flags[depKey]))
         })
         if (unmet.length > 0) {
           violations.push({

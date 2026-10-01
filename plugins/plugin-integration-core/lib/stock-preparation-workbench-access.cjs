@@ -56,7 +56,20 @@ const STOCK_PREP_PERMISSION_NAMESPACE = 'stock-prep'
 const STOCK_PREP_READ = 'stock-prep:read'
 /** OPERATE — confirm a decision (the frozen action vocabulary) and the O1'-A value-entry surface. */
 const STOCK_PREP_OPERATE = 'stock-prep:operate'
-/** ADMIN — the workbench-scoped ceiling. Deliberately BELOW platform admin: it opens nothing outside this manifest. */
+/**
+ * ADMIN — the workbench-scoped ceiling. Deliberately BELOW platform admin: it opens nothing outside
+ * this manifest EXCEPT the 安装/体检 page's 「把系统表的英文表头改成中文」 relabel
+ * (POST /api/integration/stock-preparation/managed-tables/relabel-zh), which is gated on this code
+ * directly and manifest-exempt with its reason in the permission-matrix suite (M-07/M-08).
+ *
+ * THAT IS A WRITE SCOPE, stated plainly: a holder may RENAME the customer's managed tables — still-
+ * English columns and sheet names of the main table, the confirmation ledger and configured
+ * sandboxes — to their template Chinese names. Bounded three ways: compare-and-set (only a name that
+ * is still exactly the English template label moves; nothing comes from the request), bound to a
+ * preview (`planDigest`), and DEFAULT OFF behind the operator switch
+ * MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED (exactly 'true'). It provisions nothing and installs
+ * nothing. The RBAC description below says the same, and a migration carries it to existing rows.
+ */
 const STOCK_PREP_ADMIN = 'stock-prep:admin'
 
 const STOCK_PREP_PERMISSION_CODES = Object.freeze([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN])
@@ -65,7 +78,11 @@ const STOCK_PREP_PERMISSION_CODES = Object.freeze([STOCK_PREP_READ, STOCK_PREP_O
 const STOCK_PREP_PERMISSION_DESCRIPTORS = Object.freeze([
   Object.freeze({ code: STOCK_PREP_READ, name: 'Stock Prep Read', description: 'Read the values-free stock-preparation confirmation queue' }),
   Object.freeze({ code: STOCK_PREP_OPERATE, name: 'Stock Prep Operate', description: 'Confirm stock-preparation queue decisions and read back own value entry' }),
-  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no provisioning, no pack install)' }),
+  // The ADMIN description gained the relabel write (客户反馈 2026-09-24 #4a). The seed migration used
+  // ON CONFLICT DO NOTHING, so the new text reaches existing rows through its own compare-and-set
+  // migration (zzzz20260927120000_update_stock_prep_admin_permission_description), which the
+  // permission-matrix suite pins byte-equal to this string.
+  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no provisioning, no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on)' }),
 ])
 
 /**

@@ -402,6 +402,15 @@ export interface MultitableRepairTransactionSurface {
   }): Promise<{ addedFieldIds: string[]; skippedExistingFieldIds: string[] }>
 }
 
+/** The per-entity outcome vocabulary of `relabelObjectDisplayNames` (values-free by construction). */
+export type MultitableRelabelDisplayNameStatus =
+  | 'renamed'
+  | 'would_rename'
+  | 'already_target'
+  | 'skipped_name_changed'
+  | 'skipped_name_taken'
+  | 'missing'
+
 export interface MultitableProvisioningAPI {
   getObjectSheetId(projectId: string, objectId: string): string
   /**
@@ -582,6 +591,45 @@ export interface MultitableProvisioningAPI {
     type: MultitableProvisioningFieldType
     property: Record<string, unknown>
     order: number
+  }>
+  /**
+   * RELABEL an already-provisioned object's DISPLAY NAMES — compare-and-set, one transaction, one
+   * `meta_config_revisions` row per rename (multitable/object-display-name-relabel.ts).
+   *
+   * Renames a field (or the sheet) ONLY while its current name equals `expectedName`; a name a
+   * person already changed is reported `skipped_name_changed` and left alone, and a target another
+   * field on the sheet already carries is `skipped_name_taken` (for the sheet: a sibling sheet in
+   * the same base, or a name in `takenSheetNames`). Nothing but `name` is written: the field id,
+   * type, property, order and permissions are untouched.
+   *
+   * `apply` must be exactly `true` to write; anything else is a dry run that writes nothing and
+   * answers a `planDigest`. The write leg is DEFAULT OFF — it refuses (409
+   * MULTITABLE_RELABEL_APPLY_DISABLED) unless `MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED` is exactly
+   * 'true' — and it REQUIRES `expectedPlanDigest` equal to the plan it recomputes under its own
+   * locks (409 MULTITABLE_RELABEL_PLAN_CHANGED otherwise), so nothing un-previewed is written.
+   *
+   * Scoped like every other write here — project namespace, then object scope — and the host
+   * additionally refuses unless the plugin object registry binds the derived sheet to this very
+   * (project, object). OPTIONAL like `ensureSystemBase`: a plugin newer than its host must degrade.
+   */
+  relabelObjectDisplayNames?(input: {
+    projectId: string
+    objectId: string
+    sheetName?: { expectedName: string; nextName: string } | null
+    fields: Array<{ fieldId: string; expectedName: string; nextName: string }>
+    takenSheetNames?: string[] | null
+    apply?: boolean
+    expectedPlanDigest?: string | null
+    actorId?: string | null
+  }): Promise<{
+    present: boolean
+    applied: boolean
+    sheetId: string
+    sheetName: { status: MultitableRelabelDisplayNameStatus } | null
+    fields: Array<{ fieldId: string; status: MultitableRelabelDisplayNameStatus }>
+    planDigest: string
+    revisionCount: number
+    batchId: string | null
   }>
   // FOS-2b-pre: read-only — returns a field's current property (incl. select options), or null if absent.
   getObjectField(input: {
@@ -1255,6 +1303,24 @@ export interface PluginServices {
     >
   }
   /**
+   * Approval change-request lock v5.9, product entry v2 (RATIFY 追记 2026-09-28) phase A + A2 —
+   * host→plugin port behind plugin-attendance's `GET` / `POST /api/attendance/requests/:id/cancel-round`
+   * and `POST …/cancel-round/actions` / `…/cancel-round/withdraw` (P-1 Q1′ = (i) attendance-side
+   * mounting; P-3 = (iii) round-summary carrier; P-4 summary read; A2 = owner 2026-09-29
+   * 「Attendance-side + OFF flag (Recommended)」). Same posture as `approvalAssigneeResolver` above:
+   * core-backend is the PROVIDER and ONLY plugin-attendance receives it; every other plugin gets
+   * `undefined`, and without it the consumer registers none of the routes (fail-closed). `launch` is
+   * the ONE plugin-reachable path to the dedicated cancel-round creation path (never the public
+   * `createApproval`); `canReadDocument` is lock I7's `canReadApprovalInstance` applied to the
+   * ORIGINAL document instance; `decide` / `withdraw` hand approve / reject / revoke on the round's
+   * own instance to `ApprovalProductService.dispatchAction`, unchanged; `listSeatedPendingRounds`
+   * (C2, owner 2026-09-29 16:5x 「Attendance-side list (Recommended)」, behind plugin-attendance's
+   * `GET /api/attendance/cancel-rounds/pending`) answers the pending rounds the viewer could decide
+   * now, by the decision door's own seat predicate. Implementation:
+   * `approvals/approval-cancel-round-entry-port.ts`.
+   */
+  approvalCancelRoundEntry?: import('../approvals/approval-cancel-round-entry-port').ApprovalCancelRoundEntryPort
+  /**
    * 备料按部门列写权限 — host→plugin, narrow, least-privilege WRITE-SCOPE port over the platform's
    * real per-column permission table (`field_permissions`), the ONE table the grid's write gate
    * actually reads (`loadFieldPermissionScopeMap` → `deriveFieldPermissions` →
@@ -1562,6 +1628,32 @@ export interface PluginServices {
     createRequestOperationBoundary(config: {
       adapters: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationAdaptersV1
     }): import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1
+    /**
+     * Approval-change-request lock §3 C-1 — bind the boundary built by `createRequestOperationBoundary`
+     * as the process-wide 完整业务取消 provider, so the approval side's cancel-round redemption can
+     * reach it through `attendance-cancellation-execution-port` without a compile-time dependency on
+     * this plugin. Registers the WHOLE boundary (lock §3 C-1 「复用同一套 W4 操作协议 … 仅移交连接与
+     * 事务生命周期的所有权」 — never a narrower cancel-only entry). Unbound ⇒ the approval side FAILS
+     * CLOSED (the round stays `pending`), unlike `workdayCalendar`, which fails open.
+     */
+    registerCancelRoundExecutionBoundary(
+      boundary: import('../attendance/w4c3b-request-operation-boundary').AttendanceRequestOperationBoundaryV1,
+    ): void
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+     * delivery. Separate from `registerCancelRoundExecutionBoundary` because it is NOT part of the
+     * W4 transaction protocol: it runs after the approval side's COMMIT, owns no connection and no
+     * transaction, and writes nothing. The bound function is the SAME one the plugin's HTTP cancel
+     * route calls, so the emit gate (`legacy` / `legacy_compat` only) and the payload shape exist
+     * once; the approval side hands over the W4 result verbatim and decides nothing.
+     *
+     * Unbound ⇒ the approval side logs a warning and proceeds (fail OPEN), the opposite of the
+     * execution boundary: by the time this is reached the business cancellation is already
+     * committed, so a throw could not undo it and would only turn a success into a 500.
+     */
+    registerCancelRoundCancelledEventDelivery(
+      deliver: import('../core/attendance-cancellation-execution-port').CancelRoundCancelledEventDeliveryV1,
+    ): void
     /** W4C-3c: manual_edit / recompute / ops_retirement boundary; adapters captured once. */
     createRecordOperationBoundary(config: {
       adapters: import('../attendance/w4c3c-record-operation-boundary').AttendanceRecordOperationAdaptersV1

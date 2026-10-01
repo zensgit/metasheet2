@@ -29,9 +29,16 @@
  * UPDATE here (proven by the total absence of any RETURNING/rowCount check before this slice) was SILENT
  * SUCCESS — the automation-lane contract (slice ③), NOT the plugin-lane throw contract (slice ②).
  * Regressing that into a thrown error would be an unrelated behavior change outside this slice's mandate.
- * So the guard below fails closed on the REVISION ONLY: a 0-row UPDATE still reports success (unchanged),
- * but writes NO spurious revision for a record it never touched. Proven below with a GENUINE
- * two-connection Postgres lock race (never a sleep heuristic).
+ * So the guard fails closed on the REVISION: a 0-row UPDATE still reports success (unchanged), but writes
+ * NO spurious revision for a record it never touched. Proven below with a GENUINE two-connection Postgres
+ * lock race (never a sleep heuristic).
+ *
+ * 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3, 裁定 PR #6074 A1): the same 0-row UPDATE also PUBLISHES nothing —
+ * no `multitable.record.updated` on either delivery leg (legacy bus emit with the durable flag OFF, outbox
+ * row with it ON). Before, the race still announced a fresh depth+1 event for a record nobody wrote — the
+ * approval-lane twin of the executor's ghost `record.deleted` self-chain. The race golden below now counts
+ * BOTH legs for the raced record and expects 0; G1 counts the same way and expects exactly 1, so the
+ * counter is proven to see a real publication.
  *
  * OD-3 NULL-ACTOR SCOPE NOTE (stated honestly, not glossed over): `ApprovalProductService` builds exactly
  * ONE completion event with `actor: null` in the entire file (`ApprovalProductService.ts:3974`) — the
@@ -110,6 +117,22 @@ const FLD_XB_STATUS = `fld_d1c4_xbstatus_${TS}`
 const FLD_XB_APPROVER = `fld_d1c4_xbapprover_${TS}`
 
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
+
+/**
+ * 客户反馈 2026-09-24 #3: publications of `multitable.record.updated` for ONE record across BOTH delivery legs —
+ * legacy bus emits seen by `emitSpy` (durable flag OFF) plus `meta_automation_outbox` rows (flag ON). Whatever
+ * the job's flag, a real writeback counts exactly 1 and a 0-row writeback must count 0.
+ */
+async function recordUpdatedPublications(emitSpy: { mock: { calls: unknown[][] } }, recordId: string): Promise<number> {
+  const legacy = emitSpy.mock.calls.filter(
+    (call) => call[0] === 'multitable.record.updated' && (call[1] as { recordId?: unknown } | undefined)?.recordId === recordId,
+  ).length
+  const outbox = await q(
+    `SELECT COUNT(*)::int AS n FROM meta_automation_outbox WHERE event_type = $1 AND payload->>'recordId' = $2`,
+    ['multitable.record.updated', recordId],
+  )
+  return legacy + Number((outbox.rows[0] as { n: number }).n)
+}
 
 const executionIds: string[] = []
 const ruleIds: string[] = []
@@ -458,11 +481,19 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
     expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
-  test('G1: approved same-base resultWriteback writes a revision: action=update source=approval actorId=<approver>, FULL merged snapshot (G4 merge-trap)', async () => {
+  test('G1: approved same-base resultWriteback writes a revision: action=update source=approval actorId=<approver>, FULL merged snapshot (G4 merge-trap); publishes exactly ONE record.updated', async () => {
     const svc = realService()
+    const emitSpy = vi.spyOn(eventBus, 'emit')
     try {
       const RW = { statusField: FLD_STATUS, approverField: FLD_APPROVER, completedAtField: FLD_COMPLETED }
-      await executeAndApprove(svc, SHEET, RECORD, `d1c4-g1-${TS}`, RW, 'Q4 plan')
+      const { executionId } = await executeAndApprove(svc, SHEET, RECORD, `d1c4-g1-${TS}`, RW, 'Q4 plan')
+
+      // 客户反馈 2026-09-24 #3 positive control for the race golden's zero: a REAL 1-row writeback publishes
+      // exactly one `multitable.record.updated` (on whichever delivery leg this job's flag selects).
+      expect(await recordUpdatedPublications(emitSpy, RECORD)).toBe(1)
+      // …and (final review F3 control) a writeback that DID land carries no skip marker.
+      const g1StartStep = (await svc.logs.getById(executionId))!.steps.find((s) => s.actionType === 'start_approval')
+      expect(g1StartStep?.output).not.toHaveProperty('backwriteSkipped')
 
       const row = await recordRow(RECORD)
       expect(row?.version).toBe(2)
@@ -486,6 +517,7 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
       expect(updateRev.snapshot?.[FLD_APPROVER]).toBe(APPROVER)
       expect(typeof updateRev.snapshot?.[FLD_COMPLETED]).toBe('string')
     } finally {
+      emitSpy.mockRestore()
       svc.shutdown()
     }
   })
@@ -566,8 +598,9 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
   // uncommitted DELETE. Only once `waitUntilBlockedOnRecordLock` deterministically confirms B is genuinely
   // parked behind A's lock does A COMMIT. B's UPDATE then resumes under READ COMMITTED semantics,
   // discovers the row was concurrently deleted, and affects ZERO rows.
-  test('CONCURRENT-DELETE golden: a DELETE that commits WHILE the writeback UPDATE is blocked on the row lock produces a zero-row UPDATE — resume still reports SUCCESS (pre-existing leniency preserved) and writes NO spurious revision', async () => {
+  test('CONCURRENT-DELETE golden: a DELETE that commits WHILE the writeback UPDATE is blocked on the row lock produces a zero-row UPDATE — resume still reports SUCCESS (pre-existing leniency preserved), writes NO spurious revision and publishes NO record.updated', async () => {
     const svc = realService()
+    const emitSpy = vi.spyOn(eventBus, 'emit')
     try {
       const RW = { statusField: FLD_RACE_STATUS }
       const templateId = await createPublishedTemplate(`d1c4-race-${TS}`)
@@ -620,7 +653,12 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
         holder.release()
       }
 
-      await waitForExecutionStatus(svc, execution.id, 'success')
+      const finished = await waitForExecutionStatus(svc, execution.id, 'success')
+
+      // Final review F3: the zero-row writeback is no longer SILENT — the start_approval step carries the
+      // values-free marker (the fixed reason code only), exactly as the unit W6 pins on the mock seam.
+      const raceStartStep = finished.steps.find((s) => s.actionType === 'start_approval')
+      expect(raceStartStep?.output).toMatchObject({ backwriteSkipped: 'target_record_missing' })
 
       // THE discriminating assertion: exactly the original fixture create revision — no spurious `update`.
       const revs = await revisionsOf(RECORD_RACE)
@@ -629,7 +667,12 @@ describeIfDatabase('D-1c slice ④ — approval resultWriteback writes approval 
 
       // Genuine concurrent DELETE — no live row left to compare against.
       expect(await recordRow(RECORD_RACE)).toBeUndefined()
+
+      // 客户反馈 2026-09-24 #3 (PR #6074 A1) 0-ROW EMIT GUARD: a record nobody wrote is announced to nobody —
+      // no `multitable.record.updated` on EITHER delivery leg (G1 above proves this counter sees a real one).
+      expect(await recordUpdatedPublications(emitSpy, RECORD_RACE)).toBe(0)
     } finally {
+      emitSpy.mockRestore()
       svc.shutdown()
     }
   }, 15000)

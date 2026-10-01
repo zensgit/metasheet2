@@ -147,6 +147,8 @@ JSON 化后塞进 `= $n`，静默匹配不到任何行（即静默假绿）。�
 
 ## 5. 残余
 
+- **（2026-09-25 后续）计数与 DELETE 之间无事务/行锁，并发 bind/delete 未封**——owner 复审登记（`autonomous-run-20260921-outcome.md` 第 6 节「Q2/#5923（订正）」）。已由锁协议收口：删除方同一事务内先 `FOR UPDATE` 再计数再删除，079/062/pipelines 写入方在各自写事务内先 `FOR KEY SHARE`；073 写入方（冻结 S6-A 模块 + provisioning 角色无权限）登记为 owner 决定的残余。见 `docs/development/external-system-delete-bind-lock-protocol-design-20260925.md`。
+
 - **存量悬空行**：本 PR 之前删掉的外部系统留下的 079/062/073 行仍在，仍只在读时 fail-closed。盘点/清理需要
   连真实库，属 owner 侧动作。
 - **一阶之外的第二跳**：外部系统被正确挡住后，`data_sources` 侧的覆盖不变（见上一份设计的第 7 节）。

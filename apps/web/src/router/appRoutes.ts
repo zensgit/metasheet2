@@ -369,6 +369,16 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Approvals', titleZh: '审批中心', requiresAuth: true, permissions: ['approvals:read'] }
   },
   {
+    // B-2 (todo-center-design-lock v2.14 §4) — the cross-source aggregation page. Gated exactly
+    // like `GET /api/todo/items`/`GET /api/todo/count` (`rbacGuard('approvals','read')`, see
+    // `routes/todo.ts`'s docblock on why that is coextensive with today's ONE registered source
+    // and must widen alongside the backend gate once a second source is registered).
+    path: '/todo',
+    name: 'todo-center',
+    component: () => import('../todo/views/TodoCenterView.vue'),
+    meta: { title: 'Todo Center', titleZh: '待办中心', requiresAuth: true, permissions: ['approvals:read'] }
+  },
+  {
     path: '/approvals/new/:templateId',
     name: 'approval-create',
     component: () => import('../views/approval/ApprovalNewView.vue'),
@@ -478,6 +488,21 @@ export const appRoutes: RouteRecordRaw[] = [
     name: 'elearning-manual-grading',
     component: () => import('../views/ElearningManualGradingView.vue'),
     meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
+  },
+  // Task feature line M2 skeleton (design lock §5.2): both routes are gated on tasks:read only —
+  // deliberately NO requiredFeature. §13-38 缺省乙 renders "not enabled / unsupported" off a plain
+  // 404 from GET /api/tasks/context instead of a second flag-driven route gate.
+  {
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+  },
+  {
+    path: '/tasks/:id',
+    name: 'task-detail',
+    component: () => import('../views/tasks/TasksView.vue'),
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
   },
   {
     path: '/:pathMatch(.*)*',

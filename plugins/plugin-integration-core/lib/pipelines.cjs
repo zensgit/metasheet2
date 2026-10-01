@@ -9,6 +9,8 @@
 
 const crypto = require('node:crypto')
 
+const { pinLockProtocolIsolation } = require('./external-system-pointer-lock.cjs')
+
 const PIPELINES_TABLE = 'integration_pipelines'
 const FIELD_MAPPINGS_TABLE = 'integration_field_mappings'
 const EXTERNAL_SYSTEMS_TABLE = 'integration_external_systems'
@@ -35,6 +37,11 @@ const RUNNING_RUN_UNIQUE_INDEX = 'uniq_integration_runs_one_running_per_pipeline
 // request materialize the whole view page for a pathological run.
 const PROVENANCE_BY_RUN_LIMIT_DEFAULT = 200
 const PROVENANCE_BY_RUN_LIMIT_MAX = 1000
+// f-prov200: the by-run page cursor is the `eventIndex` of the last event the previous page
+// returned, as a decimal string. event_index is the view's WITH ORDINALITY over ONE run's
+// provenance_events array, so within (tenant, workspace, run) it is unique and strictly
+// increasing — a keyset on it cannot skip or repeat an event the way an offset past a cap can.
+const PROVENANCE_BY_RUN_CURSOR_PATTERN = /^[0-9]{1,15}$/
 
 class PipelineValidationError extends Error {
   constructor(message, details = {}) {
@@ -384,6 +391,20 @@ function normalizeProvenanceRunLimit(value) {
   return Math.min(value, PROVENANCE_BY_RUN_LIMIT_MAX)
 }
 
+// f-prov200: absent/empty cursor = first page (null). Anything else must be a non-negative
+// integer — as the decimal string the previous page handed out, or a safe integer from an
+// in-process caller. Unlike the limit, a junk cursor is REJECTED rather than ignored: silently
+// restarting from the first page would hand a "load more" caller events it already has.
+function normalizeProvenanceRunCursor(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  if (typeof value === 'string' && PROVENANCE_BY_RUN_CURSOR_PATTERN.test(value)) {
+    const parsed = Number(value)
+    if (Number.isSafeInteger(parsed)) return parsed
+  }
+  throw new PipelineValidationError('cursor must be a non-negative integer string', { field: 'cursor' })
+}
+
 function compareProvenanceEntries(a, b) {
   const am = Date.parse(a.runCreatedAt)
   const bm = Date.parse(b.runCreatedAt)
@@ -450,8 +471,26 @@ async function conflictFromRunningRun(db, normalized, details = {}) {
   })
 }
 
+// The endpoint check is also the WRITER'S HALF of the external-system delete lock protocol
+// (`external-system-pointer-lock.cjs`): the row is read `FOR KEY SHARE` on the caller's transaction
+// handle, so a concurrent `deleteExternalSystem` (which holds FOR UPDATE for its whole
+// count-then-delete) makes this read WAIT; when it resumes the row is gone and the pipeline write
+// refuses as the SAME values-free PipelineValidationError it always raised for a missing endpoint —
+// instead of reaching the INSERT and dying on 057's foreign key as a bare 23503. Conversely a delete
+// that arrives while this KEY SHARE is held waits for this transaction to commit, then counts the
+// pipeline and refuses 409. Only meaningful because `upsertPipeline` and `instantiateTemplate` run
+// this INSIDE `db.transaction`; a helper that cannot lock is refused rather than degraded to the
+// unprotected `selectOne` this replaces. LOCK ORDER: source system, target system, pipeline row,
+// field mappings — KEY SHARE is compatible with KEY SHARE, so two pipeline writers naming the same
+// two systems in opposite orders cannot deadlock. ISOLATION: this check cannot pin the level itself —
+// `SET TRANSACTION` must be a transaction's FIRST statement and `instantiateTemplate` reads its
+// name clash before calling `writePipelineRow` — so BOTH transaction openers pin READ COMMITTED as
+// their first statement (`upsertPipeline` below, `integration-templates.cjs` instantiateTemplate).
 async function requireExternalSystem(db, normalized, systemId, expectedRoles, field) {
-  const row = await db.selectOne(EXTERNAL_SYSTEMS_TABLE, {
+  if (!db || typeof db.selectOneForKeyShare !== 'function') {
+    throw new Error('pipelines: transaction handle with selectOneForKeyShare is required to write a pipeline (external-system delete lock protocol)')
+  }
+  const row = await db.selectOneForKeyShare(EXTERNAL_SYSTEMS_TABLE, {
     ...scopeWhere(normalized),
     id: systemId,
   })
@@ -574,15 +613,21 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   async function upsertPipeline(input) {
     const normalized = normalizePipelineInput(input)
 
-    const write = (scopedDb) => writePipelineRow(scopedDb, normalized, idGenerator)
-
-    if (normalized.fieldMappings !== undefined) {
-      if (typeof db.transaction !== 'function') {
-        throw new Error('createPipelineRegistry: db.transaction is required when fieldMappings are provided')
-      }
-      return db.transaction(write)
+    // READ COMMITTED is pinned as the transaction's FIRST statement (the lock protocol's isolation
+    // premise, enforced — see `external-system-pointer-lock.cjs`), then the KEY SHARE endpoint checks.
+    const write = async (scopedDb) => {
+      await pinLockProtocolIsolation(scopedDb)
+      return writePipelineRow(scopedDb, normalized, idGenerator)
     }
-    return write(db)
+
+    // ALWAYS one transaction, not only when field mappings ride along: the endpoint check inside
+    // `writePipelineRow` takes KEY SHARE on both external systems, and a lock taken in autocommit is
+    // released at statement end — which would leave the INSERT/UPDATE one statement later exactly as
+    // unprotected as before. A helper without `transaction` is refused rather than written around.
+    if (typeof db.transaction !== 'function') {
+      throw new Error('createPipelineRegistry: db.transaction is required to write a pipeline (external-system delete lock protocol)')
+    }
+    return db.transaction(write)
   }
 
   async function getPipeline(input) {
@@ -797,21 +842,48 @@ function createPipelineRegistry({ db, idGenerator = crypto.randomUUID } = {}) {
   // ORDINALITY over the persisted provenance_events array), so no secondary run-time sort is
   // needed here. attrs were redacted at write (DF-N2-2b scrub gate); this path does NOT
   // re-redact, exactly like listProvenanceByRow.
+  //
+  // f-prov200: returns a PAGE, never a bare array, so a caller cannot mistake the first
+  // PROVENANCE_BY_RUN_LIMIT_DEFAULT events for the whole timeline:
+  //   items      — at most `limit` events with eventIndex > cursor, eventIndex ASC
+  //   total      — every event this run has in the caller's (tenant, workspace) scope,
+  //                counted with the SAME three-key WHERE and independent of cursor/limit
+  //   truncated  — true iff at least one more event exists after the last returned item
+  //                (decided by a one-row look-ahead, not inferred from total)
+  //   nextCursor — the last returned item's eventIndex as a string when truncated, else null
   async function listProvenanceByRun(input = {}) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input.workspaceId)
     const runId = requiredString(input.runId, 'runId')
+    const afterEventIndex = normalizeProvenanceRunCursor(input.cursor)
+    const pageLimit = normalizeProvenanceRunLimit(input.limit)
     const where = { ...scopeWhere({ tenantId, workspaceId }), run_id: runId }
     const rows = unwrapRows(await db.select(PROVENANCE_VIEW, {
       where,
+      ...(afterEventIndex !== null && { range: { event_index: { gte: afterEventIndex + 1 } } }),
       orderBy: ['event_index', 'ASC'],
-      limit: normalizeProvenanceRunLimit(input.limit),
+      // One row past the page: the only way to know, from this read alone, that the page is not
+      // the end of the timeline.
+      limit: pageLimit + 1,
     }))
     const entries = rows.map(rowToProvenanceEntry)
     // Defensive in-app re-sort: the DB ORDER BY above is the contract, but a host db layer that
     // ignores `orderBy` must not be able to hand the operator a shuffled timeline.
     entries.sort((a, b) => (a.eventIndex || 0) - (b.eventIndex || 0))
-    return entries
+    const truncated = entries.length > pageLimit
+    const items = truncated ? entries.slice(0, pageLimit) : entries
+    const total = Number(await db.countRows(PROVENANCE_VIEW, where))
+    // A count the db layer could not produce is a server fault, not "0 events": reporting a
+    // made-up total would be the very understatement this envelope exists to prevent.
+    if (!Number.isSafeInteger(total) || total < 0) {
+      throw new Error('provenance count unavailable')
+    }
+    return {
+      items,
+      total,
+      truncated,
+      nextCursor: truncated ? String(items[items.length - 1].eventIndex) : null,
+    }
   }
 
   // Marks 'running' runs that started more than `olderThanMs` milliseconds ago as 'failed'.
@@ -885,6 +957,7 @@ module.exports = {
     PROVENANCE_BY_RUN_LIMIT_DEFAULT,
     PROVENANCE_BY_RUN_LIMIT_MAX,
     normalizeProvenanceRunLimit,
+    normalizeProvenanceRunCursor,
     rowToProvenanceEntry,
     VALID_MODES,
     VALID_RUN_MODES,

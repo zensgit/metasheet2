@@ -221,13 +221,18 @@ describe('App guest bootstrap', () => {
     expect(mocks.clearStoredAuthState).toHaveBeenCalledTimes(1)
     expect(fetchLog.filter((call) => call.url.includes('/api/auth/logout')).map((call) => call.authToken))
       .toEqual([null])
-    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added exactly one —
-    // the DB-backed approval-administrator capability read, issued once per page load and only for
+    // EXHAUSTIVE: every other request this shell issues, named. P1b round 2 added one — the
+    // DB-backed approval-administrator capability read, issued once per page load and only for
     // a principal the token gate already admits (`user_roles: ["admin"]` here), because the
     // 批量转交 nav entry must not be shown off a predicate the approval list scope does not use.
+    // B-2 (todo-center-design-lock v2.14 §4) added `GET /api/todo/count`: `ApprovalTodoBadge`
+    // reads the todo-center aggregate on mount (`todo/api.ts` has no dev/test mock, so it fires
+    // for real here). Task-feature M2 added `GET /api/tasks/pending-count` from the tasks nav
+    // badge (`tasksApi` has no `USE_MOCK` either). Order follows App.vue's template: the approvals
+    // span, then the tasks span, then the admin-only 批量转交 entry.
     // A stray request added later still reddens this line.
     expect(fetchLog.map((call) => new URL(call.url).pathname))
-      .toEqual(['/api/approvals/admin/capability', '/api/auth/logout'])
+      .toEqual(['/api/todo/count', '/api/tasks/pending-count', '/api/approvals/admin/capability', '/api/auth/logout'])
     for (const key of [
       'auth_token',
       'jwt',

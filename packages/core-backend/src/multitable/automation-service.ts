@@ -60,13 +60,20 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromRows,
+  type FieldSchemaSnapshot,
+  type FieldSchemaSnapshotEntry,
+} from './field-schema-fence-recheck'
+import {
+  AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
   validateConditionGroupAgainstFields,
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
+import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, TARGET_RECORD_MISSING_SKIP_REASON, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode, type CrossBaseWriteTarget } from './automation-executor'
 // F9c: the save-time recipient gate resolves the SAME roster as the execution path and the button
 // route (one resolver, zero drift) — see assertNotificationRecipientsAtSave.
 import { loadSheetMemberUserIdSet } from './permission-service'
@@ -94,6 +101,7 @@ import {
   automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
+  isTargetRecordMissingSkippedExecution,
   isWithinAutomationRetryWindow,
   realFireTestRunEligibility,
   retryLedgerFamiliesForActions,
@@ -140,6 +148,19 @@ export type AutomationRuleValidationCode =
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
+  | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+  // 客户反馈 2026-09-24 #4b: a condition VALUE that does not fit its field's type (automation-conditions.ts).
+  | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
+ * update/delete/lock of the trigger record". Under a `record.deleted` trigger the trigger record no longer
+ * exists, so such an action can only ever be a 0-row no-op (and, before the executor fix, a self-chaining
+ * ghost event: one user delete ⇒ three execution logs). Stable code for clients; ONE fixed, values-free
+ * Chinese message (the editor shows the same sentence as its inline hint).
+ */
+export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
+export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -703,9 +724,12 @@ function declaredApprovalResultWriteback(
 }
 
 // Discriminated result of a backwrite: same-base returns the `patch` (merged into the resume tail context);
-// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3).
+// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3); same-base-missing
+// (客户反馈 2026-09-24 #3 final review F3) = a CONFIGURED same-base writeback found its record gone (lock-check
+// SELECT saw no row, or the UPDATE affected 0 rows) and wrote nothing — surfaced as a values-free marker.
 type ApprovalBackwriteOutcome =
   | { kind: 'same-base'; patch: Record<string, unknown> }
+  | { kind: 'same-base-missing' }
   | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
 
 // The backwrite patch: DECLARED fixed field→value mapping. approver = the approval actor and completedAt =
@@ -822,6 +846,99 @@ function validateCrossBaseWriteActionConfigs(
   for (const [index, action] of (actions ?? []).entries()) {
     const error = validateCrossBaseWriteConfig(action.config, action.type, `actions[${index}].config`)
     if (error) return error
+  }
+  return null
+}
+
+const RECORD_DELETED_TRIGGER = 'record.deleted'
+
+/**
+ * The record-mutating actions whose SAME-BASE form addresses the TRIGGER record (automation-executor.ts:
+ * `effectiveRecordId = context.recordId` unless the cross-base gate fires). `update_field` is the v0 alias
+ * of `update_record` (normalizeLegacyActionPair) and is listed so a raw legacy payload cannot slip past.
+ */
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES = new Set<string>(['update_record', 'delete_record', 'lock_record', 'update_field'])
+
+/**
+ * Does this action STRUCTURALLY resolve to the TRIGGER record at run time? Mirrors the executor's
+ * addressing: without a COMPLETE explicit triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) the
+ * write falls back to `context.recordId`. (An INCOMPLETE triple is refused earlier by
+ * validateCrossBaseWriteConfig with its own, more specific message.) A complete triple is only NECESSARY for
+ * retargeting, not sufficient: if the gate resolves it as same-base the executor still writes the trigger
+ * record — that half needs the database and lives in validateDeletedTriggerSelfMutationTargets.
+ */
+function actionTargetsTriggerRecord(actionType: string, config: Record<string, unknown> | null | undefined): boolean {
+  if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(actionType)) return false
+  const text = (key: string): string => (typeof config?.[key] === 'string' ? (config[key] as string).trim() : '')
+  return !(text('targetBaseId') && text('targetSheetId') && text('targetRecordId'))
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
+ * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
+ * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
+ * Deliberately NOT applied to an on/off switch (disable-only, and enable-only since #6155), a name-only or
+ * conditions-only edit, or to deleteRule: an operator must always be able to turn such a rule off and back
+ * on (setRuleEnabled routes through updateRule) — see the updateRule gate for the exact input shapes that
+ * run this check.
+ */
+export function validateDeletedTriggerSelfMutation(
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+): string | null {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  if (actionTargetsTriggerRecord(actionType, actionConfig)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  for (const action of nestedActions ?? []) {
+    if (actionTargetsTriggerRecord(action.type, action.config)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  }
+  return null
+}
+
+/**
+ * The addressing verdict of the executor's cross-base write gate, injected so this module never re-derives
+ * it: `AutomationExecutor.resolveCrossBaseWriteTarget` bound to the service's `queryFn`.
+ */
+export type CrossBaseWriteTargetResolver = (
+  triggerSheetId: string,
+  targetSheetId: string,
+  declaredTargetBaseId: string | undefined,
+) => Promise<CrossBaseWriteTarget>
+
+/**
+ * 客户反馈 2026-09-24 #3, final review F4 — the half of the save gate that needs the database. A COMPLETE
+ * triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) passes the structural check in
+ * {@link validateDeletedTriggerSelfMutation}, but at run time the executor only retargets when its
+ * cross-base gate says `crossBase`. When the target sheet resolves to the rule's OWN base (for example
+ * `targetBaseId` equal to the rule sheet's base), the gate answers same-base and update / delete / lock
+ * address `context.recordId`: the deleted trigger record again. So each complete triple on a
+ * trigger-record-mutating action is resolved with the gate's own addressing verdict (`resolveTarget`,
+ * never a local copy) against the rule's sheet, with the SAME raw inputs the executor passes
+ * (`config.targetSheetId`, `config.targetBaseId` if a string). A same-base verdict is refused with the same
+ * message. A cross-base or unresolvable verdict is left alone: at run time it either retargets or fails
+ * closed, and neither touches the trigger record. Top level and nested, like the structural check.
+ */
+export async function validateDeletedTriggerSelfMutationTargets(
+  ruleSheetId: string,
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+  resolveTarget: CrossBaseWriteTargetResolver,
+): Promise<string | null> {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  const candidates: Array<{ type: string; config: Record<string, unknown> | null | undefined }> = [
+    { type: actionType, config: actionConfig },
+    ...(nestedActions ?? []).map((action) => ({ type: action.type, config: action.config })),
+  ]
+  for (const { type, config } of candidates) {
+    // Only the shape the structural check lets through: a mutating action WITH a complete triple.
+    if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type) || actionTargetsTriggerRecord(type, config)) continue
+    const targetSheetId = config?.targetSheetId as string
+    const declaredTargetBaseId = typeof config?.targetBaseId === 'string' ? config.targetBaseId : undefined
+    const target = await resolveTarget(ruleSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
   }
   return null
 }
@@ -1287,6 +1404,16 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      // 客户反馈 2026-09-24 #4b — the sheet's field types for TYPED condition evaluation (same read as the
+      // save-time preflight). The executor caches one read per execution and degrades to the untyped
+      // legacy evaluation (with a values-free warning) if this read fails — it never fails a run.
+      loadConditionFields: async (sheetId) => {
+        const fieldRes = await queryFn(
+          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+          [sheetId],
+        )
+        return serializeAutomationConditionFieldRows(fieldRes.rows)
+      },
       transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
         const txQuery: AutomationQueryFn = async (sqlText, params) => {
           const result = await query(sqlText, params)
@@ -1483,6 +1610,28 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // 客户反馈 2026-09-24 #3: a record.deleted rule cannot update/delete/lock its own (already gone) trigger record.
+    const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+    )
+    if (deletedTriggerSelfMutationError) {
+      throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
+    // Final review F4: a complete triple the executor's gate resolves as SAME-base still writes the trigger record.
+    const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+      sheetId,
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+      this.crossBaseWriteTargetResolver(),
+    )
+    if (deletedTriggerSameBaseTargetError) {
+      throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -1927,6 +2076,68 @@ export class AutomationService {
       )
     }
 
+    // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
+    // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
+    // type/config/list, execution mode. Deliberately NOT gated like the T1-2/T1-3 blocks above (every write
+    // shape): a rename, a conditions-only or a triggerConfig-only edit, and a pure on/off switch of an EXISTING
+    // such rule must still succeed — `setRuleEnabled` routes through this method.
+    // #6155 (Ratified-by-default-2026-09-29, reverses one sentence of #6078): an enable-only PATCH
+    // (`{ enabled: true }` with none of the five shape fields) is NOT checked either. Switching a rule off and
+    // on again must bring back the state it had; the shape does not change; a rule of this shape that is on
+    // already runs and the self-targeting action changes no table record (#6078: a delete_record step ends as
+    // skipped, an update_record / lock_record step as success). `enabled: true` sent TOGETHER with a
+    // shape field is still checked — the shape field alone opens this gate. Existing rules stay loadable and
+    // switchable; they cannot be saved forward with this shape.
+    if (
+      input.triggerType !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+    ) {
+      // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
+      // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForDeletedTrigger
+      if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
+      const nextPair = normalizeLegacyActionPair(
+        input.actionType ?? existingForDeletedTrigger.action_type,
+        (input.actionConfig ?? existingForDeletedTrigger.action_config ?? null) as Record<string, unknown> | null,
+      )
+      const nextActions = input.actions !== undefined ? input.actions : existingForDeletedTrigger.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForDeletedTrigger.execution_mode ?? null
+      const nestedForDeletedTrigger = collectNestedAutomationActions(
+        nextPair.actionType,
+        (nextPair.actionConfig ?? {}) as Record<string, unknown>,
+        nextActions,
+        nextExecutionMode,
+      )
+      const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+      )
+      if (deletedTriggerSelfMutationError) {
+        throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+      // Final review F4 (same gate condition as above, so on/off switches / rename / conditions-only edits still skip it).
+      const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+        sheetId,
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+        this.crossBaseWriteTargetResolver(),
+      )
+      if (deletedTriggerSameBaseTargetError) {
+        throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+    }
+
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
     updates.updated_at = new Date().toISOString()
@@ -1969,7 +2180,8 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule through the same resulting-shape validation as every other edit.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit — except the
+   * record-deleted self-mutation shape check, which a pure on/off switch does not run (#6155).
    */
   async setRuleEnabled(
     ruleId: string,
@@ -3263,6 +3475,17 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
+    // 客户反馈 2026-09-24 #3 final review F2: every step skipped because the trigger record is gone — a retry
+    // replays the same trigger against the same record id and can only skip again. Decided from the stored row
+    // alone, like the three refusals above: before the sweep kick, the rule read and the one-shot first-retry
+    // marker, and nothing is recorded.
+    if (isTargetRecordMissingSkippedExecution(original)) {
+      return {
+        status: 409,
+        code: 'TARGET_RECORD_MISSING_NOT_RETRYABLE',
+        message: 'Every step of this execution was skipped because its trigger record no longer exists; a retry cannot change that',
+      }
+    }
     this.kickAutomationRetryLedgerSweepIfDue(Date.now())
     const lineage = await this.collectExecutionLineage(original)
     const lineageIds = lineage.map((execution) => execution.id)
@@ -3730,6 +3953,18 @@ export class AutomationService {
     try {
       const outcome = await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
       if (!outcome) return null
+      if (outcome.kind === 'same-base-missing') {
+        // 客户反馈 2026-09-24 #3 final review F3: the same-base twin of the cross-base `backwriteSkipped` below.
+        // A configured writeback whose record vanished used to return null with NO trace on the step, so the run
+        // history could not tell "not configured" from "configured, record gone, nothing written". VALUES-FREE:
+        // the marker is the fixed reason code (never an id, a field value or an error string). The step status is
+        // unchanged (same-base leniency) and nothing is merged into the tail's recordData.
+        result.output = {
+          ...(isRecord(result.output) ? result.output : {}),
+          backwriteSkipped: TARGET_RECORD_MISSING_SKIP_REASON,
+        }
+        return null
+      }
       if (outcome.kind === 'cross-base') {
         // Q3 audit: extend the start_approval step output with the target triple. §3.3: the cross-base
         // patch is NOT merged into the resume `recordData` the tail actions see (unlike the same-base
@@ -3946,14 +4181,16 @@ export class AutomationService {
     }
 
     // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
-    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
     // W7-1a parity: the shared tail lock-checks the SOURCE record (actor = the approval actor), writes the
     // patch, and emits the chaining event + realtime fan-out (actor passed through) so UI / subscribers /
     // downstream record.updated automations see the backwrite live. onMissing: 'skip' — a gone record
-    // returns null (the resume's own missing-record path already handled it), NOT an error.
+    // is NOT an error (the resume's own missing-record path already handled it); it comes back as
+    // `same-base-missing` so the step output carries a values-free marker (final review F3).
     const actorId = event.actor?.id ?? null
     const wrote = await this.applyResultWritebackPatch(bridge.sheetId, bridge.recordId, patch, {
       lockActorId: actorId,
@@ -3962,8 +4199,11 @@ export class AutomationService {
       automationDepth: this.backwriteAutomationDepth(bridge),
       lockedMessage: 'source record is locked',
       onMissing: 'skip',
+      schemaSnapshot,
     })
-    if (!wrote) return null
+    // Final review F3: `false` here only ever means "the record is gone" (SELECT saw no row, or the UPDATE
+    // affected 0 rows) — say so instead of the silent null that "no writeback configured" also returns.
+    if (!wrote) return { kind: 'same-base-missing' }
     return { kind: 'same-base', patch }
   }
 
@@ -4013,7 +4253,8 @@ export class AutomationService {
     if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
-    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -4029,6 +4270,7 @@ export class AutomationService {
       lockedMessage: 'target record is locked',
       onMissing: 'throw',
       missingMessage: `cross-base resultWriteback target record not found: ${targetRecordId} ∉ ${targetSheetId}`,
+      schemaSnapshot,
     })
     if (!wrote) return null // unreachable with onMissing:'throw'; keeps the boolean contract total
     return { kind: 'cross-base', target: { targetBaseId, targetSheetId, targetRecordId } }
@@ -4038,6 +4280,13 @@ export class AutomationService {
   // backwrite-driven cascade can't run away.
   private backwriteAutomationDepth(bridge: AutomationApprovalBridgeRow): number {
     return (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
+  }
+
+  // Rule-save F4: the executor's OWN cross-base addressing verdict, on the same `queryFn` the executor's gate
+  // uses at run time (the constructor wires `deps.queryFn = queryFn`). Read-only; takes no quota slot.
+  private crossBaseWriteTargetResolver(): CrossBaseWriteTargetResolver {
+    return (triggerSheetId, targetSheetId, declaredTargetBaseId) =>
+      this.executor.resolveCrossBaseWriteTarget(this.queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
   }
 
   /**
@@ -4095,13 +4344,22 @@ export class AutomationService {
    * longer exists" guard on the SOURCE record proves the authors already expect mid-flight deletes here).
    * The PRE-EXISTING contract for a 0-row UPDATE (proven by the fact that no RETURNING/rowCount check
    * existed at all before this slice) was SILENT SUCCESS for both same-base and cross-base callers — the
-   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Regressing that
-   * into a thrown error would be an unrelated behavior change outside this slice's mandate. So the guard
-   * fails closed on the REVISION ONLY (`if (updatedRow) { ...write revision... }`): a 0-row UPDATE still
-   * reports success and still emits the chaining/realtime events (unchanged), but writes NO spurious
-   * revision for a record this UPDATE never touched — a fabricated one would persist forever
-   * (`meta_record_revisions.record_id` carries no FK) and could resurrect the deleted record via
-   * `reconstructRecordsAtT`.
+   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Slice ④ therefore
+   * failed closed on the REVISION ONLY: a 0-row UPDATE writes NO spurious revision for a record this
+   * UPDATE never touched — a fabricated one would persist forever (`meta_record_revisions.record_id`
+   * carries no FK) and could resurrect the deleted record via `reconstructRecordsAtT`.
+   *
+   * 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3, 裁定 PR #6074 A1): a 0-row UPDATE now ALSO publishes nothing —
+   * no same-txn outbox enqueue, no legacy `multitable.record.updated` emit, no realtime invalidation. The
+   * old "still emits" leg was the same shape as the executor's ghost `record.deleted` self-chain: a fresh
+   * event (new `_eventId`, depth+1) for a record nobody wrote, re-firing downstream rules on a row that
+   * no longer exists. The gone-record POLICY is unchanged and stays the caller's `opts.onMissing` — the
+   * UPDATE seeing 0 rows is the identical fact the lock-check SELECT decides on, observed one statement
+   * later: same-base 'skip' returns false (the resume's own missing-record path already handled it, the
+   * step stays success — leniency preserved — and, since final review F3, `writeApprovalResultBack` turns
+   * that `false` into `same-base-missing` so the step output carries the values-free
+   * `backwriteSkipped: 'target_record_missing'`), cross-base 'throw' fails closed exactly as a not-found
+   * target does (`tryWriteApprovalResultBack` surfaces it as `backwriteSkipped`; never a crash).
    */
   private async applyResultWritebackPatch(
     sheetId: string,
@@ -4115,6 +4373,11 @@ export class AutomationService {
       lockedMessage: string
       onMissing: 'skip' | 'throw'
       missingMessage?: string
+      /**
+       * Field retype slice 3a (ADR §3.11 row 7): the field rows `assertResultWritebackFields` validated the
+       * patch against — read through `this.queryFn` OUTSIDE the transaction below, i.e. before the fence.
+       */
+      schemaSnapshot?: FieldSchemaSnapshot | null
     },
   ): Promise<boolean> {
     // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
@@ -4127,6 +4390,10 @@ export class AutomationService {
       _automationDepth: opts.automationDepth,
     })
     const wrote = await this.withTransaction(sheetId, async (query) => {
+      // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
+      // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
+      // unless the convert flag is 'true'.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, opts.schemaSnapshot ?? null, Object.keys(patch))
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -4147,23 +4414,30 @@ export class AutomationService {
         [JSON.stringify(patch), recordId, sheetId],
       )
       const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
-      if (updatedRow) {
-        const nextVersion = Number(updatedRow.version)
-        await recordRecordRevision(query, {
-          sheetId,
-          recordId,
-          version: Number.isFinite(nextVersion) ? nextVersion : 0,
-          action: 'update',
-          source: 'approval',
-          actorId: opts.chainActorId ?? null,
-          changedFieldIds: Object.keys(patch),
-          patch,
-          snapshot: normalizeJson(updatedRow.data),
-        })
+      if (!updatedRow) {
+        // 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3): the record vanished between the non-locking SELECT above
+        // and this UPDATE. Nothing was written ⇒ nothing is announced: no revision, no enqueue (below is
+        // skipped), no legacy emit / realtime publish (the caller skips both on `false`). Same gone-record
+        // policy as the SELECT branch — the caller's `onMissing`.
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false
       }
+      const nextVersion = Number(updatedRow.version)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: Number.isFinite(nextVersion) ? nextVersion : 0,
+        action: 'update',
+        source: 'approval',
+        actorId: opts.chainActorId ?? null,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: normalizeJson(updatedRow.data),
+      })
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
       // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
-      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      // nothing by construction — and so does the 0-row guard above. Flag OFF ⇒ no-op (the legacy emit
+      // below fires instead).
       await enqueueRecordEventIfDurable(
         {
           isTransaction: true,
@@ -4200,6 +4474,8 @@ export class AutomationService {
     sheetId: string,
     writeback: Record<string, unknown>,
     outcome: string,
+    /** Field retype slice 3a: filled with what this check validated against, for the post-fence re-check. */
+    schemaSnapshotOut?: Map<string, FieldSchemaSnapshotEntry>,
   ): Promise<void> {
     const mapped = RESULT_WRITEBACK_FIELDS
       .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
@@ -4227,6 +4503,8 @@ export class AutomationService {
       const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
       if (typeError) throw new Error(typeError)
     }
+    // Field retype slice 3a: what the check above validated against — re-compared after the fence.
+    if (schemaSnapshotOut) for (const [id, entry] of fieldSchemaSnapshotFromRows(res.rows)) schemaSnapshotOut.set(id, entry)
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
@@ -5002,34 +5280,119 @@ export async function preflightDingTalkAutomationCreate(
   return { ...input, actionConfig, actions }
 }
 
+/** The action side of a create/update input, as far as the condition preflight reads it (#4b). */
+export interface AutomationConditionPreflightActions {
+  actionType?: string | null
+  actionConfig?: Record<string, unknown> | null
+  actions?: AutomationAction[] | null
+}
+
+/** A condition_branch condition group found in a rule's action tree, with the request path it came from. */
+interface ConditionBranchGroupRef {
+  path: string
+  group: ConditionGroup
+}
+
+/**
+ * 客户反馈 2026-09-24 #4b — every `condition_branch` condition group in a rule input, at every nesting the
+ * save path accepts: the top-level `actionConfig` when the rule's action IS a condition_branch, and each
+ * `actions[i]` of that type (the A6-3-1 shape forbids a condition_branch nested inside a branch, so those two
+ * levels are exhaustive). A branch whose `conditions` is not even a valid group is SKIPPED here — the
+ * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
+ * path, so the refusal a client sees for a malformed branch is unchanged.
+ *
+ * `input.actionType` and `input.actionConfig` must be the EFFECTIVE pair. `updateRule` merges BOTH
+ * (`input.actionType ?? existing.action_type`, `input.actionConfig ?? existing.action_config`), so the PATCH
+ * route resolves them through `preflightAutomationRuleUpdate` before calling the preflight — otherwise
+ *   - a rule stored as `condition_branch` with `actions: null` could take an unvalidated branch value through a
+ *     PATCH that carries only `actionConfig`, and
+ *   - an `update_record` rule whose `actionConfig` carries `branches` (never checked: it is not a branch rule)
+ *     could be re-typed to `condition_branch` by a PATCH that carries only `actionType` (+ `executionMode`),
+ *     turning those stored, never-checked branches live.
+ */
+function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
+  const refs: ConditionBranchGroupRef[] = []
+  const visitConfig = (config: unknown, path: string): void => {
+    if (!isRecord(config) || !Array.isArray(config.branches)) return
+    config.branches.forEach((branch, index) => {
+      if (!isRecord(branch) || branch.conditions === undefined) return
+      const groupPath = `${path}.branches[${index}].conditions`
+      try {
+        refs.push({ path: groupPath, group: normalizeConditionGroupInput(branch.conditions, groupPath) })
+      } catch (error) {
+        if (!(error instanceof ConditionGroupValidationError)) throw error
+      }
+    })
+  }
+  // `actions[i]` first: when a V1 request carries `actions`, the legacy `actionConfig` column is a mirror of
+  // `actions[0].config` (parseCreateRuleInput copies it) and the executor runs `actions`, so the first refusal
+  // a client sees names the path it actually edits. A condition_branch stored in the legacy columns alone
+  // (actions null / []) is still reached through `actionConfig`.
+  for (const [index, action] of (input.actions ?? []).entries()) {
+    if (isRecord(action) && action.type === 'condition_branch') visitConfig(action.config, `actions[${index}].config`)
+  }
+  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
+  return refs
+}
+
 /**
  * Validate automation conditions against the sheet's current fields. The
  * route parser only validates JSON shape; this preflight closes the API gap
  * where direct clients could persist unknown fields, unsupported operators, or
  * frontend-incompatible scalar value types.
+ *
+ * 客户反馈 2026-09-24 #4b (裁定 PR #6074): `condition_branch` conditions (`actionsInput`) are validated against
+ * the SAME fields, from ONE `meta_fields` read, with their request path (`actions[0].config.branches[1].
+ * conditions…`); before, a branch condition was only shape-checked and a number field could be saved with
+ * `'abc'`. A value that does not fit its field's type is refused with the stable code
+ * `AUTOMATION_CONDITION_VALUE_INVALID` (date `YYYY-MM-DD`, dateTime wall clock / ISO, number, boolean).
+ * Nothing to validate ⇒ no DB read.
  */
 export async function preflightAutomationConditionFields(
   queryFn: AutomationQueryFn,
   sheetId: string,
   conditions: ConditionGroup | null | undefined,
+  actionsInput?: AutomationConditionPreflightActions | null,
 ): Promise<void> {
-  if (!conditions) return
+  const branchGroups = actionsInput ? collectConditionBranchGroups(actionsInput) : []
+  if (!conditions && branchGroups.length === 0) return
 
   const fieldRes = await queryFn(
     'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [sheetId],
   )
+  const fields = serializeAutomationConditionFieldRows(fieldRes.rows)
   try {
-    validateConditionGroupAgainstFields(
-      conditions,
-      serializeAutomationConditionFieldRows(fieldRes.rows),
-    )
+    validateConditionGroupAgainstFields(conditions, fields)
+    for (const ref of branchGroups) {
+      validateConditionGroupAgainstFields(ref.group, fields, ref.path)
+    }
   } catch (error) {
     if (error instanceof ConditionGroupValidationError) {
-      throw new AutomationRuleValidationError(error.message)
+      throw new AutomationRuleValidationError(error.message, error.code)
     }
     throw error
   }
+}
+
+/** What the PATCH route learns from the update preflight, beyond the normalized input (#4b). */
+export interface AutomationRuleUpdatePreflight {
+  /** `input` with DingTalk action values normalized where the request provided them. */
+  input: UpdateRuleInput
+  /**
+   * The rule's action type AFTER the update — `input.actionType ?? existing.action_type` — when the request
+   * touches the action tree (`actionType` / `actionConfig` / `actions`); `undefined` when it does not (no rule
+   * row was read). The condition preflight needs this to find the branches of a `condition_branch` rule
+   * whose PATCH carries only `actionConfig`.
+   */
+  effectiveActionType?: string
+  /**
+   * The rule's legacy `actionConfig` AFTER the update — the request's (normalized) when it sent one, else the
+   * STORED one — under the same condition as `effectiveActionType`. The condition preflight needs this for a
+   * PATCH that re-types a rule to `condition_branch` WITHOUT resending `actionConfig`: `updateRule` keeps the
+   * stored config, whose `branches` were never field-checked while the rule was not a branch rule.
+   */
+  effectiveActionConfig?: Record<string, unknown> | null
 }
 
 /**
@@ -5047,11 +5410,27 @@ export async function preflightDingTalkAutomationUpdate(
   input: UpdateRuleInput,
   service: Pick<AutomationService, 'getRule'>,
 ): Promise<UpdateRuleInput | null> {
+  const preflight = await preflightAutomationRuleUpdate(queryFn, sheetId, ruleId, input, service)
+  return preflight ? preflight.input : null
+}
+
+/**
+ * The full PATCH-time preflight: `preflightDingTalkAutomationUpdate` plus the EFFECTIVE action type the
+ * same rule read resolved (one `getRule` call either way — no extra fetch). `null` when the existing rule is
+ * missing or belongs to a different sheet.
+ */
+export async function preflightAutomationRuleUpdate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+  service: Pick<AutomationService, 'getRule'>,
+): Promise<AutomationRuleUpdatePreflight | null> {
   const touchesAction =
     input.actionType !== undefined ||
     input.actionConfig !== undefined ||
     input.actions !== undefined
-  if (!touchesAction) return input
+  if (!touchesAction) return { input }
 
   const existing = await service.getRule(ruleId)
   if (!existing || existing.sheet_id !== sheetId) return null
@@ -5087,5 +5466,5 @@ export async function preflightDingTalkAutomationUpdate(
   const out: UpdateRuleInput = { ...input }
   if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
   if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
-  return out
+  return { input: out, effectiveActionType: nextActionType, effectiveActionConfig: normalizedActionConfig }
 }

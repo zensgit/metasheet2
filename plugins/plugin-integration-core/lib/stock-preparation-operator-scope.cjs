@@ -57,6 +57,11 @@
 //      values, so the H0 三重门 applies: RBAC + a server-side field whitelist + audit.
 //        1. GET …/confirmation-decisions/value-entry  the per-decision readback  (O1')
 //        2. GET …/prep-lines/export                   the materials workbook     (按项目导出物料 Excel)
+//           Its sheet is the DEPLOY-GLOBAL table-action target, so the scope resolved here is then
+//           checked against that sheet's registry ownership (`isSheetOwnedByProject`, derived-id
+//           fallback) before any records IO — the same wall as (8), in its own
+//           PREP_LINE_EXPORT_TARGET_* vocabulary. See http-routes.cjs
+//           `assertStockPreparationTargetBelongsToTenant`.
 //        3. GET …/operator/projects                   the project directory      (一线看得见自己工厂的项目)
 //        4. GET …/projects/:projectNo/board           `stockPreparationOperatorProjectBoard`
 //           the project board (项目备料页). ONE project's number and name plus counts and booleans — the fourth value-bearing read on
@@ -83,7 +88,10 @@
 //           the broad READ tier (`requiredTier: STOCK_PREP_READ`) because a supervisor is meant to
 //           see whose turn it is — but WHOSE turn is still a tenant fact.
 //        7. POST …/stock-preparation/handoff/advance  `stockPreparationHandoffAdvance`
-//           the advance itself: a WRITE (see below).
+//           the advance itself: a WRITE (see below). Before it writes it probes the DEPLOY-GLOBAL
+//           table-action target for "does this project have rows", so the scope resolved here is
+//           first checked against that sheet's registry ownership — the same wall as (2) and (8), in
+//           its own STOCK_PREPARATION_HANDOFF_TARGET_* vocabulary (#6121).
 //        8. POST …/stock-preparation/carry/confirm    `stockPreparationCarryConfirm`
 //           the K2 结转 confirm: a WRITE, values-free in its response (modes, counts, field NAMES).
 //           It joins this list for a reason specific to it — the tenant string does not merely scope
@@ -93,7 +101,8 @@
 //           would be a steering vector straight into someone else's table. The scope resolved here
 //           is then checked against the bound sheet's own registry ownership
 //           (`isSheetOwnedByProject`) before any records IO — see http-routes.cjs
-//           `assertCarryTargetBelongsToTenant`.
+//           `assertCarryTargetBelongsToTenant` (the carry vocabulary of
+//           `assertStockPreparationTargetBelongsToTenant`, which the export (2) shares).
 //        9. POST …/confirmation-decisions/confirm     `stockPreparationConfirmationDecisionsConfirm`
 //           THE WRITE HALF OF (1), and the last member of that family to be enrolled. It is listed
 //           under B rather than A because its RESPONSE is values-free (the patched row's ids, status
@@ -104,6 +113,15 @@
 //           arrangement where reading an entered value was proven and writing one was not — on a
 //           claimless deployment the `x-tenant-id` header decided both the row and the trail. The
 //           scope is resolved BEFORE the audit append, so a refused caller leaves no audit row.
+//
+//   C. THE PROOF WITHOUT THE TIER — a route outside the stock-prep namespace that still returns
+//      values, so its tenant must be proven exactly as above, but whose callers hold an
+//      `integration:*` tier rather than a stock-prep one. It calls `resolveProvenOwnTenant` (the
+//      tenant half of this module, exported on its own) after its own `requireAccess` gate, and so
+//      gets every refusal below except OPERATOR_SCOPE_TIER_REQUIRED.
+//       10. GET  …/stock-preparation/source-preflight  `stockPreparationSourcePreflight`
+//           源就绪预检 (「检查这个源」): up to two observed project numbers as liveness evidence. The
+//           proven tenant is the one value its table-action lookup, binding peek and load run under.
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins
@@ -255,6 +273,88 @@ function principalActorId(user) {
 }
 
 /**
+ * THE TENANT PROOF, ON ITS OWN — "which tenant is THIS principal's, proven without trusting a
+ * header", with no permission tier attached.
+ *
+ * `resolveOperatorValueScope` below asks two questions: may this principal hold the stock-prep tier
+ * the surface requires, and whose tenant is it. The second one is this function, split out so a
+ * route that is NOT in the stock-prep namespace can ask it too. The first caller outside the scope
+ * is the source preflight (`stockPreparationSourcePreflight`, the 「检查这个源」 button), which is
+ * gated on the INTEGRATION read tier and returns up to two observed project numbers: it needs the
+ * same proof and must not be handed a stock-prep tier check that its callers never hold.
+ *
+ * It grants nothing. The route's own permission gate runs first; this only decides WHICH tenant,
+ * or refuses. Refusal order (every one decided before the host is asked, and the host before any
+ * route IO):
+ *   401 OPERATOR_SCOPE_UNAUTHENTICATED       no principal at all
+ *   403 OPERATOR_SCOPE_TENANT_CONTRADICTED   a header tenant contradicted the verified token claim
+ *   403 OPERATOR_SCOPE_TENANT_REQUIRED       principal has no tenant of its own
+ *   403 OPERATOR_SCOPE_TENANT_MISMATCH       the request tried to steer to another tenant
+ *   403 OPERATOR_SCOPE_PRINCIPAL_UNKNOWN     principal has no stable id/email to travel under
+ *   501 OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE the host cannot vouch for principals here
+ *   403 OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED  the host says this principal is not in that tenant
+ *
+ * The host is asked whether or not a verified claim exists. That is the behaviour the scope has
+ * shipped with since #5445 and it is kept byte-for-byte: `resolveOperatorValueScope` now calls this
+ * function after its tier check, so the two cannot drift apart.
+ *
+ * @returns {Promise<{ tenantId: string, actorId: string, tenantClaimVerified: boolean }>}
+ */
+async function resolveProvenOwnTenant({
+  user,
+  authenticatedTenantId,
+  explicitTenantIds = [],
+  tenantPrincipalDirectory,
+} = {}) {
+  if (!user) {
+    throw new StockPreparationOperatorScopeError(401, 'OPERATOR_SCOPE_UNAUTHENTICATED', 'authentication is required for a value-bearing operator read')
+  }
+
+  const verifiedClaim = optionalString(authenticatedTenantId) || ''
+  const { tenantId, contradicted } = ownTenantId(user, verifiedClaim)
+  if (contradicted) {
+    // A header tenant that disagrees with the verified token claim. There is no reading of that which
+    // is a legitimate caller, so it is refused rather than resolved toward either side.
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', 'the carried tenant contradicts the verified tenant claim')
+  }
+  if (!tenantId) {
+    // THE PLATFORM-SIDE REFUSAL. A tenantless platform admin lands here, deliberately: under "whose
+    // data is it" they have no own tenant, so there is no tenant whose values they may be shown on
+    // this surface. Their values-free routes are untouched and still answer for every tenant.
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_REQUIRED', 'a value-bearing operator read requires a principal with its own tenant')
+  }
+
+  for (const explicit of explicitTenantIds) {
+    const candidate = optionalString(explicit)
+    if (candidate && candidate !== tenantId) {
+      throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
+    }
+  }
+
+  const actorId = principalActorId(user)
+  if (!actorId) {
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_PRINCIPAL_UNKNOWN', 'the principal carries no stable identifier')
+  }
+
+  if (!tenantPrincipalDirectory || typeof tenantPrincipalDirectory.verifyTenantMembership !== 'function') {
+    throw new StockPreparationOperatorScopeError(501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'the host tenant principal directory is not available', {
+      requiredMethods: ['verifyTenantMembership'],
+    })
+  }
+
+  const verdict = await tenantPrincipalDirectory.verifyTenantMembership({ userId: actorId, tenantId })
+  if (!verdict || verdict.member !== true) {
+    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'the principal is not a member of its own claimed tenant')
+  }
+
+  // `tenantClaimVerified` is reported, not enforced: a deployment whose tokens carry no tenant claim
+  // is still served, because the host membership check above — not the claim — is what makes the
+  // pairing safe there. It is surfaced so an audit row can record WHICH of the two proofs was
+  // available without the route having to re-derive it.
+  return { tenantId, actorId, tenantClaimVerified: verifiedClaim === tenantId }
+}
+
+/**
  * RESOLVE THE VERIFIED OWN-TENANT VALUE SCOPE, or refuse.
  *
  * @param {object}   params
@@ -316,54 +416,23 @@ async function resolveOperatorValueScope({
     })
   }
 
-  const verifiedClaim = optionalString(authenticatedTenantId) || ''
-  const { tenantId, contradicted } = ownTenantId(user, verifiedClaim)
-  if (contradicted) {
-    // A header tenant that disagrees with the verified token claim. There is no reading of that which
-    // is a legitimate caller, so it is refused rather than resolved toward either side.
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', 'the carried tenant contradicts the verified tenant claim')
-  }
-  if (!tenantId) {
-    // THE PLATFORM-SIDE REFUSAL. A tenantless platform admin lands here, deliberately: under "whose
-    // data is it" they have no own tenant, so there is no tenant whose values they may be shown on
-    // this surface. Their values-free routes are untouched and still answer for every tenant.
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_REQUIRED', 'a value-bearing operator read requires a principal with its own tenant')
-  }
-
-  for (const explicit of explicitTenantIds) {
-    const candidate = optionalString(explicit)
-    if (candidate && candidate !== tenantId) {
-      throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'tenant scope mismatch')
-    }
-  }
-
-  const actorId = principalActorId(user)
-  if (!actorId) {
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_PRINCIPAL_UNKNOWN', 'the principal carries no stable identifier')
-  }
-
-  if (!tenantPrincipalDirectory || typeof tenantPrincipalDirectory.verifyTenantMembership !== 'function') {
-    throw new StockPreparationOperatorScopeError(501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE', 'the host tenant principal directory is not available', {
-      requiredMethods: ['verifyTenantMembership'],
-    })
-  }
-
-  const verdict = await tenantPrincipalDirectory.verifyTenantMembership({ userId: actorId, tenantId })
-  if (!verdict || verdict.member !== true) {
-    throw new StockPreparationOperatorScopeError(403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'the principal is not a member of its own claimed tenant')
-  }
-
-  // `tenantClaimVerified` is reported, not enforced: a deployment whose tokens carry no tenant claim
-  // is still served, because the host membership check above — not the claim — is what makes the
-  // pairing safe there. It is surfaced so an audit row can record WHICH of the two proofs was
-  // available without the route having to re-derive it.
-  return { tenantId, actorId, tier: requiredTier, tenantClaimVerified: verifiedClaim === tenantId }
+  // Everything after the tier is the tenant proof, and it lives in ONE place (`resolveProvenOwnTenant`
+  // above) so that the scope and the one route that asks the proof without a stock-prep tier cannot
+  // come to disagree about what "proven" means.
+  const proof = await resolveProvenOwnTenant({
+    user,
+    authenticatedTenantId,
+    explicitTenantIds,
+    tenantPrincipalDirectory,
+  })
+  return { tenantId: proof.tenantId, actorId: proof.actorId, tier: requiredTier, tenantClaimVerified: proof.tenantClaimVerified }
 }
 
 module.exports = {
   OPERATOR_VALUE_TIER,
   StockPreparationOperatorScopeError,
   resolveOperatorValueScope,
+  resolveProvenOwnTenant,
   __internals: {
     holdsOperatorValueTier,
     listPrincipalPermissions,

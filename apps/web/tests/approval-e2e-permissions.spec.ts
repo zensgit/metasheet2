@@ -146,7 +146,11 @@ const mockTemplateLoading = ref(false)
 const mockTemplateError = ref<string | null>(null)
 const mockTemplateTotal = ref(0)
 
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
 const loadVersionSpy = vi.fn().mockResolvedValue(undefined)
 

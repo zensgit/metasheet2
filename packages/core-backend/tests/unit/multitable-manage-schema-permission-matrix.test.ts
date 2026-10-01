@@ -135,7 +135,7 @@ const FIELD_REVISION = {
   created_at: '2026-08-30T00:00:00.000Z',
 }
 
-function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) {
+function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = [], scopedSheetId: string = SHEET_ID) {
   const fieldsForSheet = (sheetId: string) =>
     Array.from(fields.values())
       .filter((f) => f.sheet_id === sheetId)
@@ -147,8 +147,10 @@ function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) 
     // No sheet-scoped assignments by default: isolates the GLOBAL capability derivation. The
     // `canDeleteSheet` section opts into scoped `spreadsheet_permissions` rows on SHEET_ID (as a
     // direct user grant), because that is where delete authority and canManageFields diverge.
+    // `scopedSheetId` (A6) lets a cell grant that scope on a DIFFERENT sheet (the managed one) —
+    // default unchanged (SHEET_ID), so every pre-existing call site is untouched.
     if (sql.includes('FROM spreadsheet_permissions')) {
-      return { rows: scopedCodes.map((code) => ({ sheet_id: SHEET_ID, perm_code: code, subject_type: 'user' })) }
+      return { rows: scopedCodes.map((code) => ({ sheet_id: scopedSheetId, perm_code: code, subject_type: 'user' })) }
     }
     // Managed-sheet guard (DELETE /sheets/:sheetId): only the plugin-provisioned sheet has a registry row.
     if (sql.includes('FROM plugin_multitable_object_registry')) {
@@ -167,7 +169,12 @@ function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) 
       return { rows: [SHEET_ID, PEOPLE_SHEET_ID, MANAGED_SHEET_ID].includes(p(0)) ? [{ id: p(0) }] : [] }
     }
     if (sql.includes('FROM meta_sheets s') && sql.includes('LEFT JOIN meta_bases')) {
-      return { rows: p(0) === SHEET_ID ? [{ ...SHEET_ROW }] : [] }
+      // A6: GET /context's own sheet-row read (the one immediately behind the authority gate) must
+      // also answer for the managed sheet, or the managed-sheet `canDeleteSheet` cells below 404
+      // before ever reaching capability derivation.
+      if (p(0) === SHEET_ID) return { rows: [{ ...SHEET_ROW }] }
+      if (p(0) === MANAGED_SHEET_ID) return { rows: [{ ...MANAGED_SHEET_ROW }] }
+      return { rows: [] }
     }
     if (sql.includes('FROM meta_bases') && sql.includes('WHERE id = $1')) {
       return { rows: p(0) === BASE_ID ? [{ ...BASE_ROW }] : [] }
@@ -178,7 +185,10 @@ function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) 
       return { rows: p(0) === BASE_ID ? [{ ...BASE_ROW, name: p(1) }] : [] }
     }
     if (sql.includes('FROM meta_sheets') && sql.includes('WHERE base_id = $1')) {
-      return { rows: [{ ...SHEET_ROW }, { ...PEOPLE_SHEET_ROW }] }
+      // MANAGED_SHEET_ROW joins the base's sheet list too (A6: GET /context needs it in
+      // `readableSheetRows` to answer for `sheetId=MANAGED_SHEET_ID` at all — see the
+      // `canDeleteSheet` managed-sheet cell below).
+      return { rows: [{ ...SHEET_ROW }, { ...PEOPLE_SHEET_ROW }, { ...MANAGED_SHEET_ROW }] }
     }
     if (/FROM meta_sheets\b/.test(sql) && sql.includes('WHERE id = $1')) {
       if (p(0) === SHEET_ID) return { rows: [{ ...SHEET_ROW }] }
@@ -259,14 +269,20 @@ function createMockPool(fields: Map<string, Field>, scopedCodes: string[] = []) 
 
 // ── app harness ────────────────────────────────────────────────────────────────
 
-async function buildApp(tier: TierId, fields: Map<string, Field>, scopedCodes: string[] = []): Promise<Express> {
-  return (await buildAppWithPool(tier, fields, scopedCodes)).app
+async function buildApp(
+  tier: TierId,
+  fields: Map<string, Field>,
+  scopedCodes: string[] = [],
+  scopedSheetId: string = SHEET_ID,
+): Promise<Express> {
+  return (await buildAppWithPool(tier, fields, scopedCodes, scopedSheetId)).app
 }
 
 async function buildAppWithPool(
   tier: TierId,
   fields: Map<string, Field>,
   scopedCodes: string[] = [],
+  scopedSheetId: string = SHEET_ID,
 ): Promise<{ app: Express; pool: ReturnType<typeof createMockPool> }> {
   vi.doMock('../../src/rbac/service', () => ({
     isAdmin: vi.fn().mockResolvedValue(false),
@@ -278,7 +294,7 @@ async function buildAppWithPool(
 
   const { poolManager } = await import('../../src/integration/db/connection-pool')
   const { univerMetaRouter } = await import('../../src/routes/univer-meta')
-  const pool = createMockPool(fields, scopedCodes)
+  const pool = createMockPool(fields, scopedCodes, scopedSheetId)
   vi.spyOn(poolManager, 'get').mockReturnValue(pool as any)
 
   const app = express()
@@ -983,4 +999,89 @@ describe('GET /context capabilities.canDeleteSheet — same gate as DELETE /shee
     expect(del.status).toBe(200)
   })
 
+  // A6 (customer feedback 2026-09-24 #1b): DELETE /sheets/:sheetId 409s SHEET_PLUGIN_MANAGED for a
+  // plugin-provisioned sheet REGARDLESS of authority (see the guard describe block further below) —
+  // so `canDeleteSheet: true` for one draws a trash icon (MetaSheetViewRail.vue) that can never
+  // work. The projection must AND `hasSheetLifecycleAuthority` with "not managed", using the exact
+  // check the DELETE route itself uses (`resolveSheetDeleteRefusal`) rather than a second predicate.
+  it('plugin-managed sheet (registry row) => canDeleteSheet FALSE for T1 admin, even though the SAME actor gets TRUE on an unmanaged sheet with the SAME authority', async () => {
+    const managed = await on(await buildApp('T1_admin', freshFields()))
+      .get('/api/multitable/context').query({ sheetId: MANAGED_SHEET_ID })
+    expect(managed.status).toBe(200)
+    // schema authority itself is untouched — only the delete projection is gated on "managed"
+    expect(managed.body.data.capabilities.canManageFields).toBe(true)
+    expect(managed.body.data.capabilities.canDeleteSheet).toBe(false)
+
+    vi.resetModules()
+    const unmanaged = await on(await buildApp('T1_admin', freshFields()))
+      .get('/api/multitable/context').query({ sheetId: SHEET_ID })
+    expect(unmanaged.status).toBe(200)
+    expect(unmanaged.body.data.capabilities.canDeleteSheet).toBe(true)
+
+    // and the route agrees on both cells: 409 for the managed sheet, 200 for the ordinary one
+    vi.resetModules()
+    const delManaged = await on(await buildApp('T1_admin', freshFields())).delete(`/api/multitable/sheets/${MANAGED_SHEET_ID}`)
+    expect(delManaged.status).toBe(409)
+    expect(delManaged.body.error.code).toBe('SHEET_PLUGIN_MANAGED')
+  })
+
+  // Same shape, sheet-scoped ADMIN instead of global schema authority — the OTHER branch of
+  // `hasSheetLifecycleAuthority` must be ANDed with "not managed" too, not just the global one.
+  it('plugin-managed sheet (registry row) => canDeleteSheet FALSE for a sheet-scoped ADMIN grant too', async () => {
+    const app = await buildApp('T4_read_only', freshFields(), ['spreadsheet:read', 'spreadsheet:admin'], MANAGED_SHEET_ID)
+    const res = await on(app).get('/api/multitable/context').query({ sheetId: MANAGED_SHEET_ID })
+    expect(res.status).toBe(200)
+    expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+    const del = await on(app).delete(`/api/multitable/sheets/${MANAGED_SHEET_ID}`)
+    expect(del.status).toBe(409)
+  })
+
+  // AUTHZ-FIRST, mirrored from the DELETE route's own posture (sheet-delete-guard.ts): an actor who
+  // holds no lifecycle authority at all never learns whether the sheet is managed — the bit is
+  // simply false either way, same as before this fix.
+  // N2 (adversarial-review round, #6089): proves the authority-first ORDERING, not just the final
+  // bit — an actor without lifecycle authority must never even ASK the registry whether the sheet is
+  // managed (the same posture the DELETE route itself already holds, asserted on `pool.query` further
+  // below in "T2 write-only operator on the managed sheet"). `buildAppWithPool` (not `buildApp`) so
+  // the mock pool's own call log is inspectable here.
+  it('plugin-managed sheet (registry row) => canDeleteSheet stays FALSE for an actor without lifecycle authority, and the registry is never even queried (authority-first)', async () => {
+    const { app, pool } = await buildAppWithPool('T2_write_only', freshFields())
+    const res = await on(app).get('/api/multitable/context').query({ sheetId: MANAGED_SHEET_ID })
+    expect(res.status).toBe(200)
+    expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+    expect(pool.query.mock.calls.filter((c) => /FROM\s+plugin_multitable_object_registry/i.test(String(c[0])))).toEqual([])
+  })
+
+  // S1 (adversarial-review round, #6089): the managed-sheet probe is a SIDE lookup on an otherwise-
+  // successful load — only the delete button is at stake, never the load itself. A THROWN lookup
+  // (missing table, transient connection error, …) must not 500 the whole /context response; it
+  // fails CLOSED to canDeleteSheet: false and logs values-free (see univer-meta.ts's try/catch
+  // around resolveSheetDeleteRefusal). Contrast with the field-delete guard's OWN "registry table
+  // missing" cell above, which fails closed by PROPAGATION (503) — /context's shape is different
+  // (200, bit zeroed) because unlike a destructive write, a stale trash-button visibility is safely
+  // recoverable and the rest of the page is still useful without it.
+  it('GET /context: the managed-sheet probe THROWS (registry unreadable) => still 200, canDeleteSheet fails closed to false (not a 500), logged values-free', async () => {
+    const { app, pool } = await buildAppWithPool('T1_admin', freshFields())
+    const original = pool.query.getMockImplementation()!
+    pool.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (/FROM\s+plugin_multitable_object_registry/i.test(sql)) {
+        throw new Error('relation "plugin_multitable_object_registry" does not exist')
+      }
+      return original(sql, params)
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await on(app).get('/api/multitable/context').query({ sheetId: SHEET_ID })
+      expect(res.status).toBe(200)
+      expect(res.body.data.capabilities.canDeleteSheet).toBe(false)
+      // schema authority itself is untouched — the probe failure only zeroes the delete bit
+      expect(res.body.data.capabilities.canManageFields).toBe(true)
+      // values-free: no sheet id (or anything else request-specific) reaches the log line
+      expect(errorSpy).toHaveBeenCalled()
+      const logged = errorSpy.mock.calls.map((call) => call.map((arg) => JSON.stringify(arg)).join(' ')).join('\n')
+      expect(logged).not.toContain(SHEET_ID)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
 })

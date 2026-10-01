@@ -1,3 +1,4 @@
+import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancellation-execution-port'
 /**
  * Unified approval bridge types.
  *
@@ -83,11 +84,79 @@ export interface UnifiedApprovalDTO {
    */
   canDecideCurrentNode?: boolean
   /**
+   * May THIS viewer stage process evidence (过程附件) on the comment action of this instance right
+   * now? Server-resolved per viewer as the conjunction of two existing answers from
+   * `approval-seat-authorization.ts` — `decisionDoorIsSeatGated(instance)` AND
+   * `resolveCanDecideCurrentNode(...)` — and nothing else.
+   *
+   * WHY NOT `canDecideCurrentNode` ITSELF: that field reports `true` for a pending instance whose
+   * decisions do not go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row), because there is no seat predicate to mirror
+   * there. Process evidence is bound only by the template-runtime dispatch (the comment action's
+   * `attachmentIds` rider), so on those instances an uploader would be an affordance nothing can
+   * complete. The first conjunct removes exactly that case; the second is the door's own seat
+   * answer, so USER seats, ROLE seats, delegated seats and the pending branch frontier of a
+   * parallel region are covered the same way the door covers them.
+   *
+   * `false` when the instance is not pending, when no viewer identity was supplied, when the
+   * viewer holds no matching active seat at a decidable node key, and on every instance whose
+   * decisions do not go through the seat-gated door.
+   *
+   * Independent of the attachments feature flag: the value says who holds the seat, not whether
+   * the pipeline is on. Clients gate the uploader on the flag AND this field. Presentation only —
+   * the upload route's own seat check and the bind-time 403 `APPROVAL_ASSIGNMENT_REQUIRED` remain
+   * the authority. ABSENT means "this backend does not compute it" (an older server); unlike
+   * `canDecideCurrentNode` there is no wider prior behaviour worth restoring, so clients read
+   * absence as "no uploader".
+   */
+  canAttachProcessEvidence?: boolean
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * lock:86 「`reverseLeaveBalanceDeduction`(返回 `unrecoverableExpired`,**必须呈现**)」 — the
+   * 呈现 channel, DEFAULT CONTRACT (⚠️ owner 待裁, 按默认值; the alternatives are listed with the
+   * type in `core/attendance-cancellation-execution-port.ts`).
+   *
+   * Present on the response of the approve action that REDEEMED a 撤销 round, AND — since the
+   * owner's 2026-09-20 ruling — on `getApproval`, read back from the approve audit row that
+   * committed in the same transaction as the cancellation. `undefined` on every other approval and
+   * every other action, so no existing consumer's shape changes by a byte. Values-free: a status
+   * token plus integer counters — no ids, no names, no free text.
+   *
+   * ⚠️ CORRECTED 2026-09-20 (this docblock previously claimed two things that were false; both are
+   * recorded rather than silently rewritten):
+   *  - 「`getApproval` does NOT project it, so a later `GET /approvals/:id` omits it」 — true when
+   *    written, no longer true: `getApproval` now whitelist-projects it, which is exactly the
+   *    「呈现 must also survive a reload」 branch this text had left as an open owner decision. The
+   *    owner ruled it must: 「呈现默认值不能替代持久读取能力」.
+   *  - 「carried verbatim by `UnifiedApprovalHistoryDTO.metadata`」 — MEASURED FALSE on the HTTP
+   *    surface (`verify-c2-history-dto-cancellation-outcome-20260920.md` §3.1, real-DB + real
+   *    HTTP). `loadLocalHistory` does carry `metadata` verbatim onto that DTO, but its only
+   *    production call site sits inside `routes/approval-history.ts`'s `plm:` branch, and a
+   *    platform (bare-UUID) cancel-round id never enters it — so for platform instances that DTO
+   *    is never constructed and the promised durable read did not exist. What the platform history
+   *    surface carries today is a per-key-path WHITELIST (`cancellationOutcome`,
+   *    `cancelRoundCloseReason`, plus Lock-9's `attachmentIds`), never verbatim `metadata`.
+   */
+  cancellationOutcome?: CancelRoundCancellationOutcomeV1 | null
+  /**
+   * The bounded close-reason token of a cancel round the system CLOSED without redeeming —
+   * `round_expired` (窗口/策略已关) or `business_blocked:<code>` (业务不可逆) — whitelist-projected
+   * from the system-closure audit row's `metadata.cancelRoundCloseReason`.
+   *
+   * Owner ruling 2026-09-20. Before it, a 驳回 by the system closure and a 驳回 by a human approver
+   * were byte-identical on this surface (same `status`, same version fields; the only difference
+   * was the sentinel `actor_id`, which reaches no rendered field) — and `expired` vs `blocked` were
+   * indistinguishable from each other too (§4.2 of the verification MD, measured). `undefined` on
+   * every approval that is not a system-closed cancel round.
+   *
+   * The adapter's finer free-text cause (`cancelRoundBlockDetail`) is deliberately NOT carried.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state for the 待我处理 (pending) tab — `true` once the

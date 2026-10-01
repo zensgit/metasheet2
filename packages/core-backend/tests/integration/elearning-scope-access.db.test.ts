@@ -3,10 +3,9 @@
  * DATABASE_URL is mandatory; missing infrastructure must not produce green.
  */
 import { randomUUID } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
-import { COURSE_VERSIONS_STATE_TRIGGER } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
@@ -109,6 +108,41 @@ async function expectSqlState(
   await client.query(`RELEASE SAVEPOINT ${savepoint}`)
   expect(caught).toBeDefined()
   expect((caught as { code?: string }).code).toBe(expected)
+}
+
+// The catalog-scan fixture is bulk-loaded inside a transaction that is rolled
+// back, so autovacuum never analyzes it. Without this, the planner uses the
+// statistics that earlier files left behind. If an autovacuum pass saw one of
+// these tables empty with a page still allocated (reltuples = 0, relpages >= 1),
+// the planner applies a density of 0 to every page it finds and plans the
+// 10,000-row joins as ~1 row. The result is a nested loop with a join filter
+// that compares 10,000 x 10,000 rows. ANALYZE inside the transaction counts the
+// transaction's own rows, so every statement is planned for the catalog size
+// the fixture really has. The pg_statistic rows roll back with the
+// transaction. PostgreSQL writes the pg_class page and tuple counts in place;
+// until autovacuum cleans the rolled-back rows, those counts can only make
+// later plans expect a larger table.
+async function analyzeBulkFixture(
+  client: PoolClient,
+  tables: readonly string[],
+): Promise<void> {
+  await client.query(`ANALYZE ${tables.join(', ')}`)
+}
+
+interface ExplainPlanNode {
+  'Node Type': string
+  'Subplan Name'?: string
+  'Actual Rows'?: number
+  Plans?: ExplainPlanNode[]
+}
+
+function findCtePlan(node: ExplainPlanNode, cteName: string): ExplainPlanNode | undefined {
+  if (node['Subplan Name'] === `CTE ${cteName}`) return node
+  for (const child of node.Plans ?? []) {
+    const found = findCtePlan(child, cteName)
+    if (found) return found
+  }
+  return undefined
 }
 
 interface CourseSeed {
@@ -629,11 +663,66 @@ describe('elearning L1 scope/access gate (real DB)', () => {
     })
   })
 
-  it('bounds the real catalog scan at 10,000 active scope rules', async () => {
-    await withRolledBackDb(async (client, db) => {
-      const orgId = actor('org-scan-boundary')
-      const userId = actor('scan-learner')
-      const fixtureTable = 'elearning_audience_scan_fixture'
+  describe('bounds the real catalog scan at 10,000 active scope rules', () => {
+    // Setup is kept apart from the measured calls. beforeAll builds the whole
+    // fixture in one transaction under its own hook budget, the tests only call
+    // the resolver, and afterAll rolls the transaction back.
+    //
+    // The fixture has SCAN_LIMIT + 2 active 'all' rules, one per published
+    // course version. Excluding versions moves the visible count across the
+    // boundary. At 10,000 visible rules the call must match. At 10,001 and
+    // 10,002 it must fail closed, and at 10,002 the candidate scan must stop
+    // at SCAN_LIMIT + 1 rows.
+    const orgId = actor('org-scan-boundary')
+    const userId = actor('scan-learner')
+    const fixtureTable = 'elearning_audience_scan_fixture'
+    const catalogTables = [
+      'elearning_courses',
+      'elearning_course_versions',
+      'elearning_scopes',
+      'elearning_scope_revisions',
+      'elearning_scope_revision_rules',
+    ] as const
+    // Setup takes about 1.5 s and gets its own hook budget. Each measured call
+    // takes about 20 to 100 ms with fresh statistics and 15 s or more on the
+    // quadratic plan, so 10 s is generous but still catches a relapse.
+    const SETUP_BUDGET_MS = 60_000
+    const CALL_BUDGET_MS = 10_000
+    let scanClient: PoolClient | undefined
+    let scanDb: TransactionalClientDb
+    let firstVersionIds: string[] = []
+
+    function recordingDb() {
+      const statements: Array<{ sql: string; params: unknown[] }> = []
+      return {
+        statements,
+        db: {
+          query: (statement: string, params?: unknown[]) => {
+            statements.push({ sql: statement, params: params ?? [] })
+            return scanDb.query(statement, params)
+          },
+        },
+      }
+    }
+
+    beforeAll(async () => {
+      const client = await pool.connect()
+      scanClient = client
+      await client.query('BEGIN')
+      scanDb = new TransactionalClientDb(client)
+      // Triage evidence only: the planner statistics this fixture starts from.
+      // reltuples = 0 with relpages >= 1 is the state that made the scan
+      // quadratic before the fixture analyzed its own rows.
+      const foundStatistics = await client.query(
+        `SELECT t.name, c.reltuples, c.relpages
+           FROM unnest($1::text[]) WITH ORDINALITY AS t(name, position)
+           JOIN pg_class c ON c.oid = to_regclass(t.name)
+          ORDER BY t.position`,
+        [catalogTables],
+      )
+      console.info(`[catalog-scan fixture] planner statistics found (reltuples/relpages): ${
+        foundStatistics.rows.map((row) => `${row.name}=${row.reltuples}/${row.relpages}`).join(' ')
+      }`)
       await seedActiveMembership(client, userId, orgId)
       await client.query(
         `CREATE TEMP TABLE ${fixtureTable} ON COMMIT DROP AS
@@ -645,7 +734,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
            md5($1 || ':revision:' || n)::uuid AS revision_id,
            md5($1 || ':rule:' || n)::uuid AS rule_id
          FROM generate_series(1, $2::integer) AS series(n)`,
-        [orgId, ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1],
+        [orgId, ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 2],
       )
       await client.query(
         `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
@@ -653,6 +742,9 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      // Each bulk-written table is analyzed before the next statement plans
+      // against it (foreign-key checks included). See analyzeBulkFixture.
+      await analyzeBulkFixture(client, [fixtureTable, 'elearning_courses'])
       await client.query(
         `INSERT INTO elearning_course_versions (
            id, org_id, course_id, version, status, title, created_by
@@ -661,24 +753,39 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
-      await client.query(
-        `ALTER TABLE elearning_course_versions DISABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
-      )
-      await client.query(
-        `UPDATE elearning_course_versions version
-            SET status = 'published', updated_at = clock_timestamp()
-           FROM ${fixtureTable} fixture
-          WHERE version.org_id = $1 AND version.id = fixture.version_id`,
-        [orgId],
-      )
-      await client.query(
-        `ALTER TABLE elearning_course_versions ENABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
-      )
+      await analyzeBulkFixture(client, ['elearning_course_versions'])
+      // The publish guard requires a video and an exam per version. This
+      // fixture only needs published rows that the catalog scan can see, so the
+      // UPDATE runs with session_replication_role = replica. That skips the
+      // user trigger without the table lock of ALTER TABLE ... DISABLE TRIGGER.
+      // It also skips foreign-key checks for this UPDATE, because PostgreSQL
+      // implements foreign keys as triggers. The UPDATE sets only status and
+      // updated_at, not the FK columns org_id and course_id. The role is back
+      // to origin before the next statement, so the following inserts and
+      // updates get normal foreign-key checks, and afterAll rolls the
+      // transaction back. Setting the parameter requires a superuser on
+      // PostgreSQL 14, which is what CI runs; CI connects as the bootstrap
+      // superuser postgres (ankane/setup-postgres user: postgres). On
+      // PostgreSQL 15+ a role can instead be granted SET ON PARAMETER
+      // session_replication_role.
+      await client.query(`SET LOCAL session_replication_role = replica`)
+      try {
+        await client.query(
+          `UPDATE elearning_course_versions version
+              SET status = 'published', updated_at = clock_timestamp()
+             FROM ${fixtureTable} fixture
+            WHERE version.org_id = $1 AND version.id = fixture.version_id`,
+          [orgId],
+        )
+      } finally {
+        await client.query(`SET LOCAL session_replication_role = origin`)
+      }
       await client.query(
         `INSERT INTO elearning_scopes (id, org_id, created_by)
          SELECT scope_id, $1, $2 FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      await analyzeBulkFixture(client, ['elearning_scopes'])
       await client.query(
         `INSERT INTO elearning_scope_revisions (
            id, org_id, scope_id, revision, actor_id, reason
@@ -687,6 +794,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      await analyzeBulkFixture(client, ['elearning_scope_revisions'])
       await client.query(
         `INSERT INTO elearning_scope_revision_rules (
            id, org_id, scope_revision_id, subject_type, subject_ref, include_children
@@ -714,27 +822,76 @@ describe('elearning L1 scope/access gate (real DB)', () => {
           WHERE course.org_id = $1 AND course.id = fixture.course_id`,
         [orgId],
       )
-      const firstVersion = await client.query(
+      // The final pass sees the linked scope, revision and version columns.
+      await analyzeBulkFixture(client, catalogTables)
+      const firstVersions = await client.query(
         `SELECT version_id::text AS version_id
          FROM ${fixtureTable}
-         WHERE n = 1`,
+         WHERE n <= 2
+         ORDER BY n`,
       )
-      const excludedVersionId = String(firstVersion.rows[0]?.version_id)
+      firstVersionIds = firstVersions.rows.map((row) => String(row.version_id))
+      expect(firstVersionIds).toHaveLength(2)
+    }, SETUP_BUDGET_MS)
 
-      await expect(listElearningAudienceCourseMatches(db, {
+    afterAll(async () => {
+      if (!scanClient) return
+      try {
+        await scanClient.query('ROLLBACK')
+      } finally {
+        scanClient.release()
+      }
+    })
+
+    it('matches when exactly 10,000 active rules are visible, in one statement', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
         orgId,
         userId,
-        excludedCourseVersionIds: [excludedVersionId],
+        excludedCourseVersionIds: firstVersionIds,
         limit: 1,
       })).resolves.toHaveLength(1)
-      await expect(listElearningAudienceCourseMatches(db, {
+      expect(recorder.statements).toHaveLength(1)
+    }, CALL_BUDGET_MS)
+
+    it('fails closed as unavailable when 10,001 active rules are visible', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
+        orgId,
+        userId,
+        excludedCourseVersionIds: [firstVersionIds[0]!],
+        limit: 1,
+      })).rejects.toMatchObject({ code: 'unavailable' })
+      expect(recorder.statements).toHaveLength(1)
+    }, CALL_BUDGET_MS)
+
+    it('stops the candidate scan at 10,001 rows when 10,002 active rules are visible', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
         orgId,
         userId,
         excludedCourseVersionIds: [],
         limit: 1,
       })).rejects.toMatchObject({ code: 'unavailable' })
-    })
-  }, 30_000)
+      expect(recorder.statements).toHaveLength(1)
+
+      // Re-run the exact statement and parameters under EXPLAIN ANALYZE to
+      // count the rows each bounded stage produced. The row counts do not
+      // depend on the plan shape or on wall-clock time.
+      const [issued] = recorder.statements
+      const explained = await scanClient!.query(
+        `EXPLAIN (ANALYZE, TIMING OFF, FORMAT JSON) ${issued!.sql}`,
+        issued!.params as never,
+      )
+      const plan = (explained.rows[0]?.['QUERY PLAN'] as Array<{ Plan: ExplainPlanNode }>)[0]!.Plan
+      const candidateScan = findCtePlan(plan, 'bounded_course_rules')
+      const matcherInput = findCtePlan(plan, 'active_course_rules')
+      expect(candidateScan, 'bounded_course_rules must stay a materialized CTE').toBeDefined()
+      expect(matcherInput, 'active_course_rules must stay a materialized CTE').toBeDefined()
+      expect(candidateScan!['Actual Rows']).toBe(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1)
+      expect(matcherInput!['Actual Rows']).toBeLessThanOrEqual(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT)
+    }, CALL_BUDGET_MS)
+  })
 
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {
     await withRolledBackDb(async (client, db) => {

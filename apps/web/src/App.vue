@@ -26,6 +26,16 @@
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
               </ShellChromeBoundary>
             </span>
+            <!-- B-2 (todo-center-design-lock v2.14 §2 "前端壳" row: 中心替换/推广该徽标) — the
+                 badge above is now DATA-wired to the todo center's own aggregate, but that alone
+                 left the page it aggregates into reachable only by typing /todo — no nav entry
+                 anywhere pointed at it. Same gate as the badge/审批中心 link (both read the same
+                 `approvals:read`-gated data; today's ONLY registered source is `approval`), same
+                 nav-link styling, kept as its OWN entry rather than folded into `nav-approvals` or
+                 made the badge's own href — deliberately, so this addition cannot regress the
+                 existing "badge is a sibling of the link, never a child of it" contract the P1b
+                 comment above and approvalNavTodoBadge.spec.ts already pin. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
           </template>
           <template v-else>
             <router-link v-if="hasFeature('attendance')" to="/attendance" class="nav-link">{{ navLabels.attendance }}</router-link>
@@ -36,6 +46,18 @@
               <router-link to="/approvals" class="nav-link">{{ navLabels.approvals }}</router-link>
               <ShellChromeBoundary>
                 <ApprovalTodoBadge v-if="!isPublicRoute" :label="navLabels.approvalTodo" />
+              </ShellChromeBoundary>
+            </span>
+            <!-- B-2: same entry as the plmWorkbenchFocused branch above — see that comment. -->
+            <router-link v-if="canUseApprovals" to="/todo" class="nav-link" data-testid="nav-todo-center">{{ navLabels.todoCenter }}</router-link>
+            <!-- M2: the persistent tasks 待办 badge (design lock §5.2). Same visibility gate as
+                 the link itself (`canUseTasks`); wrapped in `ShellChromeBoundary` so a badge-only
+                 failure cannot blank the shell, and gated
+                 on `!isPublicRoute` so it never polls off an anonymous/guest route. -->
+            <span v-if="canUseTasks" class="nav-tasks">
+              <router-link to="/tasks" class="nav-link" data-testid="nav-tasks">{{ navLabels.tasks }}</router-link>
+              <ShellChromeBoundary>
+                <TasksTodoBadge v-if="!isPublicRoute" :label="navLabels.tasksTodo" />
               </ShellChromeBoundary>
             </span>
             <router-link
@@ -123,6 +145,7 @@ import { useLocale } from './composables/useLocale'
 import { usePlugins } from './composables/usePlugins'
 import ApprovalTodoBadge from './approvals/components/ApprovalTodoBadge.vue'
 import ApprovalBatchTransferNavEntry from './approvals/components/ApprovalBatchTransferNavEntry.vue'
+import TasksTodoBadge from './tasks/TasksTodoBadge.vue'
 import ShellChromeBoundary from './components/ShellChromeBoundary.vue'
 import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
@@ -173,6 +196,10 @@ const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
 })
+const canUseTasks = computed(() => {
+  void route.fullPath
+  return hasPermission('tasks:read')
+})
 const isLoggedIn = computed(() => {
   void route.fullPath
   return Boolean(getToken())
@@ -187,6 +214,8 @@ const navLabels = computed(() => {
       approvals: '审批中心',
       // Values-free: names the surface, never the count or any row content.
       approvalTodo: '待办审批',
+      // B-2: the nav entry point into the cross-source todo center page (/todo).
+      todoCenter: '待办中心',
       apps: '应用',
       users: '用户',
       roles: '角色',
@@ -195,6 +224,9 @@ const navLabels = computed(() => {
       automationRuns: '自动化运行',
       approvalMetrics: '审批 SLA',
       approvalBatchTransfer: '批量转交',
+      tasks: '任务',
+      // Values-free: names the surface, never the count.
+      tasksTodo: '待办任务',
       systemIntegration: '数据工厂',
       stockPreparation: '备料工作台',
       dataSources: '外接数据源',
@@ -214,6 +246,7 @@ const navLabels = computed(() => {
     workflows: 'Workflows',
     approvals: 'Approvals',
     approvalTodo: 'Pending approvals',
+    todoCenter: 'Todo Center',
     apps: 'Apps',
     users: 'Users',
     roles: 'Roles',
@@ -222,6 +255,8 @@ const navLabels = computed(() => {
     automationRuns: 'Automation Runs',
     approvalMetrics: 'Approval SLA',
     approvalBatchTransfer: 'Batch Transfer',
+    tasks: 'Tasks',
+    tasksTodo: 'Pending tasks',
     systemIntegration: 'Data Factory',
     stockPreparation: 'Stock Preparation',
     dataSources: 'Data Sources',

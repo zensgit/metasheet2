@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { spawnPythonSync, PYTHON_CANDIDATE_LABEL } from './python-interpreter.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..', '..')
@@ -67,11 +68,16 @@ function loadYaml(text) {
       // try next
     }
   }
-  const py = spawnSync(
-    'python3',
+  const py = spawnPythonSync(
     ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
     { input: text, encoding: 'utf8' },
   )
+  if (py.error) {
+    throw new Error(
+      `YAML parse: no Python interpreter could be spawned (tried ${PYTHON_CANDIDATE_LABEL}; ` +
+        `last error: ${py.error.message})`,
+    )
+  }
   if (py.status !== 0) {
     throw new Error(`YAML parse failed: ${py.stderr || py.stdout}`)
   }
@@ -1274,8 +1280,7 @@ test('legacy HTTPS backup adoption accepts one coherent prior URL triplet and re
   const dir = mkdtempSync(join(tmpdir(), 'https-legacy-backup-'))
   const backup = join(dir, 'backup.env')
   const run = () =>
-    spawnSync(
-      'python3',
+    spawnPythonSync(
       [
         '-c',
         match[1],
@@ -1357,7 +1362,7 @@ test('HTTPS restore helper dynamically restores only URL keys and removes backup
         'ROTATED_CREDENTIAL=old-marker',
       ].join('\n') + '\n',
     )
-    const result = spawnSync('python3', ['-c', match[1], current, backup, candidate], {
+    const result = spawnPythonSync(['-c', match[1], current, backup, candidate], {
       encoding: 'utf8',
     })
     assert.equal(result.status, 0, result.stderr)

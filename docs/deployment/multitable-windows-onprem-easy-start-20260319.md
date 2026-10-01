@@ -113,7 +113,11 @@ POSTGRES_PASSWORD=<strong-db-password>
 DATABASE_URL=postgres://metasheet:<strong-db-password>@127.0.0.1:5432/metasheet
 ATTACHMENT_PATH=/opt/metasheet/data/attachments
 ATTACHMENT_STORAGE_BASE_URL=http://<your-server-host>/files
+ENCRYPTION_KEY=<openssl rand -hex 32>
+ENCRYPTION_SALT=<openssl rand -hex 32, generated separately>
 ```
+
+Set `ENCRYPTION_KEY` and `ENCRYPTION_SALT` on the lines the template already has, in place. Never append a second copy of either line: the first occurrence wins (`ecosystem.config.cjs` keeps the first value of each key it reads from `docker/app.env`), so an appended value is ignored and the template's empty line stays in effect — the backend then refuses to encrypt or decrypt stored credentials.
 
 Create runtime directories:
 

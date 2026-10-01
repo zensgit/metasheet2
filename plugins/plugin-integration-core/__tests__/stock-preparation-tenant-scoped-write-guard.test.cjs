@@ -403,10 +403,13 @@ check('the derived set equals the pinned set (a new value-bearing read must be p
   )
 })
 
-// The three that derive their staging project inline. (The export does not: its sheet is the bound
-// table action's deploy-time target, which is why its own handler comment spells out what the
-// verified tenant does and does not decide there.)
+// The ones that derive their staging project inline.
 const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
+  // The export's SHEET is the bound table action's deploy-time target, but it now derives the
+  // staging project that sheet must belong to (its tenant wall, shared with the carry) — and that
+  // derivation must come from the resolved scope with no request projectId, or a caller could name
+  // the project the wall compares against.
+  'stockPreparationPrepLineExport',
   'stockPreparationConfirmationDecisionsValueEntry',
   // The confirm derives its staging project inline too, and it WRITES into it — so the check that
   // the project comes from the resolved scope with no request projectId matters more here than on
@@ -414,6 +417,11 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
+  // 通知下一步 (#6121). The advance probes the deploy-global bound sheet for "does this project have
+  // rows" before it writes, so it now runs the shared target tenant wall first — and the staging
+  // project that wall compares against must come from the resolved scope with no request projectId,
+  // or a caller could name the project the registry is asked about.
+  'stockPreparationHandoffAdvance',
 ])
 
 /**

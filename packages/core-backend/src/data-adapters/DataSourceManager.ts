@@ -7,7 +7,12 @@ import { HTTPAdapter } from './HTTPAdapter'
 import { MSSQLAdapter } from './MSSQLAdapter'
 import { MySQLAdapter } from './MySQLAdapter'
 import { PLMAdapter } from './PLMAdapter'
-import { encryptStoredSecretValue, decryptStoredSecretValue, isEncryptedSecretValue } from '../security/encrypted-secrets'
+import {
+  EncryptionMaterialError,
+  encryptStoredSecretValue,
+  decryptStoredSecretValue,
+  isEncryptedSecretValue,
+} from '../security/encrypted-secrets'
 import { assertNotK3Destination, preserveK3Marker } from './k3-destination-write-fence'
 import { assertSqlWriteAllowed, assertSqlSourceProvisionableAtRuntime, pinSqlSourceConnection } from './sql-write-arm-binding'
 import type { IConfigService, ILogger } from '../di/identifiers'
@@ -58,6 +63,101 @@ export function isLiveConnectionFkViolation(error: unknown): boolean {
 // happen — neither in memory nor on disk. Values-free by construction: the driver's text (host,
 // port, database, login) stays in the log; the client gets this code and a fixed sentence.
 export const DATA_SOURCE_DELETE_NOT_PERSISTED_CODE = 'DATA_SOURCE_DELETE_NOT_PERSISTED'
+
+// ── Load failures and in-place re-seal (#6079 dev-machine follow-up, #6067 §5 R6) ──────────────
+// A persisted source that cannot be loaded at startup never enters `adapters`/`scopes`, so every
+// id-addressed route answers 404 for it and its owner had no in-app way to re-enter a credential
+// that the CURRENT ENCRYPTION_KEY can no longer decrypt. The manager now remembers WHY each such
+// row failed (closed vocabulary below — never the error text, never config or credentials) so the
+// owner / a platform admin can see it and, for a credential failure only, re-seal it in place.
+//
+//   credentials_unreadable — an `enc:` credential failed to decrypt with the current key
+//                            (classified by the typed DataSourceCredentialUnreadableError below,
+//                            never by message prose). The ONLY state a re-seal can fix.
+//   unsupported_type       — the row's type has no registered adapter.
+//   load_failed            — anything else (malformed row, broken encryption material, ...). Also
+//                            the state a re-sealed row is left in when it may NOT go live without a
+//                            restart (armed for SQL write with no LOAD-phase pin, FIX 2 of
+//                            sql-write-arm-binding): its credential is readable now, so
+//                            credentials_unreadable would be false; what it needs is a restart,
+//                            which is an administrator's job — exactly what load_failed tells them.
+export const DATA_SOURCE_LOAD_STATES = [
+  'credentials_unreadable',
+  'unsupported_type',
+  'load_failed',
+] as const
+export type DataSourceLoadState = typeof DATA_SOURCE_LOAD_STATES[number]
+/** The ONLY load state a credential re-seal can fix. */
+const RESEALABLE_LOAD_STATE: DataSourceLoadState = 'credentials_unreadable'
+/** 409 — the source failed to load for a reason a credential cannot fix. */
+export const DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE = 'DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE'
+/** 409 — the row's ownership/scope changed since it failed to load; restart to re-observe it. */
+export const DATA_SOURCE_LOAD_FAILED_STALE_CODE = 'DATA_SOURCE_LOAD_FAILED_STALE'
+/** 409 — another re-seal of the same id is still running in this process. */
+export const DATA_SOURCE_RESEAL_IN_PROGRESS_CODE = 'DATA_SOURCE_RESEAL_IN_PROGRESS'
+/** 400 — a stored secret is unreadable and was not supplied; `details.missingCredentialKeys` names the KEYS only. */
+export const DATA_SOURCE_CREDENTIALS_REQUIRED_CODE = 'CREDENTIALS_REQUIRED'
+/** 500 — the re-seal write failed; nothing was changed (values-free, cause to the log only). */
+export const DATA_SOURCE_RESEAL_NOT_PERSISTED_CODE = 'DATA_SOURCE_RESEAL_NOT_PERSISTED'
+
+/**
+ * The typed decrypt failure. loadFromDatabase classifies a row as `credentials_unreadable` by
+ * `instanceof` on THIS class — never by reading the message, whose wording is unchanged and still
+ * only reaches the server log.
+ */
+export class DataSourceCredentialUnreadableError extends Error {
+  readonly credentialKey: string
+
+  constructor(credentialKey: string, message: string) {
+    super(message)
+    this.name = 'DataSourceCredentialUnreadableError'
+    this.credentialKey = credentialKey
+  }
+}
+
+/** Typed `unsupported_type` marker (same message as before, for the log). */
+class UnsupportedPersistedDataSourceTypeError extends Error {
+  constructor(type: string) {
+    super(`Unsupported persisted data source type: ${type}`)
+    this.name = 'UnsupportedPersistedDataSourceTypeError'
+  }
+}
+
+function classifyLoadFailure(err: unknown): DataSourceLoadState {
+  if (err instanceof DataSourceCredentialUnreadableError) return 'credentials_unreadable'
+  if (err instanceof UnsupportedPersistedDataSourceTypeError) return 'unsupported_type'
+  return 'load_failed'
+}
+
+/** What the manager keeps about a row that failed to load. NO config, NO credentials, NO error text. */
+interface DataSourceLoadFailure {
+  reason: DataSourceLoadState
+  ownerId: string | null
+  tenantId: string | null
+  workspaceId: string | null
+  scopeKind: DataSourceScopeKind
+  name: string
+  type: string
+}
+
+/** One entry of {@link DataSourceManager.listLoadFailedDataSources} — management metadata only. */
+export interface DataSourceLoadFailedListItem {
+  id: string
+  name: string
+  type: string
+  loadState: DataSourceLoadState
+  ownerId: string | null
+}
+
+/** Outcome of {@link DataSourceManager.resealLoadFailedDataSource}. `config` carries plaintext credentials: callers MUST sanitize before responding. */
+export interface DataSourceResealResult {
+  config: DataSourceConfig
+  ownerId: string | null
+  /** The load state the source was in when the re-seal started. */
+  priorLoadState: DataSourceLoadState
+  restartRequired: boolean
+  connected: boolean
+}
 
 /**
  * Actor context for data-source access decisions (the authority model).
@@ -244,6 +344,31 @@ function normalizeTenantId(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
+/**
+ * The ownership/scope columns of a persisted row, normalized EXACTLY as loadFromDatabase stores
+ * them in `scopes`. Both the load-failure snapshot and the re-seal's stale check go through this
+ * one function, so "the row changed since it failed to load" is a like-for-like comparison.
+ */
+function scopeSnapshotOfRecord(record: Pick<DataSourceRecord, 'owner_id' | 'workspace_id' | 'tenant_id' | 'scope_kind'>): {
+  ownerId: string | null
+  workspaceId: string | null
+  tenantId: string | null
+  scopeKind: DataSourceScopeKind
+} {
+  return {
+    ownerId: typeof record.owner_id === 'string' && record.owner_id.length > 0 ? record.owner_id : null,
+    workspaceId: record.workspace_id ?? null,
+    // Older databases do not have these columns. Treat absent or
+    // malformed scope metadata as the narrowest legacy posture.
+    tenantId: normalizeTenantId(record.tenant_id),
+    scopeKind: isDataSourceScopeKind(record.scope_kind) ? record.scope_kind : 'legacy_private',
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 interface DataSourceRecord {
   id: string
   name: string
@@ -283,6 +408,12 @@ export class DataSourceManager extends EventEmitter {
     tenantId: string | null
     scopeKind: DataSourceScopeKind
   }> = new Map()
+  // Rows that loadFromDatabase observed but could not load (see DATA_SOURCE_LOAD_STATES). Keyed by
+  // id; an id is never in `adapters` and here at the same time.
+  private loadFailures: Map<string, DataSourceLoadFailure> = new Map()
+  // In-process re-seal serialization: a second re-seal of the same id while one is running is
+  // refused (409) instead of racing the first one's post-commit runtime load.
+  private resealsInFlight: Set<string> = new Set()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -329,19 +460,13 @@ export class DataSourceManager extends EventEmitter {
       for (const record of records) {
         try {
           if (!this.adapterTypes.has(record.type.toLowerCase())) {
-            throw new Error(`Unsupported persisted data source type: ${record.type}`)
+            throw new UnsupportedPersistedDataSourceTypeError(record.type)
           }
           const config = this.recordToConfig(record)
           await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
-          this.scopes.set(record.id, {
-            ownerId: record.owner_id,
-            workspaceId: record.workspace_id ?? null,
-            // Older databases do not have these columns. Treat absent or
-            // malformed scope metadata as the narrowest legacy posture.
-            tenantId: normalizeTenantId(record.tenant_id),
-            scopeKind: isDataSourceScopeKind(record.scope_kind) ? record.scope_kind : 'legacy_private'
-          })
+          this.scopes.set(record.id, this.scopeOfLoadedRecord(record))
+          this.loadFailures.delete(record.id)
 
           if (record.auto_connect) {
             await this.connectDataSource(config.id).catch((err) => {
@@ -351,6 +476,7 @@ export class DataSourceManager extends EventEmitter {
           loadedCount += 1
         } catch (err) {
           console.error(`[DataSourceManager] Failed to load data source ${record.id}:`, err)
+          this.recordLoadFailure(record, classifyLoadFailure(err))
         }
       }
 
@@ -398,13 +524,49 @@ export class DataSourceManager extends EventEmitter {
         try {
           out[key] = decryptStoredSecretValue(v)
         } catch (err) {
-          throw new Error(
+          const message =
             `Failed to decrypt credential '${key}' (ENCRYPTION_KEY may have changed): ${err instanceof Error ? err.message : String(err)}`
-          )
+          // Unusable encryption MATERIAL (production without a configured key/salt) is not a
+          // per-row credential problem: re-entering a credential cannot fix it (encrypting it would
+          // fail the same way), so it stays an untyped error and classifies as `load_failed`.
+          if (err instanceof EncryptionMaterialError) throw new Error(message)
+          throw new DataSourceCredentialUnreadableError(key, message)
         }
       }
     }
     return out
+  }
+
+  /** The in-memory scope loadFromDatabase stores for a loaded row (unchanged semantics). */
+  private scopeOfLoadedRecord(record: DataSourceRecord): {
+    ownerId: string
+    workspaceId: string | null
+    tenantId: string | null
+    scopeKind: DataSourceScopeKind
+  } {
+    const snapshot = scopeSnapshotOfRecord(record)
+    return {
+      ownerId: record.owner_id,
+      workspaceId: snapshot.workspaceId,
+      tenantId: snapshot.tenantId,
+      scopeKind: snapshot.scopeKind,
+    }
+  }
+
+  /**
+   * Remember that a persisted row failed to load, and why. Stores management metadata only — no
+   * config, no credentials, no error message. An id that IS loaded is never recorded (a second
+   * loadFromDatabase over already-loaded ids would otherwise mark live sources as failed).
+   */
+  private recordLoadFailure(record: DataSourceRecord, reason: DataSourceLoadState): void {
+    if (!record || typeof record.id !== 'string' || record.id.length === 0) return
+    if (this.adapters.has(record.id)) return
+    this.loadFailures.set(record.id, {
+      reason,
+      ...scopeSnapshotOfRecord(record),
+      name: typeof record.name === 'string' ? record.name : record.id,
+      type: typeof record.type === 'string' ? record.type : '',
+    })
   }
 
   private recordToConfig(record: DataSourceRecord): DataSourceConfig {
@@ -478,7 +640,11 @@ export class DataSourceManager extends EventEmitter {
     // Reject duplicates BEFORE persisting — otherwise a create that will be
     // rejected still runs the upsert and overwrites the existing row's config
     // and owner. Use updateDataSource() to change an existing source.
-    if (this.adapters.has(config.id)) {
+    // A row that exists but failed to load is just as existing: without the second operand a
+    // create at that id would upsert over it and silently re-assign its owner / tenant / scope
+    // (the takeover the in-place re-seal replaces — see resealLoadFailedDataSource). Same wording
+    // and 409 as the loaded case, so it discloses nothing the loaded case does not.
+    if (this.adapters.has(config.id) || this.loadFailures.has(config.id)) {
       throw new Error(`Data source with id '${config.id}' already exists`)
     }
 
@@ -595,6 +761,7 @@ export class DataSourceManager extends EventEmitter {
       tenantId,
       scopeKind
     })
+    this.loadFailures.delete(id)
     return adapter
   }
 
@@ -638,6 +805,333 @@ export class DataSourceManager extends EventEmitter {
     scopeKind: DataSourceScopeKind
   } | undefined {
     return this.scopes.get(id)
+  }
+
+  /**
+   * Load state of an id, read from memory — the input of the integration facade's server-side
+   * refusal reason (#6067 §5 R1). It takes NO actor and decides NO access: its answer names a word
+   * in the server log and is never returned to a caller.
+   *
+   * EQUAL COST, by construction: the same three in-memory lookups run whatever the id is — loaded,
+   * failed to load, or nonexistent — and the verdict is taken only afterwards. No database read, no
+   * promise, no allocation. `loaded` mirrors the registry predicate of assertAccess (adapter AND
+   * scope present), so an id that is only half registered is not reported as loaded.
+   */
+  getLoadState(id: string): 'loaded' | DataSourceLoadState | 'absent' {
+    const adapterPresent = this.adapters.has(id)
+    const scopePresent = this.scopes.has(id)
+    const failure = this.loadFailures.get(id)
+    if (adapterPresent && scopePresent) return 'loaded'
+    if (failure !== undefined) return failure.reason
+    return 'absent'
+  }
+
+  /**
+   * Access for PUT /:id/credentials — the ONE route that addresses both a loaded id and a
+   * load-failed id. Returns which of the two the actor may act on; every refusal throws the SAME
+   * "not found" as assertAccess does for a nonexistent id.
+   *
+   * EQUAL COST, by construction: every call performs the SAME in-memory lookups (adapters, scopes,
+   * loadFailures, actor normalization) whatever the id is — loaded, load-failed, or nonexistent —
+   * and decides only afterwards, with no database, audit or allocation-bearing work on any branch
+   * before the throw. So a non-owner probing a load-failed id and anyone probing a nonexistent id
+   * run the identical code path to the identical throw (existence non-disclosure, incl. timing).
+   *
+   * For a loaded id the verdict is exactly assertAccess's (owner, or platform admin via the
+   * management actor shape); the route still calls assertAccess afterwards, unchanged.
+   */
+  resolveCredentialRouteTarget(id: string, actor: DataSourceActor): 'loaded' | 'load_failed' {
+    const loaded = this.adapters.has(id)
+    const scope = this.scopes.get(id)
+    const failure = this.loadFailures.get(id)
+    const { userId, platformAdmin } = normalizeActor(actor)
+    const admin = platformAdmin === true
+    const loadedPermitted = loaded && scope !== undefined && (admin || (userId !== undefined && scope.ownerId === userId))
+    const loadFailedPermitted = !loaded && failure !== undefined && (
+      admin || (userId !== undefined && failure.ownerId !== null && failure.ownerId === userId)
+    )
+    if (loadedPermitted) return 'loaded'
+    if (loadFailedPermitted) return 'load_failed'
+    throw new Error(`Data source with id '${id}' not found`)
+  }
+
+  /**
+   * Access check for a load-failed id: the STORED owner, or a platform admin (management actor
+   * shape only — a bare user id never gets the admin tier, exactly as in assertAccess).
+   *
+   * EXISTENCE NON-DISCLOSURE, and equal cost: every refusal — a non-owner, an actor with no user
+   * id, an id with no recorded failure — throws the SAME "not found" as assertAccess does for a
+   * nonexistent id, from the same in-memory lookups, with no database or audit work on any branch.
+   */
+  assertLoadFailedAccess(id: string, actor: DataSourceActor): DataSourceLoadFailure {
+    const failure = this.loadFailures.get(id)
+    const { userId, platformAdmin } = normalizeActor(actor)
+    const permitted = failure !== undefined && !this.adapters.has(id) && (
+      platformAdmin === true || (userId !== undefined && failure.ownerId !== null && failure.ownerId === userId)
+    )
+    if (!permitted) {
+      throw new Error(`Data source with id '${id}' not found`)
+    }
+    return failure
+  }
+
+  /**
+   * Load-failed sources visible to this actor: platform admin sees all, an owner sees their own,
+   * an actor with no user id sees NOTHING — the same rule scopePermitsListing applies to loaded
+   * sources, evaluated against the owner recorded at load time. Management metadata only (id,
+   * name, type, state, owner) — never config, credentials or the failure's error text.
+   *
+   * Deliberately a SEPARATE method: listDataSources() keeps its exact shape, so no caller that
+   * treats its entries as usable (adapter-backed) sources can receive one of these.
+   */
+  listLoadFailedDataSources(filter: { actor: DataSourceActor }): DataSourceLoadFailedListItem[] {
+    const { userId, platformAdmin } = normalizeActor(filter.actor)
+    const out: DataSourceLoadFailedListItem[] = []
+    for (const [id, failure] of this.loadFailures) {
+      if (this.adapters.has(id)) continue
+      const visible = platformAdmin === true || (userId !== undefined && failure.ownerId !== null && failure.ownerId === userId)
+      if (!visible) continue
+      out.push({ id, name: failure.name, type: failure.type, loadState: failure.reason, ownerId: failure.ownerId })
+    }
+    return out
+  }
+
+  /**
+   * RE-SEAL a source that failed to load because its stored credential is unreadable, IN PLACE.
+   *
+   * Contract (each clause is pinned by tests/unit/data-source-reseal-load-failed.test.ts):
+   *  - access: stored owner or platform admin; anyone else gets the uniform not-found (the route
+   *    decides that FIRST, synchronously and from memory, via resolveCredentialRouteTarget; this
+   *    method re-checks with assertLoadFailedAccess for direct callers).
+   *  - only credentials_unreadable is re-sealable; any other state is a coded 409
+   *    DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE.
+   *  - ONE transaction: `SELECT … WHERE id AND is_active AND deleted_at IS NULL FOR UPDATE`. No row
+   *    → not-found (the recorded failure is dropped). Owner / tenant / workspace / scope kind / type
+   *    differing from the load-time snapshot → 409 DATA_SOURCE_LOAD_FAILED_STALE, nothing written.
+   *  - the config is built from the ROW: connection / options / poolConfig / name / type are never
+   *    taken from the request. Credentials: supplied keys override; an unsupplied SENSITIVE key keeps
+   *    its stored plaintext, or its stored ciphertext's plaintext if the CURRENT key decrypts it;
+   *    otherwise 400 CREDENTIALS_REQUIRED naming the key NAMES only, nothing written.
+   *  - the UPDATE sets `config` (every other key of the stored config JSON byte-preserved, only
+   *    `credentials` replaced by its re-encryption) and `updated_at` — never owner_id, tenant_id,
+   *    scope_kind, workspace_id, name, type, is_active, deleted_at or auto_connect — under the same
+   *    guarded WHERE.
+   *  - SQL write arm-binding: an id armed for SQL write with no LOAD-phase pin is NOT loaded at
+   *    runtime (runtime never pins — FIX 2); the credentials are persisted, the result says
+   *    restartRequired, and the recorded state becomes load_failed (readable credential, needs an
+   *    administrator's restart — no second re-seal). Otherwise the source is loaded exactly as
+   *    loadFromDatabase would (scope from the row, auto_connect honored) but through the RUNTIME
+   *    phase, which never pins, and the recorded failure is cleared.
+   */
+  async resealLoadFailedDataSource(
+    id: string,
+    suppliedCredentials: Credentials,
+    actor: DataSourceActor
+  ): Promise<DataSourceResealResult> {
+    const failure = this.assertLoadFailedAccess(id, actor)
+    if (failure.reason !== RESEALABLE_LOAD_STATE) {
+      throw Object.assign(
+        new Error(
+          `数据源「${id}」无法装载的原因不是凭据问题，重新输入凭据无法修复，请联系管理员 / Data source '${id}' failed to load for a reason a credential cannot fix; contact an administrator.`
+        ),
+        { status: 409, code: DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE, details: { loadState: failure.reason } }
+      )
+    }
+    const db = this.db
+    // Unreachable in practice: failures are only ever recorded by loadFromDatabase, which needs a db.
+    if (!db) throw new Error(`Data source with id '${id}' not found`)
+    if (this.resealsInFlight.has(id)) {
+      throw Object.assign(
+        new Error(`数据源「${id}」正在重新写入凭据，请稍后重试 / A credential re-seal of data source '${id}' is already running; retry shortly.`),
+        { status: 409, code: DATA_SOURCE_RESEAL_IN_PROGRESS_CODE }
+      )
+    }
+    this.resealsInFlight.add(id)
+    try {
+      return await this.resealLoadFailedDataSourceLocked(db, id, suppliedCredentials, failure)
+    } finally {
+      this.resealsInFlight.delete(id)
+    }
+  }
+
+  private async resealLoadFailedDataSourceLocked(
+    db: Kysely<unknown>,
+    id: string,
+    suppliedCredentials: Credentials,
+    failure: DataSourceLoadFailure
+  ): Promise<DataSourceResealResult> {
+    const gone = Symbol('data-source-row-gone')
+    const supplied: Credentials = {}
+    for (const [key, value] of Object.entries(suppliedCredentials ?? {})) {
+      if (typeof value === 'string' && value.length > 0) supplied[key] = value
+    }
+
+    let written: { config: DataSourceConfig; record: DataSourceRecord }
+    try {
+      written = await db.transaction().execute(async (trx) => {
+        const rows = await trx
+          .selectFrom('data_sources' as never)
+          .selectAll()
+          .where('id' as never, '=', id as never)
+          .where('is_active' as never, '=', true as never)
+          .where('deleted_at' as never, 'is', null as never)
+          .forUpdate()
+          .execute() as DataSourceRecord[]
+        const record = rows[0]
+        if (!record) throw gone
+
+        const current = scopeSnapshotOfRecord(record)
+        // A credentials_unreadable row had an object config (its credential was reached and failed
+        // to decrypt). A config that is no longer an object changed underneath us — and treating
+        // it as {} would write a config with NO connection — so it is stale, never "empty".
+        const stale =
+          current.ownerId !== failure.ownerId ||
+          current.tenantId !== failure.tenantId ||
+          current.workspaceId !== failure.workspaceId ||
+          current.scopeKind !== failure.scopeKind ||
+          typeof record.type !== 'string' ||
+          record.type !== failure.type ||
+          !isPlainRecord(record.config)
+        if (stale) {
+          throw Object.assign(
+            new Error(
+              `数据源「${id}」在装载失败后已被修改，请重启服务后再操作 / Data source '${id}' changed since it failed to load; restart the service to re-observe it. Nothing was written.`
+            ),
+            { status: 409, code: DATA_SOURCE_LOAD_FAILED_STALE_CODE }
+          )
+        }
+        if (!this.adapterTypes.has(record.type.toLowerCase())) {
+          throw Object.assign(
+            new Error(
+              `数据源「${id}」的类型当前不受支持，重新输入凭据无法修复 / Data source '${id}' has a type with no registered adapter; a credential cannot fix it.`
+            ),
+            { status: 409, code: DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE, details: { loadState: 'unsupported_type' } }
+          )
+        }
+
+        const storedConfig = record.config as Record<string, unknown> // plain object: checked above
+        const storedCredentials = isPlainRecord(storedConfig.credentials) ? storedConfig.credentials : {}
+        const credentials: Credentials = { ...(storedCredentials as Credentials) }
+        const missingCredentialKeys: string[] = []
+        for (const key of SENSITIVE_CREDENTIAL_KEYS) {
+          if (Object.prototype.hasOwnProperty.call(supplied, key)) continue
+          const stored = storedCredentials[key]
+          // Absent, or legacy plaintext: kept as-is (plaintext is re-encrypted below).
+          if (typeof stored !== 'string' || !isEncryptedSecretValue(stored)) continue
+          try {
+            credentials[key] = decryptStoredSecretValue(stored)
+          } catch {
+            missingCredentialKeys.push(key)
+          }
+        }
+        if (missingCredentialKeys.length > 0) {
+          throw Object.assign(
+            new Error(
+              `以下已存凭据无法用当前密钥解密，请一并重新输入：${missingCredentialKeys.join(', ')} / These stored credentials cannot be decrypted with the current key and must be re-entered: ${missingCredentialKeys.join(', ')}. Nothing was written.`
+            ),
+            { status: 400, code: DATA_SOURCE_CREDENTIALS_REQUIRED_CODE, details: { missingCredentialKeys } }
+          )
+        }
+        Object.assign(credentials, supplied)
+
+        // Everything but `credentials` comes from the ROW, never from the request.
+        const config: DataSourceConfig = {
+          id,
+          name: record.name,
+          type: record.type,
+          connection: (storedConfig.connection || {}) as ConnectionConfig,
+          credentials,
+          options: storedConfig.options as AdapterOptions | undefined,
+          poolConfig: storedConfig.poolConfig as DataSourceConfig['poolConfig'],
+        }
+
+        await trx
+          .updateTable('data_sources' as never)
+          .set({
+            config: { ...storedConfig, credentials: this.encryptCredentials(credentials) },
+            updated_at: new Date(),
+          } as never)
+          .where('id' as never, '=', id as never)
+          .where('is_active' as never, '=', true as never)
+          .where('deleted_at' as never, 'is', null as never)
+          .execute()
+
+        return { config, record }
+      })
+    } catch (err) {
+      if (err === gone) {
+        this.loadFailures.delete(id)
+        throw new Error(`Data source with id '${id}' not found`)
+      }
+      if (err instanceof Error) {
+        const status = (err as { status?: unknown }).status
+        const code = (err as { code?: unknown }).code
+        if (typeof status === 'number' && typeof code === 'string' && [
+          DATA_SOURCE_LOAD_FAILED_STALE_CODE,
+          DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
+          DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+        ].includes(code)) {
+          throw err
+        }
+      }
+      // Driver / encryption failure: the transaction rolled back, nothing changed. The cause (which
+      // can embed host, database or login) goes to the log only.
+      console.warn(`[DataSourceManager] Credential re-seal could not be persisted: ${id}`, err)
+      throw Object.assign(
+        new Error(`数据源「${id}」的凭据未能写入，未做任何修改，请重试 / Credentials of data source '${id}' could not be persisted; nothing was changed. Retry.`),
+        { status: 500, code: DATA_SOURCE_RESEAL_NOT_PERSISTED_CODE }
+      )
+    }
+
+    const { config, record } = written
+    const result = (restartRequired: boolean, connected: boolean): DataSourceResealResult => ({
+      config,
+      ownerId: failure.ownerId,
+      priorLoadState: failure.reason,
+      restartRequired,
+      connected,
+    })
+
+    // SQL WRITE ARM-BINDING (FIX 2). This id never passed the LOAD phase, so it has no pin. If the
+    // deploy allowlist arms it, it may only go live through the next restart's LOAD phase (which
+    // pins the row's connection — unchanged by this write). Any refusal from the provisioning guard
+    // is read as "do not load now": fail-closed toward NOT going live.
+    let provisionableNow = true
+    try {
+      assertSqlSourceProvisionableAtRuntime(
+        (status, code, message, details) => Object.assign(new Error(message), { status, code, details }),
+        id,
+      )
+    } catch {
+      provisionableNow = false
+    }
+    if (!provisionableNow) {
+      // Still not loaded, but the credential is readable now: credentials_unreadable would be false,
+      // and what remains is an administrator's restart — load_failed (no further re-seal).
+      this.loadFailures.set(id, { ...failure, reason: 'load_failed' })
+      return result(true, false)
+    }
+
+    // Runtime load, as loadFromDatabase would — but through the RUNTIME phase, which never pins.
+    let adapter: BaseDataAdapter
+    try {
+      adapter = await this.addDataSourceInternal(config, false, 'runtime')
+    } catch (err) {
+      // The credentials ARE persisted; only the in-process load failed. The next restart's LOAD
+      // phase re-observes the row, so say exactly that rather than claiming it is live.
+      console.error(`[DataSourceManager] Re-sealed data source could not be loaded at runtime: ${id}`, err)
+      this.loadFailures.set(id, { ...failure, reason: 'load_failed' })
+      return result(true, false)
+    }
+    this.scopes.set(id, this.scopeOfLoadedRecord(record))
+    this.loadFailures.delete(id)
+
+    if (record.auto_connect) {
+      await this.connectDataSource(id).catch((err) => {
+        console.error(`[DataSourceManager] Auto-connect failed for ${id}:`, err)
+      })
+    }
+    return result(false, adapter.isConnected())
   }
 
   /**
@@ -1133,6 +1627,7 @@ export class DataSourceManager extends EventEmitter {
     this.adapters.delete(id)
     this.connectionPool.delete(id)
     this.scopes.delete(id)
+    this.loadFailures.delete(id)
 
     // ④ resource release last, and never a reason to undo ② / ③.
     adapter.removeAllListeners()
@@ -1640,6 +2135,8 @@ export class DataSourceManager extends EventEmitter {
     this.adapterTypes.clear()
     this.connectionPool.clear()
     this.scopes.clear()
+    this.loadFailures.clear()
+    this.resealsInFlight.clear()
     this.removeAllListeners()
   }
 }

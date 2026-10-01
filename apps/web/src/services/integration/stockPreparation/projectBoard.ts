@@ -7,7 +7,9 @@
 //
 // The second is the 通知下一步 contract, which lands on its own branch and its own schedule. This
 // module therefore treats it as an OPTIONAL capability and says so in the type system rather than in
-// a comment: `readStockPreparationHandoff` never throws for "the route is not there" — a 404, a 501
+// a comment. Only its READ lives here; the POST is confirmationQueue.ts `advanceStockPreparationHandoff`,
+// the one client whose type requires `fromStepKey` (see the note at the end of this file).
+// `readStockPreparationHandoff` never throws for "the route is not there" — a 404, a 501
 // or a `configured: false` body all resolve to `null`, and the page renders no button. That is what
 // makes this page work whether or not the handoff slice has merged, and it is deliberately NOT a
 // try/catch that swallows every failure: a 403 or a 500 still throws, because those mean something
@@ -93,9 +95,10 @@ export interface StockPreparationProjectBoard {
 /**
  * 轮到谁 — the handoff cursor, as this page needs it.
  *
- * A SUBSET of what the handoff route returns, on purpose: the page shows whose turn it is and
- * whether this operator is the one holding it, and nothing else. Widening this interface to mirror
- * the whole response would couple the page to a contract that is still being rebased.
+ * A SUBSET of what the handoff route returns, on purpose: the page shows whose turn it is, whether
+ * this operator is the one holding it, and — the one field added for the press itself — which step a
+ * press would complete. Widening this interface to mirror the whole response would couple the page
+ * to a contract that is still being rebased.
  */
 export interface StockPreparationHandoffCursor {
   configured: boolean
@@ -105,22 +108,19 @@ export interface StockPreparationHandoffCursor {
   stepCount: number
   terminal: boolean
   completed: boolean
-  /** Whether the CALLER is the current handler — decides whether 通知下一步 may be pressed. */
+  /**
+   * Whether the CALLER is the current handler — one of the two ways 通知下一步 may be pressed; the
+   * other is an owed resend (confirmationQueue.ts `stockPreparationHandoffMayPress`).
+   */
   isCurrentHandler: boolean
-}
-
-/** The result of pressing 通知下一步. */
-export interface StockPreparationHandoffAdvance {
-  projectNo: string | null
-  fromStepKey: string | null
-  currentStepKey: string | null
-  stepIndex: number | null
-  stepCount: number
-  changed: boolean
-  terminal: boolean
-  notified: boolean
-  /** 'sent' | 'skipped' | 'not_configured' — a closed server vocabulary, clamped by the view. */
-  notifyOutcome: string | null
+  /**
+   * The step whose group notice is still owed and still sendable by this caller (server-computed).
+   * Carried for the same two uses the confirmation queue makes of it: a press sends it as
+   * `fromStepKey` ahead of `currentStepKey` (`stockPreparationHandoffFromStepKey`), and its handler
+   * may press to send it even after the turn has moved on (`stockPreparationHandoffMayPress`). Absent
+   * on a backend older than that field, which reads as "nothing owed".
+   */
+  resendableStepKey?: string | null
 }
 
 const BOARD_BASE = '/api/integration/stock-preparation'
@@ -172,24 +172,12 @@ export async function readStockPreparationHandoff(
   return cursor
 }
 
-/**
- * 通知下一步 — hand the project to whoever is next.
- *
- * Deliberately has NO absent-route fallback: it is only ever called from a control that
- * `readStockPreparationHandoff` already proved exists, so a 404 here is a genuine surprise and must
- * surface rather than resolve to a shrug.
- */
-export async function advanceStockPreparationHandoff(
-  scope: IntegrationScope & { projectNo: string },
-): Promise<StockPreparationHandoffAdvance> {
-  const response = await apiFetch(`${BOARD_BASE}/handoff/advance`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      tenantId: scope.tenantId,
-      workspaceId: scope.workspaceId,
-      projectNo: scope.projectNo,
-    }),
-  })
-  return parseStockPreparationConfirmResponse<StockPreparationHandoffAdvance>(response)
-}
+// 通知下一步's POST IS DELIBERATELY NOT IN THIS MODULE.
+//
+// This file used to carry its own `advanceStockPreparationHandoff` that posted only
+// { tenantId, workspaceId, projectNo }. The route requires `fromStepKey`
+// (plugins/plugin-integration-core/lib/http-routes.cjs, stockPreparationHandoffAdvance) and answered
+// 400 STOCK_PREPARATION_HANDOFF_REQUEST_INVALID to every press this page ever made. The page now calls
+// confirmationQueue.ts `advanceStockPreparationHandoff`, whose parameter type REQUIRES `fromStepKey`,
+// with the key from `stockPreparationHandoffFromStepKey` — one client and one derivation for both
+// surfaces, so a second client that forgets the key cannot come back.

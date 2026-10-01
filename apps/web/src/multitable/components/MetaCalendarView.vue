@@ -351,7 +351,8 @@
 import { ref, computed, watch } from 'vue'
 import type { LinkedRecordSummary, MetaAttachment, MetaCalendarViewConfig, MetaField, MetaRecord, MultitableCommentPresenceSummary } from '../types'
 import { resolveCalendarViewConfig } from '../utils/view-config'
-import { formatFieldDisplay } from '../utils/field-display'
+import { formatFieldDisplay, viewDateOnlyDayKey, viewDayZone, viewTodayKey } from '../utils/field-display'
+import { dateTimeValueDayKey } from '../utils/business-timezone'
 import {
   buildCalendarDay,
   buildCalendarDays,
@@ -428,7 +429,6 @@ const emit = defineEmits<{
 
 const dateFieldId = ref<string | null>(null)
 const viewMode = ref<'month' | 'week' | 'day'>('month')
-const viewDate = ref(new Date())
 const pendingConfigKey = ref<string | null>(null)
 const { isZh } = useLocale()
 const commentsChipLabel = computed(() => commentLabel('comment.title', isZh.value))
@@ -473,6 +473,23 @@ const dateFields = computed(() =>
 const dateField = computed(() =>
   dateFieldId.value ? props.fields.find((f) => f.id === dateFieldId.value) ?? null : null,
 )
+
+/**
+ * The calendar's "today" (客户反馈 2026-09-24 #4c follow-up): today in the date field's day zone, else the
+ * business timezone — for `date` calendars too (viewTodayKey). The day the view opens on, the today highlight,
+ * "Today" and quick-create all use it, the same calendar the date-time buckets below use; never the browser's
+ * day, which differs from it for part of every day when the browser is not in the business timezone.
+ */
+function calendarTodayKey(): string {
+  return viewTodayKey(dateField.value)
+}
+
+const viewDate = ref(parseDateForCell(calendarTodayKey()))
+
+const endDateField = computed(() => {
+  const endFieldId = calendarConfig.value.endDateFieldId
+  return endFieldId ? props.fields.find((f) => f.id === endFieldId) ?? null : null
+})
 
 const activeDayStr = computed(() => fmt(viewDate.value.getFullYear(), viewDate.value.getMonth() + 1, viewDate.value.getDate()))
 
@@ -530,9 +547,9 @@ const eventsByDate = computed(() => {
       })
       : row.id
     const title = titleDisplay === '—' ? row.id : titleDisplay
-    const startDate = normalizeDate(String(row.data[dateField.value.id] ?? ''))
+    const startDate = recordDayKey(dateField.value, row.data[dateField.value.id])
     const endFieldId = calendarConfig.value.endDateFieldId
-    const endDate = endFieldId ? normalizeDate(String(row.data[endFieldId] ?? '')) : null
+    const endDate = endFieldId ? recordDayKey(endDateField.value, row.data[endFieldId]) : null
     if (!startDate) continue
     const start = new Date(`${startDate}T00:00:00`)
     const end = new Date(`${(endDate ?? startDate)}T00:00:00`)
@@ -575,6 +592,8 @@ function buildCell(date: Date, inMonth: boolean): CalendarCell {
     holidays: props.calendarHolidays ?? [],
     isCurrentMonth: inMonth,
     showLunarCalendar: true,
+    // The "today" highlight marks the calendar's today (business day) — the calendar the date-time buckets use.
+    today: parseDateForCell(calendarTodayKey()),
   })
   const dateStr = calendarDay.date
   const all = eventsByDate.value[dateStr] ?? []
@@ -588,11 +607,6 @@ function buildCell(date: Date, inMonth: boolean): CalendarCell {
     overflow: Math.max(0, all.length - MAX_EVENTS_PER_CELL),
   }
 }
-
-const todayStr = computed(() => {
-  const today = new Date()
-  return fmt(today.getFullYear(), today.getMonth() + 1, today.getDate())
-})
 
 const monthCells = computed<CalendarCell[]>(() => {
   const first = new Date(viewDate.value.getFullYear(), viewDate.value.getMonth(), 1)
@@ -679,6 +693,21 @@ function fmt(y: number, m: number, d: number): string {
 
 function normalizeDate(raw: string): string | null {
   return normalizeDateKey(raw)
+}
+
+/**
+ * The calendar day a record's value falls on. A date-time (dateTime / createdTime / modifiedTime) lands on the
+ * day its cell SHOWS — its wall clock in the field / business timezone (客户反馈 2026-09-24 #4c follow-up) —
+ * never on the UTC day (`normalizeDateKey` reads the first ten characters of the stored `…Z` instant) nor on
+ * the browser's day. A `date` field lands on the day ITS cell shows too (#6181, viewDateOnlyDayKey): a day as
+ * written keeps that day; a stored instant (`2026-09-17T16:00:00.000Z`) is its business-timezone day
+ * (`2026-09-18`), not the UTC day the first ten characters name. Text / number fields keep `normalizeDate`.
+ */
+function recordDayKey(field: MetaField | null, value: unknown): string | null {
+  const zone = viewDayZone(field)
+  // A value the grammar cannot read (legacy junk) keeps the old day logic rather than vanishing.
+  const businessDay = zone ? dateTimeValueDayKey(value, zone) : viewDateOnlyDayKey(field, value)
+  return businessDay ?? normalizeDate(String(value ?? ''))
 }
 
 function parseDateForCell(dateStr: string): Date {
@@ -779,7 +808,7 @@ function goNext() {
 }
 
 function goToday() {
-  viewDate.value = new Date()
+  viewDate.value = parseDateForCell(calendarTodayKey())
 }
 
 function cellAriaLabel(cell: CalendarCell): string {

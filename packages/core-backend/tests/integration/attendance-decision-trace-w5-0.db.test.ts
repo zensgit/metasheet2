@@ -179,8 +179,8 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
   ): Promise<string> {
     const instanceId = `${PFX}_inst_${randomUUID()}`
     await pool.query(
-      `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata)
-       VALUES ($1, 'pending', 0, '{}'::jsonb, '{"approvalFlow":{"steps":[]}}'::jsonb)`,
+      `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata, workflow_key)
+       VALUES ($1, 'pending', 0, '{}'::jsonb, '{"approvalFlow":{"steps":[]}}'::jsonb, 'attendance.request')`,
       [instanceId],
     )
     await pool.query(
@@ -195,8 +195,8 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
     )
     // The reverse-link that authorizes ⑥: a request row owned by requesterUserId pointing at this instance.
     await pool.query(
-      `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id)
-       VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3)`,
+      `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id, approval_workflow_key)
+       VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3,'attendance.request')`,
       [orgId, requesterUserId, instanceId],
     )
     return instanceId
@@ -861,15 +861,15 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
       await seedMembership(orgId, requesterId, true)
       const instanceId = `${PFX}_g1_e6_inst_${randomUUID()}`
       await pool.query(
-        `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata)
-         VALUES ($1, 'pending', 0, '{}'::jsonb, '{}'::jsonb)`,
+        `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata, workflow_key)
+         VALUES ($1, 'pending', 0, '{}'::jsonb, '{}'::jsonb, 'attendance.request')`,
         [instanceId],
       )
       // Deliberately ZERO rows in approval_assignments — the OD-W5-2=(a) "resolution failed for
       // every step, reason discarded, nothing persisted" scenario (§1-6① / §3.3⑥ 断环 clause).
       await pool.query(
-        `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id)
-         VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3)`,
+        `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id, approval_workflow_key)
+         VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3,'attendance.request')`,
         [orgId, requesterId, instanceId],
       )
       const app = makeApp({ id: requesterId })
@@ -964,8 +964,8 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
       await seedMembership(orgId, requesterId, true)
       const instanceId = `${PFX}_e6_inactive_inst_${randomUUID()}`
       await pool.query(
-        `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata)
-         VALUES ($1, 'pending', 0, '{}'::jsonb, '{}'::jsonb)`,
+        `INSERT INTO approval_instances (id, status, version, requester_snapshot, metadata, workflow_key)
+         VALUES ($1, 'pending', 0, '{}'::jsonb, '{}'::jsonb, 'attendance.request')`,
         [instanceId],
       )
       await pool.query(
@@ -974,8 +974,8 @@ describeIfDatabase('W5-0 GET decision-trace (admin + self hosts, real DB)', () =
         [instanceId, assigneeId, JSON.stringify({ resolvedFrom: { kind: 'direct_manager' } })],
       )
       await pool.query(
-        `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id)
-         VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3)`,
+        `INSERT INTO attendance_requests (org_id, user_id, work_date, request_type, status, approval_instance_id, approval_workflow_key)
+         VALUES ($1,$2,CURRENT_DATE,'time_correction','pending',$3,'attendance.request')`,
         [orgId, requesterId, instanceId],
       )
       const app = makeApp({ id: requesterId })

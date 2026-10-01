@@ -10,6 +10,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client, Pool } from 'pg'
 import { Kysely, PostgresDialect, sql } from 'kysely'
+import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
@@ -54,6 +55,7 @@ let db: Kysely<unknown> | undefined
 let downloadPools: typeof import('../src/integration/db/connection-pool').poolManager | undefined
 let applicationClosedDownloadPool = false
 let shutdownAuthMessaging: (() => Promise<void>) | undefined
+
 try {
   await admin.connect()
   assert.equal(await realpath((await admin.query('SHOW data_directory')).rows[0].data_directory), pgdata)
@@ -1965,6 +1967,7 @@ try {
       console.log('PASS: manual command captures live/deleted source attachments, publishes and reads exact bytes; exact retry never rereads source')
       const express = require('express') as typeof import('express')
       const { univerMetaRouter } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+      const { createMultitableAiRoutes } = require('../src/routes/multitable-ai.ts') as typeof import('../src/routes/multitable-ai')
       const attachmentApp = express()
       attachmentApp.use(express.json())
       const { authRouter } = require('../src/routes/auth.ts') as typeof import('../src/routes/auth')
@@ -2016,6 +2019,7 @@ try {
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
       }))
+      attachmentApp.use('/api/multitable', createMultitableAiRoutes())
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
       let verifyFullApplication: (() => Promise<void>) | undefined
       try {
@@ -2585,7 +2589,7 @@ try {
   await shutdownAuthMessaging?.()
   if (!applicationClosedDownloadPool) await downloadPools?.close()
   if (created) {
-    assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=$1', [database])).rows[0].n, 0)
+    await assertPrivateDatabaseBackendsExited(admin, database)
     await admin.query(`DROP DATABASE "${database}"`)
     assert.equal((await admin.query('SELECT count(*)::int AS n FROM pg_database WHERE datname=$1', [database])).rows[0].n, 0)
     console.log('CLEAN: owned database and connections = 0')

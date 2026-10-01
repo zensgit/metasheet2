@@ -118,9 +118,8 @@
                  every status StatusTag owns still goes through StatusTag. -->
             <StatusTag
               v-if="!localStatusLabel(submission.status)"
-              domain="approvalInstance"
+              v-bind="approvalStatusTagProps(submission)"
               size="sm"
-              :status="submission.status"
             />
             <span
               v-else
@@ -293,6 +292,7 @@ import { computed, inject, onUnmounted, ref, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import {
   isRecordApprovalTerminalStatus,
   recordApprovalApproverFallbackLabel,
@@ -318,6 +318,10 @@ import { getApproval, getApprovalHistory, normalizeApprovalHistoryEnvelope } fro
 // `src/approvals/**` and `src/views/approval/**`. This card renders only the display name the approval
 // payload already carries; see `progressAssigneeLabel`.
 import { useApprovalPermissions } from '../../approvals/permissions'
+// 撤销锁 P-2: the one StatusTag domain selector shared by the five approval-instance render points. A
+// record submission carries no `workflowKey` (it is not an approval-instance DTO), so it always
+// resolves to `approvalInstance` here — a cancel round is never created through a record submission.
+import { approvalStatusTagProps } from '../../approvals/cancelRound'
 import type { MultitableApiClient } from '../api/client'
 import type { MetaRecord, MetaRecordApprovalSubmission } from '../types'
 import type { ApprovalAssignmentDTO, UnifiedApprovalDTO } from '../../types/approval'
@@ -810,11 +814,10 @@ function onRetryProgress(instanceId: string | undefined): void {
   void loadProgress(instanceId)
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatApprovalTime(value: string): string {
   if (!value) return ''
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) return value
-  return new Date(timestamp).toLocaleString()
+  return formatBusinessTimestamp(value) ?? value
 }
 </script>
 

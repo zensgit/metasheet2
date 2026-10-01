@@ -18,7 +18,7 @@
 // given an anchor when a real, always-rendered element exists for it — no invented anchors.
 
 import { automationActionTypeLabel } from './utils/meta-automation-labels'
-import type { AutomationActionType } from './types'
+import type { AutomationActionType, AutomationRule } from './types'
 
 export interface SaveBlockReason {
   key: string
@@ -106,6 +106,86 @@ export interface SaveBlockActionSnapshot {
   deleteRecord?: SaveBlockDeleteRecordSnapshot
   crossBaseTarget?: SaveBlockCrossBaseTargetSnapshot
   fwbWriteback?: SaveBlockFwbWritebackSnapshot
+  /**
+   * 客户反馈 2026-09-24 #3: the trigger is `record.deleted` and this action (or a branch sub-action inside it)
+   * would update/delete/lock the TRIGGER record — which no longer exists at that point. The backend refuses the
+   * save with DELETED_TRIGGER_SELF_MUTATION; pre-evaluated by the editor (it knows the trigger and the
+   * cross-base target), mirrored here as an anchored reason.
+   */
+  deletedTriggerSelfMutation?: boolean
+}
+
+// ── The ONE client-side detector for "record.deleted + an action that mutates the trigger record" ──────────
+// 客户反馈 2026-09-24 #3 (裁定 PR #6074) / #6155. Under a `record.deleted` trigger the trigger record no longer
+// exists, so a SAME-BASE update_record / delete_record / lock_record of it can only no-op (a delete step ends as
+// skipped, an update / lock step as success; no table record is changed). Two consumers share this decision so
+// they cannot drift: the rule editor (the pre-evaluated
+// `deletedTriggerSelfMutation` above → its save-block reason, inline hint and disabled option) and the automation
+// panel (a non-blocking notice on a LISTED rule that is on or being switched on). It mirrors the backend's
+// STRUCTURAL check (automation-service.ts validateDeletedTriggerSelfMutation): a mutating action without a
+// COMPLETE cross-base target resolves to the trigger record, and a branch sub-action counts by its type alone.
+// Not mirrored (it needs the database): the backend's same-base resolution of a complete target.
+
+/** The action types that address the trigger record unless they carry a complete cross-base target. */
+export const TRIGGER_RECORD_MUTATING_ACTION_TYPES: ReadonlySet<string> = new Set(['update_record', 'delete_record', 'lock_record'])
+
+export interface DeletedTriggerActionShape {
+  type: string
+  /** The action's config carries a COMPLETE cross-base target (targetBaseId + targetSheetId + targetRecordId). */
+  completeCrossBaseTarget: boolean
+  /** The `type` of every sub-action inside it (condition_branch / parallel_branch branches). */
+  nestedActionTypes: readonly string[]
+}
+
+/** Does this action (or a branch sub-action inside it) mutate the trigger record under this trigger? */
+export function isDeletedTriggerSelfMutation(triggerType: string, action: DeletedTriggerActionShape): boolean {
+  if (triggerType !== 'record.deleted') return false
+  if (TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(action.type)) return !action.completeCrossBaseTarget
+  return action.nestedActionTypes.some((type) => TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type))
+}
+
+function isPlainConfig(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** A RAW (as-stored) action config names all three cross-base target ids (non-blank). */
+export function hasCompleteCrossBaseTarget(config: unknown): boolean {
+  if (!isPlainConfig(config)) return false
+  const text = (key: string): string => (typeof config[key] === 'string' ? (config[key] as string).trim() : '')
+  return Boolean(text('targetBaseId') && text('targetSheetId') && text('targetRecordId'))
+}
+
+/** The `type` of every sub-action inside a RAW (as-stored) condition_branch / parallel_branch config. */
+export function rawBranchActionTypes(raw: unknown): string[] {
+  if (!isPlainConfig(raw)) return []
+  const out: string[] = []
+  const collect = (branch: unknown): void => {
+    if (!isPlainConfig(branch) || !Array.isArray(branch.actions)) return
+    for (const sub of branch.actions) {
+      if (isPlainConfig(sub) && typeof sub.type === 'string') out.push(sub.type)
+    }
+  }
+  if (Array.isArray(raw.branches)) raw.branches.forEach(collect)
+  collect(raw.defaultBranch)
+  return out
+}
+
+/**
+ * The panel's adapter: a STORED rule as listed. Its actions are `actions[]` when non-empty, else the legacy
+ * top-level pair — the same choice the editor makes when it opens the rule (draftFromRule) — and the v0 alias
+ * `update_field` counts as the `update_record` it executes as.
+ */
+export function storedRuleHasDeletedTriggerSelfMutation(
+  rule: Pick<AutomationRule, 'triggerType' | 'actionType' | 'actionConfig' | 'actions'>,
+): boolean {
+  const stored: Array<{ type: string; config: unknown }> = rule.actions && rule.actions.length
+    ? rule.actions.map((action) => ({ type: action.type, config: action.config }))
+    : [{ type: rule.actionType, config: rule.actionConfig }]
+  return stored.some(({ type, config }) => isDeletedTriggerSelfMutation(rule.triggerType, {
+    type: type === 'update_field' ? 'update_record' : type,
+    completeCrossBaseTarget: hasCompleteCrossBaseTarget(config),
+    nestedActionTypes: rawBranchActionTypes(config),
+  }))
 }
 
 export interface SaveBlockReasonsInput {
@@ -134,6 +214,13 @@ export interface SaveBlockReasonsInput {
   conditionsComplete: boolean
   /** Selector for the first incomplete condition/group, when one can be identified. */
   firstIncompleteConditionAnchor?: string
+  /**
+   * 客户反馈 2026-09-24 #4b: false when a condition_branch condition row is incomplete (no field, or a value
+   * that cannot be saved in its field type's shape). Omitted = complete (callers without branch rows).
+   */
+  branchConditionsComplete?: boolean
+  /** Selector for the first incomplete condition_branch condition row. */
+  firstIncompleteBranchConditionAnchor?: string
   actions: SaveBlockActionSnapshot[]
   /** #5742: pre-evaluated result-writeback outcome→value blockers (empty / omitted when none). */
   startApprovalOutcomeValueBlocks?: StartApprovalOutcomeValueBlock[]
@@ -234,6 +321,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
         ? '请完善所有筛选条件（字段与取值均为必填）。'
         : 'Complete all filter conditions (field and value are required).',
       anchor: input.firstIncompleteConditionAnchor,
+    })
+  }
+
+  if (input.branchConditionsComplete === false) {
+    reasons.push({
+      key: 'branchConditionsIncomplete',
+      message: zh
+        ? '请完善条件分支中的所有条件（字段与取值均为必填）。'
+        : 'Complete all conditions in the condition branches (field and value are required).',
+      anchor: input.firstIncompleteBranchConditionAnchor,
     })
   }
 
@@ -392,6 +489,16 @@ export function computeSaveBlockReasons(input: SaveBlockReasonsInput): SaveBlock
           ? `「${label}」需要勾选删除确认才能保存。`
           : `"${label}" requires the delete-confirmation checkbox before saving.`,
         anchor: `${scope} [data-field="deleteRecordAck"]`,
+      })
+    }
+
+    if (action.deletedTriggerSelfMutation) {
+      reasons.push({
+        key: `action-${action.index}-deletedTriggerSelfMutation`,
+        message: zh
+          ? `「${label}」：记录删除时触发记录已不存在，不能再修改/删除/锁定它。`
+          : `"${label}": when a record is deleted its trigger record no longer exists, so it cannot be updated, deleted or locked.`,
+        anchor: `${scope} [data-field="deletedTriggerSelfMutationHint"]`,
       })
     }
 
