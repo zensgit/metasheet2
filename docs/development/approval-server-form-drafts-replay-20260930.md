@@ -188,14 +188,14 @@
 
 ## 6. 门审 r1 修复轮(2026-10-01)
 
-门审 r1(门审记录 `gate-q9-r1-20260930`,不在仓内)对头 `8dfb8eb4e6` 的判定是 0 P1 / 1 P2 / 2 P3 / 3 NIT。修复轮只新增提交,不改写已有提交:
+门审 r1(见私有记录)对头 `8dfb8eb4e6` 的判定是 0 P1 / 1 P2 / 2 P3 / 3 NIT。修复轮只新增提交,不改写已有提交:
 
 | 提交 | 处理的条目 | 内容 |
 |---|---|---|
 | `0c0d35ec27` | P2-1:四条草稿路由上的 `rbacGuard('approvals', 'write')` 没有测试 | `approval-rbac-boundary.test.ts` 把 `approvalFormDraftsRouter()` 单独挂到一个 app 上,对只有 `approvals:read` 的用户,列表 GET、单条 GET、PUT、DELETE 各一条用例断言 403,另加一条 `approvals:write` 用户四条路由都进入 handler 的正控。真库套件 A 组加同形负例:只读 token 的四条路由读数必须是 `[403, 403, 403, 403]`,该用户 0 行;同一用户换写 token 后 PUT 200。只改测试。 |
 | `67506ca76c` | NIT-1:路由遮蔽要靠 TypeError 才红 | A 组跨用户用例在读列表 body 之前先断言 `status` 为 200。只改测试。 |
 | `cf1419e3ed` | P3-1:请求被数据库自己拒绝时落成 500;服务层「绝不会」的注释不成立 | 服务层新增导出函数 `mapApprovalFormDraftStorageError`:`23514` 且约束为 `approval_fd_payload_bounds` → `ApprovalFormDraftTooLargeError`(413);SQLSTATE `22P05` / `22P02` / `22021` → `ApprovalFormDraftValidationError`(400);其余原样返回。路由的 `handleDraftError` 先调用它,四条路由都生效;其它失败仍是 values-free 500。服务层文件头与迁移 docblock 改成如实表述:服务层量的是 `JSON.stringify` 的字节数,CHECK 量的是 jsonb 文本输出,后者更大,所以过了服务层的请求仍可能被 CHECK 拒。迁移文件只改注释,DDL 逐字节不变(§6.3)。真库套件新增「storage refusals」组 7 条 HTTP 用例。`approval_fd_signature_bounds` 有意不映射:两层数的都是同一段文本的 UTF-8 字节,且服务层阈值更低,请求到不了这条 CHECK;它若真被触发,说明阈值配置错了,500 才是对的。 |
-| `9630c8e16e` | P3-2、NIT-2、NIT-3 | 只改本文件:§4 加合并前检查单两条;本节记修复轮读数,含 NIT-3 要求补跑的变异及其断言原文。 |
+| `9630c8e16e` | P3-2、NIT-2;r1 未复跑变异的补跑 | 只改本文件:§4 加合并前检查单两条;本节记修复轮读数,含 r1 未复跑变异的补跑及其断言原文。 |
 | `0f8afc01df` | `cf1419e3ed` 留下的注释矛盾 | `APPROVAL_FORM_DRAFT_SIGNATURE_LIMITS` 的注释原说服务层阈值低于 CHECK 是因为两层「重新序列化不保证逐字节相同」,并指向载荷上限的注释;那是 jsonb 的情形。改为如实表述:`signature` 是 text 列,两层数的是同一段 UTF-8 字节,服务层阈值更低,总是先触发,余量只是 headroom;`mapApprovalFormDraftStorageError` 不映射 `approval_fd_signature_bounds` 正是依据这一点。只改注释:`git diff -U0 cf1419e3ed 0f8afc01df` 只有一个 hunk(`@@ -110,5 +110,7 @@`),改动行全是 ` *` 注释行;去掉注释行后新旧文件逐字节相同(`cmp`,433 行)。 |
 | 本说明的这次更新 | — | 只改本文件:把代码终态改记为 `0f8afc01df`(§1 末行、§5、本表、§6.4 / §6.5 抬头)。 |
 
@@ -257,7 +257,7 @@
 
 迁移文件只改了注释:`git diff` 只有 docblock 里的一个 hunk(`@@ -43,3 +43,4 @@`,docblock 在第 78 / 79 行结束);从 `import` 到文件尾的 28 行新旧逐字节相同(`cmp`),两个 `sql` 模板体的 md5 也相同。
 
-### 6.4 NIT-3:补跑门审 r1 没有复跑的变异(在 `cf1419e3ed` 上跑;`0f8afc01df` 只改注释)
+### 6.4 r1 未复跑变异的补跑(在 `cf1419e3ed` 上跑;`0f8afc01df` 只改注释)
 
 | 变异 | 结果与断言原文 |
 |---|---|
@@ -286,3 +286,6 @@
 - 必需检查的 13 个 context 没有在修复轮重放,§3.5 是 `0b03117a19` 的读数。修复轮只改了 core-backend 的一个服务文件、一个路由文件、一个迁移文件的注释,以及两个测试文件。与之直接相关的必需步骤是 `test (20.x)` 的「Run type checking」与「Run core-backend tests」:前者本轮跑了 core-backend 部分,后者只跑了受影响的 3 个文件。全量以 Draft PR 上的 CI 为准:CI 是 Linux,`test (20.x)` 用 PostgreSQL 14。
 - 新的拒绝映射只有真库套件在测,按 Q9 ⑤ 它只在非必需车道。必需车道里与本片相关的是 §6.1 的 RBAC 负例和签名一致性单测。
 - SQLSTATE 只在 PostgreSQL 16.15 上实测过;真库 workflow 用的是 `postgres:16`。
+- 极深嵌套的 `data`(数千层以上)在服务层序列化时抛 `RangeError`,这条没有 SQLSTATE,不经映射,落成不带值的 500(不写入任何东西),而不是 400。修法是在序列化之前加嵌套深度上限并按 400 拒绝;不在本片。
+- `ApprovalFormDraftConflictError` 的注释仍写清除「不取顾问锁」,与现在的代码不符(清除已取同一把用户级锁,§3.3 的 M6 证明它承重);注释继承自 #5703,本片未改。
+- 门审 r2(头 `5f2b37e821`)判定 0 P1 / 0 P2 / 2 P3 / 4 NIT。本提交只改本文件:改正上面三处条目标注,补本节最后两条残留。
