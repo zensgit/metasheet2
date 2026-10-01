@@ -206,6 +206,26 @@ describeIfDatabase('P3-3 approval_form_drafts â€” real-DB acceptance (contract Â
       const bodyA = (await getAsA.json()) as { data: { draft: { data: Record<string, unknown> } | null } }
       expect(bodyA.data.draft?.data).toEqual({ secret: 'A-should-survive' })
     })
+
+    it('NEGATIVE (RBAC): a token with only approvals:read is refused with 403 on all four routes and writes nothing; the same user with approvals:write is admitted (positive control)', async () => {
+      const userR = trackUser(freshId('p33-a-rbac'))
+      const templateId = freshId('tmpl')
+      const readOnlyToken = await authToken(baseUrl, userR, { perms: 'approvals:read' })
+
+      const statuses = [
+        (await draftList(readOnlyToken)).status,
+        (await draftGet(templateId, readOnlyToken)).status,
+        (await draftPut(templateId, readOnlyToken, { signature: 'sig-r', data: { attempt: 'read-only' } })).status,
+        (await draftDelete(templateId, readOnlyToken)).status,
+      ]
+      expect(statuses).toEqual([403, 403, 403, 403])
+      const rows = await pool().query(`SELECT count(*)::int AS c FROM approval_form_drafts WHERE user_id = $1`, [userR])
+      expect((rows.rows[0] as { c: number }).c).toBe(0)
+
+      const writeToken = await authToken(baseUrl, userR)
+      const put = await draftPut(templateId, writeToken, { signature: 'sig-w', data: { attempt: 'write' } })
+      expect(put.status, await put.clone().text()).toBe(200)
+    })
   })
 
   // ===============================================================================================
