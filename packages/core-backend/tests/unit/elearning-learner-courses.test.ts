@@ -1,7 +1,13 @@
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { ELEARNING_AUDIENCE_RULE_SCAN_LIMIT } from '../../src/services/elearning-audience-resolver'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Logger } from '../../src/core/logger'
+import {
+  ELEARNING_AUDIENCE_RULE_SCAN_LIMIT,
+  ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS,
+  ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV,
+  resolveElearningAudienceScanTimeoutMs,
+} from '../../src/services/elearning-audience-resolver'
 import { ELEARNING_MEDIA_MIME } from '../../src/services/elearning-media-validation'
 import {
   ELEARNING_WATCH_POLICY_VERSION,
@@ -266,6 +272,18 @@ function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
       }).slice(0, Number(queryParams[2]))
       return { rows: candidates, rowCount: candidates.length }
     }
+    if (tag === 'elearning-audience:scan-timeout-set') {
+      return {
+        rows: [{
+          previous_statement_timeout: '30s',
+          applied_statement_timeout: `${String(queryParams[0])}ms`,
+        }],
+        rowCount: 1,
+      }
+    }
+    if (tag === 'elearning-audience:scan-timeout-restore') {
+      return { rows: [{ restored_statement_timeout: queryParams[0] }], rowCount: 1 }
+    }
     if (tag === 'elearning-audience:list-course-matches') {
       if (rows.some((row) => row.audience_scan_overflow === true)) {
         return {
@@ -449,19 +467,24 @@ describe('elearning learner courses input and SQL dispatch', () => {
       orgId: ` ${ORG} `,
       userId: ` ${USER} `,
     })).resolves.toEqual([])
-    expect(queries).toHaveLength(2)
+    // The catalog scan runs between its statement-timeout set and restore (#6175).
+    expect(queries).toHaveLength(4)
     expect(queries.map(tagOf)).toEqual([
       'elearning-access:list-assignments',
+      'elearning-audience:scan-timeout-set',
       'elearning-audience:list-course-matches',
+      'elearning-audience:scan-timeout-restore',
     ])
     expect(params).toEqual([
       [ORG, USER, ELEARNING_LEARNER_COURSES_LIMIT + 1],
+      [String(ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS)],
       [ORG, USER, [], ELEARNING_LEARNER_COURSES_LIMIT + 1],
+      ['30s'],
     ])
     expect(queries[0]).toContain('LIMIT $3')
     expect(queries[0]).toContain('revoked_at IS NULL')
-    expect(queries[1]).toContain(`LIMIT ${ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1}`)
-    expect(queries[1]).toContain(
+    expect(queries[2]).toContain(`LIMIT ${ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1}`)
+    expect(queries[2]).toContain(
       `count(*) > ${ELEARNING_AUDIENCE_RULE_SCAN_LIMIT} AS overflow`,
     )
   })
@@ -487,9 +510,13 @@ describe('elearning learner courses input and SQL dispatch', () => {
       () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
       'unavailable',
     )
+    // The restore runs before the overflow check, so a fail-closed overflow
+    // leaves the caller's transaction on its previous statement timeout.
     expect(queries.map(tagOf)).toEqual([
       'elearning-access:list-assignments',
+      'elearning-audience:scan-timeout-set',
       'elearning-audience:list-course-matches',
+      'elearning-audience:scan-timeout-restore',
     ])
   })
 })
@@ -911,5 +938,216 @@ describe('elearning learner courses public mapping', () => {
       () => listElearningLearnerCourses(createMemoryDb(overLimit).db, { orgId: ORG, userId: USER }),
       'unavailable',
     )
+  })
+})
+
+describe('elearning audience catalog scan statement timeout (#6175)', () => {
+  const ACCESS_TAG = 'elearning-access:list-assignments'
+  const SET_TAG = 'elearning-audience:scan-timeout-set'
+  const SCAN_TAG = 'elearning-audience:list-course-matches'
+  const RESTORE_TAG = 'elearning-audience:scan-timeout-restore'
+  const PREVIOUS_ROW = [{ previous_statement_timeout: '30s', applied_statement_timeout: 'n/a' }]
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+  })
+
+  function visibilityRow(): Record<string, unknown> {
+    return baseRow({
+      access_kind: 'visibility',
+      assignment_member_id: null,
+      scope_revision_rule_id: SCOPE_RULE,
+      assignment_deadline: null,
+      assignment_assigned_at: null,
+    })
+  }
+
+  // Records which handle issued each statement: the bare db or the one
+  // transaction listElearningLearnerCourses opens.
+  function createTrackingDb(
+    rows: Array<Record<string, unknown>>,
+    options: { scanFailure?: unknown; setRows?: Array<Record<string, unknown>> } = {},
+  ) {
+    const inner = createMemoryDb(rows)
+    const statements: Array<{
+      handle: string
+      tag: string | null
+      sql: string
+      params: unknown[]
+    }> = []
+    let transactions = 0
+    const db: ElearningLearnerCoursesDb = {
+      query: async (sql, params = []) => {
+        statements.push({ handle: 'bare', tag: tagOf(sql), sql, params })
+        return inner.db.query(sql, params)
+      },
+      transaction: async (handler) => {
+        const handle = `tx${++transactions}`
+        return inner.db.transaction(async (tx) => handler({
+          query: async (sql, params = []) => {
+            const tag = tagOf(sql)
+            statements.push({ handle, tag, sql, params })
+            if (tag === SCAN_TAG && options.scanFailure !== undefined) throw options.scanFailure
+            if (tag === SET_TAG && options.setRows !== undefined) {
+              return { rows: options.setRows, rowCount: options.setRows.length }
+            }
+            return tx.query(sql, params)
+          },
+        }))
+      },
+    }
+    return { db, statements }
+  }
+
+  function sqlError(message: string, code: string): Error {
+    return Object.assign(new Error(message), { code })
+  }
+
+  it('parses whole milliseconds; anything else falls back to the 5000 ms default', () => {
+    expect(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV).toBe('ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS')
+    expect(ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS).toBe(5000)
+    const cases: Array<[string | undefined, number]> = [
+      [undefined, 5000],
+      ['', 5000],
+      ['   ', 5000],
+      ['abc', 5000],
+      ['-1', 5000],
+      ['0', 0],
+      ['2500', 2500],
+      [' 2500 ', 2500],
+      ['2500.5', 5000],
+      ['1e3', 5000],
+      ['0x10', 5000],
+      ['+2500', 5000],
+      ['2147483647', 2147483647],
+      ['2147483648', 5000],
+    ]
+    for (const [raw, expected] of cases) {
+      const env = raw === undefined ? {} : { ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS: raw }
+      expect(resolveElearningAudienceScanTimeoutMs(env), JSON.stringify(raw)).toBe(expected)
+    }
+  })
+
+  it('sets the timeout with SET LOCAL semantics inside the learner transaction, around exactly the scan', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '2500')
+    const { db, statements } = createTrackingDb([visibilityRow()])
+    await expect(listElearningLearnerCourses(db, { orgId: ORG, userId: USER }))
+      .resolves.toHaveLength(1)
+
+    expect(new Set(statements.map((statement) => statement.handle))).toEqual(new Set(['tx1']))
+    const tags = statements.map((statement) => statement.tag)
+    expect(tags.slice(0, 4)).toEqual([ACCESS_TAG, SET_TAG, SCAN_TAG, RESTORE_TAG])
+    expect(tags.filter((tag) => tag === SET_TAG || tag === RESTORE_TAG)).toHaveLength(2)
+    // The caller's later statements run after the restore.
+    expect(tags.length).toBeGreaterThan(4)
+
+    const [, set, , restore] = statements
+    expect(set!.sql).toContain("set_config('statement_timeout', $1, true)")
+    expect(set!.sql).toContain("current_setting('statement_timeout')")
+    expect(set!.sql).toContain('OFFSET 0')
+    expect(set!.params).toEqual(['2500'])
+    expect(restore!.sql).toContain("set_config('statement_timeout', $1, true)")
+    expect(restore!.params).toEqual(['30s'])
+  })
+
+  it('uses the 5000 ms default when the variable is unset', async () => {
+    const saved = process.env[ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV]
+    delete process.env[ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV]
+    try {
+      const { db, statements } = createTrackingDb([])
+      await expect(listElearningLearnerCourses(db, { orgId: ORG, userId: USER }))
+        .resolves.toEqual([])
+      expect(statements.find((statement) => statement.tag === SET_TAG)?.params)
+        .toEqual(['5000'])
+    } finally {
+      if (saved !== undefined) process.env[ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV] = saved
+    }
+  })
+
+  it('0 turns the timeout off: no set and no restore statement', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '0')
+    const { db, statements } = createTrackingDb([visibilityRow()])
+    await expect(listElearningLearnerCourses(db, { orgId: ORG, userId: USER }))
+      .resolves.toHaveLength(1)
+    const tags = statements.map((statement) => statement.tag)
+    expect(tags.slice(0, 2)).toEqual([ACCESS_TAG, SCAN_TAG])
+    expect(tags).not.toContain(SET_TAG)
+    expect(tags).not.toContain(RESTORE_TAG)
+  })
+
+  it('a canceled scan (57014) is unavailable, is not retried, and logs one values-free line', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '2500')
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const { db, statements } = createTrackingDb([visibilityRow()], {
+      scanFailure: sqlError(`canceling statement due to statement timeout ${ORG} ${USER}`, '57014'),
+    })
+    await expectAsyncCode(
+      () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
+      'unavailable',
+    )
+    // No retry and no restore: the transaction is aborted and the caller rolls it back.
+    expect(statements.map((statement) => statement.tag)).toEqual([ACCESS_TAG, SET_TAG, SCAN_TAG])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith('elearning_audience_scan_canceled', {
+      orgId: ORG,
+      scanTimeoutMs: 2500,
+    })
+    const logged = JSON.stringify(warn.mock.calls)
+    expect(logged).not.toContain(USER)
+    expect(logged).not.toContain(SCOPE_RULE)
+    expect(logged).not.toContain('canceling statement')
+  })
+
+  it('logs a 57014 from the connection timeout too when the scan timeout is off', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '0')
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const { db, statements } = createTrackingDb([visibilityRow()], {
+      scanFailure: sqlError('canceling statement due to statement timeout', '57014'),
+    })
+    await expectAsyncCode(
+      () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
+      'unavailable',
+    )
+    expect(statements.map((statement) => statement.tag)).toEqual([ACCESS_TAG, SCAN_TAG])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith('elearning_audience_scan_canceled', {
+      orgId: ORG,
+      scanTimeoutMs: 0,
+    })
+  })
+
+  it('other scan failures stay unavailable, with no log line and no restore', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '2500')
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    for (const failure of [
+      sqlError('terminating connection due to administrator command', '57P01'),
+      sqlError('could not serialize access', '40001'),
+      new Error('socket hang up'),
+    ]) {
+      const { db, statements } = createTrackingDb([visibilityRow()], { scanFailure: failure })
+      await expectAsyncCode(
+        () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
+        'unavailable',
+      )
+      expect(statements.map((statement) => statement.tag)).toEqual([ACCESS_TAG, SET_TAG, SCAN_TAG])
+    }
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('fails closed before the scan when the previous timeout cannot be read', async () => {
+    vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '2500')
+    for (const setRows of [[], [{ previous_statement_timeout: null }], [{ previous_statement_timeout: '  ' }]]) {
+      const { db, statements } = createTrackingDb([visibilityRow()], { setRows })
+      await expectAsyncCode(
+        () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
+        'unavailable',
+      )
+      expect(statements.map((statement) => statement.tag)).toEqual([ACCESS_TAG, SET_TAG])
+    }
+    // A readable previous value is all the set statement has to return.
+    const { db } = createTrackingDb([visibilityRow()], { setRows: PREVIOUS_ROW })
+    await expect(listElearningLearnerCourses(db, { orgId: ORG, userId: USER }))
+      .resolves.toHaveLength(1)
   })
 })

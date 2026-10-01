@@ -3,14 +3,16 @@
  * DATABASE_URL is mandatory; missing infrastructure must not produce green.
  */
 import { randomUUID } from 'node:crypto'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
+import { Logger } from '../../src/core/logger'
 import {
   ELEARNING_AUDIENCE_RULE_SCAN_LIMIT,
+  ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV,
   listElearningAudienceCourseMatches,
   resolveElearningAudienceMembers,
 } from '../../src/services/elearning-audience-resolver'
@@ -121,12 +123,29 @@ async function expectSqlState(
 // the fixture really has. The pg_statistic rows roll back with the
 // transaction. PostgreSQL writes the pg_class page and tuple counts in place;
 // until autovacuum cleans the rolled-back rows, those counts can only make
-// later plans expect a larger table.
+// later plans expect a larger table. ANALYZE inside the transaction also
+// updates the tables' activity counters, which live outside the transaction,
+// so autovacuum's own analyze of the five catalog tables is postponed; after
+// the rollback the pg_class page and tuple counts stay too high until
+// autovacuum removes the dead rows. In three CI runs the 39 files that run
+// after this one all passed, and the step took no longer.
 async function analyzeBulkFixture(
   client: PoolClient,
   tables: readonly string[],
 ): Promise<void> {
   await client.query(`ANALYZE ${tables.join(', ')}`)
+}
+
+// The catalog scan is one statement between its statement-timeout set and
+// restore (ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS, issue #6175).
+const SCAN_WITH_TIMEOUT = [
+  'elearning-audience:scan-timeout-set',
+  'elearning-audience:list-course-matches',
+  'elearning-audience:scan-timeout-restore',
+] as const
+
+function audienceTag(statement: string): string | null {
+  return /\/\* (elearning-audience:[a-z-]+) \*\//.exec(statement)?.[1] ?? null
 }
 
 interface ExplainPlanNode {
@@ -671,8 +690,9 @@ describe('elearning L1 scope/access gate (real DB)', () => {
     // The fixture has SCAN_LIMIT + 2 active 'all' rules, one per published
     // course version. Excluding versions moves the visible count across the
     // boundary. At 10,000 visible rules the call must match. At 10,001 and
-    // 10,002 it must fail closed, and at 10,002 the candidate scan must stop
-    // at SCAN_LIMIT + 1 rows.
+    // 10,002 it must fail closed, and at 10,002 the candidate CTE must hand
+    // over SCAN_LIMIT + 1 rows. That caps the rows the matcher sees, not the
+    // rows the scan reads: every active rule of the org is still read.
     const orgId = actor('org-scan-boundary')
     const userId = actor('scan-learner')
     const fixtureTable = 'elearning_audience_scan_fixture'
@@ -851,7 +871,8 @@ describe('elearning L1 scope/access gate (real DB)', () => {
         excludedCourseVersionIds: firstVersionIds,
         limit: 1,
       })).resolves.toHaveLength(1)
-      expect(recorder.statements).toHaveLength(1)
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
     }, CALL_BUDGET_MS)
 
     it('fails closed as unavailable when 10,001 active rules are visible', async () => {
@@ -862,10 +883,11 @@ describe('elearning L1 scope/access gate (real DB)', () => {
         excludedCourseVersionIds: [firstVersionIds[0]!],
         limit: 1,
       })).rejects.toMatchObject({ code: 'unavailable' })
-      expect(recorder.statements).toHaveLength(1)
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
     }, CALL_BUDGET_MS)
 
-    it('stops the candidate scan at 10,001 rows when 10,002 active rules are visible', async () => {
+    it('caps the candidate CTE at 10,001 rows when 10,002 active rules are visible', async () => {
       const recorder = recordingDb()
       await expect(listElearningAudienceCourseMatches(recorder.db, {
         orgId,
@@ -873,12 +895,15 @@ describe('elearning L1 scope/access gate (real DB)', () => {
         excludedCourseVersionIds: [],
         limit: 1,
       })).rejects.toMatchObject({ code: 'unavailable' })
-      expect(recorder.statements).toHaveLength(1)
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
 
       // Re-run the exact statement and parameters under EXPLAIN ANALYZE to
       // count the rows each bounded stage produced. The row counts do not
       // depend on the plan shape or on wall-clock time.
-      const [issued] = recorder.statements
+      const issued = recorder.statements.find(
+        (statement) => audienceTag(statement.sql) === 'elearning-audience:list-course-matches',
+      )
       const explained = await scanClient!.query(
         `EXPLAIN (ANALYZE, TIMING OFF, FORMAT JSON) ${issued!.sql}`,
         issued!.params as never,
@@ -892,6 +917,102 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       expect(matcherInput!['Actual Rows']).toBeLessThanOrEqual(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT)
     }, CALL_BUDGET_MS)
   })
+
+  it('runs the catalog scan under its own transaction-local timeout and fails closed without a retry when it fires (#6175)', async () => {
+    // Two dedicated connections. A canceled statement aborts its transaction,
+    // so this case cannot share the catalog fixture's transaction. Instead of
+    // racing a fast scan against a tiny timeout, a second session holds a lock
+    // on one table the scan reads. The scan then waits on that lock at parse
+    // time until its statement timeout cancels it (57014), whatever the machine
+    // speed. Nothing here measures wall-clock time.
+    const scanner = await pool.connect()
+    const blocker = await pool.connect()
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const showTimeout = async () => String(
+      (await scanner.query('SHOW statement_timeout')).rows[0]?.statement_timeout,
+    )
+    const input = {
+      orgId: actor('org-scan-timeout'),
+      userId: actor('scan-timeout-learner'),
+      excludedCourseVersionIds: [],
+      limit: 1,
+    }
+    try {
+      const connectionTimeout = await showTimeout()
+
+      // A generous value is what the scan statement runs under, and the
+      // transaction gets its previous value back right after the scan. This
+      // read-only transaction commits, so a session-level setting would
+      // outlive it and show up below.
+      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '60000')
+      const issued: string[] = []
+      let duringScan: string | undefined
+      await scanner.query('BEGIN')
+      try {
+        await expect(listElearningAudienceCourseMatches({
+          query: async (statement: string, params?: unknown[]) => {
+            issued.push(statement)
+            if (audienceTag(statement) === 'elearning-audience:list-course-matches') {
+              duringScan = await showTimeout()
+            }
+            const result = await scanner.query(statement, params as never)
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+          },
+        }, input)).resolves.toEqual([])
+        expect(issued.map(audienceTag)).toEqual(SCAN_WITH_TIMEOUT)
+        expect(duringScan).toBe('1min')
+        expect(await showTimeout()).toBe(connectionTimeout)
+        await scanner.query('COMMIT')
+      } catch (error) {
+        await scanner.query('ROLLBACK')
+        throw error
+      }
+      expect(await showTimeout()).toBe(connectionTimeout)
+
+      await blocker.query('BEGIN')
+      await blocker.query(`SET LOCAL lock_timeout = '10s'`)
+      await blocker.query('LOCK TABLE directory_integrations IN ACCESS EXCLUSIVE MODE')
+      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '200')
+      const canceled: string[] = []
+      await scanner.query('BEGIN')
+      // Backstop only: if the statement timeout were not applied, the scan
+      // would end on this lock timeout (55P03, which logs nothing) instead of
+      // waiting on the lock forever.
+      await scanner.query(`SET LOCAL lock_timeout = '15s'`)
+      try {
+        await expect(listElearningAudienceCourseMatches({
+          query: async (statement: string, params?: unknown[]) => {
+            canceled.push(statement)
+            const result = await scanner.query(statement, params as never)
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+          },
+        }, input)).rejects.toMatchObject({ code: 'unavailable' })
+      } finally {
+        try {
+          await scanner.query('ROLLBACK')
+        } finally {
+          await blocker.query('ROLLBACK')
+        }
+      }
+      // No retry, no restore: the scan ran once and the rollback dropped the
+      // transaction-local value. The connection keeps its own timeout.
+      expect(canceled.map(audienceTag)).toEqual(SCAN_WITH_TIMEOUT.slice(0, 2))
+      expect(await showTimeout()).toBe(connectionTimeout)
+      // The log line is written only for query_canceled (57014).
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith('elearning_audience_scan_canceled', {
+        orgId: input.orgId,
+        scanTimeoutMs: 200,
+      })
+    } finally {
+      vi.unstubAllEnvs()
+      warn.mockRestore()
+      // Destroy rather than return both connections, so no setting, open
+      // transaction or lock this case touched can reach a later test.
+      scanner.release(true)
+      blocker.release(true)
+    }
+  }, 30_000)
 
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {
     await withRolledBackDb(async (client, db) => {

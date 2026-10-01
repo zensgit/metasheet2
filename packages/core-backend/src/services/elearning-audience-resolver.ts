@@ -5,6 +5,9 @@
  * derived from current, same-org database state. RBAC token claims are not an
  * input to this module.
  */
+import { createLogger } from '../core/logger'
+
+const audienceLogger = createLogger('elearning-audience')
 
 export const ELEARNING_AUDIENCE_SUBJECT_TYPES = [
   'all',
@@ -18,6 +21,44 @@ export type ElearningAudienceSubjectType =
   (typeof ELEARNING_AUDIENCE_SUBJECT_TYPES)[number]
 
 export const ELEARNING_AUDIENCE_RULE_SCAN_LIMIT = 10_000 as const
+
+/**
+ * Statement timeout for the catalog scan of listElearningAudienceCourseMatches
+ * (issue #6175 item 2). The cap above bounds the rows handed to the matcher,
+ * not the rows the scan reads, and stale planner statistics after a bulk import
+ * can make one scan take tens of seconds. The env value is a whole number of
+ * milliseconds: unset, blank, or anything that is not a plain non-negative
+ * integer within PostgreSQL's statement_timeout range falls back to the
+ * default. 0 turns the timeout off: no statement is issued, and the
+ * connection's own statement_timeout (if any) applies as before.
+ * Registered in scripts/ops/global-history-flag-manifest.mjs.
+ */
+export const ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS' as const
+export const ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS = 5_000 as const
+const POSTGRES_STATEMENT_TIMEOUT_MAX_MS = 2_147_483_647
+
+/** Read on every scan (not cached), so tests and operators see the current env. */
+export function resolveElearningAudienceScanTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env[ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV]
+  if (typeof raw !== 'string') return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
+  const trimmed = raw.trim()
+  if (!/^[0-9]+$/.test(trimmed)) return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
+  const parsed = Number(trimmed)
+  if (!Number.isSafeInteger(parsed) || parsed > POSTGRES_STATEMENT_TIMEOUT_MAX_MS) {
+    return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
+  }
+  return parsed
+}
+
+const POSTGRES_QUERY_CANCELED = '57014'
+
+function isQueryCanceled(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === POSTGRES_QUERY_CANCELED
+}
 
 export type ElearningAudienceRuleInput =
   | { subjectType: 'all'; subjectRef?: null; includeChildren?: false }
@@ -655,6 +696,67 @@ export async function matchElearningAudienceRule(
   }
 }
 
+/**
+ * Runs the catalog scan under ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS.
+ *
+ * `db` must be bound to one open transaction; the only production caller,
+ * listElearningLearnerCourses, passes its `tx`. set_config(..., true) is the
+ * function form of SET LOCAL: the value lasts until that transaction ends, so
+ * it never stays on the pooled connection. The previous value is read in the
+ * same statement (the OFFSET 0 subquery is evaluated before the outer
+ * set_config) and put back right after a successful scan, so the caller's
+ * later statements in the same transaction keep the timeout they had.
+ *
+ * A failed scan is not retried and nothing is restored: PostgreSQL has already
+ * aborted the transaction, and the caller's rollback drops the local value.
+ * query_canceled (57014: this timeout, the connection's own statement_timeout,
+ * or an operator cancel) logs one values-free line; every failure still
+ * surfaces as `unavailable` through the caller's existing mapping.
+ */
+async function queryCatalogScanWithTimeout(
+  db: ElearningAudienceQueryable,
+  orgId: string,
+  sql: string,
+  params: unknown[],
+): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }> {
+  const timeoutMs = resolveElearningAudienceScanTimeoutMs()
+  let previousTimeout: string | null = null
+  if (timeoutMs > 0) {
+    const applied = await db.query(
+      `/* elearning-audience:scan-timeout-set */
+       SELECT
+         previous.statement_timeout AS previous_statement_timeout,
+         set_config('statement_timeout', $1, true) AS applied_statement_timeout
+       FROM (
+         SELECT current_setting('statement_timeout') AS statement_timeout
+         OFFSET 0
+       ) AS previous`,
+      [String(timeoutMs)],
+    )
+    previousTimeout = storedText(applied.rows[0]?.previous_statement_timeout)
+  }
+  let result: { rows: Array<Record<string, unknown>>; rowCount: number | null }
+  try {
+    result = await db.query(sql, params)
+  } catch (error) {
+    if (isQueryCanceled(error)) {
+      audienceLogger.warn('elearning_audience_scan_canceled', {
+        orgId,
+        scanTimeoutMs: timeoutMs,
+      })
+    }
+    throw error
+  }
+  if (previousTimeout !== null) {
+    await db.query(
+      `/* elearning-audience:scan-timeout-restore */
+       SELECT set_config('statement_timeout', $1, true) AS restored_statement_timeout`,
+      [previousTimeout],
+    )
+  }
+  return result
+}
+
 export async function listElearningAudienceCourseMatches(
   db: ElearningAudienceQueryable,
   input: {
@@ -673,7 +775,9 @@ export async function listElearningAudienceCourseMatches(
     fail('invalid_input')
   }
   try {
-    const result = await db.query(
+    const result = await queryCatalogScanWithTimeout(
+      db,
+      orgId,
       `/* elearning-audience:list-course-matches */
        WITH RECURSIVE eligible_user AS (
          SELECT user_row.id AS user_id

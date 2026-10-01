@@ -140,6 +140,7 @@ Current plugin policy:
 - ships `plugin-attendance` alongside the core app
 - ships `plugin-integration-core` so K3 WISE setup and `/api/integration/*` routes work in packaged deployments
 - ships `plugin-elearning` (learning center / cloud classroom) switched off: its `activate()` returns before registering any route or job unless `ELEARNING_ENABLED` is exactly `true`, and no package default sets that flag; with the flag off, global administrators still see its card in the app catalog
+  - once the learning center is on, `ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS` bounds one database statement: the scan that finds the self-study courses a learner may see (`GET /api/elearning/me/courses`). It is a whole number of milliseconds, default `5000`; unset, blank or anything that is not a plain whole number also means `5000`, and `0` turns this timeout off so only the database connection's own statement timeout applies. When the scan runs out of time the request answers `503` with `{"error":"unavailable"}`, nothing is retried, and the backend logs one warning line `elearning_audience_scan_canceled` with the org id and the timeout. The usual cause is planner statistics that are stale right after a bulk import; they refresh with the next automatic or manual `ANALYZE` of the e-learning catalog tables (issue #6175). Raise the value only if a large catalog keeps hitting it.
 - does not restrict the app shell to `/attendance`
 
 ## Customer delivery checklist
