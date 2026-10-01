@@ -4343,6 +4343,37 @@ describe('Attendance admin regressions', () => {
     expect(refreshed.textContent).not.toContain('100 m radius')
   })
 
+  it('refuses a partial geofence save and leaves the stored fence in place', async () => {
+    attendanceSettingsData = {
+      ipAllowlist: ['10.0.0.0/8'],
+      geoFence: { lat: 1, lng: 2, radiusMeters: 100 },
+      minPunchIntervalMinutes: 2,
+    }
+    await openAttendanceGroupPunchCard()
+    setInput(container!, '#attendance-geo-radius', '')
+    await flushUi(2)
+
+    const putsBefore = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT',
+    ).length
+    const saveButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('Save settings'))
+    expect(saveButton).toBeTruthy()
+    saveButton!.click()
+    await flushUi(4)
+
+    const putsAfter = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT',
+    ).length
+    expect(putsAfter).toBe(putsBefore)
+    expect(container!.querySelector('[data-attendance-geo-fence-error]')?.textContent).toContain('Nothing was saved')
+    expect(container!.querySelector('[data-attendance-geo-fence-hint]')?.textContent).toContain('does not clear an existing fence')
+    const card = container!.querySelector<HTMLElement>('[data-attendance-group-summary-card="punch-method"]')!
+    expect(card.querySelector('[data-attendance-group-punch-line="geofence"]')?.textContent).toContain('100 m radius')
+  })
+
   it('loads shiftCompliance into the config card, edits/clears caps, and PUTs only { shiftCompliance }', async () => {
     attendanceSettingsData = {
       shiftCompliance: { enforcement: 'block', dailyMaxMinutes: 480, weeklyMaxMinutes: null, monthlyMaxMinutes: null },
@@ -6167,6 +6198,183 @@ describe('Attendance admin regressions', () => {
     expect(vi.mocked(apiFetch).mock.calls.some(([input, init]) =>
       String(input) === '/api/attendance/assignments' && init?.method === 'POST'
     )).toBe(false)
+  })
+
+  it('keeps apply disabled for a preview-only group owner and does not call apply', async () => {
+    const applyCalls: string[] = []
+    const previewData = {
+      group: { id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai' },
+      shift: {
+        id: 'shift-a',
+        name: 'Day shift',
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      },
+      window: { startDate: '2026-06-01', endDate: '2026-06-30' },
+      target: { total: 1, userIds: ['user-create'] },
+      wouldCreate: [
+        { userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: true },
+      ],
+      skipped: [],
+      blockingConflicts: [],
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/preview') && init?.method === 'POST') {
+        return jsonResponse(200, {
+          ok: true,
+          data: previewData,
+          fixedScheduleWrites: { apply: false, rebuild: false, clear: false },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/apply')) {
+        applyCalls.push(url)
+        return jsonResponse(403, {
+          ok: false,
+          error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{ id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai', ruleSetId: 'rule-set-1' }],
+            total: 1,
+            scope: 'managed',
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [{ id: 'shift-a', name: 'Day shift', timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] }] },
+        })
+      }
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, { ok: true, data: { items: [{ id: 'rule-set-1', name: 'Ops Rules', isDefault: true }], total: 1 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+
+    const previewPanel = container!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-preview]')!
+    const shiftSelect = previewPanel.querySelector<HTMLSelectElement>('[data-attendance-group-fixed-schedule-shift]')!
+    shiftSelect.value = 'shift-a'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(previewPanel, '[data-attendance-group-fixed-schedule-start]', '2026-06-01')
+    setInput(previewPanel, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
+    await flushUi(2)
+    expect(previewPanel.querySelector('[data-attendance-group-fixed-schedule-preview-only]')?.textContent).toContain('Preview is available')
+    expect(previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-apply-submit]')!.disabled).toBe(true)
+    expect(previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')!.disabled).toBe(true)
+    expect(previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-clear-submit]')!.disabled).toBe(true)
+
+    previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')!.click()
+    await flushUi(8)
+    const applyButton = previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-apply-submit]')!
+    expect(applyButton.disabled).toBe(true)
+    applyButton.click()
+    await flushUi(2)
+    expect(applyCalls).toEqual([])
+    const status = container!.querySelector('.attendance__status-block--admin')?.textContent || ''
+    expect(status).not.toContain('Admin permissions required')
+  })
+
+  it('enables apply when preview reports scheduler dispatch and maps a later 403 off the admin copy', async () => {
+    const previewData = {
+      group: { id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai' },
+      shift: {
+        id: 'shift-a',
+        name: 'Day shift',
+        timezone: 'Asia/Shanghai',
+        workStartTime: '09:00',
+        workEndTime: '18:00',
+        workingDays: [1, 2, 3, 4, 5],
+      },
+      window: { startDate: '2026-06-01', endDate: '2026-06-30' },
+      target: { total: 1, userIds: ['user-create'] },
+      wouldCreate: [
+        { userId: 'user-create', shiftId: 'shift-a', startDate: '2026-06-01', endDate: '2026-06-30', isActive: true },
+      ],
+      skipped: [],
+      blockingConflicts: [],
+    }
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/preview') && init?.method === 'POST') {
+        return jsonResponse(200, {
+          ok: true,
+          data: previewData,
+          fixedScheduleWrites: { apply: true, rebuild: false, clear: false },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/fixed-schedule/apply') && init?.method === 'POST') {
+        return jsonResponse(403, {
+          ok: false,
+          error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' },
+        })
+      }
+      if (url.includes('/api/attendance/groups/group-a/members')) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      if (url.includes('/api/attendance/groups')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{ id: 'group-a', name: 'Ops Team', timezone: 'Asia/Shanghai', ruleSetId: 'rule-set-1' }],
+            total: 1,
+            scope: 'managed',
+          },
+        })
+      }
+      if (url.includes('/api/attendance/shifts')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [{ id: 'shift-a', name: 'Day shift', timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] }] },
+        })
+      }
+      if (url.includes('/api/attendance/rule-sets')) {
+        return jsonResponse(200, { ok: true, data: { items: [{ id: 'rule-set-1', name: 'Ops Rules', isDefault: true }], total: 1 } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+    const previewPanel = container!.querySelector<HTMLElement>('[data-attendance-group-fixed-schedule-preview]')!
+    const shiftSelect = previewPanel.querySelector<HTMLSelectElement>('[data-attendance-group-fixed-schedule-shift]')!
+    shiftSelect.value = 'shift-a'
+    shiftSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    setInput(previewPanel, '[data-attendance-group-fixed-schedule-start]', '2026-06-01')
+    setInput(previewPanel, '[data-attendance-group-fixed-schedule-end]', '2026-06-30')
+    await flushUi(2)
+    previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-preview-submit]')!.click()
+    await flushUi(8)
+
+    const applyButton = previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-apply-submit]')!
+    expect(applyButton.disabled).toBe(false)
+    expect(previewPanel.querySelector<HTMLButtonElement>('[data-attendance-group-fixed-schedule-rebuild-submit]')!.disabled).toBe(true)
+    applyButton.click()
+    await flushUi(8)
+    const status = container!.querySelector('.attendance__status-block--admin')?.textContent || ''
+    expect(status).toContain('Preview only. This account does not have permission to apply the fixed schedule.')
+    expect(status).toContain('SCHEDULER_SCOPE_FORBIDDEN')
+    expect(status).not.toContain('Admin permissions required')
+    expect(status).not.toContain('需要管理员权限')
+    expect(applyButton.disabled).toBe(true)
   })
 
   it('rebuilds and clears managed fixed schedule rows through group routes', async () => {
