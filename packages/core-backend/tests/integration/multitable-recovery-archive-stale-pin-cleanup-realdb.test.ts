@@ -1,3 +1,4 @@
+import { defineExpiredBuilderCases } from '../utils/recovery-expired-builder-cases'
 import { randomUUID, randomBytes } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
@@ -751,6 +752,25 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     }
   })
 
+  defineExpiredBuilderCases({
+    query: q, transaction: work => transaction(client => work(client.query)),
+    identity: { workspaceId: WORKSPACE, baseId: BASE, sheetId: SHEET, actorId: `${PREFIX}_actor` },
+    ownerId: OWNER, keyId: KEY_ID, sourceVectorHash: SOURCE_VECTOR_HASH,
+    anchorOperationId: ANCHOR_OPERATION, anchorSeq: ANCHOR_SEQ, checkpointId: CHECKPOINT,
+    insertArchive, waitExpiry: waitForArchiveLeaseExpiry, sourcePin: insertSourcePin,
+    attachment: id => insertAttachment(id, { recordId: null, deletedAt: null }),
+    withPreparedLayer: async work => {
+      await db.transaction().execute(async tx => { await preparedCaptures.up(tx); await abandonedBindings.up(tx) })
+      try { await work() } finally {
+        await transaction(async ({ query }) => {
+          await query('SET LOCAL session_replication_role=replica')
+          await query('TRUNCATE meta_recovery_archive_abandoned_bindings,meta_recovery_archive_prepared_captures')
+        })
+        await db.transaction().execute(async tx => { await abandonedBindings.down(tx); await preparedCaptures.down(tx) })
+      }
+    },
+  })
+
   test('manual pre-PUT complete inventory and operation reconciliation safely release abandoned pins (LOCAL synthetic)', async () => {
     await db.transaction().execute(async (tx) => { await preparedCaptures.up(tx); await abandonedBindings.up(tx) })
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2b-discard-'))
@@ -760,7 +780,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       try { return await work(client.query) } finally { depth-- }
     })
     try {
-      const generationId = await insertArchive(new Date(Date.now() + 1200).toISOString(), '2099-12-31T00:00:00.123456Z')
+      const generationId = await insertArchive(new Date(Date.now() + 4000).toISOString(), '2099-12-31T00:00:00.123456Z')
       const attachmentId = `${PREFIX}_discard_attachment`
       await insertAttachment(attachmentId, { recordId: null, deletedAt: null })
       await insertSourcePin(generationId, attachmentId)

@@ -14,6 +14,7 @@ import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const { verifyLateManualFinalizer } = require('../tests/utils/recovery-late-manual-finalizer.ts') as typeof import('../tests/utils/recovery-late-manual-finalizer')
 const manualAdmission = require('../src/multitable/recovery-archive-manual-admission.ts') as typeof import('../src/multitable/recovery-archive-manual-admission')
 const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
 const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests.ts') as typeof import('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests')
@@ -77,6 +78,7 @@ try {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
     NODE_ENV: 'test', METASHEET_ENV_DIR: root, CONFIG_FILE: `${root}/config.json`,
     DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    TEST_DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
     SECRET_PROVIDER: 'env', JWT_SECRET: randomUUID(),
   }
   for (const phase of ['fresh', 'replay']) {
@@ -1189,6 +1191,15 @@ try {
     assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
       WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 11)
     console.log('PASS: atomic manual archive publication with authentic 28-row coverage and eleven verified receipts')
+    await verifyLateManualFinalizer({ query, transaction: uploadInput.transaction,
+      createFinalize: createRecoveryArchiveManualFinalization, custody, createFixture: async () => {
+        const late = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
+          { ...admissionPolicy, leaseSeconds: 10 }))
+        await manual({ ...late, capture: async snapshot => ({ ...await capture(snapshot), binding: late.binding }),
+          upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...late, provider }) })
+        await createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...late, provider })()
+        return { ...finalInput, identity: late.identity, owner: late.owner }
+      } })
     const revokedUpload = await continuation()
     const revoker = new Client({ ...connection, database })
     await revoker.connect()
