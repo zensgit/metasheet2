@@ -47,6 +47,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
 ]
@@ -122,6 +123,11 @@ function assertD2ArchiveWiring(config, workflow) {
     '1',
     `${REAL_DB_STEP_IDS.multitable} must arm the D2 fail-not-skip marker with exact string '1'`,
   )
+  assert.equal(
+    step.env.TEST_DATABASE_URL,
+    step.env.DATABASE_URL,
+    `${REAL_DB_STEP_IDS.multitable} must provide matching database aliases for crash children`,
+  )
   assertExactRoster(
     wholeFileVitestArgs(step),
     `the parsed ${REAL_DB_STEP_IDS.multitable} whole-file Vitest arguments`,
@@ -130,6 +136,24 @@ function assertD2ArchiveWiring(config, workflow) {
 
 test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
   assertD2ArchiveWiring(readFileSync(CONFIG, 'utf8'), readFileSync(WORKFLOW, 'utf8'))
+})
+
+test('D2 crash-child database contract rejects missing or mismatched aliases', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const target = '        id: multitable-real-db-integration\n' +
+    "        if: matrix.node-version == '20.x'\n" +
+    '        env:\n' +
+    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  const alias = '          TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  for (const replacement of ['', alias.replace('metasheet_test', 'metasheet_other')]) {
+    const changed = workflow.replace(target + alias, target + replacement)
+    assert.notEqual(changed, workflow, 'database-alias mutation must apply')
+    assert.throws(() => assertD2ArchiveWiring(config, changed), (error) => {
+      assert.match(String(error.message), /matching database aliases for crash children/)
+      return true
+    })
+  }
 })
 
 test('D2 archive roster contract rejects a duplicate section-causality whole-file arg', () => {
@@ -172,6 +196,27 @@ test('archive roster contract rejects dropping D5 restore jobs from the union', 
     assert.match(String(error.message), /no duplicates or extras/)
     return true
   })
+})
+
+test('archive roster contract rejects dropping expired-object admission from either placement', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const droppedWorkflow = workflow.replace(
+    '            tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts \\\n',
+    '',
+  )
+  const droppedConfig = config.replace(
+    "      'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(droppedWorkflow, workflow, 'expired-object admission whole-file removal mutation must apply')
+  assert.notEqual(droppedConfig, config, 'expired-object admission exclusion removal mutation must apply')
+  for (const [changedConfig, changedWorkflow] of [[config, droppedWorkflow], [droppedConfig, workflow]]) {
+    assert.throws(() => assertD2ArchiveWiring(changedConfig, changedWorkflow), (error) => {
+      assert.match(String(error.message), /no duplicates or extras/)
+      return true
+    })
+  }
 })
 
 test('archive roster contract rejects dropping D4 reconstruction from the union', () => {
