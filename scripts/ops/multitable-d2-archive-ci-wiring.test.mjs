@@ -122,6 +122,11 @@ function assertD2ArchiveWiring(config, workflow) {
     '1',
     `${REAL_DB_STEP_IDS.multitable} must arm the D2 fail-not-skip marker with exact string '1'`,
   )
+  assert.equal(
+    step.env.TEST_DATABASE_URL,
+    step.env.DATABASE_URL,
+    `${REAL_DB_STEP_IDS.multitable} must provide matching database aliases for crash children`,
+  )
   assertExactRoster(
     wholeFileVitestArgs(step),
     `the parsed ${REAL_DB_STEP_IDS.multitable} whole-file Vitest arguments`,
@@ -130,6 +135,24 @@ function assertD2ArchiveWiring(config, workflow) {
 
 test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
   assertD2ArchiveWiring(readFileSync(CONFIG, 'utf8'), readFileSync(WORKFLOW, 'utf8'))
+})
+
+test('D2 crash-child database contract rejects missing or mismatched aliases', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const target = '        id: multitable-real-db-integration\n' +
+    "        if: matrix.node-version == '20.x'\n" +
+    '        env:\n' +
+    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  const alias = '          TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  for (const replacement of ['', alias.replace('metasheet_test', 'metasheet_other')]) {
+    const changed = workflow.replace(target + alias, target + replacement)
+    assert.notEqual(changed, workflow, 'database-alias mutation must apply')
+    assert.throws(() => assertD2ArchiveWiring(config, changed), (error) => {
+      assert.match(String(error.message), /matching database aliases for crash children/)
+      return true
+    })
+  }
 })
 
 test('D2 archive roster contract rejects a duplicate section-causality whole-file arg', () => {
