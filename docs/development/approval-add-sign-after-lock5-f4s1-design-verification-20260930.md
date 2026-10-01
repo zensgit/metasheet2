@@ -76,7 +76,7 @@
 - **拒绝点位置(相对台账「INV-6 守卫处」)**:409 不在 `add_sign` 分支的 INV-6 位置抛出,而在同意管线里引擎自己的三个部分表态分支里抛出。原因:任务要求「判定能否完成当前轮必须复用引擎既有的轮次完成判定,不另写一套」,而在 INV-6 位置该判定尚未发生;在分支内抛出并整体回滚,对外效果相同(不带值的 409、零持久化,§3 用例逐项断言)。副作用:同意侧在此之前的闸门先生效(例如 `commentRequired:'always'` 时无意见先得 400)。
 - **新增持久状态**:追加轮的聚合方式放在 `approval_instances.metadata` 的一个新 jsonb 键里(见 §1),无 DDL、不改运行图、不延迟任何一轮。它不是台账补全 (2)「deferred-round ledger」:(1) 之下从不需要把一轮推迟到兄弟席位表态之后。放在席位 `metadata` 上,就要求每一条改写或新增本轮席位的路径(转交、各类改派、轮内并加签)都带上该标记,轮内并加签新增的席位现在就不带;按轮次键在实例上则不依赖这些路径(同轮转交保留轮次,标记自然仍然匹配)。
 - **多人会签未轮完时前端不预判**:对话框不根据详情数据预先禁用「后加签」(那等于在前端另写一套轮次完成判定),而是在说明文字里写明「不能完成本轮时不可用」,服务端 409 时在对话框内联给出固定中英文案、保留对话框以便改用并加签。
-- **语言**:`memberActionFailure` 新增可选参数 `isZh`,缺省为中文;对话框里的文案取 `ADD_SIGN_PLACEMENT_COPY.zh`。F8-1 locale 接入时按键选语言即可。本片没有做其它本地化。
+- **语言**:`memberActionFailure` 新增可选参数 `isZh`,缺省为中文;对话框里的文案取 `ADD_SIGN_PLACEMENT_COPY.zh`。F8-1 locale 接入时按键选语言即可。本片没有做其它本地化;合并后见 §7。
 - **两行审计的意见**:执行人的意见同时写在 `approve` 与 `add_sign` 两行上(与并加签把意见写在 `add_sign` 行一致),时间线上会出现两次。
 - **【偏离已 ratify 文本,须 owner 知悉】`addSignAggregation` 只在 `after` 模式读取**:Lock-5 OD-L5-5 (a) 原文要求两人及以上的加签在 `before` / `after` 两种模式下都在动作时提供 `all | any`;本片只在 `after` 模式读取该键,`before` 与 `parallel` 不读。理由:任务要求 `before` 与 `parallel` 行为逐字节不变,且 B-2 已钉住 `before` 当前与 `parallel` 行为相同(前加签尚无独立运行时)。若以后实现前加签的独立运行时,应同时按 OD-L5-5 (a) 读取该键。
 - **服务门 400 的 details**:服务层的 `APPROVAL_ADD_SIGN_MODE_INVALID` 带 `{ nodeKey, operation }`(与同文件其它按节点的拒绝同形,不含人员或取值);路由门的同码 400 不带 details。
@@ -100,7 +100,6 @@
 | 键 | zh-CN | en |
 |---|---|---|
 | `ADD_SIGN_PLACEMENT_COPY_ZH` / `ADD_SIGN_PLACEMENT_COPY_EN` 的 `parallelLabel` | 并加签 | Alongside me |
-| 同上 `parallelHint` | 引用 `ADD_SIGN_MODE_HINT` | 引用 `ADD_SIGN_MODE_HINT_EN`(F8-1 已有;与本片原英文逐字相同) |
 | 同上 `afterLabel` | 后加签 | After me |
 | 同上 `afterHint` | 你的这一票按同意处理；加签人将在同一节点上开始新一轮审批，该轮通过后流程才继续。不会插入新的审批节点，也不是「当前节点自动通过并流转到新增节点」。若你的同意还不能完成本轮（多人会签还有人未表态、门槛未达），后加签不可用；可在其他审批人表态后再用，或改用并加签。 | Your seat is counted as an approval; the added approvers then start a new round at this SAME node, and the flow continues only when that round passes. No new approval node is inserted, and this is not "auto-pass the current node and move to an inserted one". If your approval would not complete the current round (others still to decide in an all-approve round, a threshold not yet met), after-sign is unavailable — use it once the others have decided, or add alongside instead. |
 | 同上 `aggregationLabel` | 加签人审批方式 | How the added approvers decide |
@@ -114,11 +113,11 @@
 - 原 `ADD_SIGN_PLACEMENT_COPY.zh` / `.en` 改为 `ADD_SIGN_PLACEMENT_COPY_ZH` / `ADD_SIGN_PLACEMENT_COPY_EN`(英文表的类型是 `Record<keyof typeof 中文表, string>`,两表键一一对应),由 `addSignPlacementCopy(isZh)` 按界面语言取一张;详情页经 `addSignCopy` 读取。
 - 原 `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE.zh` / `.en` 改为常量对 `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE` / `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN`,与 F8-1 的 `NODE_OPERATION_DISABLED_MESSAGE` / `NODE_OPERATION_DISABLED_MESSAGE_EN` 同形。
 - `memberActionFailure(error, fallback, isZh)`:按 F8-1,`isZh` 为必填(本片原为可选、缺省中文);新 409 按 `isZh` 取上面这对常量。详情页按 F8-1 传入界面语言。
-- 并加签说明沿用 F8-1 的 `addSignModeHint(isZh)`。
+- 并加签说明沿用 F8-1 的 `addSignModeHint(isZh)`(`ADD_SIGN_MODE_HINT` / `ADD_SIGN_MODE_HINT_EN`;F8-1 的英文与本片原英文逐字相同)。本片原表里的 `parallelHint` 只是引用这对常量,合并后详情页不读它,所以从两张表里删去;它的文本仍经 `addSignModeHint(isZh)` 渲染。
 - **表单项标签「加签方式」**:与 F8-1 已有的标签键 `addSignMode`(`approvalDetailLabels.ts` 的 `DETAIL_ZH` / `DETAIL_EN`)是同一个表单项,合并后用 F8-1 的键:中文同为「加签方式」,英文为 F8-1 的 How approvers are added。本片原表里的 `fieldLabel`(英文 Add-sign placement;本片界面只渲染中文表)不再保留。这是本节唯一没有保留的本片文案。
 
 **守卫登记**:
 
-- 门 ①(`templateCenterI18n.spec.ts` 中 F8-1 的逐文件源码守卫):`addSignHonestyCopy.ts` 的结构计数由 `constPair: 1` 改为 `zhTable: 1, constPair: 2`(新增的中文表与新 409 常量对);`memberActionErrorCopy.ts`(`constPair: 1`)与 `ApprovalDetailView.vue`(`ternary: 10`)的计数不变。未新增具名例外。
-- 门 ②(挂载渲染扫描):加签对话框的具名例外表仍为空。扫描打开加签对话框时渲染「加签方式」标签、两个单选项与并加签说明;后加签说明、聚合控件与新 409 文案只在选中后加签、加签人两人及以上或服务端拒绝时出现,不在这条扫描的渲染范围内。
-- 本片 spec(`approval-member-bar-operation-policy.spec.ts` 的 F4-S1 describe)改读新的键名,并与该文件其余用例一样给 `memberActionFailure` 显式传语言;断言内容不变。
+- 门 ①(`templateCenterI18n.spec.ts` 中 F8-1 的逐文件源码守卫):`addSignHonestyCopy.ts` 的结构计数由 `constPair: 1` 改为 `zhTable: 1, constPair: 2`(新增的中文表与新 409 常量对);`memberActionErrorCopy.ts`(`constPair: 1`)与 `ApprovalDetailView.vue`(`ternary: 10`)的计数不变。未新增具名例外。删去 `parallelHint` 后计数不变。
+- 门 ②(挂载渲染扫描):加签对话框的具名例外表仍为空。扫描打开加签对话框时渲染「加签方式」标签、两个单选项与并加签说明;后加签说明、聚合控件与新 409 文案只在选中后加签、加签人两人及以上或服务端拒绝时出现,不在这条扫描的渲染范围内;这三处的英文由本片 spec 的英文用例覆盖(见下条)。
+- 本片 spec(`approval-member-bar-operation-policy.spec.ts` 的 F4-S1 describe)改读新的键名,并与该文件其余用例一样给 `memberActionFailure` 显式传语言;断言内容不变。该 describe 另加一条英文界面用例:选后加签、挑两个加签人,断言后加签说明与聚合控件(标签、两个选项、说明)取 `ADD_SIGN_PLACEMENT_COPY_EN`,服务端 409 时对话框内联 `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN`,对话框文本与属性值零 CJK;用例结束由该 describe 的 afterEach 恢复 zh-CN。
