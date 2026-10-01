@@ -10,12 +10,20 @@
  * Closed set of task-domain id prefixes (lock §4.1 `:92`). `event` (`tev`, for `task_events.id`)
  * was added by owner ruling 2026-09-26 (「按建议」 on the `tev_` proposal); lock §4.1 lists only
  * tsk/tlst/tcmt, so this is a recorded addition to that list.
+ *
+ * ASSUMPTION(task-d): [M4 ruling pack v2, R23] `group` (`tgrp`, for `task_groups.id`) and
+ * `listEvent` (`tlev`, for `task_list_events.id`) are added here — the M4 pack's recommended
+ * value, NOT an owner ruling (R23 is unratified). `task_notification_deliveries.id` is a uuid
+ * (R23), not a generated domain id, so it gets no entry here. List/task/comment/group members and
+ * items use composite primary keys (R23), so they need no id prefix either.
  */
 export const TASK_ID_PREFIXES = {
   task: 'tsk',
   list: 'tlst',
   comment: 'tcmt',
   event: 'tev',
+  group: 'tgrp',
+  listEvent: 'tlev',
 } as const
 
 export type TaskDomainIdKind = keyof typeof TASK_ID_PREFIXES
@@ -34,7 +42,10 @@ export type TaskIdRandomSource = (bytes: number) => string
 /** Suffix length requested from the injected random source. Fixed so callers get a stable shape. */
 const TASK_ID_RANDOM_BYTES = 16
 
-/** Server-generated id format (lock §4.1 `:92`, plus `tev`): `^(tsk|tlst|tcmt|tev)_[A-Za-z0-9]+$`. PURE. */
+/**
+ * Server-generated id format (lock §4.1 `:92`, plus `tev`; plus `tgrp`/`tlev` — ASSUMPTION(task-d):
+ * R23): `^(tsk|tlst|tcmt|tev|tgrp|tlev)_[A-Za-z0-9]+$`. PURE.
+ */
 export function generateTaskDomainId(kind: TaskDomainIdKind, random: TaskIdRandomSource): string {
   const prefix = Object.prototype.hasOwnProperty.call(TASK_ID_PREFIXES, kind)
     ? TASK_ID_PREFIXES[kind]
