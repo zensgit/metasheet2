@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 
 const HARNESS = '/verification/approval-member-action-dialog-harness.html'
 
-async function openHarness(page: Page, width: number, height: number): Promise<void> {
+async function openHarness(page: Page, width: number, height: number, query = ''): Promise<void> {
   await page.setViewportSize({ width, height })
   await page.route('**/api/plugins', (route) => route.fulfill({
     status: 200,
@@ -24,7 +24,7 @@ async function openHarness(page: Page, width: number, height: number): Promise<v
       users: [{ id: 'user_target', name: '目标审批人', email: 'target@example.test' }],
     }),
   }))
-  await page.goto(HARNESS)
+  await page.goto(`${HARNESS}${query}`)
   await page.waitForFunction(() => window.__P5C_MEMBER_DIALOG_READY__ === true)
   await expect(page.getByTestId('approval-comment-button')).toBeVisible()
 }
@@ -307,4 +307,41 @@ test('P5-C mobile comment dialog traps focus and restores its trigger', async ({
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(trigger).toBeFocused()
+})
+
+test('a role-seated approver sees the process-evidence uploader in the 评论 dialog; without the server field the same viewer does not', async ({ page }) => {
+  // The uploader is gated on the pipeline flag AND the server-resolved `canAttachProcessEvidence`.
+  // The fixture's only seat is ROLE-typed, so the client-side mirror behind the 「等待你处理」 cue
+  // is false — the cue's absence below is the proof this is not the old user-seat path.
+  await page.route('**/api/approval/attachments/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ attachments: [] }),
+  }))
+
+  await openHarness(page, 1440, 960, '?scenario=role-seat-evidence')
+  await expect(page.getByTestId('approval-my-turn-badge')).toHaveCount(0)
+
+  const trigger = page.getByTestId('approval-comment-button')
+  await trigger.click()
+  const dialog = page.getByRole('dialog', { name: '添加评论' })
+  await expect(dialog).toBeVisible()
+  await expectDialogPaintedWithinViewport(page, 'approval-comment-dialog')
+  await expect(page.getByTestId('approval-comment-attachment-upload')).toBeVisible()
+  await expect(page.getByTestId('approval-comment-attachment-input')).toBeEnabled()
+  await expectNoHorizontalOverflow(page)
+  await page.screenshot({
+    path: 'verification-output/p5c-role-seat-evidence-uploader-1440.png',
+    fullPage: false,
+  })
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+
+  // Same viewer, same role seat, same flag — only the server's answer differs.
+  await openHarness(page, 1440, 960, '?scenario=role-seat-evidence&evidence=denied')
+  await expect(page.getByTestId('approval-my-turn-badge')).toHaveCount(0)
+  await page.getByTestId('approval-comment-button').click()
+  await expect(page.getByRole('dialog', { name: '添加评论' })).toBeVisible()
+  await expect(page.getByTestId('approval-comment-submit')).toBeVisible()
+  await expect(page.getByTestId('approval-comment-attachment-upload')).toHaveCount(0)
 })

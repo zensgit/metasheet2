@@ -16,7 +16,9 @@
  * The server applies the same rule to zone-less text it receives (core-backend `multitable/date-time-wall-clock.ts`
  * + `business-timezone.ts`), so grid paste, import, prefill and REST agree with what this module shows.
  *
- * Date-only `date` fields (floating calendar day, #3417) never pass through here.
+ * Date-only `date` fields (floating calendar day, #3417) are shown as `YYYY-MM-DD` by field-display.ts's
+ * `formatDateOnlyValue`: a day as written keeps its day; a stored instant takes `formatBusinessTimestamp(…,
+ * { precision: 'day' })` here, so it is the business-timezone day in every browser.
  *
  * Pure except for the one reactive holder of the server-provided zone; no dependency beyond `Intl`.
  */

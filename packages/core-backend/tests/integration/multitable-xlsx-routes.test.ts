@@ -257,6 +257,55 @@ describe('multitable xlsx routes', () => {
     expect(JSON.parse(String(insertCall?.[1]?.[2]))).toEqual({ fld_name: 'Alpha', fld_when: stored, fld_tokyo: stored })
   })
 
+  // #6181 (the rule #6178 applies to `date` cells on the web): a `date` (date-only) column exports as the
+  // `YYYY-MM-DD` day the grid shows — a day as written keeps that day; a stored INSTANT (the PLM refresh writes
+  // ISO instants into date columns) is its day in the business timezone (Asia/Shanghai default), not the raw ISO
+  // and never the UTC day. A value that names no day keeps the raw projection.
+  test('date exports as the YYYY-MM-DD day the grid shows (xlsx AND csv): days as written kept, instants on their business day', async () => {
+    const fieldRows = [
+      { id: 'fld_name', name: 'Name', type: 'string', property: {}, order: 1 },
+      { id: 'fld_day', name: 'Day', type: 'date', property: {}, order: 2 },
+    ]
+    const records = [
+      { id: 'rec_1', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Instant', fld_day: '2026-09-17T16:00:00.000Z' } }, // 09-18 00:00 北京时间, UTC day 09-17
+      { id: 'rec_2', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Written', fld_day: '2026-09-18' } },
+      { id: 'rec_3', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Slashes', fld_day: '2026/9/18' } },
+      { id: 'rec_4', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Junk', fld_day: 'not a date' } },
+      { id: 'rec_5', sheet_id: SHEET_ID, version: 1, data: { fld_name: 'Empty', fld_day: null } },
+    ]
+    const parseBody = (res: any, callback: any) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: any) => chunks.push(Buffer.from(chunk)))
+      res.on('end', () => callback(null, Buffer.concat(chunks)))
+    }
+
+    const exporter = await createApp({ tokenPerms: ['multitable:read'], queryHandler: defaultQueryHandler(records, fieldRows) })
+    const xlsxResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const parsed = xlsx.read(xlsxResponse.body, { type: 'buffer' })
+    const rows = xlsx.utils.sheet_to_json(parsed.Sheets[parsed.SheetNames[0]], { header: 1, raw: false, defval: '' })
+    expect(rows).toEqual([
+      ['Name', 'Day'],
+      ['Instant', '2026-09-18'], // raw ISO before; its UTC day would be 2026-09-17
+      ['Written', '2026-09-18'],
+      ['Slashes', '2026-09-18'],
+      ['Junk', 'not a date'], // names no day → raw projection, never dropped
+      ['Empty', ''],
+    ])
+
+    const csvResponse = await request(exporter.app)
+      .get(`/api/multitable/sheets/${SHEET_ID}/export-xlsx?format=csv`)
+      .buffer(true)
+      .parse(parseBody)
+      .expect(200)
+    const csvLines = Buffer.from(csvResponse.body).toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/)
+    expect(csvLines.slice(1, 3)).toEqual(['Instant,2026-09-18', 'Written,2026-09-18'])
+    expect(csvLines.join('\n')).not.toContain('T16:00:00.000Z')
+  })
+
   // PR #6083 review must-fix item 1: a workbook whose dateTime / date columns are Excel NATIVE date cells
   // (numFmt 22 `m/d/yy h:mm`, numFmt 14 `m/d/yy`) — what a person gets by typing a date into Excel — must
   // import: the dateTime cell as the Excel wall clock in the business zone, the date cell as that calendar day.

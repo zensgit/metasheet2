@@ -68,4 +68,26 @@ describe('publishApprovalCountsForUsers dual-publish wiring (B-2, todo-center-de
     expect(mockedApprovalPublish).not.toHaveBeenCalled()
     expect(mockedTodoPublish).not.toHaveBeenCalled()
   })
+
+  it('an optional per-user permissions context reaches BOTH publishers for that user; a caller that passes none sends no permissions key (the approval-side call sites, unchanged)', async () => {
+    mockedApprovalPublish.mockClear()
+    mockedTodoPublish.mockClear()
+
+    await publishApprovalCountsForUsers(
+      undefined,
+      [
+        { userId: 'with-perms', roles: ['r'], permissions: ['attendance:approve'] },
+        { userId: 'without-perms', roles: ['r'] },
+      ],
+      'cancel-round:approve',
+    )
+
+    for (const mocked of [mockedApprovalPublish, mockedTodoPublish]) {
+      const withPerms = mocked.mock.calls.find((call) => call[0].userId === 'with-perms')?.[0]
+      const withoutPerms = mocked.mock.calls.find((call) => call[0].userId === 'without-perms')?.[0]
+      expect(withPerms?.permissions).toEqual(['attendance:approve'])
+      expect(withoutPerms).toBeDefined()
+      expect(Object.prototype.hasOwnProperty.call(withoutPerms, 'permissions')).toBe(false)
+    }
+  })
 })

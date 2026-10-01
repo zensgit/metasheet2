@@ -7,14 +7,9 @@
  * per-flag activation string, and the illegal-combination rules). It never dumps the full container
  * environment, tokens, or connection strings.
  *
- * `--strict` additionally runs the manifest's dependency/conflict rules (`evaluateFlagRules`) against
- * the observed flags and turns any violation into a hard STOP (non-zero exit), in addition to its
- * existing job of promoting the image-tag-mismatch WARN into a STOP. The five illegal-combination
- * checks (lossy-without-base, side-door-without-capture, sheet-revert-intent-with-retention-on,
- * pit-reset-intent-with-retention-on, undelete-without-revert-gate) are ALSO
- * evaluated and reported as STOPs in the default (non-strict) mode — this preserves the pre-existing
- * unconditional destructive-recovery-vs-retention stops (do not regress either to strict-only) and is the safer
- * default for an operator-facing safety helper: a plain run cannot miss a genuinely illegal config.
+ * Manifest dependency/conflict rules (`evaluateFlagRules`) are hard STOPs in both modes.
+ * `--strict` additionally promotes advisory warnings to STOPs. A plain run must not
+ * miss an illegal flag combination.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -69,10 +64,8 @@ Flags shown come from scripts/ops/global-history-flag-manifest.mjs (single sourc
 Global History line's flags, their exact activation string, and illegal-combination rules).
 
 --strict additionally promotes advisory warnings (image-tag mismatch, a flag value that looks truthy
-but does not match its exact activation string) into hard stops. Illegal flag combinations
-(lossy-without-base, side-door-without-capture, sheet-revert-intent-with-retention-on,
-pit-reset-intent-with-retention-on,
-undelete-without-revert-gate) are ALWAYS hard stops, in both modes.
+but does not match its exact activation string) into hard stops. Manifest illegal
+flag combinations are always hard stops, in both modes.
 
 Examples:
   METASHEET_STATUS_SSH_HOST=mainuser@staging-host \\

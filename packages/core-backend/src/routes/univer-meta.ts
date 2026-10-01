@@ -20,7 +20,7 @@ import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
 import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
-import { dateTimeMinuteKey, formatDateTimeValue } from '../multitable/date-time-wall-clock'
+import { dateTimeMinuteKey, formatDateOnlyValue, formatDateTimeValue } from '../multitable/date-time-wall-clock'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -16769,9 +16769,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
       // export re-imports to the same instant (minute precision — the displayed precision).
       const exportDateTimeZoneById = new Map<string, string>()
+      // #6181: a `date` (date-only) column exports as the `YYYY-MM-DD` day the grid shows (#6178): a day as written
+      // keeps that day; a stored instant (e.g. `2026-09-17T16:00:00.000Z`) is its day in the instance business
+      // timezone (`2026-09-18` in Asia/Shanghai) — not the raw ISO, never the UTC day. The web shows a `date` in
+      // the business timezone only (no per-field zone), so the export does too.
+      const exportDateOnlyZoneById = new Map<string, string>()
       for (const field of fields) {
         if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
         else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+        else if (field.type === 'date') exportDateOnlyZoneById.set(field.id, resolveMultitableBusinessTimezone())
       }
       // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
       // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
@@ -16791,6 +16797,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             const wallClock = formatDateTimeValue(cell, dateTimeZone)
             // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
             if (wallClock !== null) return wallClock
+          }
+          const dateOnlyZone = exportDateOnlyZoneById.get(field.id)
+          if (dateOnlyZone) {
+            const day = formatDateOnlyValue(cell, dateOnlyZone)
+            // A value that names no day (legacy junk) keeps the raw projection — never dropped.
+            if (day !== null) return day
           }
           const lookupZone = exportLookupDateTimeZoneById.get(field.id)
           if (lookupZone && Array.isArray(cell)) {

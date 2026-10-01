@@ -59,6 +59,7 @@ import {
 } from './approval-effective-node-operations'
 import {
   assignmentMatchesActor,
+  decisionDoorIsSeatGated,
   readParallelBranchStates,
   resolveCanDecideCurrentNode,
 } from './approval-seat-authorization'
@@ -5902,6 +5903,20 @@ export interface ApprovalRoutePreviewResult {
   truncated: boolean
 }
 
+/**
+ * 撤销锁增补 P-11 (c) — the lock §14.1 seat-arm fence: the ONLY seat arms a cancel round may carry.
+ * `source_queue` is excluded on purpose (the todo-center lock records that arm's decision door,
+ * read admission and badge disagreeing), so the cancel line cannot inherit that disagreement.
+ */
+export const CANCEL_ROUND_ALLOWED_SEAT_ARMS: ReadonlySet<string> = new Set(['user', 'role'])
+
+export function cancelRoundSeatArmsWithinFence(assignments: ReadonlyArray<{ assignmentType?: unknown }>): boolean {
+  return assignments.every(
+    (assignment) =>
+      typeof assignment.assignmentType === 'string' && CANCEL_ROUND_ALLOWED_SEAT_ARMS.has(assignment.assignmentType),
+  )
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -9475,6 +9490,19 @@ export class ApprovalProductService {
           'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
         )
       }
+      // 增补 P-11 (c), lock §14.1 seat-arm fence (RATIFY 追记 2026-09-28, owner 「Adopt all 3, split
+      // locks (Recommended)」): a cancel round's seats may only be `user` / `role` arms, never
+      // `source_queue`. The seed graph seats people by id, so this is a fail-closed trip-wire for a
+      // future graph / resolver edit, answered like the backstop above (same registered code, no new
+      // one) and BEFORE any write. This path is the only writer of a cancel round's seats: §9-9 /
+      // §14.3 refuse every verb or job that could change one afterwards.
+      if (!cancelRoundSeatArmsWithinFence(initial.assignments)) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
 
       const requestNo = await this.allocateRequestNo()
       const title = `撤销「${original.title ?? documentId}」`
@@ -9729,6 +9757,44 @@ export class ApprovalProductService {
       definitionPolicy: original.policy_snapshot,
       roundPolicy: { windowDays, suite },
     })
+
+    // C-3 row 4 「最终评估:业务不可逆」 — the ORIGINAL document (held `FOR UPDATE` above) is no longer
+    // an approved document, so there is nothing left for this round to cancel. This is the creation
+    // path's own precondition (`createCancelRoundInstance`: `original.status !== 'approved'` ⇒ 409
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`) evaluated again at the decision point, which is what
+    // §2-G4 「双时点按当前策略评估」 asks of every creation-time predicate — and it answers with the
+    // SAME code, exactly as the two policy codes above do when re-derivation fails here.
+    //
+    // It closes as `blocked` (persisted in this transaction by the C-3 closer), NOT as a throw:
+    // falling through to redemption would hand C-1 a document it can no longer cancel, and the
+    // resulting error would roll the whole transaction back and leave the round `pending` with its
+    // seats — a state no retried approve can ever leave, because the document does not become
+    // approved again (only a reject or the requester's withdraw would end the round).
+    // It also must not be `expired`: the window is not why this round cannot proceed.
+    //
+    // Precedence, deliberately: after the policy derivation (so the decision snapshot is the normal
+    // one whenever the policy itself is readable; a policy that cannot be derived still reports its
+    // own code), and BEFORE the window query, so a document that is both no longer approved and past
+    // its window reports the reason that holds regardless of the clock, and the retryable
+    // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` throw below can never pre-empt a closure that no retry
+    // could change. `detail` carries the observed status beside the bounded reason (never projected
+    // to any read surface — see `projectCancelRoundCloseReasonForReadV1`).
+    //
+    // Implementer choice, FLAGGED for owner registration: the code is the existing
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`, reused in the open `business_blocked:<code>` domain
+    // (P-7) — no new code, and the P-8 registry is unchanged.
+    if (original.status !== 'approved') {
+      return {
+        roundId: round.id,
+        documentId: round.document_id,
+        evaluation: {
+          decision: 'blocked',
+          code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+          detail: typeof original.status === 'string' ? original.status : null,
+        },
+        policySnapshotAtDecision,
+      }
+    }
 
     // §2-G2 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)」 — the FIRST approved transition
     // on the original document, read off its own audit trail (`approval_instances` has no
@@ -13638,12 +13704,19 @@ export class ApprovalProductService {
     // detail read: the FE store publishes an action response into the slot the detail read fills,
     // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
     // moment an approver acts.
-    dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+    const canDecideCurrentNode = resolveCanDecideCurrentNode({
       instance: row,
       assignments: assignmentsResult.rows,
       viewerUserId: viewerUserId ?? null,
       viewerRoles: viewerRoles ?? null,
     })
+    dto.canDecideCurrentNode = canDecideCurrentNode
+    // Process-evidence (过程附件) uploader affordance — the identical expression
+    // `ApprovalBridgeService.getApproval` (the detail read) carries: the seat answer above,
+    // restricted to the seat-gated door. Filled HERE too for the same reason as the field above: the
+    // FE store publishes an action response into the slot the detail read fills, so a builder that
+    // omitted it would take the uploader away from a seated approver the moment they post a 评论.
+    dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
 
     // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
     // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a reader who reloads

@@ -545,6 +545,27 @@ export interface UnifiedApprovalDTO {
    * not deny.
    */
   canDecideCurrentNode?: boolean
+  /**
+   * May THIS viewer stage process evidence (过程附件) on this instance's 评论 action right now?
+   * Resolved server-side: the decision door's own seat answer (user, role and delegated seats, and
+   * the pending branch frontier of a parallel region), restricted to instances whose decisions go
+   * through the seat-gated door — so it is `false` on a legacy / `plm:` instance even where
+   * `canDecideCurrentNode` is `true`, because nothing binds process evidence there.
+   *
+   * It does not read the attachments flag; the view conjoins `approvalAttachments` itself. Read it
+   * as `=== true`: `undefined` (an older server) means no uploader, unlike `canDecideCurrentNode`
+   * above — hiding an optional uploader is the safe side, and the server's seat checks stay the
+   * authority either way.
+   */
+  canAttachProcessEvidence?: boolean
+  /**
+   * Cancel round (`workflowKey === 'approval.cancel-round'`) only — mirrors the backend DTO field.
+   * The bounded close-reason token of a round the SYSTEM closed (`round_expired` or
+   * `business_blocked:<code>`), whitelist-projected by the DETAIL read (`getApproval`) only; list rows
+   * never carry it. On a detail DTO its absence means 「not a system closure」; on a list row it means
+   * nothing — see approvals/useCancelRoundCloseReasons.ts.
+   */
+  cancelRoundCloseReason?: string
   assignments: ApprovalAssignmentDTO[]
   /**
    * B3-02 (行级未读): per-viewer read state, populated ONLY on the 待我处理 (pending) tab — `true`

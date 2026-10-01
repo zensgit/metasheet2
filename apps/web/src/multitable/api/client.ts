@@ -476,6 +476,8 @@ export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
   return {
     rowCount: copySheetCount(data.rowCount),
     fieldCount: copySheetCount(data.fieldCount),
+    builtFieldCount: copySheetCount(data.builtFieldCount),
+    viewCount: copySheetCount(data.viewCount),
     overLimit: data.overLimit === true || data.exceedsLimit === true,
     rowLimit: copySheetCount(limits.maxRows) ?? copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
     fieldDisclosures,

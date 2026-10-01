@@ -974,6 +974,9 @@ export interface CopySheetViewFilterDrop {
 export interface CopySheetDryRunResult {
   rowCount: number | null
   fieldCount: number | null
+  /** Columns the copy will actually build (mirror columns are not built); null when the server sent none. */
+  builtFieldCount: number | null
+  viewCount: number | null
   overLimit: boolean
   rowLimit: number | null
   fieldDisclosures: CopySheetFieldDisclosure[]

@@ -422,6 +422,59 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
   })
 
+  // Tasks: the web shows 任务, its badge and /tasks only when the session says tasks=true, which
+  // must be exactly when TASKS_ENABLED is the literal 'true' (the same predicate that mounts
+  // /api/tasks). Checked on both session payload producers the web reads: login and /me.
+  const TASKS_FLAG_CASES = [
+    ['unset', undefined, false],
+    ['empty', '', false],
+    ['TRUE', 'TRUE', false],
+    ['1', '1', false],
+    ['leading space', ' true', false],
+    ['trailing space', 'true ', false],
+    ['false', 'false', false],
+    ['exact true', 'true', true],
+  ] as const
+
+  async function withTasksEnabledEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const had = Object.prototype.hasOwnProperty.call(process.env, 'TASKS_ENABLED')
+    const previous = process.env.TASKS_ENABLED
+    if (value === undefined) delete process.env.TASKS_ENABLED
+    else process.env.TASKS_ENABLED = value
+    try {
+      return await run()
+    } finally {
+      if (had) process.env.TASKS_ENABLED = previous
+      else delete process.env.TASKS_ENABLED
+    }
+  }
+
+  it.each(TASKS_FLAG_CASES)('login as an administrator with TASKS_ENABLED %s (%j): features.tasks is %s', async (_label, value, expected) => {
+    const response = await withTasksEnabledEnv(value, () => loginAdminForElearningPayload())
+    expect(response.statusCode).toBe(200)
+    const features = (response.body as Record<string, any>).data.features
+    expect(features.tasks).toBe(expected)
+    // The administrator's other role-derived features are unaffected: tasks is not inferred from role.
+    expect(features.attendanceAdmin).toBe(true)
+  })
+
+  it.each(TASKS_FLAG_CASES)('/me for an administrator with TASKS_ENABLED %s (%j): features.tasks is %s', async (_label, value, expected) => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'admin@example.com',
+      name: 'Admin',
+      role: 'admin',
+      permissions: [],
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+    const response = await withTasksEnabledEnv(value, () => invokeRoute('get', '/me', {
+      headers: { authorization: 'Bearer live-token' },
+    }))
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.tasks).toBe(expected)
+  })
+
   it('accepts a generic identifier payload for login', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {

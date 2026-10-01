@@ -97,6 +97,13 @@
  *      not exhaustive; for the routes that exist today those shapes are pinned by layer 1's runtime probes,
  *      not by this layer, and for a NEW route this layer guarantees only the listed shapes.
  *
+ * 4. routes/admin-users.ts (#6163). It serves /api/admin/users and its siblings but is mounted at the
+ *    root (index.ts `this.app.use(adminUsersRouter())`), so the discovery in layer 3 never reaches it.
+ *    It is scanned on its own at the foot of this file with the same scanner: the only sinks that may
+ *    send text taken from an error are seven allowlisted by route and error code (text this code base
+ *    writes itself), every sendAdminUsersServerFailure call must pass a literal sentence, and a
+ *    memory-level self-proof rewrites every helper call site into seven echo shapes.
+ *
  * Mutation self-proof is built in and memory-level (no source file is written, so a parallel suite
  * cannot observe a mutant): every responder call site in the tree is rewritten, in memory, into each
  * of thirteen echo shapes (chained `.message` / `String()`, responder `extra`, assignment-derived local,
@@ -123,9 +130,11 @@ import vm from 'node:vm'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isAdmin } from '../../src/rbac/service'
 import { usePinnedServer } from '../utils/pinned-server'
+import ts from 'typescript'
 import {
   discoverMountedRouterTree,
   localRouterExportNames,
+  parseSource,
   scanResponseErrorEcho,
   type ResponderCall,
   type RouterTree,
@@ -1811,5 +1820,310 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     }
     expect(missed).toEqual([])
     expect(total).toBeGreaterThanOrEqual(49 * shapes.length)
+  })
+})
+
+// ── 4. routes/admin-users.ts: outside the mounted tree, scanned on its own (#6163) ──────────────
+//
+// admin-users.ts serves /api/admin/users, /api/admin/invites, /api/admin/role-delegation/… but is
+// mounted at the ROOT (index.ts `this.app.use(adminUsersRouter())`), not inside initAdminRoutes, so
+// the tree discovery above never reaches it. #6163: two of its 500 branches put Node's GCM error text
+// on /admin/users. Every 500 branch of the file now answers through sendAdminUsersServerFailure with a
+// fixed sentence; this block keeps it that way with the same scanner, plus two rules of its own:
+//   - EXACT allowlist, by route and error code (never by line number): the only sinks of the file
+//     that may send text taken from an error are the seven listed below, each of which sends text this
+//     code base wrote itself. A new echo anywhere in the file, or an allowlisted site that disappears,
+//     turns the guard red;
+//   - every sendAdminUsersServerFailure call passes a LITERAL sentence (a string literal, or a
+//     module-level const bound to one), so the helper's message parameter can never carry error text.
+
+const ADMIN_USERS = 'admin-users.ts'
+const ADMIN_USERS_FAILURE_HELPER = 'sendAdminUsersServerFailure'
+
+const ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT: ReadonlyArray<{ route: string; code: string; reason: string }> = [
+  {
+    route: 'POST /api/admin/users',
+    code: 'AttendanceShiftReferenceUnavailableError.code',
+    reason: 'typed error class of admin-users.ts: status 422, its own code, a message that states only a segment count, details it writes itself',
+  },
+  {
+    route: 'POST /api/admin/users',
+    code: 'AttendanceDefaultShiftNotFoundError.code',
+    reason: 'typed error class of admin-users.ts: status 404, code DEFAULT_SHIFT_NOT_FOUND, the fixed message "Default shift not found"',
+  },
+  {
+    route: 'POST /api/admin/users',
+    code: 'LOGIN_ALIAS_FAILED',
+    reason: 'LoginAliasClaimError only ever carries the fixed sentence "Failed to claim login alias" (login-alias-service.ts); admin-users-routes.test.ts pins that sentence',
+  },
+  {
+    route: 'PATCH /api/admin/users/:userId/profile',
+    code: 'LOGIN_ALIAS_FAILED',
+    reason: 'the same LoginAliasClaimError fixed sentence as on the create route',
+  },
+  {
+    route: 'POST /api/admin/users/activate/bulk',
+    code: 'mapActivateRequestError().code',
+    reason: 'request parsing: 400 ACTIVATE_REQUEST_INVALID carries the parser text admin-users.ts writes; anything else goes through mapActivateError',
+  },
+  {
+    route: 'POST /api/admin/users/:id/activate',
+    code: 'mapActivateRequestError().code',
+    reason: 'the same request-parsing mapping as the bulk route',
+  },
+  {
+    route: 'POST /api/admin/users/:id/activate',
+    code: 'mapActivateError().code',
+    reason: 'reads only error.code and answers a fixed status, code and message from ACTIVATE_ERROR_POLICY; the admin-users-activate-error tests pin it',
+  },
+]
+
+const allowlistKey = (entry: { route: string; code: string }) => `${entry.route} :: ${entry.code}`
+
+function unwrapExpression(expr: ts.Expression): ts.Expression {
+  let current = expr
+  while (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current)) {
+    current = current.expression
+  }
+  return current
+}
+
+const isFunctionNode = (node: ts.Node): boolean =>
+  ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isMethodDeclaration(node)
+
+/** `METHOD /path` of the route registration around a node, or `function <name>` for a named helper. */
+function enclosingRouteOf(node: ts.Node): string {
+  for (let p: ts.Node | undefined = node.parent; p; p = p.parent) {
+    if (
+      ts.isCallExpression(p)
+      && ts.isPropertyAccessExpression(p.expression)
+      && ['get', 'post', 'patch', 'put', 'delete'].includes(p.expression.name.text)
+      && p.arguments.length > 0
+      && ts.isStringLiteralLike(p.arguments[0])
+    ) {
+      return `${p.expression.name.text.toUpperCase()} ${p.arguments[0].text}`
+    }
+    if (ts.isFunctionDeclaration(p) && p.name) return `function ${p.name.text}`
+  }
+  return '(module scope)'
+}
+
+/**
+ * The error code a sink answers with: the literal when it is one; for `<x>.code`, the class of an
+ * enclosing `if (<x> instanceof C)` (`C.code`) or the mapper that `<x>` was bound to (`mapper().code`).
+ */
+function errorCodeOfSink(call: ts.CallExpression): string {
+  if (!(ts.isIdentifier(call.expression) && call.expression.text === 'jsonError')) {
+    return `(not a jsonError sink: ${call.getText().replace(/\s+/g, ' ').slice(0, 60)})`
+  }
+  const codeArg = call.arguments[2]
+  if (!codeArg) return '(no code argument)'
+  if (ts.isStringLiteralLike(codeArg)) return codeArg.text
+  const inner = unwrapExpression(codeArg)
+  if (ts.isPropertyAccessExpression(inner) && ts.isIdentifier(inner.expression)) {
+    const holder = inner.expression.text
+    for (let p: ts.Node | undefined = call.parent; p && !isFunctionNode(p); p = p.parent) {
+      if (!ts.isIfStatement(p)) continue
+      const condition = unwrapExpression(p.expression)
+      if (
+        ts.isBinaryExpression(condition)
+        && condition.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword
+        && ts.isIdentifier(condition.left) && condition.left.text === holder
+        && ts.isIdentifier(condition.right)
+      ) {
+        return `${condition.right.text}.${inner.name.text}`
+      }
+    }
+    for (let p: ts.Node | undefined = call.parent; p && !isFunctionNode(p); p = p.parent) {
+      if (!ts.isBlock(p)) continue
+      for (const statement of p.statements) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const declaration of statement.declarationList.declarations) {
+          const init = declaration.initializer ? unwrapExpression(declaration.initializer) : undefined
+          if (
+            ts.isIdentifier(declaration.name) && declaration.name.text === holder
+            && init && ts.isCallExpression(init) && ts.isIdentifier(init.expression)
+          ) {
+            return `${init.expression.text}().${inner.name.text}`
+          }
+        }
+      }
+    }
+  }
+  return codeArg.getText()
+}
+
+/** The outermost call that starts on a line (the scanner reports a sink at its call's first line). */
+function sinkCallAtLine(sf: ts.SourceFile, line: number): ts.CallExpression | undefined {
+  let found: ts.CallExpression | undefined
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (ts.isCallExpression(node) && sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1 === line) {
+      found = node
+      return
+    }
+    node.forEachChild(visit)
+  }
+  visit(sf)
+  return found
+}
+
+/** Offenders of a source text, keyed by route and error code. */
+function adminUsersOffenderKeys(source: string): string[] {
+  const sf = parseSource(ADMIN_USERS, source)
+  return scanResponseErrorEcho(ADMIN_USERS, source).offenders.map((offender) => {
+    const call = sinkCallAtLine(sf, offender.line)
+    return call
+      ? allowlistKey({ route: enclosingRouteOf(call), code: errorCodeOfSink(call) })
+      : `(no call at line ${offender.line}) :: ${offender.text}`
+  })
+}
+
+type HelperCall = {
+  call: ts.CallExpression
+  resText: string
+  codeText: string
+  sentence: ts.Expression
+  errorText: string
+}
+
+function failureHelperCalls(sf: ts.SourceFile): HelperCall[] {
+  const calls: HelperCall[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === ADMIN_USERS_FAILURE_HELPER) {
+      calls.push({
+        call: node,
+        resText: node.arguments[1]?.getText(sf) ?? 'res',
+        codeText: node.arguments[2]?.getText(sf) ?? "'?'",
+        sentence: node.arguments[3],
+        errorText: node.arguments[4]?.getText(sf) ?? 'error',
+      })
+    }
+    node.forEachChild(visit)
+  }
+  visit(sf)
+  return calls.sort((x, y) => x.call.getStart(sf) - y.call.getStart(sf))
+}
+
+/** Helper calls whose sentence is not a literal (or a module-level const bound to a literal). */
+function nonLiteralSentenceSites(source: string): string[] {
+  const sf = parseSource(ADMIN_USERS, source)
+  const literalConsts = new Set<string>()
+  for (const statement of sf.statements) {
+    if (!ts.isVariableStatement(statement) || !(statement.declarationList.flags & ts.NodeFlags.Const)) continue
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.initializer && ts.isStringLiteralLike(declaration.initializer)) {
+        literalConsts.add(declaration.name.text)
+      }
+    }
+  }
+  return failureHelperCalls(sf)
+    .filter(({ sentence }) => !(sentence && (ts.isStringLiteralLike(sentence) || (ts.isIdentifier(sentence) && literalConsts.has(sentence.text)))))
+    .map(({ call, codeText }) => `${enclosingRouteOf(call)} :: ${codeText}`)
+}
+
+describe('structural guard: routes/admin-users.ts (mounted at the root, outside the /api/admin tree) — #6163', () => {
+  it('admin-users.ts is not part of the discovered /api/admin tree, which is why it is scanned here on its own', () => {
+    expect(routerTree().files).not.toContain(ADMIN_USERS)
+  })
+
+  it('every allowlist entry is unique and carries a reason', () => {
+    const keys = ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT.map(allowlistKey)
+    expect(new Set(keys).size).toBe(keys.length)
+    for (const entry of ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT) expect(entry.reason.length).toBeGreaterThan(20)
+  })
+
+  it('the only sinks that send text taken from an error are exactly the seven allowlisted ones (by route and error code)', () => {
+    expect(adminUsersOffenderKeys(readRoute(ADMIN_USERS)).sort()).toEqual(
+      ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT.map(allowlistKey).sort(),
+    )
+  })
+
+  it('every sendAdminUsersServerFailure call passes a literal sentence', () => {
+    expect(nonLiteralSentenceSites(readRoute(ADMIN_USERS))).toEqual([])
+  })
+
+  it('is not vacuous: 45 helper calls, each inside a catch and handing it the caught value; the helper itself is a 500 sink', () => {
+    const source = readRoute(ADMIN_USERS)
+    const sf = parseSource(ADMIN_USERS, source)
+    const calls = failureHelperCalls(sf)
+    expect(calls).toHaveLength(45)
+    for (const { call, errorText } of calls) {
+      let clause: ts.CatchClause | undefined
+      for (let p: ts.Node | undefined = call.parent; p && !clause; p = p.parent) if (ts.isCatchClause(p)) clause = p
+      const binding = clause?.variableDeclaration?.name
+      expect({ at: enclosingRouteOf(call), caught: binding && ts.isIdentifier(binding) ? binding.text : null })
+        .toEqual({ at: enclosingRouteOf(call), caught: errorText })
+    }
+    const lines = source.split('\n')
+    const helperSinks = scanResponseErrorEcho(ADMIN_USERS, source).sinks.filter((sink) => {
+      const call = sinkCallAtLine(sf, sink.line)
+      return call !== undefined && enclosingRouteOf(call) === `function ${ADMIN_USERS_FAILURE_HELPER}`
+    })
+    expect(helperSinks.map((sink) => sink.status)).toEqual([500])
+    expect(lines[helperSinks[0].line - 1]).toContain('res.status(500).json(')
+  })
+
+  it('mutation self-proof: at EVERY helper call site, each echo shape turns this guard red', () => {
+    const source = readRoute(ADMIN_USERS)
+    const sf = parseSource(ADMIN_USERS, source)
+    const calls = failureHelperCalls(sf)
+    const allowed = ADMIN_USERS_SELF_WRITTEN_ERROR_TEXT.map(allowlistKey).sort()
+    const lineAt = (text: string, offset: number) => text.slice(0, offset).split('\n').length
+
+    // (a) The call goes back to an inline 500 that carries the caught error: the scan must flag
+    //     every rewritten site, where it now stands.
+    const rawShapes: Array<{ id: string; build: (c: HelperCall) => string }> = [
+      { id: 'jsonError .message', build: (c) => `jsonError(${c.resText}, 500, ${c.codeText}, (${c.errorText} as Error)?.message || ${c.sentence.getText(sf)})` },
+      { id: 'jsonError String()', build: (c) => `jsonError(${c.resText}, 500, ${c.codeText}, String(${c.errorText}))` },
+      { id: 'jsonError template', build: (c) => `jsonError(${c.resText}, 500, ${c.codeText}, \`failed: \${${c.errorText}}\`)` },
+      { id: 'status chain .message', build: (c) => `${c.resText}.status(500).json({ ok: false, error: { code: ${c.codeText}, message: (${c.errorText} as Error).message } })` },
+    ]
+    const missed: string[] = []
+    for (const shape of rawShapes) {
+      let out = ''
+      let cursor = 0
+      const spans: Array<{ site: string; from: number; to: number }> = []
+      for (const c of calls) {
+        out += source.slice(cursor, c.call.getStart(sf))
+        const from = out.length
+        out += shape.build(c)
+        spans.push({ site: `${enclosingRouteOf(c.call)} :: ${c.codeText}`, from, to: out.length })
+        cursor = c.call.getEnd()
+      }
+      out += source.slice(cursor)
+      const offenderLines = scanResponseErrorEcho(ADMIN_USERS, out).offenders.map((o) => o.line)
+      for (const span of spans) {
+        const first = lineAt(out, span.from)
+        const last = lineAt(out, span.to)
+        if (!offenderLines.some((line) => line >= first && line <= last)) missed.push(`${span.site} <- ${shape.id}`)
+      }
+      expect(adminUsersOffenderKeys(out).sort()).not.toEqual(allowed)
+    }
+
+    // (b) The helper is kept but handed the caught error as its sentence: every site breaks the
+    //     literal-sentence rule, and the scan flags the helper's own 500 sink.
+    const sentenceShapes: Array<{ id: string; build: (c: HelperCall) => string }> = [
+      { id: 'sentence .message', build: (c) => `(${c.errorText} as Error)?.message || ${c.sentence.getText(sf)}` },
+      { id: 'sentence String()', build: (c) => `String(${c.errorText})` },
+      { id: 'sentence template', build: (c) => `\`failed: \${${c.errorText}}\`` },
+    ]
+    for (const shape of sentenceShapes) {
+      let out = ''
+      let cursor = 0
+      for (const c of calls) {
+        out += source.slice(cursor, c.sentence.getStart(sf))
+        out += shape.build(c)
+        cursor = c.sentence.getEnd()
+      }
+      out += source.slice(cursor)
+      const flaggedSites = nonLiteralSentenceSites(out)
+      if (flaggedSites.length !== calls.length) missed.push(`literal-sentence rule saw ${flaggedSites.length}/${calls.length} <- ${shape.id}`)
+      const keys = adminUsersOffenderKeys(out)
+      if (!keys.some((key) => key.startsWith(`function ${ADMIN_USERS_FAILURE_HELPER} ::`))) missed.push(`helper sink not flagged <- ${shape.id}`)
+    }
+
+    expect(missed).toEqual([])
+    expect(calls.length * rawShapes.length).toBe(180)
   })
 })

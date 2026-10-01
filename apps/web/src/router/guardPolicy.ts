@@ -97,7 +97,7 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
  * whose whole point is that admins lose nothing. The workbench's access story is therefore carried
  * entirely by the permission gate (step 2) and the shared vocabulary behind it.
  */
-export const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
+export const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning', 'tasks'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }
