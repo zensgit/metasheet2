@@ -48,6 +48,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-object-deletion-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-object-deletion-claim-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
 ]
@@ -211,6 +212,28 @@ test('archive roster contract rejects dropping expired-object admission from eit
   )
   assert.notEqual(droppedWorkflow, workflow, 'expired-object admission whole-file removal mutation must apply')
   assert.notEqual(droppedConfig, config, 'expired-object admission exclusion removal mutation must apply')
+  for (const [changedConfig, changedWorkflow] of [[config, droppedWorkflow], [droppedConfig, workflow]]) {
+    assert.throws(() => assertD2ArchiveWiring(changedConfig, changedWorkflow), (error) => {
+      assert.match(String(error.message), /no duplicates or extras/)
+      return true
+    })
+  }
+})
+
+
+test('archive roster contract rejects dropping expired-object claim from either placement', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const droppedWorkflow = workflow.replace(
+    '            tests/integration/multitable-recovery-archive-object-deletion-claim-realdb.test.ts \\\n',
+    '',
+  )
+  const droppedConfig = config.replace(
+    "      'tests/integration/multitable-recovery-archive-object-deletion-claim-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(droppedWorkflow, workflow, 'expired-object claim whole-file removal mutation must apply')
+  assert.notEqual(droppedConfig, config, 'expired-object claim exclusion removal mutation must apply')
   for (const [changedConfig, changedWorkflow] of [[config, droppedWorkflow], [droppedConfig, workflow]]) {
     assert.throws(() => assertD2ArchiveWiring(changedConfig, changedWorkflow), (error) => {
       assert.match(String(error.message), /no duplicates or extras/)

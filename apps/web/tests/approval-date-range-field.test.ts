@@ -200,23 +200,23 @@ describe('Lock-8 L8-B draft carrier + buildFormSchema', () => {
 
 describe('Lock-8 L8-B OD-L8-8 — derived duration is display-only, renders and updates', () => {
   it('computes a whole-day duration for the civil-date arm', () => {
-    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-05')).toBe('4 天')
-    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-01')).toBe('0 天')
+    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-05', true)).toBe('4 天')
+    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-01', true)).toBe('0 天')
   })
 
   it('computes an hours/minutes duration for the time-bearing arms, and the text CHANGES when an endpoint changes (not vacuous)', () => {
-    const first = computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T17:30:00')
+    const first = computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T17:30:00', true)
     expect(first).toBe('8 小时 30 分钟')
-    const second = computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T18:00:00')
+    const second = computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T18:00:00', true)
     expect(second).toBe('9 小时')
     expect(second).not.toBe(first) // the positive control: changing ONE endpoint changes the rendered text.
   })
 
   it('renders null (no duration) for an out-of-order or incomplete pair — not negative/nonsensical text', () => {
-    expect(computeDateRangeDurationText('date', '2026-08-05', '2026-08-01')).toBeNull()
-    expect(computeDateRangeDurationText('date', '2026-08-01', '')).toBeNull()
-    expect(computeDateRangeDurationText('date', '', '2026-08-01')).toBeNull()
-    expect(computeDateRangeDurationText(undefined, '2026-08-01', '2026-08-05')).toBeNull()
+    expect(computeDateRangeDurationText('date', '2026-08-05', '2026-08-01', true)).toBeNull()
+    expect(computeDateRangeDurationText('date', '2026-08-01', '', true)).toBeNull()
+    expect(computeDateRangeDurationText('date', '', '2026-08-01', true)).toBeNull()
+    expect(computeDateRangeDurationText(undefined, '2026-08-01', '2026-08-05', true)).toBeNull()
   })
 
   it('isDateRangeEndpointValid fails closed on a missing/off-enum dateType — never the permissive instant branch', () => {
@@ -233,5 +233,17 @@ describe('Lock-8 L8-B OD-L8-8 — derived duration is display-only, renders and 
     expect(dateRangePickerElementType('date_minute')).toBe('datetime')
     expect(dateRangePickerValueFormat('date_half_day')).toBe('YYYY-MM-DDTHH:mm:ss')
     expect(dateRangePickerValueFormat('date_minute')).toBe('YYYY-MM-DDTHH:mm:ss')
+  })
+})
+
+// O-8 / F8-1: ApprovalNewView renders the derived duration in the shell locale.
+describe('Lock-8 L8-B OD-L8-8 — derived duration in English (O-8 / F8-1)', () => {
+  it('uses English unit words for both arms', () => {
+    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-05', false)).toBe('4 days')
+    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-02', false)).toBe('1 day')
+    expect(computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T17:30:00', false)).toBe('8 h 30 min')
+    expect(computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T18:00:00', false)).toBe('9 h')
+    expect(computeDateRangeDurationText('date_minute', '2026-08-01T09:00:00', '2026-08-01T09:45:00', false)).toBe('45 min')
+    expect(computeDateRangeDurationText('date', '2026-08-01', '2026-08-05', false)).not.toMatch(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/)
   })
 })

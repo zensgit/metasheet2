@@ -6,6 +6,7 @@
  * Includes mock fallback for development when backend is not available.
  */
 import { apiFetch, apiGet, apiPost } from '../utils/api'
+import { useLocale } from '../composables/useLocale'
 import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateGroupDTO,
@@ -1237,13 +1238,16 @@ export class ApprovalApiError extends Error {
  * carrying the server's message verbatim (falling back to a generic status-coded message for a
  * non-JSON or shape-less body). Exported standalone (rather than folded into a fetch wrapper) so
  * it is unit-testable against a fabricated `Response` independent of `USE_MOCK`.
+ *
+ * O-8 / F8-1: only that generic fallback follows the shell locale (read when the error is built);
+ * a server-supplied message is still shown verbatim.
  */
 export async function approvalRequestError(response: Response): Promise<never> {
   const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
   const rawMessage = payload?.error?.message
   const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
     ? rawMessage
-    : `请求失败（${response.status}）`
+    : (useLocale().isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`)
   throw new ApprovalApiError(message, response.status, payload?.error?.code)
 }
 

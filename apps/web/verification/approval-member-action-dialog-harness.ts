@@ -15,6 +15,7 @@ import 'element-plus/dist/index.css'
 import ApprovalDetailView from '../src/views/approval/ApprovalDetailView.vue'
 import { useApprovalStore } from '../src/approvals/store'
 import { useAuth } from '../src/composables/useAuth'
+import { useLocale } from '../src/composables/useLocale'
 import { useFeatureFlags } from '../src/stores/featureFlags'
 
 declare global {
@@ -38,6 +39,10 @@ async function main(): Promise<void> {
   const roleSeatEvidence = params.get('scenario') === 'role-seat-evidence'
   const evidenceAllowed = params.get('evidence') !== 'denied'
 
+  // O-8 / F8-1: ApprovalDetailView follows the shell locale; the paired spec asserts the shipped
+  // zh-CN accessible names (the C1 selectors), so pin zh-CN instead of inheriting the browser's
+  // language. The English copy is covered by the jsdom render scans.
+  useLocale().setLocale('zh-CN')
   localStorage.setItem('metasheet_features', JSON.stringify({
     approvalMobile: true,
     approvalAttachments: roleSeatEvidence,

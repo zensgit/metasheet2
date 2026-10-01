@@ -48,7 +48,7 @@
         :class="`approval-mobile-list__date--${waitSeverity(row.createdAt)}`"
         :title="formatDate(row.createdAt)"
       >
-        已等待 {{ formatRelativeWait(row.createdAt) }}
+        {{ waitingPhrase(formatRelativeWait(row.createdAt, isZh), isZh) }}
       </div>
     </button>
   </div>
@@ -58,7 +58,7 @@
 import { computed, watch } from 'vue'
 import type { FormSchema, UnifiedApprovalDTO } from '../../types/approval'
 import { useLocale } from '../../composables/useLocale'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
 import { resolveRowSummaryLine } from '../../approvals/useApprovalListFieldSummary'
 import { useCancelRoundCloseReasons } from '../../approvals/useCancelRoundCloseReasons'
 import StatusTag from '../../components/status/StatusTag.vue'
@@ -135,7 +135,7 @@ function formatDate(dateStr: string): string {
 // B2-01: same row-summary glue the desktop table uses, resolved against the `templateSchemas`
 // cache the parent owns and passes down as a prop.
 function rowSummaryLine(row: UnifiedApprovalDTO): string {
-  return resolveRowSummaryLine(props.templateSchemas, row)
+  return resolveRowSummaryLine(props.templateSchemas, row, isZh.value)
 }
 </script>
 

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import {
   createApp,
   defineComponent,
@@ -461,6 +462,8 @@ describe('ApprovalCenterView', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // O-8 / F8-1: the center follows the shell locale; this suite asserts its zh-CN copy.
+    useLocale().setLocale('zh-CN')
     mockPendingApprovals.value = []
     mockMyApprovals.value = []
     mockCcApprovals.value = []
