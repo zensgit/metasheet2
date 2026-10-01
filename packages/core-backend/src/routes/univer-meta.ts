@@ -20,7 +20,7 @@ import { parseConditionalRules } from '../multitable/permission-rule-evaluator'
 import { withFormLayout, projectPublicFormLayout, sanitizeFormRedirectUrl } from '../multitable/form-layout'
 import { projectFormContextView } from '../multitable/form-context-view-projection'
 import { resolveDateTimeFieldTimeZone, resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
-import { dateTimeMinuteKey, formatDateTimeValue } from '../multitable/date-time-wall-clock'
+import { dateTimeMinuteKey, formatDateOnlyValue, formatDateTimeValue } from '../multitable/date-time-wall-clock'
 import { rbacGuard } from '../rbac/rbac'
 import {
   deriveCapabilities,
@@ -419,6 +419,11 @@ import {
   prepareSheetLinkDeleteFencePlan,
   type FieldLinkRestoreFencePlan,
 } from '../multitable/link-writer-fence'
+import {
+  assertFieldSchemaUnchangedAfterFence,
+  DerivedMergeTargetRetypedError,
+  FieldSchemaChangedError,
+} from '../multitable/field-schema-fence-recheck'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -3283,7 +3288,9 @@ async function recalculateFormulaFields(
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
               derivedWriteBlocked = true
-              console.warn(`[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
             } else {
               throw err
             }
@@ -4290,7 +4297,9 @@ async function computeDependentLookupRollupRecords(
           } catch (err) {
             if (err instanceof SheetWriterBlockedError) {
               if (requireComplete) throw new Error('RECOVERY_DERIVED_WRITE_INCOMPLETE')
-              console.warn(`[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
+              console.warn(err instanceof DerivedMergeTargetRetypedError
+                ? `[univer-meta] fan-out relation-agg materialization refused: target field is no longer a derived field — skipped (sheet=${sheetId})`
+                : `[univer-meta] fan-out relation-agg materialization refused by recovery writer-block — skipped (sheet=${sheetId})`)
               break
             }
             throw err
@@ -6964,7 +6973,7 @@ type PatchFailurePayload = {
 
 type WriterFenceConflictPayload = {
   statusCode: 409
-  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED'
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED' | 'FIELD_SCHEMA_CHANGED'
   message: string
 }
 
@@ -6977,6 +6986,14 @@ function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload 
     }
   }
   if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  // Field retype slice 3a: a touched field changed type / options while the write waited on the fence.
+  if (err instanceof FieldSchemaChangedError) {
     return {
       statusCode: err.statusCode,
       code: err.code,
@@ -16417,9 +16434,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // import side (`validateDateTimeValue`) parses this exact wall-clock form back in the same zone, so an
       // export re-imports to the same instant (minute precision — the displayed precision).
       const exportDateTimeZoneById = new Map<string, string>()
+      // #6181: a `date` (date-only) column exports as the `YYYY-MM-DD` day the grid shows (#6178): a day as written
+      // keeps that day; a stored instant (e.g. `2026-09-17T16:00:00.000Z`) is its day in the instance business
+      // timezone (`2026-09-18` in Asia/Shanghai) — not the raw ISO, never the UTC day. The web shows a `date` in
+      // the business timezone only (no per-field zone), so the export does too.
+      const exportDateOnlyZoneById = new Map<string, string>()
       for (const field of fields) {
         if (field.type === 'dateTime') exportDateTimeZoneById.set(field.id, resolveDateTimeFieldTimeZone(field.property))
         else if (field.type === 'createdTime' || field.type === 'modifiedTime') exportDateTimeZoneById.set(field.id, resolveMultitableBusinessTimezone())
+        else if (field.type === 'date') exportDateOnlyZoneById.set(field.id, resolveMultitableBusinessTimezone())
       }
       // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
       // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
@@ -16439,6 +16462,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             const wallClock = formatDateTimeValue(cell, dateTimeZone)
             // A value that is not a date-time (legacy junk) keeps the raw projection — never dropped.
             if (wallClock !== null) return wallClock
+          }
+          const dateOnlyZone = exportDateOnlyZoneById.get(field.id)
+          if (dateOnlyZone) {
+            const day = formatDateOnlyValue(cell, dateOnlyZone)
+            // A value that names no day (legacy junk) keeps the raw projection — never dropped.
+            if (day !== null) return day
           }
           const lookupZone = exportLookupDateTimeZoneById.get(field.id)
           if (lookupZone && Array.isArray(cell)) {
@@ -18069,6 +18098,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           await acquireAutoNumberSheetWriteLock(query, view.sheetId)
           if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
         }
+        // Field retype slice 3a (ADR §3.11 row 5, form submit EDIT + CREATE incl. public forms): the submission
+        // was validated against `fieldById`, loaded through the pool before this transaction. Re-read the
+        // submitted fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift — one call covers both
+        // branches. No query unless the convert flag is 'true'.
+        await assertFieldSchemaUnchangedAfterFence(query, view.sheetId, fieldById, Object.keys(data))
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)

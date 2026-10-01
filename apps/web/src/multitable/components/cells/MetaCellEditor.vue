@@ -6,7 +6,7 @@
       ref="inputRef"
       class="meta-cell-editor__input"
       type="date"
-      :value="textControlValue(scalarActive ? scalarValue : modelValue)"
+      :value="dateControlValue(scalarActive ? scalarValue : modelValue)"
       @input="commitScalar(($event.target as HTMLInputElement).value)"
       @keydown.enter="onEnterScalarConfirm"
       @keydown.escape="onEscapeCancel"
@@ -384,6 +384,7 @@ import {
 } from '../../utils/field-config'
 import { linkActionLabel as formatLinkActionLabel } from '../../utils/link-fields'
 import {
+  formatDateOnlyValue,
   formatFieldDisplay,
   locationAddressValue,
   locationValueFromAddress,
@@ -556,6 +557,12 @@ const readonlyDisplayValue = computed(() =>
 
 function textControlValue(value: unknown): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+// `<input type="date">` only accepts `YYYY-MM-DD`; a stored instant (the PLM refresh writes ISO instants into
+// the managed table's date columns) would leave it blank. Show the day the cell displays (formatDateOnlyValue).
+function dateControlValue(value: unknown): string {
+  return formatDateOnlyValue(value) ?? ''
 }
 
 // --- Yjs opt-in binding (text cells only; inert when flag off) ---

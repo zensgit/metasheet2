@@ -22,6 +22,10 @@ vi.mock('../src/tasks/tasksApi', () => ({
 
 const mocks = vi.hoisted(() => ({
   permissions: ['tasks:read'] as string[],
+  isAdmin: false,
+  // Product features the mocked store reports as on. The existing cases describe a server with
+  // the tasks feature ON (TASKS_ENABLED exactly 'true'); case (d) switches it off.
+  features: ['tasks'] as string[],
   isZh: true,
   routePath: '/multitable',
   routeMeta: { requiresAuth: true } as Record<string, unknown>,
@@ -42,7 +46,7 @@ vi.mock('../src/stores/featureFlags', () => ({
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
     isAttendanceFocused: () => mocks.focus.attendance,
     isPlmWorkbenchFocused: () => mocks.focus.plm,
-    hasFeature: () => false,
+    hasFeature: (feature: string) => mocks.features.includes(feature),
   }),
 }))
 
@@ -61,10 +65,10 @@ vi.mock('../src/composables/useAuth', () => ({
       email: 'tasks-viewer@test.local',
       roles: [],
       permissions: mocks.permissions,
-      isAdmin: false,
+      isAdmin: mocks.isAdmin,
     }),
     getToken: () => 'session-token',
-    hasPermission: (permission: string) => mocks.permissions.includes(permission),
+    hasPermission: (permission: string) => mocks.isAdmin || mocks.permissions.includes(permission),
   }),
 }))
 
@@ -86,6 +90,8 @@ describe('app-level tasks nav entry + badge gating (P2-1)', () => {
 
   beforeEach(() => {
     mocks.permissions = ['tasks:read']
+    mocks.isAdmin = false
+    mocks.features = ['tasks']
     mocks.isZh = true
     mocks.routePath = '/multitable'
     mocks.routeMeta = { requiresAuth: true }
@@ -197,5 +203,21 @@ describe('app-level tasks nav entry + badge gating (P2-1)', () => {
 
     expect(fetchPendingCountSpy).not.toHaveBeenCalled()
     expect(badgeOf(root)).toBeNull()
+  })
+
+  // (d) the tasks feature is off (TASKS_ENABLED not exactly 'true'): nothing about tasks renders or
+  // polls, for a tasks:read holder AND for an administrator, who passes every permission probe.
+  it.each([
+    ['a tasks:read holder', false],
+    ['an administrator', true],
+  ] as const)('(d) with the tasks feature off, %s gets no nav-tasks entry, no badge and no pending-count request', async (_label, isAdmin) => {
+    mocks.features = []
+    mocks.isAdmin = isAdmin
+    const root = await mountApp()
+
+    expect(navTasksLink(root)).toBeNull()
+    expect(badgeOf(root)).toBeNull()
+    expect(fetchPendingCountSpy).not.toHaveBeenCalled()
+    expect(root.querySelector('.app-nav')).toBeTruthy()
   })
 })

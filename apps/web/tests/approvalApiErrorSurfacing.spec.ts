@@ -1,5 +1,14 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it , vi} from 'vitest'
-import { ApprovalApiError, approvalRequestError, normalizeApprovalHistoryEnvelope } from '../src/approvals/api'
+import {
+  APPROVAL_EXPORT_DEFAULT_FILE_NAME,
+  APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+  ApprovalApiError,
+  approvalRequestError,
+  exportApprovalsCsv,
+  normalizeApprovalHistoryEnvelope,
+} from '../src/approvals/api'
 import { collectHistoryAttachmentRefIds } from '../src/approvals/attachmentRefs'
 
 /**
@@ -187,5 +196,304 @@ describe('normalizeApprovalHistoryEnvelope (Lock-9 fix round, gate P1-2)', () =>
       },
     })
     expect(collectHistoryAttachmentRefIds(plmShapedHistory as never)).toEqual(['att_probe_1'])
+  })
+})
+
+/**
+ * F3-E1 (审批中心「导出 CSV」按钮) — the client half of `GET /api/approvals?format=csv`.
+ *
+ * `exportApprovalsCsv` has NO `USE_MOCK` branch (see its docblock), so unlike the functions the
+ * header of this file describes it always takes the real `apiFetch` path under Vitest and a plain
+ * `vi.stubGlobal('fetch', …)` is not vacuous here. The one case that also drives `listApprovals`
+ * (which IS gated) uses the same `resetModules` + `stubEnv('DEV', false)` escape the
+ * `getApprovalHistory` call-site test above already uses.
+ */
+describe('exportApprovalsCsv (F3-E1)', () => {
+  const CSV_BODY = '\uFEFFid,title\r\napv_1,采购申请\r\n'
+
+  function csvResponse(headers: Record<string, string>, blob: Blob = new Blob([CSV_BODY])): {
+    response: Response
+    blob: Blob
+    blobSpy: ReturnType<typeof vi.fn>
+  } {
+    const blobSpy = vi.fn().mockResolvedValue(blob)
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers(headers),
+      blob: blobSpy,
+      json: async () => { throw new Error('not json') },
+      clone() { return this },
+    } as unknown as Response
+    return { response, blob, blobSpy }
+  }
+
+  const FULL_HEADERS = {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="approvals-export.csv"',
+    'X-Approval-Export-Row-Count': '1',
+    'X-Approval-Export-Row-Limit': '500',
+    'X-Approval-Export-Row-Cap': '500',
+    'X-Approval-Export-Capped': 'false',
+  }
+
+  async function withFetch<T>(fetchMock: ReturnType<typeof vi.fn>, run: () => Promise<T>): Promise<T> {
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      return await run()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  }
+
+  function requestOf(fetchMock: ReturnType<typeof vi.fn>): { url: URL; init: RequestInit } {
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [rawUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    return { url: new URL(rawUrl), init }
+  }
+
+  it('sends every list filter plus format=csv to the list route, with the auth header and no paging', async () => {
+    const { response } = csvResponse(FULL_HEADERS)
+    const fetchMock = vi.fn().mockResolvedValue(response)
+    localStorage.setItem('auth_token', 'tok_export')
+    try {
+      await withFetch(fetchMock, () => exportApprovalsCsv({
+        tab: 'mine',
+        status: 'approved',
+        search: '采购 A&B',
+        sourceSystem: 'platform',
+        templateId: 'tpl_7',
+        createdFrom: '2026-05-01T00:00:00Z',
+        createdTo: '2026-06-30T23:59:59Z',
+        // A caller holding a list query still carries paging; it must not reach the export URL.
+        ...({ page: 3, pageSize: 10 } as object),
+      }))
+    } finally {
+      localStorage.removeItem('auth_token')
+    }
+
+    const { url, init } = requestOf(fetchMock)
+    expect(url.pathname).toBe('/api/approvals')
+    expect(Object.fromEntries(url.searchParams.entries())).toEqual({
+      tab: 'mine',
+      status: 'approved',
+      search: '采购 A&B',
+      sourceSystem: 'platform',
+      templateId: 'tpl_7',
+      createdFrom: '2026-05-01T00:00:00Z',
+      createdTo: '2026-06-30T23:59:59Z',
+      format: 'csv',
+    })
+    // The server selects the CSV branch on the exact literal only.
+    expect(url.searchParams.getAll('format')).toEqual(['csv'])
+    expect(init.method).toBe('GET')
+    const headers = new Headers(init.headers)
+    expect(headers.get('Authorization')).toBe('Bearer tok_export')
+    expect(headers.get('Accept')).toBe('text/csv')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('never sends limit/offset of its own: the row ceiling stays the server default', async () => {
+    const { response } = csvResponse(FULL_HEADERS)
+    const fetchMock = vi.fn().mockResolvedValue(response)
+    await withFetch(fetchMock, () => exportApprovalsCsv({ tab: 'pending' }))
+    const { url } = requestOf(fetchMock)
+    expect([...url.searchParams.keys()].sort()).toEqual(['format', 'tab'])
+  })
+
+  it('an empty query still asks for CSV (format is never dropped)', async () => {
+    const { response } = csvResponse(FULL_HEADERS)
+    const fetchMock = vi.fn().mockResolvedValue(response)
+    await withFetch(fetchMock, () => exportApprovalsCsv())
+    expect(requestOf(fetchMock).url.search).toBe('?format=csv')
+  })
+
+  it('carries exactly the filters listApprovals sends for the same query (one shared mapping)', async () => {
+    const query = {
+      tab: 'completed' as const,
+      status: 'rejected' as const,
+      search: 'PO-2026',
+      sourceSystem: 'all' as const,
+      templateId: 'tpl_9',
+      createdFrom: '2026-01-01T00:00:00Z',
+      createdTo: '2026-01-31T23:59:59Z',
+    }
+    const { response } = csvResponse(FULL_HEADERS)
+    const fetchMock = vi.fn(async (rawUrl: string) => (
+      new URL(rawUrl).searchParams.get('format') === 'csv'
+        ? response
+        : { ok: true, status: 200, json: async () => ({ data: [], total: 0 }), clone() { return this } }
+    ))
+    vi.resetModules()
+    vi.stubEnv('DEV', false)
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const api = await import('../src/approvals/api')
+      await api.listApprovals({ ...query, page: 2, pageSize: 10 })
+      await api.exportApprovalsCsv(query)
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+      vi.resetModules()
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [listParams, exportParams] = fetchMock.mock.calls.map(([rawUrl]) => (
+      Object.fromEntries(new URL(rawUrl).searchParams.entries())
+    ))
+    // Positive control: the list request really went out with paging, so the comparison below is
+    // between two real requests rather than between two empty objects.
+    expect(listParams).toMatchObject({ page: '2', pageSize: '10', tab: 'completed' })
+    const { page: _page, pageSize: _pageSize, ...listFilters } = listParams
+    const { format, ...exportFilters } = exportParams
+    expect(format).toBe('csv')
+    expect(exportFilters).toEqual(listFilters)
+    expect(Object.keys(exportFilters).sort()).toEqual(Object.keys(query).sort())
+  })
+
+  it('returns the response body untouched, with the file name and the four export headers', async () => {
+    const { response, blob, blobSpy } = csvResponse({
+      ...FULL_HEADERS,
+      'X-Approval-Export-Row-Count': '37',
+      'X-Approval-Export-Row-Limit': '500',
+      'X-Approval-Export-Row-Cap': '500',
+      'X-Approval-Export-Capped': 'false',
+    })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv({ tab: 'pending' }))
+
+    // Identity, not equality: the function hands back the very object `response.blob()` produced.
+    expect(result.blob).toBe(blob)
+    expect(blobSpy).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      fileName: 'approvals-export.csv',
+      rowCount: 37,
+      rowLimit: 500,
+      rowCap: 500,
+      capped: false,
+    })
+  })
+
+  it('reports a capped export as capped', async () => {
+    const { response } = csvResponse({
+      ...FULL_HEADERS,
+      'X-Approval-Export-Row-Count': '412',
+      'X-Approval-Export-Capped': 'true',
+    })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv())
+    expect(result.capped).toBe(true)
+    expect(result.rowCount).toBe(412)
+  })
+
+  it('reports unreadable export headers as null — never as zero rows or "not capped"', async () => {
+    const { response } = csvResponse({ 'Content-Type': 'text/csv; charset=utf-8' })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv())
+    expect(result.rowCount).toBeNull()
+    expect(result.rowLimit).toBeNull()
+    expect(result.rowCap).toBeNull()
+    expect(result.capped).toBeNull()
+    expect(result.fileName).toBe(APPROVAL_EXPORT_DEFAULT_FILE_NAME)
+  })
+
+  it.each([
+    ['a negative count', '-1'],
+    ['a fractional count', '1.5'],
+    ['a non-number', 'many'],
+    ['an empty value', ''],
+    ['an unsafe integer', '9007199254740993'],
+  ])('treats %s in a count header as unreadable', async (_label, value) => {
+    const { response } = csvResponse({ ...FULL_HEADERS, 'X-Approval-Export-Row-Count': value })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv())
+    expect(result.rowCount).toBeNull()
+    // The sibling headers of the same response are still read.
+    expect(result.rowCap).toBe(500)
+  })
+
+  it.each([['TRUE'], ['1'], ['yes'], ['']])('treats a non-canonical capped value (%j) as unknown', async (value) => {
+    const { response } = csvResponse({ ...FULL_HEADERS, 'X-Approval-Export-Capped': value })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv())
+    expect(result.capped).toBeNull()
+  })
+
+  it.each([
+    ['a path fragment', 'attachment; filename="../approvals-export.csv"'],
+    ['a name with a space', 'attachment; filename="approvals export.csv"'],
+    ['a different extension', 'attachment; filename="approvals-export.exe"'],
+    ['an unquoted name', 'attachment; filename=approvals-export.csv'],
+    ['no file name at all', 'attachment'],
+  ])('falls back to the fixed file name for %s', async (_label, disposition) => {
+    const { response } = csvResponse({ ...FULL_HEADERS, 'Content-Disposition': disposition })
+    const result = await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv())
+    expect(result.fileName).toBe(APPROVAL_EXPORT_DEFAULT_FILE_NAME)
+  })
+
+  it('rejects a 200 that is not CSV instead of handing its body to the caller', async () => {
+    // The shape a server without the CSV branch answers with: the JSON list, status 200.
+    const blobSpy = vi.fn()
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'application/json; charset=utf-8' }),
+      blob: blobSpy,
+      json: async () => ({ data: [], total: 0 }),
+      clone() { return this },
+    } as unknown as Response
+
+    let caught: unknown
+    try {
+      await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv({ tab: 'pending' }))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(ApprovalApiError)
+    expect((caught as ApprovalApiError).code).toBe(APPROVAL_EXPORT_UNEXPECTED_RESPONSE)
+    expect((caught as ApprovalApiError).status).toBe(200)
+    expect(blobSpy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [400, 'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED'],
+    [403, 'FORBIDDEN'],
+    [500, 'APPROVAL_EXPORT_FAILED'],
+    [503, 'APPROVAL_EXPORT_DEGRADED'],
+  ])('surfaces a %i refusal as ApprovalApiError carrying the server code %s, and reads no body as CSV', async (status, code) => {
+    const blobSpy = vi.fn()
+    const response = {
+      ok: false,
+      status,
+      headers: new Headers({ 'Content-Type': 'application/json; charset=utf-8' }),
+      blob: blobSpy,
+      json: async () => ({ error: { code, message: `server says ${code}` } }),
+      clone() { return this },
+    } as unknown as Response
+
+    let caught: unknown
+    try {
+      await withFetch(vi.fn().mockResolvedValue(response), () => exportApprovalsCsv({ sourceSystem: 'plm' }))
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(ApprovalApiError)
+    expect((caught as ApprovalApiError).status).toBe(status)
+    expect((caught as ApprovalApiError).code).toBe(code)
+    expect((caught as ApprovalApiError).message).toBe(`server says ${code}`)
+    expect(blobSpy).not.toHaveBeenCalled()
+  })
+
+  it('source tripwire: the export path builds no CSV and no Blob of its own', () => {
+    const source = readFileSync(resolve(__dirname, '../src/approvals/api.ts'), 'utf8')
+    const start = source.indexOf('// CSV export of the approval list')
+    const end = source.indexOf('export async function getApproval(')
+    // Count guard so a rename that empties the slice cannot leave this vacuously green.
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const exportSection = source.slice(start, end)
+    expect(exportSection).toContain('export async function exportApprovalsCsv(')
+    expect(exportSection).toContain('await response.blob()')
+    expect(exportSection).not.toMatch(/new\s+Blob\s*\(/)
+    expect(exportSection).not.toMatch(/\.join\s*\(/)
+    expect(exportSection).not.toMatch(/if\s*\(\s*USE_MOCK/)
+    // A known bypass this tripwire does not see: CSV text assembled in ANOTHER module and passed
+    // in. The view-level case in approval-center.spec.ts pins the other end (the object handed to
+    // `URL.createObjectURL` is the very Blob this function returned).
   })
 })

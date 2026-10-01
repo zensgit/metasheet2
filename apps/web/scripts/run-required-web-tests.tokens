@@ -164,6 +164,14 @@ automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+cancelRoundEntryApproverList
+cancelRoundEntryAttendancePanel
+cancelRoundEntryCenterRoute
+cancelRoundEntryContract
+cancelRoundEntryCore
+cancelRoundEntryDetailView
+cancelRoundEntrySurfaces
+cancelRoundEntryTodoCenter
 categoryCandidateInput
 comment-affordance-color-consistency
 conditional-formatting-dialog-i18n
@@ -477,6 +485,8 @@ tasks-context.spec.ts
 tasks-detail-view.spec.ts
 tasks-list-view.spec.ts
 tasks-nav-badge.spec.ts
+tasks-nav-feature-gate.spec.ts
+tasks-nav-relogin.spec.ts
 tasks-routes.spec.ts
 tasks-view-transitions.spec.ts
 tasks-view.spec.ts
@@ -537,6 +547,7 @@ useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
 useAutoSumTotal
 usePlmExportActions
+userManagementView
 view-manager-multitable-contract
 workflowHubView
 xlsx-mapping

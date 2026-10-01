@@ -32,6 +32,7 @@
  *    This opt-in path does not change the legacy/default per-record transaction behavior above.
  */
 import { fenceWriterEntry, fenceWriterEntriesInOrder, isWriterFenceEnabled, SheetWriterBlockedError } from './canonical-sheet-fence'
+import { assertDerivedMergeTargetsStillDerived } from './field-schema-fence-recheck'
 import { poolManager } from '../integration/db/connection-pool'
 import { assertInTransaction } from './pg-transaction-guard'
 import type { QueryFn } from './permission-service'
@@ -98,6 +99,11 @@ export async function applyFencedDerivedDataMerge(
     await poolManager.get().transaction(async ({ query: fencedQuery }) => {
       const fq = fencedQuery as unknown as DerivedMergeQueryFn
       await fenceWriterEntry(fq, sheetId)
+      // Field retype slice 3a (ADR §3.11 row 13, derived variant): `updates` were computed OUTSIDE this fence
+      // from formula fields. If a key's field was retyped meanwhile (e.g. formula → string, then string →
+      // select), refuse with a SheetWriterBlockedError subclass — the callers' existing skip branch drops the
+      // materialization AND its echo. No query unless the convert flag is 'true'.
+      await assertDerivedMergeTargetsStillDerived(fq, sheetId, Object.keys(updates))
       // lock-exempt: system derived-value materialization — no user actor (a record lock is read-only to system recompute)
       // revision-exempt: derived materialization, no version bump — pure fn of stored inputs, recomputed on next write
       await fq(

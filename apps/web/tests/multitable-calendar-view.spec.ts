@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaCalendarView from '../src/multitable/components/MetaCalendarView.vue'
 import { useLocale } from '../src/composables/useLocale'
-import { businessTodayKey } from '../src/multitable/utils/business-timezone'
+import { businessTodayKey, resetBusinessTimezone } from '../src/multitable/utils/business-timezone'
 
 // Days relative to the day the calendar opens on — the business today (客户反馈 2026-09-24 #4c follow-up), never
 // the browser's day (the old local-midnight + UTC-date form was also a day early on UTC+ hosts).
@@ -609,5 +609,62 @@ describe('MetaCalendarView', () => {
     expect(container.querySelector('.meta-calendar__cell')?.getAttribute('aria-label')).toContain('2026年')
 
     app.unmount()
+  })
+
+  // #6181 (the rule #6178 applies to `date` cells): a `date` field holding a stored INSTANT lands on the day it
+  // falls on in the business timezone (Asia/Shanghai default) — `2026-09-17T16:00:00.000Z` is 09-18 00:00 there —
+  // never the UTC day its first ten characters name (09-17); a day as written keeps its day. The start AND the end
+  // field go through the same rule.
+  it('#6181: a date field holding an instant lands on its business-timezone day; a day as written keeps its day', async () => {
+    resetBusinessTimezone()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-10T04:00:00.000Z'))
+
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+
+    const app = createApp({
+      render() {
+        return h(MetaCalendarView, {
+          rows: [
+            { id: 'rec_instant', version: 1, data: { fld_title: 'PLM refresh', fld_start: '2026-09-17T16:00:00.000Z' } },
+            { id: 'rec_written', version: 1, data: { fld_title: 'Written day', fld_start: '2026-09-18' } },
+            {
+              id: 'rec_span',
+              version: 1,
+              data: { fld_title: 'Instant span', fld_start: '2026-09-20T16:00:00.000Z', fld_end: '2026-09-22T16:00:00.000Z' },
+            },
+          ],
+          fields: [
+            { id: 'fld_title', name: 'Title', type: 'string' },
+            { id: 'fld_start', name: 'Start', type: 'date' },
+            { id: 'fld_end', name: 'End', type: 'date' },
+          ],
+          loading: false,
+          viewConfig: {
+            dateFieldId: 'fld_start',
+            endDateFieldId: 'fld_end',
+            titleFieldId: 'fld_title',
+            defaultView: 'month',
+            weekStartsOn: 0,
+          },
+        })
+      },
+    })
+
+    app.mount(container)
+    await nextTick()
+
+    const daysOf = (title: string) => Array.from(container.querySelectorAll('.meta-calendar__cell'))
+      .filter((cell) => !cell.classList.contains('meta-calendar__cell--outside'))
+      .filter((cell) => Array.from(cell.querySelectorAll('.meta-calendar__event')).some((el) => (el.textContent ?? '').includes(title)))
+      .map((cell) => cell.querySelector('.meta-calendar__day-num')?.textContent?.trim())
+
+    expect(daysOf('PLM refresh')).toEqual(['18']) // UTC day (old first-ten-characters bucketing): 17
+    expect(daysOf('Written day')).toEqual(['18']) // a day as written keeps its day
+    expect(daysOf('Instant span')).toEqual(['21', '22', '23']) // UTC days would be 20-22
+
+    app.unmount()
+    container.remove()
   })
 })

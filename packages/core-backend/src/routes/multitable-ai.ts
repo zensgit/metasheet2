@@ -43,6 +43,7 @@ import {
 } from '../multitable/record-write-service'
 import { createYjsInvalidationPostCommitHook } from '../multitable/post-commit-hooks'
 import { LinkWriterFencePlanChangedError } from '../multitable/link-writer-fence'
+import { FieldSchemaChangedError } from '../multitable/field-schema-fence-recheck'
 import { normalizeJson } from '../multitable/field-codecs'
 import { poolManager } from '../integration/db/connection-pool'
 import { eventBus } from '../integration/events/event-bus'
@@ -595,7 +596,7 @@ export function createMultitableAiRoutes(deps: MultitableAiRouteDeps = {}): Rout
               })
               return
             }
-            if (err instanceof LinkWriterFencePlanChangedError) {
+            if (err instanceof LinkWriterFencePlanChangedError || err instanceof FieldSchemaChangedError) {
               await finalize('write_failed', err.message)
               res.status(err.statusCode).json({
                 ok: false,

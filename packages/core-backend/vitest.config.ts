@@ -1857,6 +1857,10 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Private-database backend drain proof. Requires a throwaway database.
+      // Excluded here so the no-DB job cannot skip-green it. Wired as a whole
+      // file in plugin-tests.yml step "Run private-db backend drain proof".
+      'tests/integration/timemachine-private-db-backend-drain.db.test.ts',
       // Approval cancel-round WI-0 lock-order census (Q-A, slice 1) — two real Postgres
       // connections constructing the class-`00` rollout advisory lock (real production key
       // derivation) against a real `approval_instances` row lock, both the §9-4 forward order
@@ -1961,6 +1965,13 @@ export default defineConfig({
       // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
       // seven cancel-round files above, no EXPECT_DB).
       'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+      // Cancel-round product entry v2 (lock v5.9 header RATIFY 追记 2026-09-28), phase A: the
+      // attendance-side `GET`/`POST /api/attendance/requests/:id/cancel-round` acceptance — real
+      // DB, real running server with plugin-attendance, real login tokens, RBAC_BYPASS='false'.
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling of the cancel-round files above; s6a pin recomputed with it).
+      'tests/integration/approval-cancel-round-attendance-entry.db.test.ts',
       // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
       // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
       // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;

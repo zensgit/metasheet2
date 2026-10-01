@@ -211,6 +211,7 @@ import {
   registerAttendanceCancellationExecutionProvider,
   registerCancelRoundCancelledEventDelivery,
 } from './core/attendance-cancellation-execution-port'
+import { buildApprovalCancelRoundEntryPort } from './approvals/approval-cancel-round-entry-port'
 import {
   deriveApprovalInstanceOrgIdWithSelector,
   ApprovalOrgUnresolvedError,
@@ -244,7 +245,7 @@ import {
   correlationErrorHandler,
   correlationIdMiddleware,
 } from './middleware/correlation'
-import { approvalsRouter } from './routes/approvals'
+import { approvalsRouter, publishApprovalCountsForUsers } from './routes/approvals'
 import { todoRouter } from './routes/todo'
 import { tasksRouter } from './routes/tasks'
 import { pendingSourceRegistry } from './services/pending-source-registry'
@@ -2610,6 +2611,19 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // Approval change-request lock v5.9, product entry v2 phase A + A2 (P-1 Q1′ = (i)): the
+        // cancel-round entry port. Least-privilege like approvalAssigneeResolver — ONLY
+        // plugin-attendance receives it; every other plugin gets undefined, and without it the
+        // consumer registers none of its cancel-round routes.
+        // Phase C (增补 P-11): the port's post-action todo count refresh is bound to the SAME publisher
+        // the approval-side action routes call, on this server's injector.
+        approvalCancelRoundEntry:
+          manifest.name === 'plugin-attendance'
+            ? buildApprovalCancelRoundEntryPort({
+                publishCounts: (users, reason) =>
+                  publishApprovalCountsForUsers({ injector: this.injector }, users, reason),
+              })
+            : undefined,
         // E-learning L2: core owns eligibility and delivery-ledger insertion.
         // The persisted job worker gets only this narrow port; other plugins
         // cannot submit reminder intents through the host service surface.
