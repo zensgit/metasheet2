@@ -31,6 +31,11 @@ export const ELEARNING_AUDIENCE_RULE_SCAN_LIMIT = 10_000 as const
  * integer within PostgreSQL's statement_timeout range falls back to the
  * default. 0 turns the timeout off: no statement is issued, and the
  * connection's own statement_timeout (if any) applies as before.
+ * Ceiling: the pool's client-side query timeout (DB_QUERY_TIMEOUT, default
+ * 30000 ms) minus a 1000 ms margin. A value above it is clamped, because the
+ * client timer would fire first with an error that carries no SQLSTATE: the
+ * 57014 branch below would never run and the server statement would keep
+ * running behind the client's ROLLBACK.
  * Registered in scripts/ops/global-history-flag-manifest.mjs.
  */
 export const ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS' as const
@@ -49,7 +54,22 @@ export function resolveElearningAudienceScanTimeoutMs(
   if (!Number.isSafeInteger(parsed) || parsed > POSTGRES_STATEMENT_TIMEOUT_MAX_MS) {
     return ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS
   }
-  return parsed
+  if (parsed === 0) return 0
+  return Math.min(parsed, resolveElearningAudienceScanTimeoutCeilingMs(env))
+}
+
+/** Pool client-side query timeout (integration/db/connection-pool.ts, DB_QUERY_TIMEOUT) minus a margin. */
+const POOL_QUERY_TIMEOUT_DEFAULT_MS = 30_000
+const SCAN_TIMEOUT_CEILING_MARGIN_MS = 1_000
+
+export function resolveElearningAudienceScanTimeoutCeilingMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = typeof env.DB_QUERY_TIMEOUT === 'string' ? env.DB_QUERY_TIMEOUT.trim() : ''
+  const poolTimeout = /^[0-9]+$/.test(raw) && Number.isSafeInteger(Number(raw)) && Number(raw) > 0
+    ? Number(raw)
+    : POOL_QUERY_TIMEOUT_DEFAULT_MS
+  return Math.max(1, poolTimeout - SCAN_TIMEOUT_CEILING_MARGIN_MS)
 }
 
 const POSTGRES_QUERY_CANCELED = '57014'

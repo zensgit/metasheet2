@@ -6,6 +6,7 @@ import {
   ELEARNING_AUDIENCE_RULE_SCAN_LIMIT,
   ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS,
   ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV,
+  resolveElearningAudienceScanTimeoutCeilingMs,
   resolveElearningAudienceScanTimeoutMs,
 } from '../../src/services/elearning-audience-resolver'
 import { ELEARNING_MEDIA_MIME } from '../../src/services/elearning-media-validation'
@@ -1020,13 +1021,35 @@ describe('elearning audience catalog scan statement timeout (#6175)', () => {
       ['1e3', 5000],
       ['0x10', 5000],
       ['+2500', 5000],
-      ['2147483647', 2147483647],
+      ['29000', 29000],
+      ['29001', 29000],
+      ['2147483647', 29000],
       ['2147483648', 5000],
     ]
     for (const [raw, expected] of cases) {
       const env = raw === undefined ? {} : { ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS: raw }
       expect(resolveElearningAudienceScanTimeoutMs(env), JSON.stringify(raw)).toBe(expected)
     }
+  })
+
+  it('clamps the scan timeout under the pool client-side query timeout (DB_QUERY_TIMEOUT minus 1000 ms), never under 1 ms, and leaves 0 alone', () => {
+    const at = (scan: string, poolTimeout: string | undefined) =>
+      resolveElearningAudienceScanTimeoutMs(
+        poolTimeout === undefined
+          ? { ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS: scan }
+          : { ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS: scan, DB_QUERY_TIMEOUT: poolTimeout },
+      )
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({})).toBe(29000)
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '10000' })).toBe(9000)
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '500' })).toBe(1)
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: 'abc' })).toBe(29000)
+    expect(resolveElearningAudienceScanTimeoutCeilingMs({ DB_QUERY_TIMEOUT: '0' })).toBe(29000)
+    expect(at('5000', '10000')).toBe(5000)
+    expect(at('9500', '10000')).toBe(9000)
+    // The default itself is clamped when the pool timeout is below it.
+    expect(resolveElearningAudienceScanTimeoutMs({ DB_QUERY_TIMEOUT: '4000' })).toBe(3000)
+    expect(at('0', '10000')).toBe(0)
+    expect(at('120000', undefined)).toBe(29000)
   })
 
   it('sets the timeout with SET LOCAL semantics inside the learner transaction, around exactly the scan', async () => {

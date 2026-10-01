@@ -926,7 +926,13 @@ describe('elearning L1 scope/access gate (real DB)', () => {
     // time until its statement timeout cancels it (57014), whatever the machine
     // speed. Nothing here measures wall-clock time.
     const scanner = await pool.connect()
-    const blocker = await pool.connect()
+    let blocker: PoolClient
+    try {
+      blocker = await pool.connect()
+    } catch (error) {
+      scanner.release(true)
+      throw error
+    }
     const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
     const showTimeout = async () => String(
       (await scanner.query('SHOW statement_timeout')).rows[0]?.statement_timeout,

@@ -618,7 +618,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
     key: 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS',
     type: 'numeric',
-    activationValue: 'numeric ms (default 5000; unset / blank / anything but a plain integer 0..2147483647 after trimming = 5000; 0 = no scan timeout)',
+    activationValue: 'numeric ms (default 5000; unset / blank / anything but a plain integer 0..2147483647 after trimming = 5000; 0 = no scan timeout; any other value is clamped to DB_QUERY_TIMEOUT (pool client-side query timeout, default 30000) minus 1000 ms, so the server cancels before the pg client timer does)',
     dependsOn: ['ELEARNING_ENABLED'],
     conflictsWith: [],
     danger: 'low',
