@@ -1403,6 +1403,7 @@ jobs:
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           METASHEET_REAL_DB_TEST_STEP: '1' # marks the real-DB allowlist step so a fail-not-skip sentinel can scope its throw here only
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for multitable real-DB integration}"

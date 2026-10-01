@@ -14,6 +14,8 @@ import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const { verifyFinalizeProcessFaults } = require('../tests/utils/recovery-finalize-process-faults.ts') as typeof import('../tests/utils/recovery-finalize-process-faults')
+const { verifyLateManualFinalizer } = require('../tests/utils/recovery-late-manual-finalizer.ts') as typeof import('../tests/utils/recovery-late-manual-finalizer')
 const manualAdmission = require('../src/multitable/recovery-archive-manual-admission.ts') as typeof import('../src/multitable/recovery-archive-manual-admission')
 const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
 const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests.ts') as typeof import('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests')
@@ -77,6 +79,7 @@ try {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
     NODE_ENV: 'test', METASHEET_ENV_DIR: root, CONFIG_FILE: `${root}/config.json`,
     DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    TEST_DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
     SECRET_PROVIDER: 'env', JWT_SECRET: randomUUID(),
   }
   for (const phase of ['fresh', 'replay']) {
@@ -625,7 +628,7 @@ try {
     assert.equal(binaryDelivered.length, 2)
     const continuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
     const binaryStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const binaryProvider = binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') })
+    const binaryProvider = { storeId: randomUUID(), ...binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') }) }
     let binaryAllowed = true
     let revokeAfterHead = false
     let binaryPuts = 0
@@ -683,7 +686,7 @@ try {
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
   const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
     createRecoveryArchiveManualObjectUpload, createRecoveryArchiveManualManifestUpload,
-    createRecoveryArchiveManualFinalization } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+    createRecoveryArchiveManualFinalization, createRecoveryArchiveManualCommand } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -1098,7 +1101,7 @@ try {
     assert.equal(repeatedUploads, 10)
     assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
     const stores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const provider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') })
+    const provider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') }) }
     const objectUpload = createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...repeated, provider })
     const objectExpiry = (await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid',
       [repeated.owner.generationId])).rows[0].expires_at.toISOString()
@@ -1189,6 +1192,15 @@ try {
     assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
       WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 11)
     console.log('PASS: atomic manual archive publication with authentic 28-row coverage and eleven verified receipts')
+    await verifyLateManualFinalizer({ query, transaction: uploadInput.transaction,
+      createFinalize: createRecoveryArchiveManualFinalization, custody, createFixture: async () => {
+        const late = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
+          { ...admissionPolicy, leaseSeconds: 10 }))
+        await manual({ ...late, capture: async snapshot => ({ ...await capture(snapshot), binding: late.binding }),
+          upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...late, provider }) })
+        await createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...late, provider })()
+        return { ...finalInput, identity: late.identity, owner: late.owner }
+      } })
     const revokedUpload = await continuation()
     const revoker = new Client({ ...connection, database })
     await revoker.connect()
@@ -1238,7 +1250,7 @@ try {
       await query('INSERT INTO meta_recovery_archive_keys(key_id) VALUES ($1)', [capability.keyId])
       const localInput = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
         { ...admissionPolicy, keyId: capability.keyId }))
-      const localProvider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath })
+      const localProvider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath }) }
       await manual({ ...localInput, capture: async (snapshot) => ({ ...await capture(snapshot),
         binding: localInput.binding, keyCustody: capability }),
       upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
@@ -1839,7 +1851,7 @@ try {
   }
   const attachmentContinuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
   const attachmentStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-  const attachmentProvider = attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') })
+  const attachmentProvider = { storeId: randomUUID(), ...attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') }) }
   const attachmentShared = { ...attachmentCapture, provider: attachmentProvider }
   let captureSourceReads = 0
   const withAttachments = attachmentContinuationBindings.bindRecoveryArchiveManualContinuation(uploadInput.transaction,
@@ -1912,6 +1924,21 @@ try {
     assert.equal(finalObjects.length, 11 + syntheticAttachments.length)
     assert.ok(finalObjects.every((row) => row.state === 'verified'))
     for (const ref of archiveReferences) assert.equal(ref.immutable_version, finalObjects.find((row) => row.attachment_id === ref.attachment_id).provider_version)
+    const stagingProvenance = (await query(`SELECT s.object_state,s.terminal_receipt_sha256,b.operation_id,
+      o.state AS receipt_state FROM meta_recovery_archive_staging_objects s
+      JOIN meta_recovery_archive_abandoned_bindings b USING(generation_id,staging_object_id)
+      JOIN meta_recovery_archive_objects o ON o.generation_id=b.generation_id AND o.object_id=b.object_id
+      WHERE s.generation_id=$1::uuid`, [attachmentCapture.owner.generationId])).rows
+    assert.equal(stagingProvenance.length, finalObjects.length)
+    assert.equal(new Set(stagingProvenance.map(row => row.operation_id)).size, finalObjects.length)
+    assert.ok(stagingProvenance.every(row => row.object_state === 'sealed' && row.terminal_receipt_sha256 === null && row.receipt_state === 'verified'))
+    const abandonedCleanup = require('../src/multitable/recovery-archive-abandoned-object-cleanup.ts') as typeof import('../src/multitable/recovery-archive-abandoned-object-cleanup')
+    await assert.rejects(abandonedCleanup.claimRecoveryArchiveAbandonedObjectCleanup(uploadInput.transaction, async () => true,
+      { identity: attachmentCapture.identity, owner: attachmentCapture.owner, cleanupOwnerId: 'synthetic-refused-cleaner',
+        leaseExpiresAt: new Date(Date.now() + 60000).toISOString() }), { message: 'RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED' })
+    assert.deepEqual(await pins(attachmentCapture.owner.generationId), archiveReferences)
+    console.log('PASS: complete sealed staging provenance preserves normal finalization/source-pin handoff; verified generation refuses abandoned cleanup claim')
+
     const attachmentReader = require('../src/multitable/recovery-archive-reader.ts') as typeof import('../src/multitable/recovery-archive-reader')
     const attachmentPreview = require('../src/multitable/recovery-archive-preview.ts') as typeof import('../src/multitable/recovery-archive-preview')
     const readAuthority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
@@ -1946,6 +1973,8 @@ try {
       process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
       process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
       process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+      await verifyFinalizeProcessFaults({ createCommand: createRecoveryArchiveManualCommand, query, transaction: uploadInput.transaction, env, root,
+        request: admissionRequest, policy: admissionPolicy, custody: attachmentCustody, macKey: attachmentKey })
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
