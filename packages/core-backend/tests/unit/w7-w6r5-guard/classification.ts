@@ -11,26 +11,21 @@
  * what makes `unclaimed = 0` mean something. A file that appears under a
  * pinned root and in neither list below reds the guard by construction.
  *
- * `NOT_CALCULATION_PATH` IS EMPTY, and that is a measured result, not an
- * omission. Every one of the 72 files the walk currently yields was checked
- * against both ban legs with the whole domain classified `calculation_path`,
- * and zero violated either leg — so there was no file that HAD to be carved
- * out to keep the guard green. Leaving the carve-out list empty is therefore
- * the strictly stronger partition: both ban legs apply to every walked file.
- *
- * This also happens to close W7-R10's own first stated blind spot for this
- * head. That blind spot is "a file classified `not_calculation_path` —
- * deliberately or by mistake — leaves the ban legs inapplicable to it while
- * Leg 0 stays green, because the classification file is the CLAIM side and a
- * `not_calculation_path` entry is a reviewable assertion, not a proof". With
- * the carve-out list empty there is no such entry to review, so the blind spot
- * is vacuously absent at this head. It is NOT closed as a class: the moment
- * anyone adds a first entry below, the blind spot is live again and the
- * mitigation is the one W7-R10 prescribes — review the classification diff and
- * spot-check the entry for non-reachability from the frozen-context build
- * path. The guard cannot do that for you; it can only force the entry to be
- * written down. Every entry MUST therefore carry a reason (the type below
- * makes that structural, not a convention).
+ * `NOT_CALCULATION_PATH` started empty. Every file the walk yielded at that
+ * head was checked against both ban legs with the whole domain classified
+ * `calculation_path`, and zero violated either leg. The first carve-out is
+ * `plugins/plugin-attendance/lib/attendance-export-disclosure.cjs`: report
+ * export row-cap headers only. It does not build or read the frozen
+ * work-date context. Classifying it `not_calculation_path` re-opens
+ * W7-R10's first blind spot for that one file (both ban legs no longer
+ * apply to it). The reason on the entry is the review record. The blind
+ * spot is NOT closed as a class: a `not_calculation_path` entry is a
+ * reviewable assertion, not a proof. The mitigation is the one W7-R10
+ * prescribes — review the classification diff and spot-check the entry for
+ * non-reachability from the frozen-context build path. The guard cannot do
+ * that for you; it can only force the entry to be written down. Every entry
+ * MUST therefore carry a reason (the type below makes that structural, not
+ * a convention).
  *
  * W7-R10's other three stated blind spots are unaffected by the empty
  * carve-out list and are carried verbatim rather than papered over: (2) a call
@@ -180,8 +175,14 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
 
 /**
  * Files under the pinned roots that CANNOT reach the frozen-context build
- * path, each with its reason. EMPTY at this head — see the file header for why
- * that is a measured result and what it does and does not close.
+ * path, each with its reason. See the file header: a carve-out drops both
+ * ban legs for that file and must stay reviewable.
  */
 export const ATTENDANCE_W7_NOT_CALCULATION_PATH_FILES_V1: readonly AttendanceW7NotCalculationPathEntryV1[] =
-  Object.freeze([] as const)
+  Object.freeze([
+    {
+      relPath: 'plugins/plugin-attendance/lib/attendance-export-disclosure.cjs',
+      reason:
+        'Report export row-cap disclosure only. It builds response headers for matched versus returned rows. It does not build, read, or import the frozen work-date context, so the W6 aggregate bans do not apply to it.',
+    },
+  ] as const)
