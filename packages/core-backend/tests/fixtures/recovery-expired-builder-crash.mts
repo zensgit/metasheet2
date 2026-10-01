@@ -14,7 +14,7 @@ const { claimRecoveryArchiveAbandonedObjectCleanup, cleanupRecoveryArchiveAbando
 let pool: Pool | undefined
 try {
   if (process.env.NODE_ENV !== 'test' || !process.env.DATABASE_URL || process.env.DATABASE_URL !== process.env.TEST_DATABASE_URL) throw new Error('HARNESS_REQUIRED')
-  const [input] = await once(process, 'message') as [{ action: 'upload-crash' | 'upload-late' | 'cleanup-crash' | 'complete'; terminalize: boolean;
+  const [input] = await once(process, 'message') as [{ action: 'upload-crash' | 'upload-late' | 'cleanup-crash' | 'complete'; terminalize: boolean; crashObjectId?: string;
     identity: RecoveryArchiveScopeIdentity; owner: RecoveryArchivePreparedCaptureOwner;
     options: Omit<RecoveryArchiveFileStoreOptions, 'transactionDepth'> }]
   pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
@@ -53,7 +53,7 @@ try {
     }
   } else {
     if (input.terminalize) await abandonExpiredRecoveryArchiveBuilder(transaction, async () => true, input)
-    const lease = await pool.query(`SELECT (clock_timestamp()+interval '2 seconds')::text AS expires`)
+    const lease = await pool.query(`SELECT (clock_timestamp()+interval '4 seconds')::text AS expires`)
     const owner = await claimRecoveryArchiveAbandonedObjectCleanup(transaction, async () => true,
       { ...input, cleanupOwnerId: `${input.owner.ownerId}_next`, leaseExpiresAt: input.action === 'complete' ? '2099-01-01T00:00:00Z' : lease.rows[0].expires })
     let reconciled = 0
@@ -64,7 +64,7 @@ try {
       }, discard: async request => {
         if (depth !== 0) throw new Error('IO_IN_TRANSACTION')
         const result = await provider.discard(request)
-        if (input.action === 'cleanup-crash' && result.outcome === 'absent') return barrier('discard-confirmed', owner)
+        if (input.action === 'cleanup-crash' && request.objectId === input.crashObjectId && result.outcome === 'absent') return barrier('discard-confirmed', owner)
         return result
       } },
     })

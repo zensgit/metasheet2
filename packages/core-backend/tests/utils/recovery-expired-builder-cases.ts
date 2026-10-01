@@ -6,6 +6,7 @@ import * as path from 'node:path'
 import { expect, test } from 'vitest'
 import { abandonExpiredRecoveryArchiveBuilder } from '../../src/multitable/recovery-archive-expired-builder'
 import { claimRecoveryArchiveAbandonedObjectCleanup, recoveryArchivePreparedStagingPlan } from '../../src/multitable/recovery-archive-abandoned-object-cleanup'
+import { recoveryArchiveDiscardReceipt } from '../../src/multitable/recovery-archive-abandoned-object-store'
 import { persistRecoveryArchivePreparedCapture } from '../../src/multitable/recovery-archive-prepared-capture'
 import { encodeRecoveryArchivePreparedEnvelope } from '../../src/multitable/recovery-archive-prepared-upload'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
@@ -61,13 +62,32 @@ export function defineExpiredBuilderCases(c: Context): void {
     expect(await read(owner.generationId)).toEqual(terminal)
   })
 
-  test('expired-builder CAS cannot discard a competing live lease extension', async () => {
+  test('expired-builder CAS waits for a competing renewal transaction and refuses its committed live lease', async () => {
     const owner = ownerFor(await c.insertArchive(await lease(1)))
-    await c.query(`UPDATE meta_recovery_archives SET lease_expires_at=clock_timestamp()+interval '1 minute' WHERE generation_id=$1::uuid`, [owner.generationId])
-    const renewed = await read(owner.generationId)
+    let entered!: (value: { pid: number; row: unknown }) => void, release!: () => void
+    const locked = new Promise<{ pid: number; row: unknown }>(resolve => { entered = resolve })
+    const hold = new Promise<void>(resolve => { release = resolve })
+    const renewal = c.transaction(async query => {
+      const pid = (await query('SELECT pg_backend_pid() AS pid')).rows[0]['pid'] as number
+      const row = (await query(`UPDATE meta_recovery_archives SET lease_expires_at=clock_timestamp()+interval '1 minute'
+        WHERE generation_id=$1::uuid RETURNING *`, [owner.generationId])).rows[0]
+      entered({ pid, row }); await hold
+    })
+    const renewed = await locked
     await new Promise(resolve => setTimeout(resolve, 1100))
-    await expect(abandon(owner)).rejects.toThrow(refusal)
-    expect(await read(owner.generationId)).toEqual(renewed)
+    const pending = abandon(owner).then(() => null, error => error as Error)
+    let blocked = false
+    try {
+      const deadline = Date.now() + 2000
+      while (Date.now() < deadline && !blocked) {
+        blocked = (await c.query('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid))) AS blocked', [renewed.pid])).rows[0]['blocked'] === true
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 10))
+      }
+    } finally { release(); await renewal }
+    expect(blocked).toBe(true)
+    expect((await pending)?.message).toMatch(refusal)
+    expect(await read(owner.generationId)).toEqual(renewed.row)
+    console.log('PASS: renewal holds a generation lock, CAS blocked in PostgreSQL, committed live lease preserved')
   })
 
   test.each(['builder', 'cleaner', 'late-builder'] as const)('real process %s resumes exact operation inventory without losing pins, nonces or key references', async crash => {
@@ -154,20 +174,34 @@ export function defineExpiredBuilderCases(c: Context): void {
         }
         expect(await pinCount()).toEqual([{ n: 1 }]); expect(await receipts()).toEqual([{ n: 0 }])
         await c.waitExpiry(generationId)
+        let reconciled = 0
         if (crash === 'cleaner') {
-          const cleaner = spawn({ action: 'cleanup-crash', terminalize: true, identity: c.identity, owner, options }); children.push(cleaner)
+          const uploaded = plan[0].binding
+          expect(Buffer.from((await provider.get(uploaded)).bytes)).toEqual(Buffer.from(object.bytes))
+          const target = inventory.find(row => row['object_id'] === uploaded.objectId)!
+          const cleaner = spawn({ action: 'cleanup-crash', crashObjectId: uploaded.objectId, terminalize: true, identity: c.identity, owner, options }); children.push(cleaner)
           const barrier = await cleaner.message
           prior = barrier.owner as RecoveryArchivePreparedCaptureOwner
           expect(barrier).toEqual({ stage: 'discard-confirmed', owner: { ...owner, ownerKind: 'archive_cleanup', ownerId: `${owner.ownerId}_next`, ownerFence: '2' }, pid: cleaner.child.pid, depth: 0 })
+          // This barrier is for the object whose actual ciphertext was read above, not a never-PUT inventory entry.
+          await expect(fs.stat(path.join(root, `${generationId}-${uploaded.objectId}.object`))).rejects.toMatchObject({ code: 'ENOENT' })
+          const request = { ...uploaded, operationId: String(target['operation_id']), storeId: options.storeId }
+          expect(await provider.status(request)).toEqual({ outcome: 'absent', receiptSha256: recoveryArchiveDiscardReceipt(request) })
+          expect(await provider.head(uploaded)).toBeNull()
+          expect((await c.query('SELECT object_state,terminal_receipt_sha256 FROM meta_recovery_archive_staging_objects WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid', [generationId, target['staging_object_id']])).rows).toEqual([{ object_state: 'sealed', terminal_receipt_sha256: null }])
+          const priorReceipts = Number((await receipts())[0]['n'])
+          expect(priorReceipts).toBeGreaterThanOrEqual(0); expect(priorReceipts).toBeLessThan(11)
+          reconciled = priorReceipts + 1
+          expect(await pinCount()).toEqual([{ n: 1 }])
           cleaner.child.kill('SIGKILL'); expect(await cleaner.closed).toEqual({ code: null, signal: 'SIGKILL' })
-          expect(await pinCount()).toEqual([{ n: 1 }]); expect(await receipts()).toEqual([{ n: 0 }])
+          expect(await pinCount()).toEqual([{ n: 1 }]); expect(await receipts()).toEqual([{ n: priorReceipts }])
           await c.waitExpiry(generationId)
         }
         const resumed = spawn({ action: 'complete', terminalize: crash === 'builder', identity: c.identity, owner: prior, options }); children.push(resumed)
         const done = await resumed.message
         expect(done).toEqual({ stage: 'complete', result: { outcome: 'complete', confirmed: 11 },
           owner: { ...prior, ownerKind: 'archive_cleanup', ownerId: `${prior.ownerId}_next`, ownerFence: crash === 'builder' ? '2' : '3' },
-          reconciled: crash === 'cleaner' ? 1 : 0, depth: 0, pid: resumed.child.pid })
+          reconciled, depth: 0, pid: resumed.child.pid })
         expect(await resumed.closed).toEqual({ code: 0, signal: null })
         expect(await pinCount()).toEqual([{ n: 0 }]); expect(await receipts()).toEqual([{ n: 11 }])
         expect((await c.query('SELECT * FROM meta_recovery_archive_abandoned_bindings WHERE generation_id=$1::uuid ORDER BY staging_object_id', [generationId])).rows).toEqual(inventory)
