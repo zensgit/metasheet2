@@ -235,6 +235,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: expireRecoveryArchiveAfterLegalHoldCheck :: <no in-tree call>', '31', 'no in-tree caller; writes meta_recovery_archives only.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: <module> :: sql:meta_recovery_archive_legal_hold_release_authorize', '33', 'module-level SQL constant; the function re-enters a fence the TS caller already holds; no meta_records statement.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: <module> :: sql:meta_recovery_archive_expiry_authorize', '33', 'as above.'),
+  NONWRITER('multitable/recovery-archive-object-deletions.ts :: <module> :: sql:meta_recovery_archive_object_deletion_command', 'new (33-like)', 'Module-level SQL command takes the canonical fence through deletion_check; writes only archive deletion intents, never meta_records.data.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: <module> :: sql-dml:meta_recovery_archive_legal_holds', '33', 'DML on the legal-hold table fires the guard_row trigger (a SQL acquirer); no meta_records statement.', 2),
   NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: executeLivePunch :: ${W4C0}`, '32', W4C0_REASON),
   NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: executeScheduledRunInternal :: ${W4C0}`, '32', W4C0_REASON, 5),
@@ -264,6 +265,8 @@ const SQL_ACQUIRERS = [
   'meta_recovery_archive_expiry_authorize',
   'meta_recovery_archive_legal_hold_guard_row',
   'meta_recovery_archive_legal_hold_release_authorize',
+  'meta_recovery_archive_object_deletion_check',
+  'meta_recovery_archive_object_deletion_command',
   'meta_recovery_token_burn_delete_authorize',
   'meta_recovery_token_burn_delete_request_row',
 ]
