@@ -56,6 +56,9 @@ async function settle(rounds = 10): Promise<void> {
   }
 }
 
+/** Upper bound for one sign-in to leave the login route (the cases themselves allow 60 s). */
+const SIGN_IN_DEADLINE_MS = 15_000
+
 type Router = import('vue-router').Router
 type Flags = ReturnType<typeof import('../src/stores/featureFlags').useFeatureFlags>
 type Auth = ReturnType<typeof import('../src/composables/useAuth').useAuth>
@@ -185,9 +188,19 @@ describe('a second sign-in in the same tab re-reads the session features (one mo
     password.value = 'not-a-real-password'
     password.dispatchEvent(new Event('input'))
     ;(container!.querySelector('form') as HTMLFormElement).dispatchEvent(new Event('submit', { cancelable: true }))
-    for (let i = 0; i < 40 && router.currentRoute.value.name === 'login'; i += 1) await settle(2)
+    // Wait by wall clock, not by a fixed number of event-loop turns: on a loaded CI runner the
+    // login round trip (fetch stub -> bootstrapSession -> loadProductFeatures -> router.replace)
+    // can take more turns than a fixed budget allows (web-tests run 36808069343 on 2026-10-01).
+    const deadline = Date.now() + SIGN_IN_DEADLINE_MS
+    while (router.currentRoute.value.name === 'login' && Date.now() < deadline) {
+      await settle(2)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
     await settle()
-    expect(router.currentRoute.value.name).not.toBe('login')
+    expect(
+      router.currentRoute.value.name,
+      `still on the login route after ${SIGN_IN_DEADLINE_MS} ms; requests so far: ${requests.join(', ')}`,
+    ).not.toBe('login')
   }
 
   /** What SessionCenterView.redirectToLogin() does on a revoked session: an in-app redirect. */
