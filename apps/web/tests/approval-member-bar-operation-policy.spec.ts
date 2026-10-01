@@ -1061,6 +1061,7 @@ describe('F4-S1 (Lock-5 L5-B) — 后加签 on the add-sign dialog', () => {
     container = null
     pickerState.nextId = 'user_target'
     vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
   })
 
   async function mountView() {
@@ -1228,6 +1229,51 @@ describe('F4-S1 (Lock-5 L5-B) — 后加签 on the add-sign dialog', () => {
       expect(errorSpy).not.toHaveBeenCalled()
       expect((container!.querySelector('[data-el-dialog="加签"]') as HTMLElement).getAttribute('data-dialog-visible')).toBe('true')
       expect(dialog.querySelector('[data-testid="approval-action-dialog-error"]')?.textContent).toBe(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  // O-8 / F8-1: the same surfaces in English. The F8-1 render scan opens this dialog in its default
+  // state only; the after hint and the aggregation control appear once 后加签 is chosen (the
+  // control only with two or more addees), and the round-incomplete copy only on the server's 409.
+  it('in English, 后加签 with two addees renders the after hint, the aggregation control and the round-incomplete 409 INLINE from the _EN copy, and the dialog carries no CJK', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const { ADD_SIGN_PLACEMENT_COPY_EN, ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN } = await import('../src/approvals/addSignHonestyCopy')
+    const { MEMBER_ACTION_DIALOG_GRAMMAR_EN } = await import('../src/approvals/memberActionDialogGrammar')
+    const { ElMessage } = await import('element-plus')
+    const refused = Object.assign(new Error('After-mode add_sign requires the current round to complete with this approval'), {
+      status: 409,
+      code: 'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE',
+    })
+    const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    try {
+      // The describe's afterEach restores zh-CN.
+      useLocale().setLocale('en')
+      executeActionSpy.mockRejectedValue(refused)
+      await mountView()
+      ;(q(container!, 'approval-add-sign-button') as HTMLButtonElement).click()
+      await flushUi()
+      const dialogSelector = `[data-el-dialog="${MEMBER_ACTION_DIALOG_GRAMMAR_EN.add_sign.dialogTitle}"]`
+      const dialog = container!.querySelector(dialogSelector) as HTMLElement
+      expect(dialog.getAttribute('data-dialog-visible')).toBe('true')
+
+      await choose(dialog, 'approval-add-sign-placement-after')
+      await pick(dialog, 'user_target')
+      await pick(dialog, 'user_second')
+      expect(dialog.querySelector('[data-testid="approval-add-sign-after-hint"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.afterHint)
+      expect(dialog.querySelector(`[data-el-form-item-label="${ADD_SIGN_PLACEMENT_COPY_EN.aggregationLabel}"]`)).toBeTruthy()
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-all"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationAll)
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-any"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationAny)
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-hint"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationHint)
+
+      ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+      await flushUi(12)
+      expect(executeActionSpy).toHaveBeenCalled()
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect((container!.querySelector(dialogSelector) as HTMLElement).getAttribute('data-dialog-visible')).toBe('true')
+      expect(dialog.querySelector('[data-testid="approval-action-dialog-error"]')?.textContent).toBe(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN)
+      expectNoCjkOutside(renderedTextAndAttributes(dialog), [], 'F4-S1 add_sign dialog, after-sign with two addees and the 409 (en)')
     } finally {
       errorSpy.mockRestore()
     }

@@ -83,12 +83,11 @@ export type ClientAddSignAggregation = 'all' | 'any'
  * (`EN: Record<keyof typeof ZH, string>`, so vue-tsc enforces key parity — the `*_ZH` / `*_EN` shape
  * the member-surface source guard recognises), and `addSignPlacementCopy(isZh)` picks one from the
  * shell locale. The form-item label above the choice is the detail view's own `addSignMode` label
- * key (`approvalDetailLabels.ts`), so it is not repeated here; `parallelHint` is the 并加签 hint
- * pair above, by reference.
+ * key (`approvalDetailLabels.ts`), and the 并加签 hint is `addSignModeHint(isZh)` above, so neither
+ * is repeated here.
  */
 export const ADD_SIGN_PLACEMENT_COPY_ZH = {
   parallelLabel: '并加签',
-  parallelHint: ADD_SIGN_MODE_HINT,
   afterLabel: '后加签',
   afterHint:
     '你的这一票按同意处理；加签人将在同一节点上开始新一轮审批，该轮通过后流程才继续。不会插入新的审批节点，也不是「当前节点自动通过并流转到新增节点」。若你的同意还不能完成本轮（多人会签还有人未表态、门槛未达），后加签不可用；可在其他审批人表态后再用，或改用并加签。',
@@ -100,7 +99,6 @@ export const ADD_SIGN_PLACEMENT_COPY_ZH = {
 
 export const ADD_SIGN_PLACEMENT_COPY_EN: Readonly<Record<keyof typeof ADD_SIGN_PLACEMENT_COPY_ZH, string>> = {
   parallelLabel: 'Alongside me',
-  parallelHint: ADD_SIGN_MODE_HINT_EN,
   afterLabel: 'After me',
   afterHint:
     'Your seat is counted as an approval; the added approvers then start a new round at this SAME node, and the flow continues only when that round passes. No new approval node is inserted, and this is not "auto-pass the current node and move to an inserted one". If your approval would not complete the current round (others still to decide in an all-approve round, a threshold not yet met), after-sign is unavailable — use it once the others have decided, or add alongside instead.',
