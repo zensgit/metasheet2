@@ -28041,7 +28041,7 @@
       "get": {
         "operationId": "getElearningAppInstallation",
         "summary": "Read organization cloud-classroom installation",
-        "description": "Organization and actor come only from the authenticated session. Missing\ninstance means not-installed. canManage is server-derived from hydrated\nglobal elearning administrator authority and active organization membership.\nAdministrative setup is available independently of the deployment master flag.\n",
+        "description": "Organization and actor come only from the authenticated session. Missing\ninstance means not-installed. canManage is server-derived from hydrated\nglobal elearning administrator authority and active organization membership.\nFollows the deployment master flag: while it is not exact 'true', GET, POST\nand PUT all answer 404 `{ error: feature_disabled }` right after\nauthentication, read and write nothing, and do not reveal whether an\ninstallation exists. Existing installations are kept and apply again once\nthe flag is exact 'true'.\n",
         "security": [
           {
             "bearerAuth": []
@@ -28063,6 +28063,10 @@
           },
           "403": {
             "description": "Authoritative organization context required."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing read.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "503": {
             "description": "Installation authority unavailable; no fallback enablement."
@@ -28109,6 +28113,10 @@
           },
           "403": {
             "description": "Missing organization, administrator authority, or active membership."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing written.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "503": {
             "description": "Installation authority unavailable."
@@ -28166,6 +28174,10 @@
           },
           "403": {
             "description": "Missing organization, administrator authority, or active membership."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing written.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "409": {
             "description": "Application not installed."

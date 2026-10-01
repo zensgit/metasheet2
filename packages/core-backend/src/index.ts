@@ -335,7 +335,11 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
-import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
+import {
+  createElearningAppInstallationRouter,
+  requireElearningAppInstallation,
+  requireElearningEnabled,
+} from './routes/elearning-app-installation'
 import { authenticate as authenticateElearningApp } from './middleware/auth'
 import { methodOverrideMiddleware } from './middleware/method-override'
 import { methodProbeRouter } from './routes/method-probe'
@@ -343,6 +347,7 @@ import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
+  isElearningEnabled,
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
   resolveElearningCatalogFeature,
@@ -1718,7 +1723,13 @@ export class MetaSheetServer {
       this.app.use(elearningMediaPlaybackRouter)
     }
 
-    this.app.use(createElearningAppInstallationRouter({ getDb: () => poolManager.get() }))
+    // Installation writes follow the same master switch as the business routes below: while
+    // ELEARNING_ENABLED is off every method on this path answers 404 feature_disabled after
+    // authentication and touches no table (routes/elearning-app-installation.ts).
+    this.app.use(createElearningAppInstallationRouter({
+      getDb: () => poolManager.get(),
+      featureGate: requireElearningEnabled(),
+    }))
     if (process.env.ELEARNING_ENABLED === 'true') {
       this.app.use('/api/elearning', authenticateElearningApp,
         requireElearningAppInstallation({ getDb: () => poolManager.get() }))
@@ -3377,6 +3388,12 @@ export class MetaSheetServer {
     const context = this.createPluginContext(loaded)
     try {
       await pluginInstance.activate(context)
+      // plugin-elearning's activate() returns before registering any route, service or timer while
+      // its master switch is off (plugins/plugin-elearning/index.cjs, same exact-'true' rule as
+      // isElearningEnabled). Call that what it is -- loaded, inactive -- instead of 'active'.
+      if (name === 'plugin-elearning' && !isElearningEnabled(process.env)) {
+        return this.setPluginRuntimeState(name, 'inactive')
+      }
       return this.setPluginRuntimeState(name, 'active')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
