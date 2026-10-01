@@ -748,6 +748,104 @@ describeIfDatabase('P3-3 approval_form_drafts — real-DB acceptance (contract �
   })
 
   // ===============================================================================================
+  // Content the database refuses on its own — the payload CHECK after jsonb re-serialization, or
+  // text Postgres cannot store — answers 413 / 400 like the service's own checks, writes nothing,
+  // and keeps the body values-free. Driven over HTTP because the mapping happens at the route
+  // (`mapApprovalFormDraftStorageError`). The D block above still covers the generic 500 for an
+  // unrelated database failure.
+  // ===============================================================================================
+  describe('storage refusals caused by the request answer 413 / 400, not 500', () => {
+    async function rowCount(userId: string): Promise<number> {
+      const res = await pool().query(`SELECT count(*)::int AS c FROM approval_form_drafts WHERE user_id = $1`, [userId])
+      return (res.rows[0] as { c: number }).c
+    }
+
+    async function expectRefusal(res: Response, status: number, code: string): Promise<void> {
+      const raw = await res.text()
+      expect(res.status, raw).toBe(status)
+      const parsed = JSON.parse(raw) as { ok: boolean; error?: { code?: string } }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.error?.code).toBe(code)
+      // Values-free: none of the database's own error text reaches the client.
+      for (const dbText of ['check constraint', 'approval_fd_', 'invalid input syntax', 'Unicode', 'byte sequence']) {
+        expect(raw).not.toContain(dbText)
+      }
+    }
+
+    it('POSITIVE CONTROL: a compliant 1 KiB payload saves over HTTP (200) and lands one row', async () => {
+      const userId = trackUser(freshId('p33-st-ok'))
+      const token = await authToken(baseUrl, userId)
+      const res = await draftPut(freshId('tmpl'), token, { signature: 'sig', data: { note: 'x'.repeat(1024) } })
+      expect(res.status, await res.clone().text()).toBe(200)
+      expect(await rowCount(userId)).toBe(1)
+    })
+
+    it('a payload UNDER the service threshold whose jsonb text exceeds the DB CHECK is refused with 413 APPROVAL_FORM_DRAFT_TOO_LARGE (new draft) and writes nothing', async () => {
+      const userId = trackUser(freshId('p33-st-inflate'))
+      const token = await authToken(baseUrl, userId)
+      const data = { a: new Array(129000).fill(1) }
+      // Sanity: the input clears the service check and fails only at the CHECK — otherwise this
+      // would exercise the service check, not the refusal mapping.
+      expect(Buffer.byteLength(JSON.stringify(data), 'utf8')).toBeLessThanOrEqual(APPROVAL_FORM_DRAFT_LIMITS.maxServicePayloadBytes)
+      const measured = await pool().query(`SELECT octet_length($1::jsonb::text)::int AS n`, [JSON.stringify(data)])
+      expect((measured.rows[0] as { n: number }).n).toBeGreaterThan(APPROVAL_FORM_DRAFT_LIMITS.maxPayloadBytes)
+
+      await expectRefusal(await draftPut(freshId('tmpl'), token, { signature: 'sig', data }), 413, 'APPROVAL_FORM_DRAFT_TOO_LARGE')
+      expect(await rowCount(userId)).toBe(0)
+    })
+
+    it('the same inflated payload on an EXISTING draft (update path) is refused with 413 and leaves the stored draft unchanged', async () => {
+      const userId = trackUser(freshId('p33-st-inflate-upd'))
+      const templateId = freshId('tmpl')
+      const token = await authToken(baseUrl, userId)
+      await saveApprovalFormDraft({ userId, templateId, signature: 'sig-kept', data: { kept: true } })
+
+      await expectRefusal(
+        await draftPut(templateId, token, { signature: 'sig-new', data: { a: new Array(129000).fill(1) } }),
+        413,
+        'APPROVAL_FORM_DRAFT_TOO_LARGE',
+      )
+      const after = await draftGet(templateId, token)
+      expect(after.status).toBe(200)
+      const body = (await after.json()) as { data: { draft: { signature: string; data: unknown } | null } }
+      expect(body.data.draft?.signature).toBe('sig-kept')
+      expect(body.data.draft?.data).toEqual({ kept: true })
+      expect(await rowCount(userId)).toBe(1)
+    })
+
+    it('U+0000 inside data is refused with 400 VALIDATION_ERROR and writes nothing', async () => {
+      const userId = trackUser(freshId('p33-st-data-nul'))
+      const token = await authToken(baseUrl, userId)
+      await expectRefusal(await draftPut(freshId('tmpl'), token, { signature: 'sig', data: { note: 'a\u0000b' } }), 400, 'VALIDATION_ERROR')
+      expect(await rowCount(userId)).toBe(0)
+    })
+
+    it('an unpaired surrogate inside data is refused with 400 VALIDATION_ERROR and writes nothing', async () => {
+      const userId = trackUser(freshId('p33-st-data-surrogate'))
+      const token = await authToken(baseUrl, userId)
+      await expectRefusal(await draftPut(freshId('tmpl'), token, { signature: 'sig', data: { note: 'a\ud800b' } }), 400, 'VALIDATION_ERROR')
+      expect(await rowCount(userId)).toBe(0)
+    })
+
+    it('U+0000 inside the signature is refused with 400 VALIDATION_ERROR and writes nothing', async () => {
+      const userId = trackUser(freshId('p33-st-sig-nul'))
+      const token = await authToken(baseUrl, userId)
+      await expectRefusal(await draftPut(freshId('tmpl'), token, { signature: 'si\u0000g', data: { a: 1 } }), 400, 'VALIDATION_ERROR')
+      expect(await rowCount(userId)).toBe(0)
+    })
+
+    it('U+0000 inside the template id is refused with 400 VALIDATION_ERROR on PUT, GET and DELETE, and PUT writes nothing', async () => {
+      const userId = trackUser(freshId('p33-st-tpl-nul'))
+      const token = await authToken(baseUrl, userId)
+      const templateId = 'tmpl\u0000x'
+      await expectRefusal(await draftPut(templateId, token, { signature: 'sig', data: { a: 1 } }), 400, 'VALIDATION_ERROR')
+      await expectRefusal(await draftGet(templateId, token), 400, 'VALIDATION_ERROR')
+      await expectRefusal(await draftDelete(templateId, token), 400, 'VALIDATION_ERROR')
+      expect(await rowCount(userId)).toBe(0)
+    })
+  })
+
+  // ===============================================================================================
   // Empty-data DELETE (client decides PUT-vs-DELETE — see the service module's own docblock for why
   // this is single-sided; this proves the DELETE side of that contract server-side).
   // ===============================================================================================

@@ -40,9 +40,10 @@
  *  - Per-draft payload cap is DEFENSE IN DEPTH: the primary enforcement is the frozen
  *    `APPROVAL_FORM_DRAFT_LIMITS.maxPayloadBytes` constant compared in the SERVICE layer (mirrors
  *    `APPROVAL_ATTACHMENT_LIMITS` + its service-layer comparisons); this CHECK is the second layer,
- *    mirroring `approval_att_size_bounds`. The service threshold is set STRICTLY BELOW this CHECK's
- *    bound (a safety margin) so a request that clears the service layer can never bounce off this
- *    CHECK as an unexpected 500 — see the service module's own comment.
+ *    mirroring `approval_att_size_bounds`. The service threshold is set below this CHECK's bound,
+ *    but the service measures `JSON.stringify` bytes while this CHECK measures jsonb's own text
+ *    output, which is larger, so a request can clear the service layer and still be refused here;
+ *    the route answers that refusal with the same 413 — see the service module's own comment.
  *
  *  - `signature` gets THE SAME TWO-LAYER TREATMENT as `data` (gate P3-5, added in the same
  *    migration file rather than a second one, since this migration has not been applied anywhere

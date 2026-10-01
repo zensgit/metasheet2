@@ -32,11 +32,15 @@
  *   - `APPROVAL_FORM_DRAFT_LIMITS.maxPayloadBytes` mirrors `APPROVAL_ATTACHMENT_LIMITS`'s shape
  *     (frozen constant + service comparison) AND is backed by the DB CHECK
  *     `approval_fd_payload_bounds` in the migration (defense in depth). This service's own
- *     rejection threshold (`maxServicePayloadBytes`) is set STRICTLY BELOW the DB CHECK's bound —
- *     `octet_length(jsonb::text)` (Postgres's re-serialization) is not byte-identical to
- *     `Buffer.byteLength(JSON.stringify(data))` (this process's serialization) for all inputs, so a
- *     request that clears this service's check must never be able to bounce off the DB CHECK as an
- *     unexpected 500 (which would also collide with the "never throw to the user" requirement).
+ *     rejection threshold (`maxServicePayloadBytes`) is set below the DB CHECK's bound, but the two
+ *     layers measure different serializations: this process measures
+ *     `Buffer.byteLength(JSON.stringify(data))`, the CHECK measures `octet_length(data::text)`, and
+ *     jsonb's text output adds a space after every `:` and `,`. The gap grows with the payload, so
+ *     no fixed margin closes it (measured on PostgreSQL 16: an array of 129000 ones is 258007 bytes
+ *     to this check and 387007 bytes to the CHECK). A request that clears this check CAN therefore
+ *     still be refused by the CHECK; the route answers that refusal with the same 413 this check
+ *     throws (`mapApprovalFormDraftStorageError` below), and the transaction rolls back, so nothing
+ *     is written.
  *   - `APPROVAL_FORM_DRAFT_SIGNATURE_LIMITS.maxSignatureBytes` (FIX 5, gate P3-5): `signature` is a
  *     SECOND client-controlled string on this endpoint that carried no bound at all before this fix
  *     — same two-layer shape and margin discipline as the payload cap immediately above, backed by
@@ -153,6 +157,40 @@ export class ApprovalFormDraftConflictError extends Error {
     super('Draft was concurrently cleared')
     this.name = 'ApprovalFormDraftConflictError'
   }
+}
+
+/** SQLSTATEs Postgres raises for client-supplied text it cannot store (measured on PostgreSQL 16):
+ *  `22P05` — `\u0000` in a jsonb string or key; `22P02` — an unpaired UTF-16 surrogate escape in
+ *  jsonb (the `data` cast is the only cast these statements apply to client input); `22021` — a
+ *  U+0000 character in a text parameter (`signature`, or the template id taken from the URL). */
+const UNSTORABLE_TEXT_SQLSTATES: ReadonlySet<string> = new Set(['22P05', '22P02', '22021'])
+
+/**
+ * Maps a database refusal caused by the request's own content onto the error this module throws
+ * when its own checks catch the same kind of problem, so the route answers 413 / 400 instead of
+ * its generic 500. Anything else, including this module's own errors, is returned unchanged.
+ *
+ *  - `23514` on `approval_fd_payload_bounds` → `ApprovalFormDraftTooLargeError` (413). The CHECK
+ *    measures jsonb's text output, which can exceed what the service check measured — see QUOTAS
+ *    in the file header.
+ *  - a SQLSTATE in `UNSTORABLE_TEXT_SQLSTATES` → `ApprovalFormDraftValidationError` (400).
+ *
+ * `approval_fd_signature_bounds` is deliberately NOT mapped: both layers count the same UTF-8
+ * bytes of a text value and the service threshold is the lower one, so no request can reach that
+ * CHECK; if it ever fires, the service threshold is misconfigured and the generic 500 is right.
+ * Nothing is written in any mapped case: saves and clears run in a transaction that rolls back on
+ * the error, and loads only read.
+ */
+export function mapApprovalFormDraftStorageError(error: unknown): unknown {
+  if (!error || typeof error !== 'object') return error
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown }
+  if (code === '23514' && constraint === 'approval_fd_payload_bounds') {
+    return new ApprovalFormDraftTooLargeError()
+  }
+  if (typeof code === 'string' && UNSTORABLE_TEXT_SQLSTATES.has(code)) {
+    return new ApprovalFormDraftValidationError('Draft contains characters that cannot be stored')
+  }
+  return error
 }
 
 // ------------------------------------------------------------------------------------------------

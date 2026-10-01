@@ -31,6 +31,7 @@ import {
   listApprovalFormDrafts,
   loadApprovalFormDraft,
   saveApprovalFormDraft,
+  mapApprovalFormDraftStorageError,
   ApprovalFormDraftConflictError,
   ApprovalFormDraftTooLargeError,
   ApprovalFormDraftValidationError,
@@ -53,7 +54,12 @@ function unauthenticatedResponse(res: Response): Response {
   return res.status(401).json(draftErrorResponse('UNAUTHENTICATED', 'Authentication required'))
 }
 
-function handleDraftError(res: Response, error: unknown, fallbackCode: string, fallbackMessage: string): Response {
+function handleDraftError(res: Response, rawError: unknown, fallbackCode: string, fallbackMessage: string): Response {
+  // A refusal the database raised because of the request's own content (the payload CHECK after
+  // jsonb re-serialization, or text Postgres cannot store) gets the same 413 / 400 the service's
+  // own checks produce — see `mapApprovalFormDraftStorageError`. Everything else still ends in the
+  // values-free 500 below.
+  const error = mapApprovalFormDraftStorageError(rawError)
   if (error instanceof ApprovalFormDraftValidationError) {
     return res.status(400).json(draftErrorResponse(error.code, error.message))
   }
