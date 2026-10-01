@@ -107,11 +107,13 @@ export const APPROVAL_FORM_DRAFT_LIMITS = Object.freeze({
 /** FIX 5 (gate P3-5): `signature` had NO bound at all — not even the non-blank shape `user_id`/
  *  `template_id` carry. Same two-layer shape as `APPROVAL_FORM_DRAFT_LIMITS`: `maxSignatureBytes`
  *  documents the DB CHECK's own bound (`approval_fd_signature_bounds`, literal `8192` baked into
- *  the migration); `maxServiceSignatureBytes` is the enforced service-layer threshold, set
- *  STRICTLY BELOW it for the same reason (`octet_length` re-serialization is not guaranteed
- *  byte-identical across the two layers) — see the payload cap's own comment above. In practice a
- *  signature is an `id:type|...` join of field ids/types (`formSchemaSignature`) — normally a few
- *  hundred bytes even for a large form, so 8 KiB is headroom, not a tight fit. */
+ *  the migration); `maxServiceSignatureBytes` is the enforced service-layer threshold, set below
+ *  it. Unlike the payload, `signature` is a text column: both layers count the same UTF-8 bytes
+ *  (`Buffer.byteLength` here, `octet_length` in the CHECK), so the lower service threshold always
+ *  fires first and the margin is headroom only. `mapApprovalFormDraftStorageError` relies on this
+ *  to leave `approval_fd_signature_bounds` unmapped. In practice a signature is an `id:type|...`
+ *  join of field ids/types (`formSchemaSignature`) — normally a few hundred bytes even for a large
+ *  form, so 8 KiB is headroom, not a tight fit. */
 export const APPROVAL_FORM_DRAFT_SIGNATURE_LIMITS = Object.freeze({
   maxSignatureBytes: 8192, // 8 KiB — matches migration CHECK approval_fd_signature_bounds
   maxServiceSignatureBytes: 8064, // 8 KiB - 128 byte safety margin, strictly below the DB CHECK
