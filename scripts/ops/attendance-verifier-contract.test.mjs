@@ -4,6 +4,7 @@ import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 import * as preflight from './attendance-acceptance-preflight.mjs'
+import { AttendanceDelegatedAdminContractError } from './attendance-delegated-admin-contract.mjs'
 
 import { selectAttendanceAdminWorkspaceSection } from './attendance-admin-navigation.mjs'
 import { buildAttendanceAdminDirectoryRequests } from './attendance-smoke-api.mjs'
@@ -192,17 +193,23 @@ for (const [file, expectedCalls] of [
   })
 }
 
-function consumerFixture(file, { payload, refreshAvailable = true }) {
+function consumerFixture(file, { payload, refreshAvailable = true, delegatedAllowed = true }) {
   const source = readFileSync(path.join(repoRoot, file), 'utf8')
-  const evidence = { actions: 0, proofTokens: [] }
+  const evidence = { actions: 0, proofTokens: [], delegatedProofTokens: [] }
   const action = () => { evidence.actions++; throw new Error('ACCEPTANCE_ACTION_REACHED') }
   const refresh = async () => ({ ok: refreshAvailable, status: refreshAvailable ? 200 : 401, text: async () => JSON.stringify({ success: refreshAvailable, data: { token: nextToken } }) })
   const context = vm.createContext({
     apiBase, token: initialToken, apiBaseEnv: apiBase, webUrl: 'https://acceptance.invalid/attendance',
+    process: { env: { AUTH_EXPECTED_TENANT_ID: 'fixture-org' } }, requireDelegatedAttendanceAdmin: true,
     log() {}, logInfo() {}, logWarn() {}, normalizeUrl: value => value, normalizeWebAttendanceUrl: value => value,
     deriveApiBase: () => apiBase, deriveApiBaseFromWebUrl: () => apiBase, decodeJwtPayload: () => ({ userId: 'fixture-user' }),
     fetch: refresh, fetchWithRetry: refresh, apiFetch: action, apiGetJson: action, parseFeatures: action, featuresJson: '',
     AcceptanceTenantError: preflight.AcceptanceTenantError,
+    AttendanceDelegatedAdminContractError,
+    verifyDelegatedAttendanceAdmin: async ({ token: candidate }) => {
+      evidence.delegatedProofTokens.push(candidate)
+      if (!delegatedAllowed) throw new AttendanceDelegatedAdminContractError('PLATFORM_ADMIN_NOT_ALLOWED')
+    },
     verifyAcceptanceTokenTenant: (base, candidate) => preflight.verifyAcceptanceTokenTenant(base, candidate, {
       env: { AUTH_EXPECTED_TENANT_ID: 'fixture-org' },
       fetchImpl: async (_url, options) => {
@@ -242,6 +249,16 @@ for (const file of consumers) {
     assert.equal(fixture.context.token, nextToken)
     assert.deepEqual(fixture.evidence.proofTokens, [`Bearer ${nextToken}`, `Bearer ${nextToken}`])
     assert.equal(fixture.evidence.actions, 1)
+  })
+  test(`${file} rejects a refreshed platform-admin token before any action`, async () => {
+    const fixture = consumerFixture(file, {
+      payload: { success: true, data: { user: { tenantId: 'fixture-org' } } },
+      delegatedAllowed: false,
+    })
+    await assert.rejects(fixture.refresh(), /PLATFORM_ADMIN_NOT_ALLOWED/)
+    assert.equal(fixture.context.token, initialToken)
+    assert.equal(fixture.evidence.actions, 0)
+    assert.deepEqual(fixture.evidence.delegatedProofTokens, [nextToken])
   })
 }
 

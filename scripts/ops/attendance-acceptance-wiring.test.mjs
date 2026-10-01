@@ -46,7 +46,7 @@ test('hermetic acceptance tests are in the strict contract job', () => {
   const matrix = yaml.load(read('.github/workflows/attendance-gate-contract-matrix.yml'))
   assert.ok(matrix.jobs.contracts.strategy.matrix.case_id.includes('strict'))
   const run = read('scripts/ops/attendance-run-gate-contract-case.sh').split('if [[ "$CASE_ID" == "strict" ]]; then')[1].split('\nfi')[0]
-  for (const file of ['attendance-acceptance-preflight', 'attendance-acceptance-wiring', 'attendance-provision-user', 'attendance-verifier-contract', 'attendance-auth-scripts', 'resolve-attendance-smoke-token']) {
+  for (const file of ['attendance-acceptance-preflight', 'attendance-acceptance-wiring', 'attendance-delegated-admin-contract', 'attendance-provision-user', 'attendance-verifier-contract', 'attendance-auth-scripts', 'resolve-attendance-smoke-token']) {
     assert.match(run, new RegExp(`scripts/ops/${file}\\.test\\.mjs(?:\\s|$)`))
   }
 })

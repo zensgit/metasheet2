@@ -4,6 +4,11 @@ import os from 'os'
 import path from 'path'
 import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
+import {
+  AttendanceDelegatedAdminContractError,
+  assertDelegatedAttendanceAdminIdentity,
+} from './ops/attendance-delegated-admin-contract.mjs'
+import { verifyDelegatedAttendanceAdmin } from './ops/attendance-verify-delegated-admin.mjs'
 import { randomUUID } from 'node:crypto'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
@@ -17,6 +22,7 @@ const allowLegacyImport = process.env.ALLOW_LEGACY_IMPORT === '1'
 const apiRetryAttempts = Math.max(1, Number(process.env.API_RETRY_ATTEMPTS || 5))
 const apiRetryDelayMs = Math.max(100, Number(process.env.API_RETRY_DELAY_MS || 1000))
 const apiTimeoutMs = Math.max(1000, Number(process.env.API_TIMEOUT_MS || 60000))
+const requireDelegatedAttendanceAdmin = process.env.REQUIRE_DELEGATED_ATTENDANCE_ADMIN === 'true'
 
 function logInfo(message) {
   console.log(`[attendance-production-flow] ${message}`)
@@ -165,6 +171,13 @@ async function refreshAuthToken(apiBase) {
     const nextToken = body?.data?.token
     if (typeof nextToken === 'string' && nextToken.length > 20) {
       await verifyAcceptanceTokenTenant(apiBase, nextToken)
+      if (requireDelegatedAttendanceAdmin) {
+        await verifyDelegatedAttendanceAdmin({
+          apiBase,
+          token: nextToken,
+          expectedTenantId: process.env.AUTH_EXPECTED_TENANT_ID,
+        })
+      }
       token = nextToken
       return true
     }
@@ -172,6 +185,7 @@ async function refreshAuthToken(apiBase) {
     return false
   } catch (error) {
     if (error instanceof AcceptanceTenantError) throw error
+    if (error instanceof AttendanceDelegatedAdminContractError) throw error
     logWarn(`token refresh error: ${(error && error.message) || String(error)}`)
     return false
   }
@@ -435,6 +449,13 @@ async function run() {
   const meData = me.body?.data ?? {}
   const user = meData?.user ?? meData?.userInfo ?? meData?.me ?? {}
   const features = meData?.features ?? {}
+  if (requireDelegatedAttendanceAdmin) {
+    assertDelegatedAttendanceAdminIdentity({
+      user,
+      features,
+      expectedTenantId: process.env.AUTH_EXPECTED_TENANT_ID,
+    })
+  }
   const userId = user?.userId || user?.id || user?.user_id
   const isAdmin = String(user?.role || '').toLowerCase() === 'admin' || Boolean(features.attendanceAdmin)
   if (!features?.attendance) {
