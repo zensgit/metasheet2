@@ -217,6 +217,26 @@ describe('detailField — validateDetailColumnsDraft (mirrors backend reject-set
     expect(errors.some((e) => e.includes('类型不支持'))).toBe(true)
   })
 
+  it('REGRESSION (approval-detail-leaf-attachment-pin-20260904, F3): rejects an attachment sub-field (not authorable as a detail leaf)', () => {
+    // A sub-field can never be `attachment`; the draft type is widened to FormFieldType to test it,
+    // mirroring the existing `detail`-nesting case above. Backend counterpart:
+    // approval-detail-attachment-leaf-probe.test.ts (createTemplate) and
+    // approval-detail-leaf-set-mirror.test.ts (cross-package set equality).
+    const errors = validateDetailColumnsDraft(
+      '明细',
+      [leafDraft({ type: 'attachment' as DetailColumnDraft['type'] })],
+      '',
+      '',
+    )
+    expect(errors.some((e) => e.includes('类型不支持'))).toBe(true)
+  })
+
+  it('positive control: a text sub-field is accepted (same shape as the attachment case above, different type)', () => {
+    const errors = validateDetailColumnsDraft('明细', [leafDraft({ type: 'text' })], '', '')
+    expect(errors.some((e) => e.includes('类型不支持'))).toBe(false)
+    expect(errors).toEqual([])
+  })
+
   it('rejects a select sub-field with no options', () => {
     const errors = validateDetailColumnsDraft('明细', [leafDraft({ type: 'select', optionsText: '' })], '', '')
     expect(errors.some((e) => e.includes('需要至少一个选项'))).toBe(true)
