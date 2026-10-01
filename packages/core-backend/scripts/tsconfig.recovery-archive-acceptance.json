@@ -3,12 +3,16 @@
   "compilerOptions": {
     "module": "ESNext",
     "noEmit": true,
-    "lib": ["ES2022", "DOM"]
+    "lib": [
+      "ES2022",
+      "DOM"
+    ]
   },
   "include": [
     "../src/**/*",
     "../core/**/*",
     "../types/**/*",
+    "../tests/fixtures/recovery-finalize-process-fault.mts",
     "./verify-recovery-archive-server.mts",
     "./verify-recovery-local-backup.mts",
     "./verify-recovery-local-startup.mts",
@@ -16,6 +20,8 @@
     "./private-db-backend-drain.d.ts",
     "./verify-recovery-manual-checkpoint.mts",
     "./verify-recovery-attachment-stage.mts",
-    "./start-recovery-local.mts"
+    "./start-recovery-local.mts",
+    "./verify-recovery-local-manual-target.mts",
+    "./verify-recovery-local-rollback.mts"
   ]
 }
