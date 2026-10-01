@@ -34,6 +34,11 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: vi.fn(),
 }))
 
+function attendanceRequestPath(url: string): string {
+  const queryAt = url.indexOf('?')
+  return queryAt === -1 ? url : url.slice(0, queryAt)
+}
+
 function jsonResponse(status: number, payload: unknown): Response {
   return {
     ok: status >= 200 && status < 300,
@@ -346,7 +351,7 @@ describe('Attendance admin anchor navigation', () => {
         savedGroups.splice(0, savedGroups.length, group)
         return jsonResponse(200, { ok: true, data: group })
       }
-      if (url === '/api/attendance/groups/group-new/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-new/members') {
         return jsonResponse(200, { ok: true, data: { items: [] } })
       }
       return jsonResponse(200, {
@@ -450,11 +455,11 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members' && init?.method === 'POST') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && init?.method === 'POST') {
         postBodies.push(JSON.parse(String(init.body || '{}')))
         return jsonResponse(200, { ok: true, data: { items: [] } })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -582,7 +587,7 @@ describe('Attendance admin anchor navigation', () => {
         deleteUrls.push(url)
         return jsonResponse(200, { ok: true, data: { removed: true } })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -656,7 +661,7 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -721,7 +726,7 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -780,11 +785,11 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members' && init?.method === 'POST') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && init?.method === 'POST') {
         postBodies.push(JSON.parse(String(init.body || '{}')))
         return jsonResponse(200, { ok: true, data: { items: [] } })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -1049,7 +1054,7 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, {
           ok: true,
           data: {
