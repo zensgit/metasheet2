@@ -1243,6 +1243,11 @@ describe('ApprovalCenterView', () => {
     })
 
     afterEach(async () => {
+      // saveExportFile revokes the object URL in a setTimeout(…, 0), and flushUi only drains
+      // microtasks, so a test that saved a file can end with that timer still pending. Let it
+      // fire against the spy before the real (jsdom: absent) URL methods are put back; otherwise
+      // it throws after the restore and the run reports an uncaught TypeError.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
       anchorClickSpy.mockRestore()
       ;(URL as { createObjectURL?: unknown }).createObjectURL = originalCreateObjectUrl
       ;(URL as { revokeObjectURL?: unknown }).revokeObjectURL = originalRevokeObjectUrl
