@@ -999,7 +999,9 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
   //   ZH_ARM         — the zh-CN arm of an early return; its English arm is the `if (!isZh)` return
   //                    directly above it in the source.
   const RULES: FileRule[] = [
-    { file: 'src/approvals/addSignHonestyCopy.ts', constPair: 1 },
+    // constPair = ADD_SIGN_MODE_HINT and the F4-S1 round-incomplete message; zhTable = the F4-S1
+    // add-sign placement copy (ADD_SIGN_PLACEMENT_COPY_ZH / _EN).
+    { file: 'src/approvals/addSignHonestyCopy.ts', zhTable: 1, constPair: 2 },
     {
       file: 'src/approvals/api.ts',
       scopeFrom: 'export async function approvalRequestError(response: Response): Promise<never> {',
