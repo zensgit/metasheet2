@@ -9,6 +9,7 @@ import { jsonError, jsonOk, parsePagination } from '../util/response'
 import { redeliverFailedAttendanceNotification } from '../services/AttendanceNotificationRedelivery'
 import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { sanitizeCsvCell } from '../services/csv-cell'
 import {
   assignUserRoles,
   isRoleAssignable,
@@ -288,11 +289,10 @@ function resolveAttendanceRoleAssignment(body: unknown): AttendanceRoleResolutio
   return { roleId: finalRoleId, error: null }
 }
 
+// Delegates to the shared csv-cell.ts sanitizer (RFC-4180 quoting plus formula-injection
+// lead-char neutralization); kept as a local wrapper so the call sites below stay unchanged.
 function csvCell(value: unknown): string {
-  if (value === null || value === undefined) return ''
-  const text = typeof value === 'string' ? value : typeof value === 'number' ? String(value) : JSON.stringify(value)
-  if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`
-  return text
+  return sanitizeCsvCell(value)
 }
 
 function parseDateParam(raw: unknown): Date | null {
