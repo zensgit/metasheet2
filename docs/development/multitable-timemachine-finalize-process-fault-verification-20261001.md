@@ -27,6 +27,33 @@ durable archive-block/RR path, full D7 or actual staging acceptance.
   `tsc --listFiles`, actually collecting both the child fixture and sibling helper.
   All old acceptance includes and required test selectors remain present.
 
+## Parent test-lane repair and published CI
+
+The source parent is synchronized to Draft #6201
+`44b46c1a2a445ea97b5e9a0aa69f0644c169fcb1`. Its workflow alias producer fix
+`eb66e3f1bc60416ff4684b54a51936f7492b119c` adds the same explicit test DB URL
+to the existing exact multitable step and keeps the child equality guard strict.
+That parent locally passes its parsed fourteen-file archive roster: 312 tests,
+D2b 25, zero skipped; fifty wiring/neighbor tests, RED/restored alias mutation,
+validation and read-only audit pass. Its retained dependency-relink limitation
+and original 3fda standard-lane failure remain in the parent verification report.
+This child changes no runtime/helper/fixture bytes during parent synchronization;
+new publication-head CI remains a separate gate.
+
+Original child dispatch `36808533496`, head
+`4812b9996e6b088929b10d1d2020b5c2c6768b9c`, has a complete successful Node 18
+job `110198178426`. Its strict step 87 window actually executes all nine files /
+239 tests / zero skipped in three batches, the late-MAC positive/refusal, and both
+new fault outcomes with four attachments, fifteen objects and fourteen nonces.
+Both observe PostgreSQL blocking and SIGKILL; committed outcome observes a live
+lease after COMMIT. Archive 101 is intentionally Node 20-only and skipped here.
+Complete log (7,543,187 bytes / twenty-nine validated ranges) SHA256:
+`b86e48d7a72b3ef05c620c1c1fe95e61f60fd5ed7f5dccbc4342dff591f02e57`.
+The old Node 20 run and repaired publication-head dispatch are not covered by
+this successful Node 18 evidence. A first log-census attempt incorrectly expected
+one combined test summary; its failure is retained and the actual three batches
+are parsed independently. It is not a runtime test failure.
+
 ## Actual process outcomes
 
 Each case derives its four source attachments/pins, fifteen uploaded objects and
@@ -44,6 +71,36 @@ Full-row/digest comparisons preserve prepared data, permanent nonces, original
 bindings, staging key references, key row and hot history. Retry provider
 construction still performs filesystem admission IO; this is not zero filesystem
 IO. Barriers and the thirty-second fixture lease exist only in test seams/input.
+
+## Fresh current-main local APFS composition
+
+Private validation branch `codex/tm-current-main-apfs-20261001` freezes composite
+`4079bad87d86b8712987f889728a7453b8efa9b8` on observed main
+`0386f47fdc9a3e88f38e06c46547389fda42d3d7`. All twenty-four main Tasks/auth/web
+changes are preserved byte-identically; nine candidate production paths equal
+4812/eb66, five backup helpers equal PR #6183, and the acceptance includes retain
+the exact union of all three sources. The Phase 5 parser is outside this recovery
+dependency closure and its live attribution remains separate.
+
+The fresh exclusively owned APFS/PG run completes the same real manual generation
+backup, source unavailable, initially empty independent target, official FD3
+launcher and scalar/attachment/history recovery. Two fresh flag-OFF processes
+prove HTTP response parity and no writes across twenty-two compared tables
+(including records/revisions; this is not twenty-two archive-only tables).
+The separate seeded 5001-row control completes two chunks and 5001 derived effects.
+Driver and outer runner exit 0; actual PG startup identity, stop 0/status 3,
+zero databases/backends, driver group/scoped processes, PID, listener and all
+three exclusively owned roots are checked. Complete log SHA256:
+`176283cb1cc65a94a2f19db8e925104979085a2541c6fba654aad449fb03dd84`.
+
+Acceptance typing actually collects the finalize child/helper and manual target /
+rollback; fifty wiring/neighbor tests pass. Independent source/log/census/lifecycle
+review is CLEAR. The actual shared login path runs, but this recovery harness does
+not separately assert the Tasks feature payload. Evidence and driver:
+`artifacts/tm-current-main-apfs-20261001/` in the private acceptance checkout.
+This proves that exact private LOCAL composition, not a main merge, complete CI,
+actual staging/full D7, physical attestation, per-child cache-off or power loss.
+Historical c933/a1d runs keep their original source and environment identities.
 
 ## Evidence and boundaries
 
