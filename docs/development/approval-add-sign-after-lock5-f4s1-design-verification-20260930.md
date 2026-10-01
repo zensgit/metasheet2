@@ -88,3 +88,37 @@
 - Lock-5 X-3(三视口真浏览器)不因本片成立:F4-S1 浏览器用例只覆盖桌面与平板两档;手机视口下加签入口本就隐藏(既有 P5-C 用例「mobile keeps only supported actions」钉住,本片未改)。
 - 钉钉卡片通道只有同意 / 拒绝两种决定(`ApprovalCardDecision`),没有加签动作,未涉及。
 - 依次审批「最后一人」后加签正例(见 §5 第一条,不可达)。
+
+## 7. 与 F8-1 合并后的文案本地化
+
+依据:本说明 §1「前端」行与 §5「语言」条(本片文案中英两份,F8-1 接入时按键选语言);F8-1 说明 `approval-member-surface-locale-design-verification-20260930.md` §1–§4(成员面文案跟随界面语言;中英同形表、按 `isZh` 取值;门 ① 逐文件源码守卫识别的五种结构与按文件钉死的计数;门 ② 挂载渲染扫描与具名例外表)。
+
+本片与 F8-1 合并时,本片新增的成员可见文案按 F8-1 的结构改为中英两份,由界面语言选取。文本逐字不变;加签方式的选择、聚合控件的出现条件、请求体与新 409 的判定都不变。
+
+**键与文本**(都在 `apps/web/src/approvals/addSignHonestyCopy.ts`):
+
+| 键 | zh-CN | en |
+|---|---|---|
+| `ADD_SIGN_PLACEMENT_COPY_ZH` / `ADD_SIGN_PLACEMENT_COPY_EN` 的 `parallelLabel` | 并加签 | Alongside me |
+| 同上 `parallelHint` | 引用 `ADD_SIGN_MODE_HINT` | 引用 `ADD_SIGN_MODE_HINT_EN`(F8-1 已有;与本片原英文逐字相同) |
+| 同上 `afterLabel` | 后加签 | After me |
+| 同上 `afterHint` | 你的这一票按同意处理；加签人将在同一节点上开始新一轮审批，该轮通过后流程才继续。不会插入新的审批节点，也不是「当前节点自动通过并流转到新增节点」。若你的同意还不能完成本轮（多人会签还有人未表态、门槛未达），后加签不可用；可在其他审批人表态后再用，或改用并加签。 | Your seat is counted as an approval; the added approvers then start a new round at this SAME node, and the flow continues only when that round passes. No new approval node is inserted, and this is not "auto-pass the current node and move to an inserted one". If your approval would not complete the current round (others still to decide in an all-approve round, a threshold not yet met), after-sign is unavailable — use it once the others have decided, or add alongside instead. |
+| 同上 `aggregationLabel` | 加签人审批方式 | How the added approvers decide |
+| 同上 `aggregationAll` | 会签（全部同意） | All must approve |
+| 同上 `aggregationAny` | 或签（任一同意） | Any one approves |
+| 同上 `aggregationHint` | 两人及以上后加签时必选；只约束加签人这一轮。 | Required when adding two or more approvers after you; it governs only their round. |
+| `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE` / `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN` | 本节点还有其他审批人尚未表态，你的同意还不能完成本轮，暂不能后加签；可在其他审批人表态后再后加签，或改用并加签。 | Other approvers at this node have not decided yet, so your approval would not complete the current round and after-sign is unavailable. You can after-sign once they have decided, or add the approver alongside you instead. |
+
+**结构对应**:
+
+- 原 `ADD_SIGN_PLACEMENT_COPY.zh` / `.en` 改为 `ADD_SIGN_PLACEMENT_COPY_ZH` / `ADD_SIGN_PLACEMENT_COPY_EN`(英文表的类型是 `Record<keyof typeof 中文表, string>`,两表键一一对应),由 `addSignPlacementCopy(isZh)` 按界面语言取一张;详情页经 `addSignCopy` 读取。
+- 原 `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE.zh` / `.en` 改为常量对 `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE` / `ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN`,与 F8-1 的 `NODE_OPERATION_DISABLED_MESSAGE` / `NODE_OPERATION_DISABLED_MESSAGE_EN` 同形。
+- `memberActionFailure(error, fallback, isZh)`:按 F8-1,`isZh` 为必填(本片原为可选、缺省中文);新 409 按 `isZh` 取上面这对常量。详情页按 F8-1 传入界面语言。
+- 并加签说明沿用 F8-1 的 `addSignModeHint(isZh)`。
+- **表单项标签「加签方式」**:与 F8-1 已有的标签键 `addSignMode`(`approvalDetailLabels.ts` 的 `DETAIL_ZH` / `DETAIL_EN`)是同一个表单项,合并后用 F8-1 的键:中文同为「加签方式」,英文为 F8-1 的 How approvers are added。本片原表里的 `fieldLabel`(英文 Add-sign placement;本片界面只渲染中文表)不再保留。这是本节唯一没有保留的本片文案。
+
+**守卫登记**:
+
+- 门 ①(`templateCenterI18n.spec.ts` 中 F8-1 的逐文件源码守卫):`addSignHonestyCopy.ts` 的结构计数由 `constPair: 1` 改为 `zhTable: 1, constPair: 2`(新增的中文表与新 409 常量对);`memberActionErrorCopy.ts`(`constPair: 1`)与 `ApprovalDetailView.vue`(`ternary: 10`)的计数不变。未新增具名例外。
+- 门 ②(挂载渲染扫描):加签对话框的具名例外表仍为空。扫描打开加签对话框时渲染「加签方式」标签、两个单选项与并加签说明;后加签说明、聚合控件与新 409 文案只在选中后加签、加签人两人及以上或服务端拒绝时出现,不在这条扫描的渲染范围内。
+- 本片 spec(`approval-member-bar-operation-policy.spec.ts` 的 F4-S1 describe)改读新的键名,并与该文件其余用例一样给 `memberActionFailure` 显式传语言;断言内容不变。
