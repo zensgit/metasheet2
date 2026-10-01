@@ -2,11 +2,12 @@
 /**
  * Phase 5 Metrics Percentiles Parser
  *
- * Reads Prometheus /metrics/prom endpoint, parses histogram buckets,
+ * Reads a Prometheus metrics endpoint or a previously fetched metrics file, parses histogram buckets,
  * and calculates P50/P95/P99 percentiles from cumulative distributions.
  *
  * Usage:
  *   npx tsx scripts/phase5-metrics-percentiles.ts <metrics-url> [output-json-path]
+ *   npx tsx scripts/phase5-metrics-percentiles.ts --metrics-file <input-path> [output-json-path]
  *
  * Example:
  *   npx tsx scripts/phase5-metrics-percentiles.ts http://localhost:8900/metrics/prom
@@ -43,6 +44,13 @@ interface PercentileResult {
 interface MetricsOutput {
   timestamp: string;
   metrics: Record<string, PercentileResult>;
+  latency_source_census: Record<string, {
+    declared: boolean;
+    family_series: number;
+    selector_series: number;
+    selector_samples: number;
+    reason: 'absent_family' | 'declared_empty' | 'selector_mismatch' | 'no_positive_samples' | 'observed';
+  }>;
   raw_data: {
     histograms: Histogram[];
   };
@@ -263,6 +271,45 @@ function filterHistograms(histograms: Histogram[], targetMetrics: string[]): His
   return histograms.filter(h => targets.has(h.metric) || targetMetrics.some(t => h.metric.startsWith(t)));
 }
 
+function buildLatencySourceCensus(
+  metricsText: string,
+  histograms: Histogram[],
+  thresholds: Array<{ metric: string; kind: string; prometheus_metric?: string; label_selector?: Record<string, string> }>,
+): MetricsOutput['latency_source_census'] {
+  const declared = new Set(
+    Array.from(metricsText.matchAll(/^[ \t]*#[ \t]*TYPE[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)[ \t]+histogram[ \t]*\r?$/gm), match => match[1]),
+  );
+  const census: MetricsOutput['latency_source_census'] = {};
+
+  for (const threshold of thresholds) {
+    if (threshold.kind !== 'latency' || !threshold.prometheus_metric) continue;
+
+    const family = threshold.prometheus_metric;
+    const familyHistograms = histograms.filter(histogram => histogram.metric === family);
+    const selector = threshold.label_selector || {};
+    const selectorHistograms = familyHistograms.filter(histogram =>
+      Object.keys(histogram.labels).length === Object.keys(selector).length &&
+      Object.entries(selector).every(([key, value]) => histogram.labels[key] === value),
+    );
+    const selectorSamples = selectorHistograms.reduce((total, histogram) => total + histogram.count, 0);
+    const isDeclared = declared.has(family);
+
+    census[threshold.metric] = {
+      declared: isDeclared,
+      family_series: familyHistograms.length,
+      selector_series: selectorHistograms.length,
+      selector_samples: selectorSamples,
+      reason: familyHistograms.length === 0
+        ? (isDeclared ? 'declared_empty' : 'absent_family')
+        : selectorHistograms.length === 0
+          ? 'selector_mismatch'
+          : selectorSamples === 0 ? 'no_positive_samples' : 'observed',
+    };
+  }
+
+  return census;
+}
+
 /**
  * Main execution
  */
@@ -271,16 +318,19 @@ async function main() {
 
   if (args.length === 0) {
     console.error('Usage: npx tsx phase5-metrics-percentiles.ts <metrics-url> [output-json-path]');
+    console.error('   or: npx tsx phase5-metrics-percentiles.ts --metrics-file <input-path> [output-json-path]');
     console.error('Example: npx tsx phase5-metrics-percentiles.ts http://localhost:8900/metrics/prom');
     process.exit(1);
   }
 
-  const metricsUrl = args[0];
-  const outputPath = args[1];
+  const fromFile = args[0] === '--metrics-file';
+  const metricsSource = args[fromFile ? 1 : 0];
+  const outputPath = args[fromFile ? 2 : 1];
 
   try {
-    console.error(`[INFO] Fetching metrics from ${metricsUrl}...`);
-    const metricsText = await fetchMetrics(metricsUrl);
+    if (!metricsSource) throw new Error('Metrics source is required');
+    console.error(fromFile ? '[INFO] Reading previously fetched metrics...' : `[INFO] Fetching metrics from ${metricsSource}...`);
+    const metricsText = fromFile ? fs.readFileSync(metricsSource, 'utf-8') : await fetchMetrics(metricsSource);
 
     console.error(`[INFO] Parsing Prometheus metrics...`);
     const allHistograms = parsePrometheusMetrics(metricsText);
@@ -295,7 +345,7 @@ async function main() {
     const thresholdsData = JSON.parse(thresholdsContent);
 
     // Extract unique prometheus_metric values from latency thresholds
-    const targetMetrics = Array.from(new Set(
+    const targetMetrics = Array.from(new Set<string>(
       thresholdsData.thresholds
         .filter((t: any) => t.kind === 'latency')
         .map((t: any) => t.prometheus_metric)
@@ -326,6 +376,7 @@ async function main() {
     const output: MetricsOutput = {
       timestamp: new Date().toISOString(),
       metrics,
+      latency_source_census: buildLatencySourceCensus(metricsText, allHistograms, thresholdsData.thresholds),
       raw_data: {
         histograms: relevantHistograms
       }
