@@ -263,8 +263,13 @@ async function main(): Promise<Record<string, unknown>> {
       [manual.sheetId],
     )).rows[0] as { count: number }, { count: 1 })
     const manualSourceNonces = await readNonceTuples(sourceRuntime.query, manual.generationId)
-    assert.deepEqual(manualSourceNonces.map(row => row.section_name), [...RECOVERY_ARCHIVE_V1_SECTION_NAMES].sort())
-    assert.equal(manualSourceNonces.length, 10)
+    const { recoveryArchiveAttachmentNonceIdentity } = require('../src/multitable/recovery-archive-attachment-crypto.ts') as typeof import('../src/multitable/recovery-archive-attachment-crypto')
+    const expectedManualNonceIdentities = [...RECOVERY_ARCHIVE_V1_SECTION_NAMES,
+      recoveryArchiveAttachmentNonceIdentity(manual.attachmentId)].sort()
+    assert.deepEqual(manualSourceNonces.map(row => row.section_name), expectedManualNonceIdentities)
+    assert.equal(manualSourceNonces.length, 11)
+    assert.deepEqual(sourceCapturedAuthority.attachmentObjects?.map(object => object.attachmentId), [manual.attachmentId])
+    assert.equal(sourceCapturedAuthority.attachmentObjects![0].binding.generationId, manual.generationId)
     assert.equal((await readLiveRows(sourceRuntime.query, manual.sheetId)).length, 5001)
     sourceSession.lock()
     assert.equal(sourceSession.isUnlocked(), false)
@@ -540,6 +545,8 @@ async function main(): Promise<Record<string, unknown>> {
         sameGenerationImportedAndRestored: true,
         records: 5001,
         nonceSections: 10,
+        attachmentNonceReservations: 1,
+        totalNonceReservations: 11,
         operations: 'sync-attachment-selected-fields-then-async-scalar-whole-sheet',
         chunkCommittedCounts: [5000, 1],
         sameJobLeaseTakeover: true,

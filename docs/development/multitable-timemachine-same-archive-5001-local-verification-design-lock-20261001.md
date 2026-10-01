@@ -9,6 +9,9 @@ D2+ merge, staging, independent durable storage and KMS gates remain open.
 - Extend the existing LOCAL verification composition only. Capture a real manual
   generation through the public admission/builder path, containing 5,001 synthetic
   records and an immutable attachment on a middle record, with all ten sections.
+  Require ten section nonce identities plus the exact single attachment nonce
+  identity (eleven total reservations), preserved byte-for-byte through import
+  and restore. Do not accept arbitrary extra nonce rows.
   Do not seed a verified generation or relax the async attachment refusal.
 - Back up the full source database/catalog and owned archive/custody. Import into
   a distinct database proven to have zero user tables before import. Remove the
