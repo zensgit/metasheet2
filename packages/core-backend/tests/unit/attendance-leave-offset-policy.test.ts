@@ -4,10 +4,13 @@ const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cj
 const helpers = attendancePlugin.__attendanceLeaveOffsetForTests as {
   LEAVE_DEDUCTION_POOLS: readonly string[]
   LEAVE_DEDUCTION_INSUFFICIENT_MODES: readonly string[]
+  LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE: string
   normalizeLeaveBalanceDeductionPolicySetting: (raw: unknown) => {
     enabled: boolean
     rules: Array<{ requestLeaveType: string; deductFrom: string[]; insufficient: string }>
   }
+  leaveOffsetRuleDeclaresPartialAbsence: (rule: { insufficient?: string } | null | undefined) => boolean
+  leaveOffsetPolicyDeclaresPartialAbsence: (policy: { rules?: Array<{ insufficient?: string }> } | null | undefined) => boolean
 }
 
 describe('#加班银行 v1-2a — LeaveOffsetPolicy normalizer (LATENT, enum-strict)', () => {
@@ -58,5 +61,26 @@ describe('#加班银行 v1-2a — LeaveOffsetPolicy normalizer (LATENT, enum-str
   it('the pool + insufficient vocabularies are the bounded enums', () => {
     expect([...helpers.LEAVE_DEDUCTION_POOLS].sort()).toEqual(['annual', 'comp_time', 'unpaid'])
     expect([...helpers.LEAVE_DEDUCTION_INSUFFICIENT_MODES].sort()).toEqual(['block', 'partial_unpaid_absence'])
+  })
+
+  it('#6009 partial_unpaid_absence stays readable and is flagged as not online', () => {
+    // Read path keeps the legacy token so GET / the admin editor can show it. PUT and approve
+    // refuse it (see the settings route + executeRequestDecisionInTransaction); they must not
+    // rewrite it to block on read, or the poison would disappear while still being stored.
+    const stored = helpers.normalizeLeaveBalanceDeductionPolicySetting({
+      enabled: true,
+      rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
+    })
+    expect(stored.rules).toEqual([
+      { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
+    ])
+    expect(helpers.leaveOffsetRuleDeclaresPartialAbsence(stored.rules[0])).toBe(true)
+    expect(helpers.leaveOffsetPolicyDeclaresPartialAbsence(stored)).toBe(true)
+    expect(helpers.leaveOffsetPolicyDeclaresPartialAbsence({
+      rules: [{ insufficient: 'block' }],
+    })).toBe(false)
+    expect(helpers.leaveOffsetPolicyDeclaresPartialAbsence(undefined)).toBe(false)
+    expect(helpers.leaveOffsetPolicyDeclaresPartialAbsence({ enabled: true })).toBe(false)
+    expect(helpers.LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE_CODE).toBe('LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE')
   })
 })

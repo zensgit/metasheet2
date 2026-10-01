@@ -4468,14 +4468,34 @@ describe('Attendance admin regressions', () => {
     expect(Boolean(rule0Type && rule0Pool && rule0Ins)).toBe(true)
     expect(rule0Type!.value).toBe('personal_leave')
     expect(rule0Pool!.value).toBe('comp_time')
+    // #6009: a stored partial_unpaid_absence rule stays visible, but the option is disabled and
+    // the card says unpaid-absence accounting is not online. Saving it must not PUT.
     expect(rule0Ins!.value).toBe('partial_unpaid_absence')
+    const legacyOption = Array.from(rule0Ins!.querySelectorAll('option')).find((option) => option.value === 'partial_unpaid_absence')
+    expect(legacyOption?.disabled).toBe(true)
+    expect(container!.querySelector('[data-leave-offset="partial-absence-offline"]')?.textContent).toContain('not online')
+    expect(container!.querySelector('[data-leave-offset-rule-insufficient-unsupported]')).toBeTruthy()
 
-    // Add a second rule and fill it (sick_leave → annual, block).
+    container!.querySelector<HTMLButtonElement>('[data-leave-offset="save"]')!.click()
+    await flushUi(6)
+    const refusedPuts = vi.mocked(apiFetch).mock.calls.filter(([url, init]) =>
+      String(url).includes('/api/attendance/settings')
+      && String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase() === 'PUT')
+    expect(refusedPuts).toHaveLength(0)
+    const refusedStatus = container!.querySelector('.attendance__status-block--admin .attendance__status')
+    expect(refusedStatus?.classList.contains('attendance__status--error')).toBe(true)
+    expect(refusedStatus?.textContent).toContain('not online')
+
+    // Switch the legacy rule to block, then add a second rule (sick_leave → annual, block).
+    rule0Ins!.value = 'block'
+    rule0Ins!.dispatchEvent(new Event('change'))
     container!.querySelector<HTMLButtonElement>('[data-leave-offset="add"]')!.click()
     await flushUi(2)
     const rule1Type = container!.querySelector<HTMLInputElement>('[data-leave-offset-rule="1"] [data-leave-offset-rule-type]')
     const rule1Pool = container!.querySelector<HTMLSelectElement>('[data-leave-offset-rule="1"] [data-leave-offset-rule-pool]')
-    expect(Boolean(rule1Type && rule1Pool)).toBe(true)
+    const rule1Ins = container!.querySelector<HTMLSelectElement>('[data-leave-offset-rule="1"] [data-leave-offset-rule-insufficient]')
+    expect(Boolean(rule1Type && rule1Pool && rule1Ins)).toBe(true)
+    expect(Array.from(rule1Ins!.querySelectorAll('option')).some((option) => option.value === 'partial_unpaid_absence')).toBe(false)
     rule1Type!.value = 'sick_leave'
     rule1Type!.dispatchEvent(new Event('input'))
     rule1Pool!.value = 'annual'
@@ -4495,7 +4515,7 @@ describe('Attendance admin regressions', () => {
       leaveBalanceDeductionPolicy: {
         enabled: true,
         rules: [
-          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
+          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'block' },
           { requestLeaveType: 'sick_leave', deductFrom: ['annual'], insufficient: 'block' },
         ],
       },
