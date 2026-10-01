@@ -14,6 +14,7 @@ import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const { verifyFinalizeProcessFaults } = require('../tests/utils/recovery-finalize-process-faults.ts') as typeof import('../tests/utils/recovery-finalize-process-faults')
 const { verifyLateManualFinalizer } = require('../tests/utils/recovery-late-manual-finalizer.ts') as typeof import('../tests/utils/recovery-late-manual-finalizer')
 const manualAdmission = require('../src/multitable/recovery-archive-manual-admission.ts') as typeof import('../src/multitable/recovery-archive-manual-admission')
 const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
@@ -685,7 +686,7 @@ try {
   await query(`INSERT INTO users(id,password_hash,role,is_active) VALUES ($1,'synthetic-only','admin',true)`, [actorId])
   const { createRecoveryArchiveManualContinuation, createRecoveryArchiveManualAdmission, createRecoveryArchiveManualSourceRecheck,
     createRecoveryArchiveManualObjectUpload, createRecoveryArchiveManualManifestUpload,
-    createRecoveryArchiveManualFinalization } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
+    createRecoveryArchiveManualFinalization, createRecoveryArchiveManualCommand } = require('../src/routes/univer-meta.ts') as typeof import('../src/routes/univer-meta')
   const manual = createRecoveryArchiveManualContinuation(uploadInput.transaction)
   const manualInput = { ...uploadInput, identity: { actorId, workspaceId: 'w', baseId: 'b', sheetId: 's' } }
   let manualUploads = 0
@@ -1972,6 +1973,8 @@ try {
       process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
       process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
       process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+      await verifyFinalizeProcessFaults({ createCommand: createRecoveryArchiveManualCommand, query, transaction: uploadInput.transaction, env, root,
+        request: admissionRequest, policy: admissionPolicy, custody: attachmentCustody, macKey: attachmentKey })
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
