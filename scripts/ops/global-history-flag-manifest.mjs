@@ -616,6 +616,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/elearning/feature-flags.ts#ELEARNING_ENROLLMENT_ENABLED',
   },
   {
+    key: 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS',
+    type: 'numeric',
+    activationValue: 'numeric ms (default 5000; unset / blank / anything but a plain integer 0..2147483647 after trimming = 5000; 0 = no scan timeout; any other value is clamped to DB_QUERY_TIMEOUT (pool client-side query timeout, default 30000) minus 1000 ms, so the server cancels before the pg client timer does)',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Issue #6175: statement timeout for the e-learning audience catalog scan (listElearningAudienceCourseMatches, the self-study half of GET /api/elearning/me/courses). The scan reads every active scope rule of the org before the 10,000-rule cap applies, and stale planner statistics right after a bulk import can make one scan take tens of seconds. Applied as a transaction-local setting (set_config(..., true), the function form of SET LOCAL) for that one statement inside the learner-list transaction, and put back right after the scan; it never stays on the pooled connection. Read on every scan: a plain integer of milliseconds from 0 to 2147483647 after trimming; unset, blank, negative, decimal, exponent, hex or signed values fall back to 5000. 0 = no scan timeout: no statement is issued and the connection's own statement_timeout (DB_STATEMENT_TIMEOUT for the main pool) applies as before. On query_canceled (SQLSTATE 57014) the scan is not retried, one values-free warn line `elearning_audience_scan_canceled` {orgId, scanTimeoutMs} is logged, and the route answers 503 {error: 'unavailable'} like every other audience failure. Not a gate: nothing turns on or off, and the default is the intended state. danger=low: too low a value makes the learner course list answer 503 on large catalogs; a value above the connection's own statement_timeout raises the server-side bound for this one statement. No-op unless the e-learning surface is mounted (ELEARNING_ENABLED).",
+    source: 'packages/core-backend/src/services/elearning-audience-resolver.ts#resolveElearningAudienceScanTimeoutMs',
+  },
+  {
     key: 'DINGTALK_TODO_MIRROR_ENABLED',
     type: 'boolean',
     activationValue: 'true',
