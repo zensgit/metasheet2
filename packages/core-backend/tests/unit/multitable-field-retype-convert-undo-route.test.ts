@@ -268,6 +268,30 @@ describe('POST /fields/:fieldId/retype-undo (ADR §3 撤销)', () => {
     }
   })
 
+  test('the sheet became managed while the request is already past its pool-side gates ⇒ 422 under the fence, before any row lock', async () => {
+    // The in-transaction re-check (field-retype-convert-execute.ts, undo step "托管表并集（栅栏下复核）"). Each mark lands
+    // when the transaction takes the fence, i.e. after the pool-side managed-sheet check already passed.
+    const marks: Array<[string, (w: FakeWorld) => void]> = [
+      ['plugin_managed_sheet', (w) => { w.pluginRegistry.add(SHEET) }],
+      ['system_managed_sheet', (w) => { w.sheets[0].system_kind = 'approval_projection' }],
+      ['pipeline_staging_sheet', (w) => { w.pipelineStaging.add(SHEET) }],
+      ['approval_projection_sheet', (w) => { w.approvalProjection.add(SHEET) }],
+    ]
+    for (const [reason, mark] of marks) {
+      const arranged = await converted()
+      const from = arranged.pg.statements.length
+      state.hook = (statement, w) => {
+        if (statement.inTransaction && statement.sql.includes('pg_advisory_xact_lock') && arranged.pg.statements.length >= from) mark(w)
+      }
+      const { issued } = await expectRefused(arranged, () => undo({ convertRevisionId: arranged.id, confirm: CONFIRM }), {
+        status: 422, code: 'FIELD_RETYPE_CONVERT_NOT_SUPPORTED', details: { reason }, newTransactions: 1,
+      })
+      state.hook = undefined
+      expect([reason, issued.filter((sql) => /FOR UPDATE/.test(sql))]).toEqual([reason, []])
+      expect([reason, arranged.pg.world.fields[0].type]).toEqual([reason, 'multiSelect'])
+    }
+  })
+
   test('a live row that is no longer a JSON object reads as a changed cell: refused, never restored into', async () => {
     for (const shape of [[], [FIELD], 'text', 7, null]) {
       const arranged = await converted()

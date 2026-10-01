@@ -14803,7 +14803,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    * 事务之前的每一步都只读、不取任何锁；到不了事务的请求对库零写入。
    *
    * `PATCH /fields/:fieldId` 与无损白名单一行不改：`string → select / multiSelect` 在那里照旧 400。
-   * 提交后：字段缓存失效 + 被改写记录的协同文档失效。**不做**（与 PATCH 改类型同口径）：公式物化值重算、视图
+   * 提交后：字段缓存失效 + 该表全部活动记录的协同文档失效（ADR 增补 C4：不只被改写的记录）。**不做**（与 PATCH 改类型同口径）：公式物化值重算、视图
    * filter / sort / group 迁移、自动化 `record.updated`、实时推送。
    */
   const sendFieldRetypeConvertFailure = (res: Response, failure: FieldRetypeConvertFailure) => res.status(failure.status).json({
