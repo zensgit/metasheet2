@@ -1718,6 +1718,10 @@ export type RecordCommitOutcome = 'written' | 'stale_reprev' | 'write_conflict' 
  * patchRecords + outcome mapping are byte-identical (so a value the user did NOT
  * review is never written, and perms are re-checked at commit — criteria 3 + 6).
  *
+ * Outcome of a refused write: a record that shifted (version conflict) AND a target column that changed type
+ * while the write waited (FieldSchemaChangedError) are both `stale_reprev` — the value is no longer the one that
+ * was reviewed against what it would be written into. Everything else patchRecords throws is `write_conflict`.
+ *
  * Re-gate AT COMMIT (perms may have changed since the preview/generation):
  *  6a) record-read gate (read-denied / vanished → skipped_no_perm)
  *  6b) layer-3 field-permission on the target field (patchRecords does NOT run
@@ -1797,6 +1801,15 @@ async function commitOneRecord(args: {
     if (err instanceof ServiceVersionConflictError) {
       // Record shifted since the value was generated — DROP it, never overwrite
       // against data the user did not review.
+      return 'stale_reprev'
+    }
+    // Field retype slice 3b: the target column changed type or options while this row's write waited on the sheet
+    // fence (patchRecords' post-fence re-check, 409 FIELD_SCHEMA_CHANGED on the single-record routes). The value
+    // was generated and reviewed against the column as it WAS, so it is dropped exactly like a row whose record
+    // shifted: `stale_reprev` — "changed since preview, not written, run the fill again". A known refusal, not
+    // an unexpected failure: no error log. Thrown only with the conversion flag AND the writer fence on; with
+    // either off this branch is never reached.
+    if (err instanceof FieldSchemaChangedError) {
       return 'stale_reprev'
     }
     // Everything else patchRecords can throw at commit (a locked record, a

@@ -49,6 +49,7 @@ REQUIRED_PATHS=(
   "packages/core-backend/migrations"
   "plugins/plugin-attendance"
   "plugins/plugin-integration-core"
+  "plugins/plugin-elearning"
   "scripts/ops/attendance-onprem-bootstrap.sh"
   "scripts/ops/attendance-onprem-bootstrap-admin.sh"
   "scripts/ops/attendance-onprem-env-check.sh"
@@ -759,7 +760,7 @@ cat > "${METADATA_JSON_TMP_PATH}" <<EOF
   "windowsDefaultStagingRoot": "C:\\\\ms-tmp",
   "attendanceOnly": false,
   "productMode": "platform",
-  "includedPlugins": ["plugin-attendance", "plugin-integration-core"],
+  "includedPlugins": ["plugin-attendance", "plugin-integration-core", "plugin-elearning"],
   "archive": "$(basename "$ARCHIVE_TGZ_PATH")",
   "archiveZip": "$(basename "$ARCHIVE_ZIP_PATH")",
   "checksumFile": "$(basename "$CHECKSUM_FILE")",

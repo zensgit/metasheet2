@@ -1812,6 +1812,8 @@ exec npx vitest run \
   tasks-detail-view.spec.ts \
   tasks-list-view.spec.ts \
   tasks-nav-badge.spec.ts \
+  tasks-nav-feature-gate.spec.ts \
+  tasks-nav-relogin.spec.ts \
   tasks-routes.spec.ts \
   tasks-view-transitions.spec.ts \
   tasks-view.spec.ts \

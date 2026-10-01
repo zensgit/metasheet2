@@ -1703,7 +1703,7 @@ export class RecordService {
       }
       // Field retype slice 3a (ADR §3.11 row 4, REST + OAPI single-record PATCH): `fieldById` was loaded through
       // the pool BEFORE this transaction and the patch was validated against it. Re-read the touched fields FOR
-      // SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift. No query unless the convert flag is 'true'.
+      // SHARE and refuse 409 FIELD_SCHEMA_CHANGED on drift. No query unless the conversion flag AND the writer fence are both on.
       await assertFieldSchemaUnchangedAfterFence(query, sheetId, fieldById, Object.keys(data))
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)

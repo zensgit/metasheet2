@@ -24,6 +24,7 @@
 
 - **请求**：`{ targetType: 'select' | 'multiSelect' }`。不接受 `property`——选项由服务端从单元格推导。
 - **门（五段，顺序固定，任一不过即停、不扫描）**：① flag `MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT !== 'true'` ⇒ 403 `FIELD_RETYPE_CONVERT_DISABLED`；② `MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA === 'true'` ⇒ 409 `FIELD_RETYPE_TRUST_REQUIRED`，`details.reason='legacy_manage_schema_flag'`（该 flag 让 `multitable:write` 也拿到 `canManageFields`，`manage-schema-permission.ts:33-40`、manifest `:50-59`，低于 owner 批的门；env-only、values-free）；③ `capabilities.canManageFields`（照抄 PATCH `univer-meta.ts:13946`；表级已含 `&& scope.canWrite`，`permission-service.ts:1493`）⇒ 否则 403；④ `sheetLiveness !== 'live'` ⇒ 404 `sendSheetNotLive`（PATCH 下一行 `:13947`；`sheet-refusals.ts:47-51` 给 `SHEET_DELETED` / `NOT_FOUND`；死表不清零能力、调用方必须答 404，`permission-service.ts:1755-1762`；新表级路径须断言存活，`sheet-liveness.ts:20-29`）；⑤ `hasFullTableReadAccess`（`:7286-7304`，既有用法 `:10915`）⇒ 否则整面 403，**无 scoped 模式、无 undisclosed 标记**（R6 裁决，`docs/development/multitable-global-history-r6-ratification-decision-record-20260708.md` §2；`lossy-retype-oracle.ts:44-48`）。**三个端点同五门**。
+  （2026-09-28 增补，见文末「增补 B」：门 ⑤ 的完整定义是 **`capabilities.canRead` 且 `hasFullTableReadAccess`**；③ ④ ⑤ 收成一个函数、三个端点共用；执行与撤销另在事务内从数据库重新解析权限；`data` 不是 JSON 对象的行让整次转换被拒。）
 - **范围校验**：源 `type !== 'string'`、目标不在首批、排除集、§1 并集 ⇒ 422 `FIELD_RETYPE_CONVERT_NOT_SUPPORTED` + `details.reason ∈ {pair_not_in_first_batch, excluded_type, plugin_managed_sheet, system_managed_sheet, plugin_tagged_fields, pipeline_staging_sheet, approval_projection_sheet}`。
 - **扫描范围与上限**：live `meta_records`（`sheet_id`）+ **本表回收站** `meta_records_trash`（同 `sheet_id`）。`live + trash > resolveSheetRevertMaxRecords()`（默认 5000，`restore-caps.ts:15, :17-20`）⇒ 413 `SHEET_TOO_LARGE`，不截断（照抄 `:10925-10927`）。回收站行恢复时原样 INSERT、`version` 重置 1、无任何类型校验、无 flag 门（`record-service.ts:1140`, `:1233-1238`），不扫就会把未转换的原值带回选项列、绕过 A。规则：回收站行 `data ? F` 且 `data->F` 非 JSON null、非 `''` ⇒ 整次 `rejected`，reason `trashed_rows_with_value`（recordIds = 其 `record_id`）；空形（缺键 / null / `''`）放行——恢复后是读侧容忍的旧空形（`config-restore.ts:63-65`），下一次写入折成规范空值（`field-codecs.ts:1041`；`record-write-service.ts:582`），且恢复本身让撤销 ② 失败（集合多一个），不撕裂前镜像。
 - **零写入**：走 `pool.query`（同 `:10915` 的预览），不开事务、不取栅栏、不写任何表。
@@ -56,7 +57,7 @@
 5. 预铸 `convertRevisionId = randomUUID()`（照 `:11254` / `:11316`）；`mintOperation`。
 6. **写前镜像（live 每行一条，含空格、含未变格）**：新函数 `captureRetypeConvertPreImageRows`（`captureLossyRetypePreImageRows` 的兄弟，`tombstone-capture.ts:225-238` 一字不动），`reason = 'retype_convert'`（一次迁移放宽 CHECK，`zzzz20260708090000_create_meta_tombstone_tables.ts:34`），`config_revision_id = convertRevisionId`（索引 `(config_revision_id, field_id)`，`:44-47`），**`operation_id` 恒 NULL**。`value jsonb NOT NULL`（`:33`）装不下缺键 / JSON null，故 value 存信封 **`{"k":<hasKey>,"v":<原始 JSON>,"post":<写入值>}`**（v2.1 §1 候选 (c)；无 version 轴，见撤销 ③；不混入 R1 的 `reason='field_delete'` 过滤 `:7768`）。
 7. `UPDATE meta_fields SET type, property`（§4）→ **一条**原生 jsonb 批量 `UPDATE meta_records`，**只碰 `data->F IS DISTINCT FROM post` 的行**（`string→select` 下 `'A'→'A'` 不碰、不 bump、不写 revision——同 4c-1 排除 `unchanged`，`:11308`），形状照 `:7646-7655`，`RETURNING` 计数 == 预期变更行数否则抛（`:7656-7660`），声明 lock-exempt 并写理由（`:7644`）→ 每个被碰行**恰一条** record revision 在新 version 上（连续性要求 `:7745-7749`）：`patch={F:post}`、`snapshot=` 写后整行、`changedFieldIds=[F]`，走 `recordRecordRevisionsBatch`（`:7800`）传 `ledger`（`record-history-service.ts:55-64`），**`batchId = convertRevisionId`**；转换从不删键，故 revision `patch` 的 `null` 删键哨兵（`record-write-service.ts:1069-1077`）在此不出现 → `recordConfigRevision({ id: convertRevisionId, batchId: convertRevisionId, changedKeys:['type','property'], source:'mutation' })`（`config-revision-recorder.ts:40, :44`；`operation_id` NULL）→ 写作业行 → `sealOperation` → COMMIT。
-8. **提交后**：`invalidateFieldCache(sheetId)`（先例 `:11322`、`:14198`；`metaFieldCache` 无 TTL，`:659`、`:4580-4594`，漏失效后果见 D-6 注 `:11364-11373`）+ Yjs 失效（同 record restore 装的 post-commit hook，`:11879-11881`）。**不做**（与 PATCH 改类型同口径，§7 告知）：公式物化值重算（PATCH 只在公式表达式变更时重算，`:14210-14213`）、视图 filter / sort / group 迁移、自动化 `record.updated`（原生 UPDATE 绕过 `record-write-service.ts:1092-1098` 的订阅通知，同 4c-1）、实时推送（PATCH `/fields` 在 `:13912-14253` 内无 publish 调用）。
+8. **提交后**：`invalidateFieldCache(sheetId)`（先例 `:11322`、`:14198`；`metaFieldCache` 无 TTL，`:659`、`:4580-4594`，漏失效后果见 D-6 注 `:11364-11373`）+ Yjs 失效（同 record restore 装的 post-commit hook，`:11879-11881`）。**不做**（与 PATCH 改类型同口径，§7 告知）：公式物化值重算（PATCH 只在公式表达式变更时重算，`:14210-14213`）、视图 filter / sort / group 迁移、自动化 `record.updated`（原生 UPDATE 绕过 `record-write-service.ts:1092-1098` 的订阅通知，同 4c-1）、实时推送（PATCH `/fields` 在 `:13912-14253` 内无 publish 调用）。（2026-09-29 增补，见文末「增补 C」C3 / C4：Yjs 失效的范围是本表**全部** live 记录，不只是被改写的那些；被栅栏后复核拒掉的实时编辑会让该记录的协同文档失效、通知到编辑者。）
 9. **局部关联（v2.1 §3 候选 (b)+(c)）**：新表 `meta_field_retype_conversions (convert_revision_id uuid PK, sheet_id, field_id, source_type, source_property jsonb, target_type, target_property jsonb, record_count int, actor_id, created_at, undone_at NULL, undo_revision_id uuid NULL)`，**不带 `operation_id`、不建任何 FK**。一个 id 取回三半：配置半（`meta_config_revisions.id`）、前镜像（`config_revision_id`）、记录半（`batch_id`）。record revision 带账本 `operation_id`（它们是记录事件）；前镜像与配置修订**不带**：D2d1 的 `fk_mfvt_operation` / `fk_mcr_operation` 指向 endpoint（`zzzz20260826122500_add_operation_binding_to_nonrecord_history.ts:263-276`），零记录事件时 `sealOperation` 不写 endpoint（`operation-ledger.ts:158-160`），空表转换打了标签会在 COMMIT 违反 FK；且保留期清理只删 `operation_id IS NULL` 组（`meta-revision-retention.ts:254-259`），打标签 = 永不过期，「开启时 365 天」不成立。**不**给 `ConfigRevisionInput` 加 `ledger`、不改 endpoint 校验（`zzzz20260715210000_create_meta_record_history_operations.ts:167-174`）；空表转换作业行仍存在、撤销仍可达、不制造不存在的记录锚点。
 10. **封住 Time Machine Tier-2 的「撤销的撤销」**：`source` 只能是 `mutation | restore`（`config-revision-recorder.ts:31`；CHECK `zzzz20260624200000_add_config_revision_source.ts:10-11`），转换修订在历史里与普通 PATCH 改类型分不出来；Tier-2 判定 `isSupportedFieldRetypeRevert`（`config-restore.ts:94-101`）只排 11 个排除类型、不查白名单，`string ↔ select/multiSelect` 都能过，而其前提「forward PATCH 不迁值、schema-only 回滚无损」（`:63-66`）对本路径**不成立**——回滚转换修订会把字段翻回 `string` 而每格仍是 `["A"]`，之后撤销 ① 永远 409、前镜像取不回。锁：config-restore **预览与执行**对 `entity_type='field'` 的修订先查 `meta_field_retype_conversions WHERE convert_revision_id=$1 OR undo_revision_id=$1`，命中 ⇒ 422 `RESTORE_NOT_SUPPORTED`，`details.reason='field_retype_conversion'`，values-free；位置：预览在签发凭证前，执行在事务内 `applyConfigRevert` 之前（`:11355`）与 4c-1 分支之前（`:11303`）。单记录版本恢复走 `RecordWriteService.patchRecords`（`:11884`）自带选项校验，不另加门。
 11. **封住真并发写入（不是预览→执行的顺序漂移）**：`RecordWriteService` 在事务外用调用方加载的 `fieldById` 校验（`record-write-service.ts:711`），事务内才取栅栏（`:834-840`），之后仍用旧 `fieldById` 写（旧类型 `string` 走 `patch[F]=change.value`，`:1002`；`expectedVersion` 可选，`:875-877`、`:920`）；栅栏是独占 `pg_advisory_xact_lock`（`canonical-sheet-fence.ts:81-83`），按 `string` 校验过的写入只是排队等我们提交，然后照写。今日只有三类写入者在栅栏后复核字段：link 写入者（`link-writer-fence.ts:146-153`、`:190`）、审批表单回写 FWB（`approval-fwb-write-action.ts:78-84` `FOR SHARE` 实读 + `:96-108` 类型 / 选项交集）、精确锚点恢复（`exact-anchor-recovery-execute.ts:2010-2015` 整表 schema 哈希）。r3 证明 r1 的「三处接线清单」漏了两条同形路径：OAPI `PATCH /records/:recordId`（`univer-meta.ts:18041`，`apiTokenAuth`，API token 可达 → `RecordService.patchRecord` `:18138`；`record-service.ts:1351` 事务外经 pool 加载字段、`:1398-1411` 按旧类型校验、`:1538-1557` 取栅栏、`:1613-1618` 写入，无复核）与表单提交（`POST /views/:viewId/submit` `univer-meta.ts:17371`；`:17449` 事务外经 pool 加载字段、`:17488-17504` 校验、`:17680` `acquireAutoNumberSheetWriteLock` 即同一把栅栏——`auto-number-service.ts:23-28` 直接转调 `acquireCanonicalSheetFence`、`:17710-17716` UPDATE / `:17806-17809` INSERT，无复核；公共表单匿名可达，`:17420-17428`、`:17804`）。场景：`string → multiSelect` 持栅栏期间有人把某格改成 `"B "`，排队写入在我们提交后把纯字符串落进多选列。
@@ -115,7 +116,9 @@
 
     （2026-09-28 增补，不改上表：main 在 `c5dd857b2` 之后新增两个持栅栏者——「复制数据表」事务（行 34 免检）与托管表显示名重命名（行 35 非数据写入者），见文末「增补 A」。）
 
-12. **自动化写入者的选项校验（r3 S4，取 (a)；r4 更正范围）**：今日**两处**写入绕过全部记录写校验器、直接 jsonb 合并——自动化 `update_record`（`automation-executor.ts:3143-3148` 注释自陈「this bare UPDATE bypasses the 5 record-write validators」，写 `:3216-3223`）、`create_record`（`:3715-3717`）。转换后它们会把未校验的纯字符串 / 任意形状写进选项列，**不会被拒**（首版 §7「自动化会被选项校验拒」的说法错了，已改）。**审批 `resultWriteback` 不在此列**（r4 更正 r3 的「三处」）：同库（`automation-service.ts:4160`）与跨库（`:4230`）两条路径都先过 `assertResultWritebackFields`（`:4436-4467`）→ `resultWritebackFieldTypeError`（`:772-805`）——statusField 目标只许 `string` / `longText` / `select`（`:485-486`、`:781-782`，`multiSelect` 目标一律拒），`select` 目标的解析值须在选项内否则抛（`:784-789`），approverField 只许 `string` / `longText`（`:485`、`:793-799`），completedAtField 只许 `string` / `longText` / `dateTime`（`:801-803`；r5 N4 补，select / multiSelect 目标同拒）。它的缺口不是缺校验，是**校验在栅栏之前**：`:4447` 经 `this.queryFn` 在事务外读字段，写入却在其后的 `withTransaction`（`:4276-4278` 取栅栏）里 `:4372-4378`——排队等我们提交的 writeback 按旧 `string` 类型过检后照写，正是 §3.11 的同一竞态，由 §3.11 的助手（表行 7）封住，不另加选项校验。审批表单回写 FWB 两条缝已在栅栏后 `FOR SHARE` 复核类型与选项（§3.11 表行 9），亦不在此列。二选一：(a) 首批给两处加选项 / 形状校验；(b) 记录缺口，表有启用规则含同库 update / create 动作指向该字段时拒绝转换。**取 (a)**：(b) 靠解析规则配置，管不住转换之后新建的规则，让「拒绝转换」的判定在转换时刻之后失效（r3 给的第二条理由「`resultWriteback` 不在自动化规则表里」是错的——它声明在规则 `start_approval` 动作的 config 里，`:4134-4135`，保存时校验按此遍历 `:4489-4490`；该理由已撤）；(a) 与 §3.11 合并成一次动作——两处在栅栏之后（`withTransaction` 缝之后、UPDATE / INSERT 之前）`FOR SHARE` 实读目标字段，目标 `select` 按 `record-service.ts:1398-1408` 同口径（非字符串拒、`''` 放行、其余须在选项内），`multiSelect` 走 `normalizeMultiSelectValue`（`field-codecs.ts:1041-1061`）；不符 ⇒ 自动化步 `failed` 进执行日志，零写入，values-free。先例：`update_record` 已对 rich-longText 按目标字段配置无条件消毒（`:3143-3148`），本校验是同一位置的同类守卫。**不受本 flag 门控**（T 层默认值：这是既有缺陷的修正——今日就能把非选项值写进未转换的选项列；owner 可否决为「仅本 flag 开时启用」）。已知行为变化：写非选项值的既有 `update_record` / `create_record` 规则从静默落库变为步失败，写进 §7 告知；`resultWriteback` 非并发路径无行为变化（今日已拒）。其余字段类型不加校验，非本 ADR 范围。单测：两写入者各一组（选项内成功 / 选项外拒 / 非字符串拒 / 多选 trim + 去重）；真库见 §6 ⑦ ⑪。
+    （2026-09-29 增补，不改上表：第 3 刀的执行事务与撤销事务是另外两个持栅栏者，判定免检、理由由守卫机械核对；普查另外跟进「入口 / 回调缝自己体内经被调函数发出的写」，见文末「增补 C」C2。）
+
+12. **自动化写入者的选项校验（r3 S4，取 (a)；r4 更正范围）**：今日**两处**写入绕过全部记录写校验器、直接 jsonb 合并——自动化 `update_record`（`automation-executor.ts:3143-3148` 注释自陈「this bare UPDATE bypasses the 5 record-write validators」，写 `:3216-3223`）、`create_record`（`:3715-3717`）。转换后它们会把未校验的纯字符串 / 任意形状写进选项列，**不会被拒**（首版 §7「自动化会被选项校验拒」的说法错了，已改）。**审批 `resultWriteback` 不在此列**（r4 更正 r3 的「三处」）：同库（`automation-service.ts:4160`）与跨库（`:4230`）两条路径都先过 `assertResultWritebackFields`（`:4436-4467`）→ `resultWritebackFieldTypeError`（`:772-805`）——statusField 目标只许 `string` / `longText` / `select`（`:485-486`、`:781-782`，`multiSelect` 目标一律拒），`select` 目标的解析值须在选项内否则抛（`:784-789`），approverField 只许 `string` / `longText`（`:485`、`:793-799`），completedAtField 只许 `string` / `longText` / `dateTime`（`:801-803`；r5 N4 补，select / multiSelect 目标同拒）。它的缺口不是缺校验，是**校验在栅栏之前**：`:4447` 经 `this.queryFn` 在事务外读字段，写入却在其后的 `withTransaction`（`:4276-4278` 取栅栏）里 `:4372-4378`——排队等我们提交的 writeback 按旧 `string` 类型过检后照写，正是 §3.11 的同一竞态，由 §3.11 的助手（表行 7）封住，不另加选项校验。审批表单回写 FWB 两条缝已在栅栏后 `FOR SHARE` 复核类型与选项（§3.11 表行 9），亦不在此列。二选一：(a) 首批给两处加选项 / 形状校验；(b) 记录缺口，表有启用规则含同库 update / create 动作指向该字段时拒绝转换。**取 (a)**：(b) 靠解析规则配置，管不住转换之后新建的规则，让「拒绝转换」的判定在转换时刻之后失效（r3 给的第二条理由「`resultWriteback` 不在自动化规则表里」是错的——它声明在规则 `start_approval` 动作的 config 里，`:4134-4135`，保存时校验按此遍历 `:4489-4490`；该理由已撤）；(a) 与 §3.11 合并成一次动作——两处在栅栏之后（`withTransaction` 缝之后、UPDATE / INSERT 之前）`FOR SHARE` 实读目标字段，目标 `select` 按 `record-service.ts:1398-1408` 同口径（非字符串拒、`''` 放行、其余须在选项内），`multiSelect` 走 `normalizeMultiSelectValue`（`field-codecs.ts:1041-1061`）；不符 ⇒ 自动化步 `failed` 进执行日志，零写入，values-free。先例：`update_record` 已对 rich-longText 按目标字段配置无条件消毒（`:3143-3148`），本校验是同一位置的同类守卫。**不受本 flag 门控**（T 层默认值：这是既有缺陷的修正——今日就能把非选项值写进未转换的选项列；owner 可否决为「仅本 flag 开时启用」）。已知行为变化：写非选项值的既有 `update_record` / `create_record` 规则从静默落库变为步失败，写进 §7 告知；`resultWriteback` 非并发路径无行为变化（今日已拒）。其余字段类型不加校验，非本 ADR 范围。单测：两写入者各一组（选项内成功 / 选项外拒 / 非字符串拒 / 多选 trim + 去重）；真库见 §6 ⑦ ⑪。（2026-09-29 增补，见文末「增补 C」C1：本条「不受本 flag 门控」**已被改判**（Decision Register R-22）——选项校验与 §3.11 的复核同门，只在本 flag 与写者栅栏**同时**开启时执行。）
 
 **撤销** `POST /api/multitable/fields/:fieldId/retype-undo { convertRevisionId, confirm: 'undo-field-type-convert' }`，同五门、同信任门、同事务。**判定顺序锁定，任一不过 ⇒ 零写入**：
 
@@ -151,7 +154,7 @@
 
 ## 5. 开关（锁定）
 
-新 flag **`MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT`**：默认 OFF；比较 **`=== 'true'` 字节精确**（不 trim、不转小写，与 capture / revert 族一致）；门控预览 / 执行 / 撤销三个端点（预览也门控——一次全表扫描并回 recordId 不该在客户环境无授权可达）。名字在 `packages` / `scripts` 全搜 `FIELD_RETYPE_(FORWARD|CONVERT|MIGRATE|EXECUTE)` 零命中。**第 2 刀就登记**进 `scripts/ops/global-history-flag-manifest.mjs`（数组 `:49`）：`type:'boolean', activationValue:'true', danger:'high', dependsOn: [], conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA']` + 一条 `conflicts` 规则（该组合在代码里是非法姿态：§2 门 ② 409）。**不用 `dependsOn` / `requires` 建模 fence**——`requires` 违规在默认与 `--strict` 两模式都是无条件 STOP、exit 1（`multitable-global-history-flag-status.mjs:184-192`、`:330`），会把「只开本 flag 跑预览」这一合法阶梯永久打红；沿用 manifest 对进程内 409 的惯例（`:169-172`、`:190`、`:212`），purpose 写明「执行 / 撤销在 fence 未开时 409 `FIELD_RETYPE_TRUST_REQUIRED`，预览仍可用」。不登记会红：完整性测试从 `packages/core-backend/src` grep `MULTITABLE_[A-Z_0-9]+`（`global-history-flag-manifest.test.mjs:142-156`, `:173-195`）。部署次序进 runbook：迁移 → 开 fence → 开本 flag（不再要求 capture flag）。
+新 flag **`MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT`**：默认 OFF；比较 **`=== 'true'` 字节精确**（不 trim、不转小写，与 capture / revert 族一致）；门控预览 / 执行 / 撤销三个端点（预览也门控——一次全表扫描并回 recordId 不该在客户环境无授权可达）。名字在 `packages` / `scripts` 全搜 `FIELD_RETYPE_(FORWARD|CONVERT|MIGRATE|EXECUTE)` 零命中。**第 2 刀就登记**进 `scripts/ops/global-history-flag-manifest.mjs`（数组 `:49`）：`type:'boolean', activationValue:'true', danger:'high', dependsOn: [], conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA']` + 一条 `conflicts` 规则（该组合在代码里是非法姿态：§2 门 ② 409）。**不用 `dependsOn` / `requires` 建模 fence**——`requires` 违规在默认与 `--strict` 两模式都是无条件 STOP、exit 1（`multitable-global-history-flag-status.mjs:184-192`、`:330`），会把「只开本 flag 跑预览」这一合法阶梯永久打红；沿用 manifest 对进程内 409 的惯例（`:169-172`、`:190`、`:212`），purpose 写明「执行 / 撤销在 fence 未开时 409 `FIELD_RETYPE_TRUST_REQUIRED`，预览仍可用」。不登记会红：完整性测试从 `packages/core-backend/src` grep `MULTITABLE_[A-Z_0-9]+`（`global-history-flag-manifest.test.mjs:142-156`, `:173-195`）。部署次序进 runbook：迁移 → 开 fence → 开本 flag（不再要求 capture flag）。（2026-09-29 增补，见文末「增补 C」C1：本 flag 与写者栅栏同时开启时，另外启用全体记录写入者的栅栏后复核与自动化选项校验；每个后端进程必须带相同的两个开关值。）
 
 ## 6. 交付分刀
 
@@ -172,7 +175,7 @@
 
 **owner 待决、本 ADR 不定（r3 S6）**：(i) Data Factory 目标适配器写入表如何进并集（待问 ⑥）；(ii) `ext_` 列逐列开放（待问 ③）；(iii) 首尾空白「整次拒绝、先清洗」的可接受性（待问 ④）。三项保持开放，首批按保守默认执行（整表排除 / 整次拒绝），不因任何评审轮次改判。
 
-**T 层默认值（`Ratified-by-default-2026-09-26`，owner 24h 可否决）**：预览也受 flag 门控；整表排除而非逐列；并集判定含 `plugin_tagged_fields` / `pipeline_staging_sheet`；预览 id 列全不抽样；manifest `dependsOn: []` + 与 legacy flag 的 `conflicts` 规则；legacy flag 开时三端点 409；作业表 `meta_field_retype_conversions`（v2.1 说「不定案」）与信封 `{k,v,post}`；前镜像 / 配置修订 `operation_id` 恒 NULL；源限 `string`（不含 longText）；新增 `non_string_value` / `trashed_rows_with_value` 拒绝；撤销 ③ 比值不比 version；写入者栅栏后复核仅在本 flag 开时启用；捕获不受 capture flag 门控；记录锁 lock-exempt；`CONTIGUITY_STRICT` 首批不要求。r3 追加（`Ratified-by-default-2026-09-27`）：§3.11 由清单改为不变量 + 结构守卫，普查表免检项以具名理由登记；撤销 ②b 回收站后态拒绝；§3.12 两个自动化写入者（`update_record` / `create_record`）选项校验取 (a) 且不受本 flag 门控。r4 追加（`Ratified-by-default-2026-09-27`）：§3.11 结构守卫键集 = 四模块全部导出入口 + 传递闭包，由导出表生成、不手写；autoNumber 回填（表行 14）与 FWB 两条缝（表行 9）登记免检；`resultWriteback` 归 §3.11 复核（表行 7）而非 §3.12 新校验；⑪ 去掉 `resultWriteback` 非并发腿。r5 追加（`Ratified-by-default-2026-09-27`）：§3.11 键集改为锁原语判定（种子 = `canonicalSheetFenceKey` / 字面前缀；含会话级锁与迁移 SQL 函数，`pg_locks` 探针登记不入键集）；回调缝按调用点处理器字面量体检查，非字面量处理器具名登记；行 13 非 scoped 派生合并必接派生型复核（仅本 flag 开）；行 19 残留修法 = 窄回填补 kind + §1 并集 (e) `approval_projection_sheet`；行 27 的 config-restore undelete 拆为行 28 免检；二阶入口不再手工计数。r6 追加（`Ratified-by-default-2026-09-27`）：行 13 派生型复核的拒绝以 `SheetWriterBlockedError` 兼容错误类抛出、不得静默返回；行 21 / 32 归类为「写入由行 2 覆盖」。
+**T 层默认值（`Ratified-by-default-2026-09-26`，owner 24h 可否决）**：预览也受 flag 门控；整表排除而非逐列；并集判定含 `plugin_tagged_fields` / `pipeline_staging_sheet`；预览 id 列全不抽样；manifest `dependsOn: []` + 与 legacy flag 的 `conflicts` 规则；legacy flag 开时三端点 409；作业表 `meta_field_retype_conversions`（v2.1 说「不定案」）与信封 `{k,v,post}`；前镜像 / 配置修订 `operation_id` 恒 NULL；源限 `string`（不含 longText）；新增 `non_string_value` / `trashed_rows_with_value` 拒绝；撤销 ③ 比值不比 version；写入者栅栏后复核仅在本 flag 开时启用；捕获不受 capture flag 门控；记录锁 lock-exempt；`CONTIGUITY_STRICT` 首批不要求。r3 追加（`Ratified-by-default-2026-09-27`）：§3.11 由清单改为不变量 + 结构守卫，普查表免检项以具名理由登记；撤销 ②b 回收站后态拒绝；§3.12 两个自动化写入者（`update_record` / `create_record`）选项校验取 (a) 且不受本 flag 门控。r4 追加（`Ratified-by-default-2026-09-27`）：§3.11 结构守卫键集 = 四模块全部导出入口 + 传递闭包，由导出表生成、不手写；autoNumber 回填（表行 14）与 FWB 两条缝（表行 9）登记免检；`resultWriteback` 归 §3.11 复核（表行 7）而非 §3.12 新校验；⑪ 去掉 `resultWriteback` 非并发腿。r5 追加（`Ratified-by-default-2026-09-27`）：§3.11 键集改为锁原语判定（种子 = `canonicalSheetFenceKey` / 字面前缀；含会话级锁与迁移 SQL 函数，`pg_locks` 探针登记不入键集）；回调缝按调用点处理器字面量体检查，非字面量处理器具名登记；行 13 非 scoped 派生合并必接派生型复核（仅本 flag 开）；行 19 残留修法 = 窄回填补 kind + §1 并集 (e) `approval_projection_sheet`；行 27 的 config-restore undelete 拆为行 28 免检；二阶入口不再手工计数。r6 追加（`Ratified-by-default-2026-09-27`）：行 13 派生型复核的拒绝以 `SheetWriterBlockedError` 兼容错误类抛出、不得静默返回；行 21 / 32 归类为「写入由行 2 覆盖」。（2026-09-29 增补，见文末「增补 C」C1：本段三处门控表述——「写入者栅栏后复核仅在本 flag 开时启用」「§3.12 … 不受本 flag 门控」「行 13 … 派生型复核（仅本 flag 开）」——由 R-22 改为**两个开关同时开启**。）
 
 ## 8. 评审处置（六轮；仅记未按原建议采纳项与需留痕的取舍，其余已并入正文）
 
@@ -199,7 +202,7 @@
 
 - r1 nit「`ORDER BY … COLLATE "C"`」→ 改为三处共用 JS 码元比较器（§4 顺序）：`hashScope` 本就在 JS 排序（`restore-preview-identity.ts:131`），共用比较器比再引入一个 SQL 排序规则少一个漂移源。
 - r1 B2 二选一 → 取「整次拒绝」不取「定义回收站数据如何转换」：后者要改写 `meta_records_trash.data` 并为其捕获前镜像，超出首批；拒绝 + 清理再预览与 A 同口径。
-- r1 B3 二选一 → 取「写入者栅栏后复核」不取「表级 schema 纪元」：前者复用 link 写入者先例（`link-writer-fence.ts:146-153`）、不加列，且只在本 flag 开时启用。
+- r1 B3 二选一 → 取「写入者栅栏后复核」不取「表级 schema 纪元」：前者复用 link 写入者先例（`link-writer-fence.ts:146-153`）、不加列，且只在本 flag 开时启用。（2026-09-29 增补，见「增补 C」C1：启用条件改为本 flag 与写者栅栏同时开启。）
 - r1 S5 → 作业表直接不设 `operation_id`，比「可空、无 FK」更少歧义。
 - r2 S1 二选一 → 保留 manifest 惯例（`dependsOn: []`），不让预览也因 fence 未开而拒绝：预览零写入，无需栅栏。
 - r2 B1「检测 Data Factory 目标」→ 部分采纳：`staging_sheet_id` 进并集；`objects[*].sheetId` 的持久化位置本轮未读，列为 §1 缺口 + 客户待问 ⑥，不假装覆盖。
@@ -301,3 +304,140 @@ git grep -n -E 'meta_recovery_archive_legal_hold_release_authorize|meta_recovery
 **要不要调用转换助手 `assertFieldSchemaUnchangedAfterFence`**：不需要。助手比较的是「调用方在栅栏**之前**拿到的 `fieldById` 快照」和「栅栏之后的 `meta_fields`」。本事务对 N 没有栅栏前快照（N 的字段在栅栏之后才建）；对 S 的快照本身就是在 fence(S) 之后取的。两处调用都只会恒等通过，是空断言。结构守卫落地时，应按行 8 的口径把本行登记为免检（理由：栅栏后实读，且只写同事务新建的表），而不是要求它接助手。F 只被读（记录存在性）和引用（`meta_links`），不写其 `meta_records.data`，同样不需要。
 
 **计数**：登记范围变为行 1–35：必接 7 行（不变）、免检 16 行（+行 34）、非数据写入者 12 行（+行 35）。`14e52a6e5` 上 stage 2 的 90 处 = `c5dd857b2` 的 88 处（按「文件 + 行文本」比对逐条仍在，行号漂移不计）+ 行 34、行 35 各 1 处；stage 1 / 1b / 3 / 4 除行号外与 `c5dd857b2` 相同。所以 `14e52a6e5` 上的普查**无遗漏**。这是文本比对的结论：88 处旧调用点没有逐条重读，结构守卫落地时以守卫结论为准。
+
+## 增补 B（2026-09-28，第 2 刀 PR #6139 终审的进入条件；随第 3 刀 b 线 PR 提交）
+
+**状态**：`Ratified-by-default-2026-09-28`（T 层，owner 24h 可否决）；登记在 `docs/development/takeover-beiliao-20260821/decision-register.md` R-21。四条都是**收紧**，没有一条放宽既有的门或作用域。§2–§4 正文除 §2 门列表下的一行指针外不改；本增补与正文冲突处以本增补为准。
+
+### B1 门 ⑤ = `canRead` 且全表读；③ ④ ⑤ 只有一份判定
+
+**修订句（替换 §2 门列表里的 ⑤）**：「⑤ `capabilities.canRead` **且** `hasFullTableReadAccess` ⇒ 否则整面 403 `FULL_TABLE_READ_REQUIRED`，无 scoped 模式、无 undisclosed 标记。」
+
+原文只点了 `hasFullTableReadAccess` 一个名字。它**不读** `capabilities.canRead`（只判行级拒读、字段遮罩、公式遮罩三个轴）；而 `canManageFields` 单凭 `multitable:manage-schema` 即为真（`manage-schema-permission.ts` `deriveCanManageFields`），与 `canRead` 无关（`access.ts` `deriveCapabilities`）。照原文写出来的路由，会让一个只有改结构权、读不了本表的主体过全部五门：预览把每条记录的 id 交给他，执行让他改写一整列他读不了的数据。（2026-09-29 更正，见「增补 C」C6：`hasFullTableReadAccess` 自 #6147 起自己也先查 `canRead`，上面「它不读」一句自那时起不再成立；门 ⑤ 的定义不变，显式的 `canRead` 判定留作纵深防御。）
+
+落地：判定在 `multitable/field-retype-convert-gates.ts` `judgeFieldRetypeConvertGates`（顺序 ③ → ④ → ⑤，只此一处）；路由侧 `gateFieldRetypeConvert` 由预览 / 执行 / 撤销三个处理器调用，处理器体内不再有任何一门的手写副本（`tests/unit/multitable-sheet-liveness-closure.guard.test.ts`「the shared field-retype gate」按源码钉住）。
+
+### B2 执行 / 撤销的权限取自数据库，在事务内、栅栏之后
+
+正文对此没有规定。预览在请求凭证带权限 claim 时按 claim 解析能力、不问库（`multitable/access.ts` `resolveRequestAccess`）；对只读端点可以接受。对改写一整列的执行与撤销，取更严的模型：
+
+- 事务外照常过五门（快速拒）；
+- 事务内，**取得栅栏之后、第一把行锁之前**，用事务自己的 `query` 从数据库重新解析请求者此刻的能力，再过 B1 的同一个判定。能力 = 请求 claim ∩ 数据库权限（`recovery-authorization-stability.ts` `resolveRecoverySheetAuthority`，与精确锚点恢复同一个解析器）；表的存活同样在事务内重读；
+- 不过 ⇒ 与事务外**字节相同**的拒绝（403 / 404），零写入、不取任何行锁。
+
+后果：库里已收回的权限、已停用或已删除的账号，不会因为一张还没过期的凭证而继续能改数据；反过来，凭证里没有的权限也不会因为库里有而多出来。
+
+### B3 `data` 不是 JSON 对象的行 ⇒ 整次拒绝
+
+扫描到的任一行（live 或本表回收站）`jsonb_typeof(data) <> 'object'` ⇒ 预览 `verdict: 'rejected'`，新增 reason **`record_data_not_object`**（`recordIds` 完整），不签发凭证。**不**把这种行当空格读：对非对象的 jsonb，`data ? F` 问的是「数组里有没有这个字符串元素」，`data -> F` 恒为 NULL，读出来的「缺键」是假的；执行的 `jsonb_set` 在非对象上要么报错要么不写。
+
+执行在栅栏与行锁之下重算计划；计划不是 `ok` 即 409 `PLAN_DRIFT`、零写入——**即使 planHash 没变**（一行的 `data` 从 `{}` 变成 `[]`，单元格照样读成缺键、哈希相同）。撤销不需要另加判定：非对象行的 `data -> F` 为 NULL，必然不等于信封 `post`，落在既有的 ③ `cells_changed` 上。
+
+预览与执行读每一行用的是**同一份列表达式文本**（`field-retype-convert-preview.ts` `FIELD_RETYPE_CONVERT_CELL_COLUMNS`：`is_object` / `has_key` / `cell`），执行只多一个 `FOR UPDATE`。
+
+### B4 真库验收必须走真路由
+
+第 2 刀的测试全部由假 pool 作答（`has_key` 与单元格在 JavaScript 里算），预览的任何一条 SQL 都没在真 PostgreSQL 上跑过。§6 第 3 刀的真库用例因此一律「预览 → 执行 → 撤销」走真路由，并另含：四态单元格（缺键 / null / `''` / 有值）在真库上的读法；**别的表**的回收站行不进本表的扫描、不动 planHash；预览签发的 planHash 被执行重算后接受；数据库里收回权限后执行与撤销拒绝。
+
+### 留给 owner、本增补不定（按正文实现，开关打开之前裁）
+
+1. 回收站行的 recordId 会出现在预览的 `rejections[].recordIds` 里，而能过五门的人未必能打开回收站。
+2. 在字段定义上隐藏的列（property 级）过得了门 ⑤——⑤ 的字段轴只看 `field_permissions`。
+3. 表级写授权可以在没有 `multitable:manage-schema` 的情况下带来改结构权。
+
+## 增补 C（2026-09-29，第 3 刀 a #6145 合入 main 之后；随第 3 刀 b 线 PR #6149 提交）
+
+正文与增补 A / B 保持原样。本增补把第 3 刀 a 合入后**代码实际的样子**写进设计锁，并补上 #6145 终审留给第 3 刀 b 的几件事。与正文冲突处以本增补为准；正文相应位置已各加一句指引。
+
+### C1 门控是两个开关，不是一个（修订 §3.11、§3.12、§5、§7、§8）
+
+以下四样东西只在 `MULTITABLE_ENABLE_FIELD_RETYPE_CONVERT` 精确为 `'true'` **且** 写者栅栏 `MULTITABLE_ENABLE_WRITER_FENCE` 开启时执行，判定只有一处（`field-schema-fence-recheck.ts` `isFieldSchemaFenceRecheckEnabled`）：
+
+| 对象 | 位置 |
+|---|---|
+| 写入者栅栏后复核（§3.11 行 1–7） | `assertFieldSchemaUnchangedAfterFence` |
+| 行 13 非 scoped 派生合并的派生型复核 | `assertDerivedMergeTargetsStillDerived` |
+| 自动化 `update_record` / `create_record` 的栅栏前字段快照 | `loadFieldSchemaSnapshot` |
+| §3.12 自动化选项校验 | `validateAutomationOptionValues` |
+
+任一开关关着 ⇒ 四样都不发任何查询，各写入者发出的语句与本功能不存在时相同。
+
+**为什么是两个**：转换开、栅栏关时，执行与撤销本就拒绝（§3 信任门），没有要保护的对象；而复核的 `FOR SHARE` 会与「先锁 `meta_fields` 行、后取栅栏」的改结构路径成环，真库复现过。
+
+**为什么选项校验也门控**：不门控会让客户既有自动化在升级当天由「值落库」变成「步失败」。
+
+**依据**：Decision Register R-22（`Ratified-by-default-2026-09-28`）。它偏离 2026-09-27 批的默认值（「不受本 flag 门控」），是协调方的决定，owner 可否决；它要求的门（两个开关）也比设计锁自己给出的门控选项（仅本 flag）更严。
+
+**对既有自动化规则的影响（开关打开之前必须先数）**：两个开关都开之后，一条规则只要往单选 / 多选列写下列任一种值，就由「值落库」变为「步失败」——
+
+| 目标列 | 值 | 拒绝原因 |
+|---|---|---|
+| 单选 | 选项外的字符串 | `select_value_not_in_options` |
+| 单选 | 非字符串，**含 `null`**（自动化没有「清空」操作，写 `null` 清空单选的规则会中招） | `select_value_not_string` |
+| 多选 | 不是数组；数组里有选项外的项；数组里有对象 / 布尔项 | `multiselect_value_invalid` |
+
+放行：单选的 `''`；多选的 `null` / `''` / 空数组；多选项按记录写路径同口径 trim、去空、去重后写入。**对所有单选 / 多选列生效，不只是转换过的列。** 计数办法见 runbook §2.4（只读 SQL，只回规则 id、字段 id 与原因）。
+
+**每个后端进程必须带相同的两个开关值。** 门读的是进程自己的环境变量。一个没带开关的进程（单独起的自动化 / 调度 worker、实时协同进程）在另一个进程做转换的时候不会复核——栅栏仍把两个事务串行，但排队的写入者醒来后照旧按转换前的类型写。部署上必须一起改、一起重启；runbook §2.3。
+
+### C2 §3.11 普查：转换与撤销自己的两个持栅栏者；入口体内的写
+
+**两个新持栅栏者**（都在 `field-retype-convert-execute.ts`，经私有入口 `enterFence`）：
+
+| 持栅栏者 | 判定 | 理由 |
+|---|---|---|
+| `executeFieldRetypeConvert` | 免检 | 不带任何栅栏之前的字段快照。栅栏之后 `FOR UPDATE` 读字段行，在该行上复核类型对，锁住本表全部 live 行与回收站行，按类型 + property + 每一格重算 planHash，与预览签的不等即 409 `PLAN_DRIFT`；写入的每个值都由锁下读到的单元格推出。只写被转换字段的键 |
+| `undoFieldRetypeConvert` | 免检 | 不带任何栅栏之前的字段快照。栅栏之后锁作业行与前镜像行，`FOR UPDATE` 读字段行，类型与 property 与转换写入的那一份 jsonb 不等即 409 `UNDO_PRECONDITION_FAILED`；写入的每个值都来自栅栏下读到的前镜像行，且只写仍等于后态的格。只写被转换字段的键 |
+
+它们是复核要保护别的写入者免受其害的那两个事务本身，接助手没有可比对的快照。**理由不只是一句话**：结构守卫新增 E 项，对这两个持栅栏者逐条核对——`meta_fields` 的带行锁读在栅栏之后、在第一条 `meta_records.data` 写之前、发在取栅栏的那个 query 上、是函数体的顶层语句（不在分支、循环、回调里）。任何一条不成立即红；合成源与改写真源的反例各一组。守卫看不见的一半——「写入的值是否确实由锁下的读推出」——由行为用例钉住（`PLAN_DRIFT`、`UNDO_PRECONDITION_FAILED`）。
+
+**入口 / 回调缝体内经被调函数发出的写（#6145 终审 C2-F1）**：持栅栏者的检查区间从入口调用**结束**处开始，入口自己体内做了什么此前从不跟进；而入口只要自己的字面量里没有 `meta_records` 写，就一直是入口。现在普查对每个持栅栏者所调的入口 / 回调缝，解析其体内的调用并向下跟两层，结果记为 `entryWritesVia`（`入口>被调函数`），**不分判定**逐键与账本比对——必接的持栅栏者同样要比，因为助手在处理器里，回调缝自己发的写在它够不着的地方。真树上今天只有一处（异步归档恢复分片，经 `applyExactAnchorRecoveryAttempt` 的 schema 哈希），已具名登记。
+
+**仍然存在的盲区（如实列出，不因本增补消失）**：入口别名与不带模块说明符的再导出（C2-F2）；`meta_records` 的带引号、行形式、`ONLY` 三种拼写与模块级 SQL 常量（C2-F3）；免检持栅栏者体内新增的直接写（C2-F4）；传给回调的 scoped 派生合并（C2-F5）；被调函数向下第三层及更深。以上五条取自 #6145 终审的探针结果，本增补没有逐条复跑；终审同时指出，这些情形下新增的写字面量多数仍会被修订处置守卫与记录锁守卫拦到，但那两个守卫用一句与 §3.11 无关的标记注释即可放行，`ONLY` 拼写三个守卫都拦不到。
+
+### C3 实时（Yjs）路径：被拒的编辑不再悄悄丢掉
+
+**此前**：实时桥没有可以应答的响应。一次 flush 因为它要写的列在等锁期间被转换而被复核拒绝（`FieldSchemaChangedError`），桥只计数、打日志；那次编辑留在共享文档里、每个编辑者都看得见，却永远到不了 `meta_records`。桥上其它拒绝（校验、权限、记录锁、表已删、恢复占用）此前同样不通知。
+
+**现在**：桥多了一个拒绝回调缝。对 `FieldSchemaChangedError`——且仅在两个开关同时开启时——让该记录的协同文档失效，走的是每一次权威写入都已经在用的那条失效路径：先取消该记录排队中的 flush，再丢掉内存文档与持久化的 Yjs 状态，最后向该记录房间里的编辑者发既有的 `yjs:invalidated` 消息。客户端今天就处理这条消息：离开文档、退回普通编辑，看到的是已提交的值；重新打开时文档由已提交的行重新播种。
+
+**没有改协议**：没有新消息，载荷没有新字段、没有新取值。代价是客户端分不出「被普通写入失效」与「编辑因列被转换而被拒」，所以实时路径上给不出一句专门的话；要给，就得在载荷里加原因——那是协议变更，留给 owner。
+
+**没有改的**：桥上其它拒绝照旧只计数、打日志。那是本功能之前就有的行为，范围比字段类型转换大，不在这一刀改。
+
+**多进程**：转换所在进程的提交后失效只作用于本进程内存里的文档与本进程的连接。协同连接若在另一个进程，靠的就是那个进程自己的桥在 flush 被拒时走上面这条路——前提是它带着相同的两个开关（C1）。
+
+### C4 提交后的协同失效范围（修订 §3 第 8 步）
+
+执行与撤销提交后，失效的是本表**全部 live 记录**的协同文档，不只是被改写的那些。整列换了类型；单选目标下「原文本恰是选项」的行不被改写，但一份打开着的文档里这一格仍是旧类型的表示。表的行数以记录上限为界。
+
+### C5 `FIELD_SCHEMA_CHANGED` 在已核验路由之外
+
+| 面 | 行为 |
+|---|---|
+| AI 批量写入（`commitOneRecord`，bulk-commit 与 job commit 共用） | 逐行作答、不答状态码。目标列在等锁期间被转换的那一行记 `stale_reprev`——「预览后已变更，未写入，请重新运行」，与记录版本漂移同一档；属已知拒绝，不按意外失败记错误日志。不新增 outcome 取值，作业行的取值集不变 |
+| AI 单格运行（`…/ai/shortcut/run`） | 第 3 刀 a 已答 409 + 本码 |
+| OpenAPI | 单条 PATCH、表单提交、批量 patch 三个路由的 409 写明各错误码并给出本码的示例；`dist` 与 SDK 已重新生成 |
+| Web | 一句人话（中 / 英各一）。对这个码，客户端的文案**优先于**服务端的英文消息；其它码照旧显示服务端消息 |
+
+这个码只会由两个开关同时开启的服务端发出，Web 侧因此不需要自己的开关。
+
+### C6 门 ⑤ 与 `hasFullTableReadAccess`（更正增补 B1 的一句话）
+
+增补 B1 写「它不读 `capabilities.canRead`」。#6147 合入后这句不再成立：该函数自己也先查 `canRead`。门 ⑤ 的定义不变——**`canRead` 且全表读**——判定函数里显式的那一条保留，作纵深防御：回调是调用方给的，判定不依赖回调内部查了什么。这一行由单测用**恒真的回调**钉住；路由级测试钉不住它（真回调会替它拒），已用变异实证。
+
+### C7 §6 第 3 刀真库验收 ⑦ ⑪ ⑫ 的落地形态
+
+- **⑦** 九个写入者形状（批量 patch、插件 patch、插件 create、单条 PATCH、表单 EDIT、表单 CREATE、自动化 update、自动化 create、审批 writeback）× 两个对手（**真实的**执行事务、**真实的**撤销事务）。三会话构造，不靠计时：一个会话只锁住表里一行；转换经真路由发出，取栅栏、过门，然后在锁全表 live 行时停在那一行上——此时它**持着栅栏**、尚未写入；写入者取快照、过自己的校验、停在栅栏上。两次停驻都由 `pg_blocking_pids` 证明，不成立即抛。放开那一行后转换提交，写入者被拒；列里只有转换写的值。审批 writeback 一腿正是设计锁要求的竞态形。
+- **⑪** 拒绝按**消息**断言（执行日志里留下的就是它），并在事务缝上观察抛出的错误、按**错误码**断言；外加九个面零写入。选项内的值落库。另含门的对照：convert flag 关时同一条规则把选项外的值写进去。
+- **⑫** 派生合并在列还是公式时算出值；列经真路由 PATCH 成文本、再转换成单选；合并停在转换的栅栏后面被拒一次，提交之后再来被拒一次；零写入、无修订。
+
+### 留给 owner、本增补不定
+
+| # | 问题 | 等待期间的安全默认 |
+|---|---|---|
+| 1 | 选项校验的范围：所有单选 / 多选列（设计锁原文，现状），还是只有经本功能转换过的列 | 现状（所有列）。开关保持关闭，直到 runbook §2.4 的计数被看过 |
+| 2 | 实时路径上要不要一句专门的话（需要在 `yjs:invalidated` 载荷里加原因，属协议变更） | 不加。编辑者收到既有的失效消息、退回普通编辑 |
+| 3 | 桥上其它拒绝（校验、权限、记录锁）是否也该通知编辑者——本功能之前就存在，范围更大 | 不改。另立事项 |
+| 4 | 门控是否应由环境变量改为库内配置，使「各进程开关一致」成为结构保证而不是部署纪律 | 不改。runbook 写明一起改、一起重启；开关打开之前逐进程核对 |
+| 5 | 增补 B 留下的三条（回收站行 id 可见性；定义级隐藏列过门 ⑤；表级写授权带来改结构权） | 同增补 B：按正文实现，开关打开之前裁 |

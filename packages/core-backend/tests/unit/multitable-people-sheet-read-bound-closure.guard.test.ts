@@ -487,6 +487,26 @@ const CROSS_FILE_ENUMERATORS: Record<string, {
       + 'every live row to plan a conversion, and the route answers counts and record ids only, never a cell value '
       + 'or a page of rows. A read window would make the conversion plan silently partial, which the design lock forbids.',
   },
+  executeFieldRetypeConvert: {
+    module: 'multitable/field-retype-convert-execute.ts',
+    returns: 'Promise<ExecuteFieldRetypeConvertOutcome>',
+    binds: false,
+    reason:
+      'WRITE under canManageFields + the full-table-read gate: the field-retype-convert EXECUTE transaction. It locks '
+      + 'and reads ONE column of every live row (and this sheet\'s recycle-bin rows) to re-compute the plan the preview '
+      + 'token binds, then rewrites that column. It answers ids and counts only, never a cell value or a page of rows; '
+      + 'a read window would convert part of a column. The People sheet is system-managed and is refused 422 before it.',
+  },
+  undoFieldRetypeConvert: {
+    module: 'multitable/field-retype-convert-execute.ts',
+    returns: 'Promise<UndoFieldRetypeConvertOutcome>',
+    binds: false,
+    reason:
+      'WRITE under canManageFields + the full-table-read gate: the whole-column UNDO transaction. It locks every live '
+      + 'row to compare the record-id set and the converted column against the pre-image, then restores that column. '
+      + 'It answers ids and counts only. A read window would make the comparison, and the restore, partial — the design '
+      + 'lock forbids a partial undo. The People sheet is system-managed and is refused 422 before it.',
+  },
   insertFieldValueTombstones: {
     module: 'multitable/tombstone-capture.ts',
     returns: 'Promise<void>',

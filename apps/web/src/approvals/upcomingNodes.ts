@@ -26,7 +26,15 @@ export interface UpcomingApprovalNode {
  * authored/validated as DAGs (see `graphLayout.graphHasCycle`) — so this walk stays safe even
  * against a malformed one.
  */
-export function buildUpcomingNodes(graph: ApprovalGraph, currentNodeKey: string, schema?: FormSchema | null): UpcomingApprovalNode[] {
+// O-8 / F8-1: `isZh` is forwarded to `nodeAssigneeSourceSummary`. Both callers pass the shell
+// locale (ApprovalDetailView directly, ApprovalNewView via graphSummary.ts); the zh-CN default only
+// keeps the existing unit tests' calls unchanged.
+export function buildUpcomingNodes(
+  graph: ApprovalGraph,
+  currentNodeKey: string,
+  schema?: FormSchema | null,
+  isZh = true,
+): UpcomingApprovalNode[] {
   const nodesByKey = new Map(graph.nodes.map((node) => [node.key, node]))
   const outgoingByNode = new Map<string, string[]>()
   for (const edge of graph.edges) {
@@ -50,7 +58,7 @@ export function buildUpcomingNodes(graph: ApprovalGraph, currentNodeKey: string,
     result.push({
       key: node.key,
       name: node.name?.trim() || node.key,
-      assigneeSummary: nodeAssigneeSourceSummary(node, schema),
+      assigneeSummary: nodeAssigneeSourceSummary(node, schema, isZh),
       isConditional: node.type === 'condition',
     })
     if (node.type === 'end') break

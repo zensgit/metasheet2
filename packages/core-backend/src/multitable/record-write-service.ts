@@ -841,7 +841,7 @@ export class RecordWriteService {
       }
       // Field retype slice 3a (ADR §3.11 row 1): `fieldById` was loaded and validated against BEFORE the fence;
       // a conversion that held the fence may have retyped a touched field meanwhile. Re-read under FOR SHARE and
-      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the convert flag is 'true'.
+      // refuse 409 FIELD_SCHEMA_CHANGED before the first row lock. No query unless the conversion flag AND the writer fence are both on.
       await assertFieldSchemaUnchangedAfterFence(
         query,
         sheetId,

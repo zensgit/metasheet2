@@ -334,6 +334,7 @@ export function pruneHiddenFormDataWithDetail(
 export function validateDetailRows(
   formSchema: FormSchema,
   formData: Record<string, unknown>,
+  isZh: boolean,
 ): string[] {
   const violations: string[] = []
   for (const field of formSchema.fields) {
@@ -352,6 +353,10 @@ export function validateDetailRows(
         if (!visibleIds.has(column.id)) continue // hidden this row — can never be "missing"
         if (isRowDerivationActive(columns, column, row)) continue // read-only derived target
         if (isEmptyValue(row[column.id])) {
+          if (!isZh) {
+            violations.push(`"${fieldLabel}" row ${index + 1} is missing "${column.label || column.id}"`)
+            continue
+          }
           violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)
         }
       }
@@ -437,10 +442,15 @@ function matchOptionLabel(options: FormOption[] | undefined, value: unknown): st
  * but — unlike that helper — passes the raw value through unchanged when it doesn't parse as a
  * date, instead of surfacing the JS-internal "Invalid Date" string to the reader.
  */
-function formatDisplayDate(value: unknown): string {
+function formatDisplayDate(value: unknown, isZh = true): string {
   const raw = String(value)
   const parsed = new Date(raw)
-  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString('zh-CN')
+  return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString(isZh ? 'zh-CN' : 'en-US')
+}
+
+/** O-8 / F8-1: the list separator used when several display values share one cell. */
+function displayListSeparator(isZh: boolean): string {
+  return isZh ? '、' : ', '
 }
 
 /**
@@ -449,15 +459,15 @@ function formatDisplayDate(value: unknown): string {
  * Render those without calling the attachment refs endpoint. Opaque id arrays from the new pipeline
  * are NOT formatted here — they resolve through `attachmentRefs.ts` when the flag is ON.
  */
-export function formatLegacyAttachmentValue(value: unknown): string {
+export function formatLegacyAttachmentValue(value: unknown, isZh = true): string {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) {
     const parts = value
-      .map((entry) => formatLegacyAttachmentValue(entry))
+      .map((entry) => formatLegacyAttachmentValue(entry, isZh))
       .filter((part) => part && part !== '-')
-    return parts.length > 0 ? parts.join('、') : '-'
+    return parts.length > 0 ? parts.join(displayListSeparator(isZh)) : '-'
   }
   if (typeof value === 'object') {
     const obj = value as Record<string, unknown>
@@ -466,7 +476,7 @@ export function formatLegacyAttachmentValue(value: unknown): string {
       if (typeof candidate === 'string' && candidate.trim()) return candidate
     }
     // Avoid dumping "[object Object]" — a nameless legacy object still surfaces as a stable placeholder.
-    return '附件'
+    return isZh ? '附件' : 'Attachment'
   }
   return String(value)
 }
@@ -481,24 +491,24 @@ export function formatLegacyAttachmentValue(value: unknown): string {
  * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
  * string/object snapshots remain readable without the new refs endpoint.
  */
-function formatDisplayValue(field: FormField, value: unknown): string {
+function formatDisplayValue(field: FormField, value: unknown, isZh: boolean): string {
   if (value === null || value === undefined || value === '') return '-'
   switch (field.type) {
     case 'select':
       return matchOptionLabel(field.options, value)
     case 'multi-select': {
       const values = Array.isArray(value) ? value : [value]
-      return values.map((entry) => matchOptionLabel(field.options, entry)).join('、')
+      return values.map((entry) => matchOptionLabel(field.options, entry)).join(displayListSeparator(isZh))
     }
     case 'date':
     case 'datetime':
-      return formatDisplayDate(value)
+      return formatDisplayDate(value, isZh)
     case 'number': {
       const num = Number(value)
-      return Number.isFinite(num) ? num.toLocaleString('zh-CN') : String(value)
+      return Number.isFinite(num) ? num.toLocaleString(isZh ? 'zh-CN' : 'en-US') : String(value)
     }
     case 'attachment':
-      return formatLegacyAttachmentValue(value)
+      return formatLegacyAttachmentValue(value, isZh)
     case 'department': {
       if (!Array.isArray(value)) return '-'
       const showFullPath = field.props?.display === 'full_path'
@@ -508,7 +518,7 @@ function formatDisplayValue(field: FormField, value: unknown): string {
         const candidate = showFullPath ? record.fullPath : record.name
         return typeof candidate === 'string' && candidate.trim() ? [candidate.trim()] : []
       })
-      return labels.length > 0 ? labels.join('、') : '-'
+      return labels.length > 0 ? labels.join(displayListSeparator(isZh)) : '-'
     }
     case 'record-link': {
       // FWB-0 Layer 2: never echo raw recordId (no id oracle). Detail snapshots have no
@@ -516,7 +526,7 @@ function formatDisplayValue(field: FormField, value: unknown): string {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const recordId = (value as { recordId?: unknown }).recordId
         if (typeof recordId === 'string' && recordId.trim()) {
-          return formatRecordLinkDisplay(null)
+          return formatRecordLinkDisplay(null, isZh)
         }
       }
       return '-'
@@ -528,7 +538,7 @@ function formatDisplayValue(field: FormField, value: unknown): string {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
         const { start, end } = value as { start?: unknown; end?: unknown }
         if (start !== undefined && end !== undefined) {
-          return `${formatDisplayDate(start)} ~ ${formatDisplayDate(end)}`
+          return `${formatDisplayDate(start, isZh)} ~ ${formatDisplayDate(end, isZh)}`
         }
       }
       return '-'
@@ -557,6 +567,12 @@ export interface BuildDisplayFieldsOptions {
    * string/object snapshot values still render inline without calling the new endpoint.
    */
   attachmentPipelineEnabled?: boolean
+  /**
+   * O-8 / F8-1: shell locale for value formatting (list separators, dates, numbers, the legacy
+   * attachment placeholder). Defaults to zh-CN so the not-yet-converted authoring callers (F8-3)
+   * keep today's output; the member surfaces pass `useLocale().isZh`.
+   */
+  isZh?: boolean
 }
 
 export function buildDisplayFields(
@@ -569,6 +585,7 @@ export function buildDisplayFields(
   const knownFieldIds = new Set(fields.map((field) => field.id))
   const result: DisplayField[] = []
   const pipelineOn = options.attachmentPipelineEnabled === true
+  const isZh = options.isZh ?? true
   // Lock-8 L8-A (§1.1, OD-L8-2/OD-L8-3): explanation carries no formSnapshot value at all (A-1),
   // so "is this field's id a snapshot key" — the test every OTHER arm below uses — is never true
   // for it and can't gate its render. Its visibility must instead be evaluated directly against
@@ -596,7 +613,7 @@ export function buildDisplayFields(
     result.push({
       key: field.id,
       label: field.label || field.id,
-      value: formatDisplayValue(field, snapshot[field.id]),
+      value: formatDisplayValue(field, snapshot[field.id], isZh),
     })
   }
 
@@ -624,6 +641,7 @@ export function summaryFields(
   formSchema: FormSchema | null | undefined,
   formSnapshot: Record<string, unknown> | null | undefined,
   limit = 3,
+  isZh = true,
 ): DisplayField[] {
   const fields = formSchema?.fields
   if (!Array.isArray(fields) || fields.length === 0) return []
@@ -637,7 +655,7 @@ export function summaryFields(
   )
   if (eligibleFieldIds.size === 0) return []
 
-  return buildDisplayFields(formSchema, formSnapshot)
+  return buildDisplayFields(formSchema, formSnapshot, { isZh })
     .filter((field) => eligibleFieldIds.has(field.key))
     .slice(0, limit)
 }
@@ -648,6 +666,6 @@ export function summaryFields(
  * single-line container with CSS `text-overflow: ellipsis`, so truncation stays purely visual
  * (never a substring cut here that could clip mid-character).
  */
-export function formatSummaryLine(fields: DisplayField[]): string {
-  return fields.map((field) => `${field.label}：${field.value}`).join(' · ')
+export function formatSummaryLine(fields: DisplayField[], isZh = true): string {
+  return fields.map((field) => (isZh ? `${field.label}：${field.value}` : `${field.label}: ${field.value}`)).join(' · ')
 }
