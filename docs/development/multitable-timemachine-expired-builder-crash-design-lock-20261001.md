@@ -1,0 +1,24 @@
+# Time Machine expired builder and process crash prerequisite
+
+Status: bounded existing D1/D2b/D7 residual implementation; Draft/HOLD. Main baseline `48ae5025a5f899de02efd511e7b7e2f2646049ce`; prerequisite PR #6195 head `e9d9095844d5cd112feaa60e00a75fb92738ab30` (runtime `dcd57c9c7af95605042138f24e1b418484f279da`). Its CI correction is separate and remains required.
+
+## Source-grounded gap
+
+D1 requires exact build-owner/fence abandonment and lease-safe source-pin cleanup; its fault matrix kills builders at upload/finalization. The later owner-confirmed manual capture contract deliberately preserves prepared retries within a live lease. `bindRecoveryArchiveManualCommand` rereads/rethrows failures, `lockOwner` rejects expired leases, and `claimRecoveryArchiveAbandonedObjectCleanup` requires an already abandoned generation. Current D2b fixtures directly update that status. Existing row guards support active-to-abandoned while preserving owner, fence and lease. An explicit expired-builder bridge closes this gap without changing within-lease retry behavior.
+
+## Minimal protocol
+
+Add one explicit authorized operation over the existing transaction seam. Snapshot server-owned scope, generation, source-vector hash and expected owner kind/id/fence. Acquire the canonical sheet fence, key row, existing writer-block admission and generation lock in existing order; recheck recovery authority. An exact CAS marks only `building/active/incomplete` with an actually expired lease as `abandoned`. Preserve owner, fence, lease, request/prepared payload, nonce and key-reference inventories; do not produce a provider receipt or release any pin. A competing renewal or finalization wins conservatively. Wrong scope, source vector, owner/fence or live lease refuses with values-free errors and zero mutation.
+
+Use the existing separate abandoned cleanup claim to advance owner/fence and its complete original-namespace inventory admission to drive cleanup. An early death before a prepared plan may be terminalized but remains ineligible for cleanup: unknown inventory never becomes evidence of absence. No provider or KMS IO occurs in a database transaction. Do not mark ordinary transient upload errors abandoned inside the manual-command catch.
+
+## Discriminating acceptance
+
+- Kill a real builder child after complete durable pre-PUT registration and successful LOCAL PUT, before the corresponding database receipt. Confirm active/incomplete state, source pins and provider bytes; wait for actual expiry, terminalize explicitly, claim with a newer cleanup fence and complete cleanup in a fresh process. Hot history remains intact and no prune runs.
+- Kill a real cleaner after durable provider absence confirmation but before its database terminal receipt. Confirm sealed staging and retained source pins, then let a fresh process claim after actual expiry and reconcile the same persisted operation UUID, namespace and binding. Release source pins only after every object has a terminal receipt; key references and nonce reservations remain unchanged.
+- Cover live-lease refusal, within-lease prepared retry/finalize positive, renewal/concurrent terminalization, tenant/scope/source-vector/owner/fence negatives, and stale builder/cleaner zero receipt/finalize/pin writes. Include namespace restart positive, ambiguous status retention and IO depth zero.
+- Mutation-check exact expiry/CAS and terminal receipt admission. Preserve cache-disabled focused/neighbor commands, realDB zero-skip census, child PID/barrier/kill/exit evidence and exact source correspondence. Existing required selectors and migration replay entries take the union.
+
+## Boundaries
+
+No new schema unless existing guards demonstrably cannot enforce this transition; never edit an existing migration. No route, scheduler, startup caller, automatic lease policy/renewal, flag, retention/provider default, remote IO or customer data. No verified/expired archive deletion, key-reference release/destruction, legacy inventory inference, physical erasure claim, NAS/power-loss proof, actual staging authorization or deployment. This is one local code/fault prerequisite; full D7 and the independent-provider/staging-KMS profile remain OPEN. Ordinary push and Draft/HOLD publication follow standing authorization; Ready and merge remain owner gated.
