@@ -22,6 +22,7 @@ import { apiFetch } from '../src/utils/api'
 import { createNetworkUnavailableError } from '../src/utils/networkErrors'
 import {
   buildPunchBasePayload,
+  buildPunchEvidencePayload,
   buildPunchRetryWithNotePayload,
   classifyPunchErrorOutcome,
   classifyPunchSuccessOutcome,
@@ -157,6 +158,21 @@ describe('Punch outcome clarity (pure)', () => {
     expect(outcome?.kind).toBe('noteRequired')
     expect(outcome?.code).toBe('OUTDOOR_NOTE_REQUIRED')
     expect(outcome?.showNoteRetry).toBe(true)
+    expect(outcome?.showPhotoRetry).toBe(false)
+  })
+
+  it('classifies OUTDOOR_PHOTO_REQUIRED and OUTDOOR_PHOTO_INVALID with the photo-retry affordance', () => {
+    const required = classifyPunchErrorOutcome({ status: 422, code: 'OUTDOOR_PHOTO_REQUIRED' }, tr)
+    expect(required?.kind).toBe('photoRequired')
+    expect(required?.code).toBe('OUTDOOR_PHOTO_REQUIRED')
+    expect(required?.showNoteRetry).toBe(false)
+    expect(required?.showPhotoRetry).toBe(true)
+    expect(required?.message).toContain('photo')
+
+    const invalid = classifyPunchErrorOutcome({ status: 422, code: ' outdoor_photo_invalid ' }, tr)
+    expect(invalid?.kind).toBe('photoInvalid')
+    expect(invalid?.showPhotoRetry).toBe(true)
+    expect(invalid?.message).toContain('rejected')
   })
 
   it('classifies LOCATION_RESTRICTED as a calibrated dead-end with no retry affordance', () => {
@@ -198,6 +214,22 @@ describe('Punch outcome clarity (pure)', () => {
       eventType: 'check_in',
       timezone: 'Asia/Shanghai',
       meta: { note: 'Client site visit' },
+    })
+    expect(payload).not.toHaveProperty('location')
+    expect(payload.meta).not.toHaveProperty('outdoor')
+  })
+
+  it('builds a photo retry payload with photoFileId and a previously entered note, and nothing else', () => {
+    const payload = buildPunchEvidencePayload(
+      { eventType: 'check_in', timezone: 'Asia/Shanghai', orgId: 'org-9' },
+      { note: '  on site  ', photoFileId: ' file-1 ' },
+    )
+    expect(payload).toEqual({
+      eventType: 'check_in',
+      timezone: 'Asia/Shanghai',
+      orgId: 'org-9',
+      photoFileId: 'file-1',
+      meta: { note: 'on site' },
     })
     expect(payload).not.toHaveProperty('location')
     expect(payload.meta).not.toHaveProperty('outdoor')
@@ -349,6 +381,85 @@ describe('Attendance punch outcome clarity (mount)', () => {
     })
     // Success clears the inline form (no stale note UI lingering).
     expect(container!.querySelector('#attendance-punch-outdoor-note')).toBeNull()
+  })
+
+  it('OUTDOOR_PHOTO_REQUIRED shows a photo picker; retry uploads then punches with photoFileId and the note', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    const punchCalls: Array<Record<string, unknown>> = []
+    const uploadBodies: unknown[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/files/upload')) {
+        uploadBodies.push((init as RequestInit | undefined)?.body)
+        return jsonResponse(200, { success: true, file: { id: 'photo-file-1' } })
+      }
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        const body = JSON.parse(String((init as RequestInit).body))
+        punchCalls.push(body)
+        if (punchCalls.length === 1) {
+          return jsonResponse(422, { ok: false, error: { code: 'OUTDOOR_NOTE_REQUIRED', message: '外勤打卡需填写备注' } })
+        }
+        if (punchCalls.length === 2) {
+          return jsonResponse(422, { ok: false, error: { code: 'OUTDOOR_PHOTO_REQUIRED', message: '外勤打卡需上传照片证据' } })
+        }
+        return jsonResponse(200, { ok: true, data: { pendingApproval: true } })
+      }
+      if (url.includes('/api/attendance/rules/me')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            runtimeRule: { timezone: 'Asia/Shanghai' },
+            punchPolicy: { outdoorPhotoRequired: true },
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-punch-photo-hint]')?.textContent).toContain('photo')
+
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    const noteInput = container!.querySelector<HTMLInputElement>('#attendance-punch-outdoor-note')
+    expect(noteInput).toBeTruthy()
+    noteInput!.value = 'Client site'
+    noteInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+    container!.querySelector<HTMLButtonElement>('[data-attendance-punch-note-retry]')!.click()
+    await flushUi(6)
+
+    expect(container!.textContent).toContain('Outdoor punch needs a photo')
+    const photoInput = container!.querySelector<HTMLInputElement>('[data-attendance-punch-photo-input]')
+    expect(photoInput).toBeTruthy()
+    const retryBeforeFile = container!.querySelector<HTMLButtonElement>('[data-attendance-punch-photo-retry]')
+    expect(retryBeforeFile!.disabled).toBe(true)
+
+    const file = new File([new Uint8Array([1, 2, 3])], 'evidence.png', { type: 'image/png' })
+    Object.defineProperty(photoInput!, 'files', { value: [file] })
+    photoInput!.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi(2)
+    const retry = container!.querySelector<HTMLButtonElement>('[data-attendance-punch-photo-retry]')
+    expect(retry!.disabled).toBe(false)
+    retry!.click()
+    await flushUi(8)
+
+    expect(uploadBodies).toHaveLength(1)
+    expect(uploadBodies[0]).toBeInstanceOf(FormData)
+    expect((uploadBodies[0] as FormData).get('file')).toBe(file)
+    expect(punchCalls).toHaveLength(3)
+    expect(punchCalls[2]).toEqual({
+      eventType: 'check_in',
+      timezone: punchCalls[0].timezone,
+      photoFileId: 'photo-file-1',
+      meta: { note: 'Client site' },
+    })
+    expect(punchCalls[2]).not.toHaveProperty('location')
+    expect(container!.querySelector('[data-attendance-punch-photo-form]')).toBeNull()
+    expect(container!.textContent).toContain('Outdoor punch submitted for approval')
   })
 
   it('G2: retry is user-initiated only — no automatic re-POST while the note form is open', async () => {

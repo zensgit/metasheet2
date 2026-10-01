@@ -329,21 +329,36 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     }
   })
 
-  it('requireApproval with no usable outdoor_punch flow → 422, writes nothing (bogus id AND empty+none)', async () => {
+  it('requireApproval with no usable outdoor_punch flow is refused on save, and punch still refuses if the flow disappears later', async () => {
     const u = `out-flow-${Date.now().toString(36)}`
     const t = await mintToken(u, 'attendance:read,attendance:write')
+    const outdoorApproval = async () => {
+      const got = await getSettings()
+      return (got.body as { data?: { punchPolicy?: { outdoor?: { requireApproval?: boolean } } } })?.data?.punchPolicy?.outdoor?.requireApproval
+    }
     try {
-      // bogus approvalFlowId
-      await setOutdoor({ requireApproval: true, approvalFlowId: '00000000-0000-4000-8000-000000000000' })
-      const r1 = await punch(t, { eventType: 'check_in', location: OUTSIDE })
-      expect(r1.status).toBe(422)
-      expect((r1.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
-      // empty id + no active outdoor flow
       await deleteOutdoorFlows()
-      await setOutdoor({ requireApproval: true, approvalFlowId: '' })
-      const r2 = await punch(t, { eventType: 'check_in', location: OUTSIDE })
-      expect(r2.status).toBe(422)
-      expect((r2.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+      const before = await outdoorApproval()
+      const bogus = await setOutdoor({ requireApproval: true, approvalFlowId: '00000000-0000-4000-8000-000000000000' })
+      expect(bogus.status).toBe(422)
+      expect((bogus.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+      expect(await outdoorApproval()).toBe(before)
+
+      const none = await setOutdoor({ requireApproval: true, approvalFlowId: '' })
+      expect(none.status).toBe(422)
+      expect((none.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+      expect(await outdoorApproval()).toBe(before)
+
+      const off = await setOutdoor({ requireApproval: false, approvalFlowId: '' })
+      expect(off.status).toBe(200)
+
+      await createOutdoorFlow()
+      const saved = await setOutdoor({ requireApproval: true, approvalFlowId: '' })
+      expect(saved.status).toBe(200)
+      await deleteOutdoorFlows()
+      const r = await punch(t, { eventType: 'check_in', location: OUTSIDE })
+      expect(r.status).toBe(422)
+      expect((r.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
       const c = await counts(u)
       expect(c.outdoorReqs).toHaveLength(0)
       expect(c.events).toHaveLength(0)
@@ -427,11 +442,20 @@ describeDb('② S3 outdoor punch approval (real DB, route-level)', () => {
     }
   })
 
-  it('P2: empty approvalFlowId requires a UNIQUE active outdoor flow; two active → 422, nothing written', async () => {
+  it('P2: empty approvalFlowId requires a UNIQUE active outdoor flow; two active refuses save, and punch still refuses if a second flow appears later', async () => {
     await deleteOutdoorFlows()
+    const flowA = await addOutdoorFlow()
     await addOutdoorFlow()
-    await addOutdoorFlow() // two active outdoor_punch flows → ambiguous
-    await setOutdoor({ requireApproval: true, approvalFlowId: '' })
+    const refused = await setOutdoor({ requireApproval: true, approvalFlowId: '' })
+    expect(refused.status).toBe(422)
+    expect((refused.body as { error?: { code?: string } })?.error?.code).toBe('OUTDOOR_APPROVAL_FLOW_REQUIRED')
+    const explicit = await setOutdoor({ requireApproval: true, approvalFlowId: flowA })
+    expect(explicit.status).toBe(200)
+
+    await deleteOutdoorFlows()
+    await createOutdoorFlow()
+    expect((await setOutdoor({ requireApproval: true, approvalFlowId: '' })).status).toBe(200)
+    await addOutdoorFlow()
     const u = `out-amb-${Date.now().toString(36)}`
     const t = await mintToken(u, 'attendance:read,attendance:write')
     try {

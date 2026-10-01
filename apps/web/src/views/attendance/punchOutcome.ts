@@ -24,8 +24,9 @@
 //
 // Hard boundaries (carried over from the design-lock, enforced by the caller):
 // no geolocation collection, no injected `meta.outdoor` marker, no new/changed
-// backend behavior. The only extra field this module ever adds to a retry
-// payload is the already-accepted `meta.note` string.
+// backend behavior. A retry may add the already-accepted `meta.note` string
+// and, for OUTDOOR_PHOTO_REQUIRED / OUTDOOR_PHOTO_INVALID, the already-accepted
+// top-level `photoFileId` (a files-row id from POST /api/files/upload).
 
 import { normalizeAttendanceTimeZone } from './attendanceDateTimePresentation'
 
@@ -89,7 +90,7 @@ export interface PunchErrorInput {
   code?: string
 }
 
-export type PunchErrorOutcomeKind = 'noteRequired' | 'locationRestricted'
+export type PunchErrorOutcomeKind = 'noteRequired' | 'photoRequired' | 'photoInvalid' | 'locationRestricted'
 
 export interface PunchErrorOutcome {
   kind: PunchErrorOutcomeKind
@@ -98,6 +99,8 @@ export interface PunchErrorOutcome {
   code: string
   /** Whether the caller should show the inline outdoor-note input + one-click retry affordance. */
   showNoteRetry: boolean
+  /** Whether the caller should show the outdoor-photo picker and upload-then-retry affordance. */
+  showPhotoRetry: boolean
 }
 
 /**
@@ -120,6 +123,31 @@ export function classifyPunchErrorOutcome(
       ),
       code: 'OUTDOOR_NOTE_REQUIRED',
       showNoteRetry: true,
+      showPhotoRetry: false,
+    }
+  }
+  if (code === 'OUTDOOR_PHOTO_REQUIRED') {
+    return {
+      kind: 'photoRequired',
+      message: tr(
+        'Outdoor punch needs a photo. Choose an image below; it will be uploaded and the punch retried.',
+        '外勤打卡需要照片。请在下方选择图片，上传后将重试打卡。',
+      ),
+      code: 'OUTDOOR_PHOTO_REQUIRED',
+      showNoteRetry: false,
+      showPhotoRetry: true,
+    }
+  }
+  if (code === 'OUTDOOR_PHOTO_INVALID') {
+    return {
+      kind: 'photoInvalid',
+      message: tr(
+        'That outdoor punch photo was rejected. Choose an image file and retry.',
+        '外勤打卡照片未通过校验。请另选一张图片后重试。',
+      ),
+      code: 'OUTDOOR_PHOTO_INVALID',
+      showNoteRetry: false,
+      showPhotoRetry: true,
     }
   }
   if (code === 'LOCATION_RESTRICTED') {
@@ -131,6 +159,7 @@ export function classifyPunchErrorOutcome(
       ),
       code: 'LOCATION_RESTRICTED',
       showNoteRetry: false,
+      showPhotoRetry: false,
     }
   }
   return null
@@ -167,6 +196,34 @@ export function buildPunchBasePayload(
  * string — nothing else (no `location`, no `meta.outdoor`). Pure so the exact
  * wire shape is unit-testable without a network mock.
  */
+export interface PunchEvidenceExtras {
+  note?: string
+  photoFileId?: string
+}
+
+export interface PunchRetryWithEvidencePayload extends PunchRetryBasePayload {
+  photoFileId?: string
+  meta?: { note: string }
+}
+
+/**
+ * Retry payload for an outdoor evidence follow-up. Adds only fields the punch
+ * schema already accepts: `meta.note` and top-level `photoFileId`. Never adds
+ * `location` or `meta.outdoor`.
+ */
+export function buildPunchEvidencePayload(
+  base: PunchRetryBasePayload,
+  extras: PunchEvidenceExtras,
+): PunchRetryWithNotePayload | PunchRetryWithEvidencePayload {
+  const note = typeof extras.note === 'string' ? extras.note.trim() : ''
+  const photoFileId = typeof extras.photoFileId === 'string' ? extras.photoFileId.trim() : ''
+  return {
+    ...base,
+    ...(photoFileId ? { photoFileId } : {}),
+    ...(note ? { meta: { note } } : {}),
+  }
+}
+
 export function buildPunchRetryWithNotePayload(
   base: PunchRetryBasePayload,
   note: string,
