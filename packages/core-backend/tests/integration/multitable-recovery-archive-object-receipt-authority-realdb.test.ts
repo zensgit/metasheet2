@@ -334,10 +334,14 @@ async function finalizeArchiveWithVerifiedObjects(
 async function truncateArchiveState(): Promise<void> {
   if (!schemaIsUp) return
   const reservationTable = await q(
-    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_snapshot_reservations') IS NOT NULL AS present`,
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_snapshot_reservations') IS NOT NULL AS present,
+            pg_catalog.to_regclass('public.meta_recovery_archive_object_deletions') IS NOT NULL AS deletion_present`,
   )
   const reservationTarget = reservationTable.rows[0]?.present
     ? 'meta_recovery_archive_snapshot_reservations,'
+    : ''
+  const deletionTarget = reservationTable.rows[0]?.deletion_present
+    ? 'meta_recovery_archive_object_deletions,'
     : ''
   const markerTable = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_section_bootstrap_markers') IS NOT NULL AS present`,
@@ -374,6 +378,7 @@ async function truncateArchiveState(): Promise<void> {
     await client.query(
       `TRUNCATE TABLE
          ${restoreJobTargets}
+         ${deletionTarget}
          meta_recovery_archive_objects,
          ${reservationTarget}
          ${markerTarget}

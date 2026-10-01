@@ -346,9 +346,13 @@ async function truncateCatalog(): Promise<void> {
     ? 'meta_recovery_archive_snapshot_reservations,'
     : ''
   const objectTable = await q(
-    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present,
+            pg_catalog.to_regclass('public.meta_recovery_archive_object_deletions') IS NOT NULL AS deletion_present`,
   )
   const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
+  const deletionTarget = objectTable.rows[0]?.deletion_present
+    ? 'meta_recovery_archive_object_deletions,'
+    : ''
   const legalHoldTable = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
   )
@@ -375,6 +379,7 @@ async function truncateCatalog(): Promise<void> {
     await q(
       `TRUNCATE TABLE
          ${restoreJobTargets}
+         ${deletionTarget}
          ${objectTarget}
          ${reservationTarget}
          meta_recovery_archive_staging_objects,
@@ -392,6 +397,7 @@ async function truncateCatalog(): Promise<void> {
     await client.query(
       `TRUNCATE TABLE
          ${restoreJobTargets}
+         ${deletionTarget}
          ${objectTarget}
          ${reservationTarget}
          meta_recovery_archive_staging_objects,
