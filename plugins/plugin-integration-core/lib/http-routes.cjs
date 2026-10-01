@@ -666,6 +666,7 @@ const {
 const {
   StockPreparationOperatorScopeError,
   resolveOperatorValueScope,
+  resolveProvenOwnTenant,
 } = require('./stock-preparation-operator-scope.cjs')
 // #3751 MVP W3 (diff rows): route-level enum gates for the diff-row filters come from the SAME frozen
 // vocabularies the engine exports (never re-typed literals).
@@ -7019,6 +7020,49 @@ function requireStockPreparationAudit() {
     // point of check 7 is to compare the source against what this deployment will actually run. An
     // unconfigured deployment falls back to the shipped default plan and still gets a useful answer —
     // reachability, data presence and detected shape do not depend on the comparison.
+    //
+    // TENANT: PROVEN, RESOLVED ONCE, BEFORE ANYTHING IS LOOKED AT.
+    //
+    // The lookup below used to be `getTableAction({ actionId })` — no tenant. With the persisted
+    // binding store wired (index.cjs wires it wherever there is a SQL db) the registry refuses a
+    // tenant-less lookup, the blanket `catch` that stood here turned that refusal into "not
+    // configured", and because neither web entry point sends `externalSystemId` the route answered
+    // 409 SOURCE_PREFLIGHT_NO_SOURCE to the binding owner and to everyone else, before it loaded
+    // anything.
+    //
+    // Giving the lookup a tenant means choosing which one, and the one this route already used for
+    // its load — `resolveTenantId`, through `scopedAdapterInput` — is not good enough for what this
+    // route returns. The report is NOT values-free: `checks.projectData.livenessSamples` carries up
+    // to two observed project numbers. `resolveTenantId` accepts `user.tenantId`, which the host
+    // fills from the `x-tenant-id` REQUEST HEADER for a claimless token, and it lets a tenantless
+    // platform admin name `?tenantId=`. Resolving the BOUND source under that tenant would have
+    // turned "you must already know another tenant's source id" into "you need only name the
+    // tenant".
+    //
+    // So the tenant is PROVEN, with the proof every value-bearing stock-prep read already uses:
+    // `resolveProvenOwnTenant` (stock-preparation-operator-scope.cjs, the tenant half of
+    // `resolveOperatorValueScope`, without its stock-prep tier). It prefers the verified token claim
+    // and refuses a carried tenant that contradicts it; a principal with no tenant of its own is
+    // refused; a tenant named in the request that is not the principal's is refused; and the HOST
+    // must vouch, through its membership directory, that this principal belongs to that tenant.
+    // A claimless token whose header names a tenant is therefore served only for a tenant the host
+    // says the principal is a member of, and refused for any other — before any lookup, with a
+    // refusal that does not depend on whether the named tenant has a source, has nothing, or does
+    // not exist. With no directory wired the route refuses (501); it never falls back to the header.
+    //
+    // WHY THE PROOF AND NOT THE SCOPE. The scope's first check is a stock-prep tier, and this route
+    // is deliberately NOT in that namespace (see the route table): the tier check would refuse the
+    // `integration:read` holders the route exists for. `requireAccess(req, 'read')` stays the only
+    // permission gate; the proof grants nothing and only decides WHICH tenant.
+    //
+    // THE STAGED CLAIM DOOR (MULTITABLE_STOCK_PREP_TENANT_CLAIM_REQUIRED, default off) is checked
+    // right after the proof. It is a no-op while the flag is off. With it on, the load below would
+    // already refuse a claimless caller through `resolveTenantId`; checking it here moves that
+    // refusal in front of the lookup instead of after it, so no refusal on this route costs a lookup.
+    //
+    // ONE VALUE. The lookup, the binding peek and the load all take `tenantId` from here. The scoped
+    // helpers below still run their own resolver, but they are handed this value first, so they can
+    // agree with it or refuse — never pick another.
     async stockPreparationSourcePreflight(req, res) {
       requireAccess(req, 'read')
       const input = normalizeStockPreparationConfirmBody(
@@ -7026,14 +7070,51 @@ function requireStockPreparationAudit() {
         VALID_STOCK_PREPARATION_SOURCE_PREFLIGHT_QUERY_KEYS,
         'STOCK_PREPARATION_SOURCE_PREFLIGHT_REQUEST_INVALID',
       )
+      const { tenantId } = await resolveProvenOwnTenant({
+        user: getUser(req),
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, input),
+        tenantPrincipalDirectory,
+      })
+      assertVerifiedTenantClaim(req, tenantId)
+      const workspaceId = resolveWorkspaceId(req, input)
 
-      // Server config, never a request input. An unconfigured deployment throws here — that is the
-      // "not plugged in yet" state, and it must degrade to the default plan rather than 5xx the whole
-      // check, exactly as the hub overview treats the same throw.
+      // Server config plus this tenant's persisted binding, never a request input. An unconfigured
+      // deployment throws TABLE_ACTION_NOT_CONFIGURED — that is the "not plugged in yet" state, and
+      // it must degrade to the default plan rather than 5xx the whole check.
+      //
+      // ONLY that state degrades. Anything else — the binding store could not answer, a stored
+      // binding did not normalize — used to be swallowed here too, which is how the tenant-less
+      // lookup went unnoticed, and which would measure a source against the DEFAULT plan while the
+      // pull runs the configured one. It is refused instead, with one fixed sentence: the store's
+      // own text can name a host or a login, so it goes nowhere, and the log gets one closed word.
       let action = null
       try {
-        action = await tableActions.getTableAction({ actionId: PLM_STOCK_PREPARATION_ACTION_ID })
-      } catch {
+        action = await tableActions.getTableAction({ tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+      } catch (error) {
+        const notConfigured = error instanceof StockPreparationTableActionError
+          && error.code === 'TABLE_ACTION_NOT_CONFIGURED'
+        if (!notConfigured) {
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            try {
+              routeLogger.warn(
+                '[plugin-integration-core] stock-prep source preflight could not resolve its source binding',
+                {
+                  reason: error instanceof StockPreparationTableActionError
+                    ? error.code
+                    : loggableRouteFailureCode(error),
+                },
+              )
+            } catch {
+              // A broken logger must not change the refusal.
+            }
+          }
+          throw new HttpRouteError(
+            503,
+            'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE',
+            'the source this deployment is bound to could not be resolved, so nothing was checked',
+          )
+        }
         action = null
       }
       const configuredSystemId = action && action.source ? firstString(action.source.externalSystemId) : undefined
@@ -7066,7 +7147,9 @@ function requireStockPreparationAudit() {
       }
 
       const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId }))
+      // The REQUESTER's identity, as before: this route borrows nobody's. Whether a non-owner may
+      // read through the binding owner is an open owner decision and is not taken here.
+      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId, tenantId }))
       const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
       if (!adapter || typeof adapter.read !== 'function') {
         throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
@@ -7078,7 +7161,7 @@ function requireStockPreparationAudit() {
       // the guard accessor that decrypts nothing, and reduced to a boolean plus two closed
       // vocabulary words before it goes anywhere near the report.
       const pullDelegation = describeTableActionReadDelegation(
-        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId })),
+        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId, tenantId })),
       )
 
       try {

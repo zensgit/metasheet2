@@ -84,6 +84,33 @@ export interface UnifiedApprovalDTO {
    */
   canDecideCurrentNode?: boolean
   /**
+   * May THIS viewer stage process evidence (过程附件) on the comment action of this instance right
+   * now? Server-resolved per viewer as the conjunction of two existing answers from
+   * `approval-seat-authorization.ts` — `decisionDoorIsSeatGated(instance)` AND
+   * `resolveCanDecideCurrentNode(...)` — and nothing else.
+   *
+   * WHY NOT `canDecideCurrentNode` ITSELF: that field reports `true` for a pending instance whose
+   * decisions do not go through the seat-gated door (a legacy platform row with no published
+   * definition, a `plm:` mirror, an after-sales row), because there is no seat predicate to mirror
+   * there. Process evidence is bound only by the template-runtime dispatch (the comment action's
+   * `attachmentIds` rider), so on those instances an uploader would be an affordance nothing can
+   * complete. The first conjunct removes exactly that case; the second is the door's own seat
+   * answer, so USER seats, ROLE seats, delegated seats and the pending branch frontier of a
+   * parallel region are covered the same way the door covers them.
+   *
+   * `false` when the instance is not pending, when no viewer identity was supplied, when the
+   * viewer holds no matching active seat at a decidable node key, and on every instance whose
+   * decisions do not go through the seat-gated door.
+   *
+   * Independent of the attachments feature flag: the value says who holds the seat, not whether
+   * the pipeline is on. Clients gate the uploader on the flag AND this field. Presentation only —
+   * the upload route's own seat check and the bind-time 403 `APPROVAL_ASSIGNMENT_REQUIRED` remain
+   * the authority. ABSENT means "this backend does not compute it" (an older server); unlike
+   * `canDecideCurrentNode` there is no wider prior behaviour worth restoring, so clients read
+   * absence as "no uploader".
+   */
+  canAttachProcessEvidence?: boolean
+  /**
    * Parallel gateway (并行分支) — populated only when the instance is in a
    * parallel region (length ≥ 2). Absent on linear state; callers that don't
    * care about parallelism keep using `currentNodeKey` unchanged.

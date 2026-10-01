@@ -68,7 +68,41 @@
               {{ advancedFilterCount }}
             </span>
           </el-button>
+          <!-- F3-E1: server-side CSV export of the list on screen (current tab + applied filters).
+               Desktop chrome only, like the batch toolbar below: the mobile action set (ballot Q8)
+               is approve/reject/comment/initiate. Disabled for the PLM source, which the server
+               refuses for CSV; the reason is the visible hint line right under this row, not a
+               hover-only tooltip (a disabled button does not fire one). -->
+          <el-button
+            v-if="!isMobileLayout"
+            class="approval-center__export-button"
+            :disabled="exportDisabled"
+            :loading="exporting"
+            aria-describedby="approval-center-export-hint"
+            data-testid="approval-export-csv"
+            @click="handleExportCsv"
+          >
+            {{ exportCopy.button }}
+          </el-button>
       </div>
+      <p
+        v-if="!isMobileLayout"
+        id="approval-center-export-hint"
+        class="approval-center__export-hint"
+        data-testid="approval-export-hint"
+      >
+        {{ exportPlmBlocked ? exportCopy.plmBlocked : exportCopy.scopeHint }}
+      </p>
+      <p
+        v-if="!isMobileLayout && exportNotice"
+        class="approval-center__export-notice"
+        :class="`approval-center__export-notice--${exportNotice.tone}`"
+        :role="exportNotice.tone === 'error' ? 'alert' : 'status'"
+        :data-export-outcome="exportNotice.kind"
+        data-testid="approval-export-notice"
+      >
+        {{ exportNotice.text }}
+      </p>
 
       <div v-show="filtersExpanded" class="approval-center__filters-advanced">
           <el-select
@@ -582,7 +616,10 @@
       data-testid="approval-batch-result-dialog"
     >
       <p class="approval-center__batch-result-summary">
-        <template v-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
+        <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
+             counted on its own — it is not a failure (the row's own line says to refresh and check). -->
+        <template v-if="batchUnconfirmedCount > 0">成功 {{ batchSucceededCount }} 项，已提交但未能确认 {{ batchUnconfirmedCount }} 项，失败 {{ batchTrueFailureCount }} 项：</template>
+        <template v-else-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
         <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
       </p>
       <ul class="approval-center__batch-result-list">
@@ -590,6 +627,7 @@
           v-for="row in batchFailureRows"
           :key="row.id"
           class="approval-center__batch-result-item"
+          :data-batch-result-kind="row.unconfirmed ? 'unconfirmed' : 'failed'"
         >
           <div class="approval-center__batch-result-item-title">{{ row.requestNo }} · {{ row.title }}</div>
           <div class="approval-center__batch-result-item-message">{{ row.message }}</div>
@@ -597,9 +635,12 @@
       </ul>
       <template #footer>
         <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <!-- 撤销轮: an accepted-but-unconfirmed row is not a failure, so it is never retried; with no true
+             failure left the button is disabled. -->
         <el-button
           type="primary"
           :loading="batchRunning"
+          :disabled="batchTrueFailureCount === 0"
           data-testid="approval-batch-retry"
           @click="retryBatchFailures"
         >
@@ -618,9 +659,29 @@ import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
+import {
+  APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+  ApprovalApiError,
+  dispatchAction,
+  exportApprovalsCsv,
+  getApproval,
+  getPendingCount,
+  markAllApprovalsRead,
+  remindApproval,
+  listTemplates,
+  type ApprovalCsvExportResult,
+  type ApprovalExportQuery,
+} from '../../approvals/api'
+import { isNetworkUnavailableError, networkUnavailableMessage } from '../../utils/networkErrors'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
+import {
+  canDecideCancelRoundWith,
+  dispatchApprovalDecision,
+  isCancelRoundActedRoundUnconfirmed,
+  isCancelRoundClientRefusal,
+  isCancelRoundWorkflow,
+} from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
@@ -638,7 +699,7 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useApprovalStore()
-const { canWrite } = useApprovalPermissions()
+const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 
 // B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
 // shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
@@ -879,8 +940,12 @@ function waitClass(createdAt: string): string {
 function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
   return row.currentNodeType === 'handler'
 }
+// 撤销轮 rows decide through the attendance route, so their approve / reject affordances (inline,
+// pane, batch) follow the grant that route checks (`canDecideCancelRoundWith`) — the same predicate
+// the detail view uses. Display only; the route remains the authority.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
+    && (!isCancelRoundWorkflow(row) || canDecideCancelRoundWith(approvalAccess?.value))
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
@@ -914,15 +979,22 @@ interface ApprovalBatchFailureRow {
   title: string
   requestNo: string
   message: string
+  /** 撤销轮: accepted by the server, but not confirmed to be the round on screen — not a failure. */
+  unconfirmed: boolean
 }
 const batchResultDialogVisible = ref(false)
 const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
+const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
+const batchTrueFailureCount = computed(() => batchFailureRows.value.length - batchUnconfirmedCount.value)
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
 
-function buildFailureRows(failed: ApprovalBatchActionResult['failed']): ApprovalBatchFailureRow[] {
+function buildFailureRows(
+  failed: ApprovalBatchActionResult['failed'],
+  unconfirmedIds: ReadonlySet<string>,
+): ApprovalBatchFailureRow[] {
   return failed.map(({ id, message }) => {
     const row = batchRowSnapshot.get(id)
     return {
@@ -930,6 +1002,7 @@ function buildFailureRows(failed: ApprovalBatchActionResult['failed']): Approval
       title: row?.title ?? id,
       requestNo: row?.requestNo ?? '-',
       message,
+      unconfirmed: unconfirmedIds.has(id),
     }
   })
 }
@@ -938,14 +1011,30 @@ async function dispatchBatchAndHandleResult(
   ids: string[],
   action: 'approve' | 'reject',
   comment: string,
+  // 撤销轮: accepted-but-unconfirmed rows from the previous pass — not re-sent, kept in the manifest.
+  carriedUnconfirmed: ApprovalBatchFailureRow[] = [],
 ): Promise<void> {
   const trimmed = comment.trim()
+  const unconfirmedIds = new Set<string>()
   const result = await runApprovalBatchAction(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
-    (id, req) => dispatchAction(id, req),
+    // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
+    // at launch carries each row's workflowKey / businessKey for that decision. Every id comes from
+    // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
+    async (id, req) => {
+      const row = batchRowSnapshot.get(id)
+      if (!row) throw new Error('操作失败，请刷新后重试')
+      try {
+        return await dispatchApprovalDecision(row, req, dispatchAction)
+      } catch (error) {
+        // accepted but not confirmed to be this row's round: still listed, counted apart from failures
+        if (isCancelRoundActedRoundUnconfirmed(error)) unconfirmedIds.add(id)
+        throw error
+      }
+    },
   )
-  if (result.failed.length === 0) {
+  if (result.failed.length === 0 && carriedUnconfirmed.length === 0) {
     ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
     batchResultDialogVisible.value = false
     batchFailureRows.value = []
@@ -955,7 +1044,7 @@ async function dispatchBatchAndHandleResult(
     lastBatchAction.value = action
     lastBatchComment.value = comment
     batchSucceededCount.value = result.succeeded.length
-    batchFailureRows.value = buildFailureRows(result.failed)
+    batchFailureRows.value = [...carriedUnconfirmed, ...buildFailureRows(result.failed, unconfirmedIds)]
     batchResultDialogVisible.value = true
   }
   clearPendingSelection()
@@ -980,14 +1069,17 @@ async function runBatch(action: 'approve' | 'reject', comment: string): Promise<
 // `batchRowSnapshot` already carries these rows' title/requestNo from the original launch, so a
 // still-failing row keeps its label; `dispatchBatchAndHandleResult` overwrites `batchFailureRows`
 // in place with whatever is left (or closes the dialog on full success).
+// 撤销轮: a row the server accepted but the page could not confirm is not a failure — it is not
+// re-sent, and it stays in the manifest (with its own "refresh and check" line) after the retry.
 async function retryBatchFailures(): Promise<void> {
   if (batchRunning.value) return
-  const ids = batchFailureRows.value.map((row) => row.id)
+  const ids = batchFailureRows.value.filter((row) => !row.unconfirmed).map((row) => row.id)
   if (ids.length === 0) return
+  const carried = batchFailureRows.value.filter((row) => row.unconfirmed)
   batchRunning.value = true
   batchAction.value = lastBatchAction.value
   try {
-    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value)
+    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value, carried)
   } finally {
     batchRunning.value = false
     batchAction.value = null
@@ -1051,11 +1143,13 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
   if (inlineApprovingId.value) return
   inlineApprovingId.value = row.id
   try {
-    await dispatchAction(row.id, { action: 'approve' })
+    await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
     ElMessage.success('审批已通过')
     loadCurrentTab()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+    // 撤销轮: the row was not (or could not be confirmed as) the leave's pending round — reload the list.
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     inlineApprovingId.value = null
   }
@@ -1090,7 +1184,7 @@ async function submitRowReject(): Promise<void> {
   rowRejectSubmitting.value = true
   rowRejectError.value = null
   try {
-    await dispatchAction(target.id, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' })
+    await dispatchApprovalDecision(target, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' }, dispatchAction)
     ElMessage.success('审批已驳回')
     rowRejectDialogVisible.value = false
     loadCurrentTab()
@@ -1098,6 +1192,7 @@ async function submitRowReject(): Promise<void> {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
     rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     rowRejectSubmitting.value = false
   }
@@ -1249,6 +1344,155 @@ const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRan
 const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
 
 // ---------------------------------------------------------------------------
+// F3-E1: 导出 CSV
+// ---------------------------------------------------------------------------
+// What the list on screen was LAST LOADED with: the tab plus its filters, no paging. Written only
+// by `loadCurrentTab()` — the one place every list reload passes through — so an export always asks
+// the server for the feed the user is looking at. Reading the filter refs live would not: the
+// search box, for one, reaches the list only on Enter / clear, so a half-typed term would narrow
+// the export to something the list is not showing.
+const appliedListFilters = ref<ApprovalExportQuery | null>(null)
+
+// The server refuses `format=csv` for the PLM source (400); the button is disabled up front so the
+// user gets the reason before clicking rather than an error after.
+const exportPlmBlocked = computed(() => appliedListFilters.value?.sourceSystem === 'plm')
+const exportDisabled = computed(() => exportPlmBlocked.value || appliedListFilters.value === null)
+const exporting = ref(false)
+
+// The outcome is stored as DATA (kind + the numbers the server reported), never as finished text,
+// so the notice follows a runtime locale switch like every other string in `exportCopy`.
+type ApprovalExportOutcome =
+  | { kind: 'complete'; rowCount: number }
+  | { kind: 'capped'; rowCount: number | null; rowLimit: number | null }
+  // The export headers could not be read. NOT the same as "complete": the file may be cut short
+  // and this page has no way to tell, so it says exactly that.
+  | { kind: 'unknown' }
+  | { kind: 'failed'; reason: 'plm' | 'unexpected' | 'forbidden' | 'network' | 'status' | 'other'; status?: number }
+const exportOutcome = ref<ApprovalExportOutcome | null>(null)
+
+// Same construct as `tabEmptyText` above (an `isZh` branch returning a table) — the only copy this
+// slice adds; the rest of this view's hardcoded chrome is converted separately.
+const exportCopy = computed(() => {
+  if (isZh.value) {
+    return {
+      button: '导出 CSV',
+      scopeHint: '导出当前标签页与已应用筛选下、你可以打开详情的审批；PLM 来源的审批不在导出范围内。单次导出有行数上限，导出行数可能少于列表显示的总数。',
+      plmBlocked: 'PLM 来源的审批不支持导出 CSV。请把来源筛选切换为全部来源或平台审批后再导出。',
+      complete: (rows: number) => (rows === 0
+        ? '没有可导出的审批，已下载的文件只包含表头。'
+        : `已导出 ${rows} 行。`),
+      capped: (rows: number | null, limit: number | null) => [
+        rows === null ? '文件已下载，但不完整：' : `已导出 ${rows} 行，但文件不完整：`,
+        limit === null ? '符合条件的审批超过了单次导出的行数上限。' : `符合条件的审批超过了单次导出上限（${limit} 行）。`,
+        '请缩小筛选范围后分批导出。',
+      ].join(''),
+      unknown: '文件已下载，但未能读取服务器返回的行数与截断标记，无法确认文件是否完整。',
+      failedForbidden: '导出失败：当前账号没有导出审批的权限。',
+      failedUnexpected: '导出失败：服务器没有返回 CSV 文件，未保存任何内容。',
+      failedStatus: (status: number) => `导出失败（HTTP ${status}），未保存任何内容，请稍后重试。`,
+      failedOther: '导出失败，未保存任何内容，请稍后重试。',
+    }
+  }
+  return {
+    button: 'Export CSV',
+    scopeHint: 'Exports the approvals in the current tab and applied filters that you can open; PLM-sourced approvals are not included. Each export has a row limit, so the file may hold fewer rows than the total the list shows.',
+    plmBlocked: 'PLM-sourced approvals cannot be exported to CSV. Switch the source filter to all sources or platform approvals to export.',
+    complete: (rows: number) => (rows === 0
+      ? 'Nothing to export: the downloaded file contains the header row only.'
+      : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}.`),
+    capped: (rows: number | null, limit: number | null) => [
+      rows === null ? 'The file was downloaded but is incomplete: ' : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}, but the file is incomplete: `,
+      limit === null ? 'the matching approvals exceed the per-export row limit. ' : `the matching approvals exceed the per-export limit of ${limit} rows. `,
+      'Narrow the filters and export in batches.',
+    ].join(''),
+    unknown: 'The file was downloaded, but the row count and truncation flag returned by the server could not be read, so it cannot be confirmed that the file is complete.',
+    failedForbidden: 'Export failed: this account is not allowed to export approvals.',
+    failedUnexpected: 'Export failed: the server did not return a CSV file. Nothing was saved.',
+    failedStatus: (status: number) => `Export failed (HTTP ${status}). Nothing was saved; please try again later.`,
+    failedOther: 'Export failed. Nothing was saved; please try again later.',
+  }
+})
+
+const exportNotice = computed<{ kind: ApprovalExportOutcome['kind']; tone: 'success' | 'warning' | 'error'; text: string } | null>(() => {
+  const outcome = exportOutcome.value
+  if (!outcome) return null
+  const copy = exportCopy.value
+  switch (outcome.kind) {
+    case 'complete':
+      return { kind: outcome.kind, tone: 'success', text: copy.complete(outcome.rowCount) }
+    case 'capped':
+      return { kind: outcome.kind, tone: 'warning', text: copy.capped(outcome.rowCount, outcome.rowLimit) }
+    case 'unknown':
+      return { kind: outcome.kind, tone: 'warning', text: copy.unknown }
+    case 'failed': {
+      const text = outcome.reason === 'plm' ? copy.plmBlocked
+        : outcome.reason === 'unexpected' ? copy.failedUnexpected
+        : outcome.reason === 'forbidden' ? copy.failedForbidden
+        : outcome.reason === 'network' ? networkUnavailableMessage(isZh.value)
+        : outcome.reason === 'status' && outcome.status !== undefined ? copy.failedStatus(outcome.status)
+        : copy.failedOther
+      return { kind: outcome.kind, tone: 'error', text }
+    }
+  }
+})
+
+function exportOutcomeOf(result: ApprovalCsvExportResult): ApprovalExportOutcome {
+  if (result.capped === true) {
+    return { kind: 'capped', rowCount: result.rowCount, rowLimit: result.rowLimit ?? result.rowCap }
+  }
+  if (result.capped === false && result.rowCount !== null) {
+    return { kind: 'complete', rowCount: result.rowCount }
+  }
+  return { kind: 'unknown' }
+}
+
+function exportFailureOf(error: unknown): ApprovalExportOutcome {
+  if (isNetworkUnavailableError(error)) return { kind: 'failed', reason: 'network' }
+  if (error instanceof ApprovalApiError) {
+    if (error.code === APPROVAL_EXPORT_UNEXPECTED_RESPONSE) return { kind: 'failed', reason: 'unexpected' }
+    if (error.code === 'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED') return { kind: 'failed', reason: 'plm' }
+    if (error.status === 403) return { kind: 'failed', reason: 'forbidden' }
+    return { kind: 'failed', reason: 'status', status: error.status }
+  }
+  return { kind: 'failed', reason: 'other' }
+}
+
+// Hands the browser the server's bytes under the server's file name. The Blob is the one
+// `exportApprovalsCsv` returned — this view never builds, filters or re-encodes CSV itself.
+function saveExportFile(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = fileName
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+}
+
+async function handleExportCsv(): Promise<void> {
+  const filters = appliedListFilters.value
+  if (exporting.value || !filters || filters.sourceSystem === 'plm') return
+  exporting.value = true
+  exportOutcome.value = null
+  // The result line describes the feed this click exported. If the list moved to another feed
+  // while the request was in flight, `loadCurrentTab()` has already dropped the line and replaced
+  // the snapshot object, so the late result is not posted under a list it does not describe. The
+  // file itself is still saved: it is exactly what was asked for at click time.
+  const stillSameFeed = () => appliedListFilters.value === filters
+  try {
+    const result = await exportApprovalsCsv(filters)
+    saveExportFile(result.blob, result.fileName)
+    if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
+  } catch (error) {
+    if (stillSameFeed()) exportOutcome.value = exportFailureOf(error)
+  } finally {
+    exporting.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 // UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
@@ -1270,15 +1514,29 @@ const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange
 let isInitialTabLoad = true
 
 function loadCurrentTab() {
-  const query = {
+  const filters = {
     search: searchText.value || undefined,
     status: (statusFilter.value || undefined) as ApprovalStatus | undefined,
-    page: currentPage.value,
-    pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
     templateId: templateFilter.value || undefined,
     createdFrom: createdFromQuery.value,
     createdTo: createdToQuery.value,
+  }
+  const query = {
+    ...filters,
+    page: currentPage.value,
+    pageSize: pageSize.value,
+  }
+  // F3-E1: the export button reads this snapshot, so it exports what THIS load asked for. A result
+  // notice describes one export of one feed; once the feed on screen is a different one (another
+  // tab or filter set — a page change is not), the notice would describe a file the list no longer
+  // matches, so it is dropped. The snapshot object is replaced only in that case, so its identity
+  // changes exactly when the feed does — `handleExportCsv` relies on that to tell whether a late
+  // result still belongs to the list on screen (a page change or same-feed reload keeps it).
+  const nextAppliedFilters: ApprovalExportQuery = { ...filters, tab: activeTab.value }
+  if (JSON.stringify(nextAppliedFilters) !== JSON.stringify(appliedListFilters.value)) {
+    exportOutcome.value = null
+    appliedListFilters.value = nextAppliedFilters
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
@@ -1605,6 +1863,32 @@ onBeforeUnmount(() => {
   width: 260px;
 }
 
+/* F3-E1: the export hint / result lines are rows of the filter card's own grid (`gap` above), so
+   they need no margin of their own. */
+.approval-center__export-hint,
+.approval-center__export-notice {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.approval-center__export-notice {
+  font-size: 13px;
+}
+
+.approval-center__export-notice--success {
+  color: var(--ms-color-success);
+}
+
+.approval-center__export-notice--warning {
+  color: var(--ms-color-warning);
+}
+
+.approval-center__export-notice--error {
+  color: var(--ms-color-danger);
+}
+
 .approval-center__error {
   margin-bottom: var(--ms-space-4);
 }
@@ -1833,6 +2117,7 @@ onBeforeUnmount(() => {
   .approval-center__toolbar-daterange,
   .approval-center__filter-toggle,
   .approval-center__clear-filters,
+  .approval-center__export-button,
   .approval-center__create-button {
     width: 100%;
   }

@@ -7,6 +7,7 @@ import {
   type RouteGuardPolicyContext,
 } from '../src/router/guardPolicy'
 import { useAuth } from '../src/composables/useAuth'
+import { useFeatureFlags } from '../src/stores/featureFlags'
 
 /**
  * Gate 22's own wording drives the lookup by PATH ("断言对象：spec import appRoutes 后取出
@@ -24,14 +25,16 @@ function isLazyViewLoader(component: RouteRecordRaw['component'], viewFile: stri
 
 /**
  * Gate 22's "comparison projection": requiresAuth === true, permissions deep-equal
- * ['tasks:read'], 'requiredFeature' in meta === false, and title/titleZh present as non-empty
- * strings. Applied identically to both /tasks and /tasks/:id.
+ * ['tasks:read'], and title/titleZh present as non-empty strings. Applied identically to both
+ * /tasks and /tasks/:id. Superseded in one point: the projection used to require NO
+ * requiredFeature; both routes now carry requiredFeature 'tasks' so that, with TASKS_ENABLED not
+ * exactly 'true', /tasks redirects home instead of opening a page whose API is not mounted.
  */
 function expectGuardRelevantProjection(route: RouteRecordRaw): void {
   const meta = route.meta as Record<string, unknown>
   expect(meta.requiresAuth).toBe(true)
   expect(meta.permissions).toEqual(['tasks:read'])
-  expect('requiredFeature' in meta).toBe(false)
+  expect(meta.requiredFeature).toBe('tasks')
   expect(typeof meta.title).toBe('string')
   expect((meta.title as string).length).toBeGreaterThan(0)
   expect(typeof meta.titleZh).toBe('string')
@@ -39,7 +42,7 @@ function expectGuardRelevantProjection(route: RouteRecordRaw): void {
 }
 
 describe('tasks routes (design lock §5.2)', () => {
-  it('exports a lazy /tasks route gated on tasks:read only, loading TasksView.vue', () => {
+  it('exports a lazy /tasks route gated on the tasks feature and tasks:read, loading TasksView.vue', () => {
     const route = routeByPath('/tasks')
 
     expect(route.name).toBe('tasks')
@@ -47,6 +50,7 @@ describe('tasks routes (design lock §5.2)', () => {
       title: 'Tasks',
       titleZh: '任务',
       requiresAuth: true,
+      requiredFeature: 'tasks',
       permissions: ['tasks:read'],
     })
     expectGuardRelevantProjection(route)
@@ -61,6 +65,7 @@ describe('tasks routes (design lock §5.2)', () => {
       title: 'Tasks',
       titleZh: '任务',
       requiresAuth: true,
+      requiredFeature: 'tasks',
       permissions: ['tasks:read'],
     })
     expectGuardRelevantProjection(route)
@@ -170,6 +175,64 @@ describe('tasks route guard admin cell (real useAuth, gate 22)', () => {
       expect(decision).toEqual({ action: 'allow' })
     } finally {
       ;(globalThis as unknown as { localStorage: typeof originalLocalStorage }).localStorage = originalLocalStorage
+    }
+  })
+})
+
+describe('tasks route feature gate (tasks session feature off -> redirect home, like the other feature-gated routes)', () => {
+  const ctx = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
+    hasFeature: () => true,
+    hasPermission: () => true,
+    attendanceFocused: false,
+    plmWorkbenchFocused: false,
+    resolveHomePath: () => '/HOME',
+    ...over,
+  })
+
+  it.each([
+    ['/tasks', '/tasks'],
+    ['/tasks/:id', '/tasks/task-1'],
+  ] as const)('%s with the tasks feature off redirects to ctx.resolveHomePath() even though every permission passes', (routePath, path) => {
+    const route = routeByPath(routePath)
+    const decision = resolveRouteGuardDecision(
+      { path, meta: route.meta },
+      ctx({ hasFeature: (feature) => feature !== 'tasks', hasPermission: () => true }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/HOME' })
+  })
+
+  it('with only the tasks feature on, /tasks is allowed', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks', meta: routeByPath('/tasks').meta },
+      ctx({ hasFeature: (feature) => feature === 'tasks', hasPermission: (p) => p === 'tasks:read' }),
+    )
+    expect(decision).toEqual({ action: 'allow' })
+  })
+
+  it('decides exactly like the elearning /learn route when each one\'s own feature is off', () => {
+    const off = ctx({ hasFeature: () => false, hasPermission: () => true })
+    const tasksDecision = resolveRouteGuardDecision({ path: '/tasks', meta: routeByPath('/tasks').meta }, off)
+    const learnDecision = resolveRouteGuardDecision({ path: '/learn', meta: routeByPath('/learn').meta }, off)
+    expect(tasksDecision).toEqual({ action: 'redirect', target: '/HOME' })
+    expect(tasksDecision).toEqual(learnDecision)
+  })
+
+  it('real store defaults (no session loaded: tasks off) + an administrator through the real useAuth: /tasks redirects to /home', () => {
+    localStorage.setItem('user_roles', JSON.stringify(['admin']))
+    try {
+      const auth = useAuth()
+      expect(auth.hasPermission('tasks:read')).toBe(true)
+      const flags = useFeatureFlags()
+      expect(flags.hasFeature('tasks')).toBe(false)
+
+      const guardCtx = buildRouteGuardContext({
+        auth: { hasPermission: auth.hasPermission, getAccessSnapshot: auth.getAccessSnapshot },
+        flags,
+      })
+      const decision = resolveRouteGuardDecision({ path: '/tasks', meta: routeByPath('/tasks').meta }, guardCtx)
+      expect(decision).toEqual({ action: 'redirect', target: '/home' })
+    } finally {
+      localStorage.removeItem('user_roles')
     }
   })
 })

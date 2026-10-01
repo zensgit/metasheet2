@@ -24,8 +24,8 @@
 
 /**
  * @typedef {Object} FlagRule
- * @property {string} kind - 'requires' (dependsOn must ALSO be active) | 'conflicts' (dependsOn/target must NOT be active together)
- * @property {string} id - stable violation id, printed by --strict
+ * @property {string} kind - 'requires' (dependsOn active) | 'requires-exact' (dependsOn equals its activationValue byte-for-byte) | 'conflicts' (target active)
+ * @property {string} id - stable violation id reported by flag status
  * @property {string} description
  */
 
@@ -66,8 +66,8 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: ['MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA'],
     danger: 'high',
     purpose:
-      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
-    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview',
+      "Field type CONVERSION with value migration, first batch string -> select / multiSelect (design lock docs/development/multitable-field-retype-first-batch-adr-20260926.md). Default OFF; exact literal 'true' only (no trim, no case folding). Gates all three endpoints: the read-only POST /fields/:fieldId/retype-preview (slice 2, shipped) and the execute / undo endpoints (slice 3). Off: every one of them answers 403 FIELD_RETYPE_CONVERT_DISABLED before any read. It also gates the fenced writers' post-fence field-schema re-check (ADR §3.11, slice 3a): every record writer that validated a write against a field snapshot taken before the canonical sheet fence re-reads the touched fields FOR SHARE after the fence and refuses 409 FIELD_SCHEMA_CHANGED (automation step fails; approval write-back throws) if a field's type or option set changed while it waited, and a non-scoped derived-value merge whose target is no longer formula/lookup/rollup is skipped. Off: none of those re-reads runs and every writer issues exactly its pre-existing statements. PATCH /fields/:fieldId is NOT affected by this flag: string -> select / multiSelect stays 400 FIELD_RETYPE_NOT_LOSSLESS there either way. With MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA on, all three endpoints refuse 409 FIELD_RETYPE_TRUST_REQUIRED (reason legacy_manage_schema_flag) — hence the conflicts rule. Execute / undo additionally refuse 409 FIELD_RETYPE_TRUST_REQUIRED while the canonical writer fence is off; that is enforced in-process and deliberately NOT modelled as a dependsOn/requires rule, so turning this flag on alone to run the read-only preview is a legal rung. Deploy order: migrations -> writer fence -> this flag. danger=high: execute rewrites a whole column of live record data.",
+    source: 'packages/core-backend/src/multitable/field-retype-convert.ts#isFieldRetypeConvertEnabled; packages/core-backend/src/routes/univer-meta.ts#retype-preview; packages/core-backend/src/multitable/field-schema-fence-recheck.ts#isFieldSchemaFenceRecheckEnabled (writer re-check, slice 3a)',
     rules: [
       {
         kind: 'conflicts',
@@ -286,8 +286,15 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'medium',
     purpose:
-      "Time Machine D2a contract flag only: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. This slice has no production caller and does not make archive behavior available. A later D2 caller remains unreachable unless this flag and MULTITABLE_ENABLE_WRITER_FENCE are both exact ON. It intentionally has no retention conflict: D2 is the archive-before-prune handoff, not current retention behavior.",
+      "Time Machine archive runtime gate: exact-case-sensitive `=== 'true'`; unset, false, TRUE, and whitespace remain OFF. The dedicated local launcher requires this flag and MULTITABLE_ENABLE_WRITER_FENCE both exact ON, admitted local configuration and FD3 custody unlock before listening. Ordinary server startup without an injected archive composition refuses ON; manual capture also requires explicit policy. This flag has no retention conflict and does not enable prune or retention.",
     source: 'packages/core-backend/src/multitable/recovery-archive-contract.ts#isMultitableRecoveryArchiveEnabled',
+    rules: [
+      {
+        kind: 'requires-exact',
+        id: 'archive-without-exact-writer-fence',
+        description: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED is active but MULTITABLE_ENABLE_WRITER_FENCE is not exactly true; the archive worker and local launcher refuse this combination.',
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND',
@@ -671,7 +678,7 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: [],
     danger: 'low',
     purpose:
-      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks.',
+      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds).',
     source: 'packages/core-backend/src/routes/tasks.ts:35',
   },
 ])
@@ -762,22 +769,24 @@ export function isValueRedactedType(spec) {
 }
 
 /**
- * Evaluate every `requires`/`conflicts` rule in the manifest against a flat env-like flag map
+ * Evaluate every `requires`/`requires-exact`/`conflicts` rule in the manifest against a flat env-like flag map
  * (`{ [key]: string | null | undefined }`). Returns a list of violations; empty = no illegal
- * combination present. Uses EXACT per-flag activation (via `isActivated`), never the loose
- * "looks truthy" heuristic, so it cannot be fooled by the R4 footgun in either direction.
+ * combination present. `requires-exact` compares the dependency's raw value with its
+ * activationValue; other rules use per-flag activation via `isActivated`.
  */
 export function evaluateFlagRules(flags) {
   const violations = []
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
     const rules = spec.rules || []
     for (const rule of rules) {
-      if (rule.kind === 'requires') {
+      if (rule.kind === 'requires' || rule.kind === 'requires-exact') {
         const selfOn = isActivated(spec, flags[spec.key])
         if (!selfOn) continue
         const unmet = spec.dependsOn.filter((depKey) => {
           const depSpec = GLOBAL_HISTORY_FLAG_BY_KEY[depKey]
-          return depSpec && !isActivated(depSpec, flags[depKey])
+          return depSpec && (rule.kind === 'requires-exact'
+            ? flags[depKey] !== depSpec.activationValue
+            : !isActivated(depSpec, flags[depKey]))
         })
         if (unmet.length > 0) {
           violations.push({

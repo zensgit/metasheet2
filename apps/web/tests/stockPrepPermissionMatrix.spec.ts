@@ -398,8 +398,8 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   it('F-08: /stock-prep declares NO requiredFeature (a flag would be a second gate on admins too)', () => {
     const block = APP_ROUTES_SOURCE.slice(APP_ROUTES_SOURCE.indexOf("path: '/stock-prep'")).slice(0, 400)
     expect(block).not.toContain('requiredFeature')
-    // And no stock-prep feature was smuggled into the known set.
-    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'])
+    // And no stock-prep feature was smuggled into the known set ('tasks' gates /tasks only).
+    expect([...KNOWN_REQUIRED_FEATURES]).toEqual(['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning', 'tasks'])
   })
 
   // ---------------------------------------------------------------------------

@@ -163,6 +163,7 @@ viewerNextMidnight = ((viewerToday + 1)::timestamp AT TIME ZONE :viewerTz)
 - **route meta × 权限门耦合（后果已写死）**：`guardPolicy.ts:221-225` 的路由权限门**先于**焦点白名单运行；`isRoutePermitted`（`apps/web/src/router/routeAccess.ts:26-31`）对 `meta.permissions` 取 **every**。`useAuth.ts:548-556`：`snapshot.isAdmin` 或 `roles.includes('admin')` **短路可达**；非 admin 且快照无 `tasks:read` ⇒ **一律 redirect 回家**，与「路由不存在」同形。计划 `guardPolicy.ts:29` 现为 `:34`（已漂对照）。门 22 行为 spec 计分，**不在** §13-10 阻断名单（§11）。§11 真机冒烟仍标前置：§13-10 落槌 **且** 权限快照带该码；未满足不计入冒烟，但不阻断门 22。
 - **§13-37 缺省**：两张焦点白名单都不加 `/tasks`。入口只加默认壳分支（与 `canUseApprovals` 同形），`attendanceFocused` / `plmWorkbenchFocused` 不渲染。
 - **§13-38 缺省乙**：不加 `requiredFeature: 'tasks'`，不改 `router/types.ts` / `guardPolicy.ts`。`canUseTasks` + `GET /api/tasks/context` 普通 404 渲染「任务功能未启用或当前服务不支持」。**404 不断言 `TASKS_ENABLED` 的值**。推荐不是启用授权。
+  - 脚注（2026-09-29）：superseded on 2026-09-29 by Decision Register R-28 (`docs/development/takeover-beiliao-20260821/decision-register.md`): the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. 被取代的是「不加 `requiredFeature: 'tasks'`，不改 `router/types.ts` / `guardPolicy.ts`」这一句；404 渲染「未启用」保留给开关开而后端仍 404 的情形。
 - 引导流三触发：context `orgId===null` / 读 `org_missing` / 写 422。`predicate_error` 不进引导。
 - 红点：常驻 `<span data-testid="tasks-todo-badge" :data-state :data-count>` 三态；不照抄审批 `applyCount(0)`。
 - 真 fetch，不复制审批 `USE_MOCK`。
@@ -487,6 +488,8 @@ N/A:本线无媒体轨。
 | `SYSTEM_SHEET_KINDS` | 计划 §7-7 两处加 `'task_projection'` + 集合相等 | **推迟**到首个任务投影 PR（§7） |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
 
+> 脚注（2026-09-29，上表「已定·产品缺省」行中的 §13-38）：superseded on 2026-09-29 by Decision Register R-28: the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. §13-37 / §13-39 与该行其余内容不变。
+
 ---
 
 ## 10. Feature flag 与 RBAC
@@ -650,6 +653,8 @@ printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' 
     - 焦点反格（**stub**）：`path='/attendance'`、`attendanceFocused=true`、`hasPermission=true` ⇒ `{ action:'allow' }`。
     - admin 格（**真实** `useAuth.hasPermission` 驱动 `buildRouteGuardContext`）：钉 `snapshot.isAdmin=true`、`permissions=[]`、`path='/tasks'`、两焦点 false ⇒ allow。负控：在**该夹具**上删 `useAuth.ts:553` 后跑本格 ⇒ **必须红**（实证：admin 短路消失、`permissions=[]` 使 `isRoutePermitted` 失败）。
 
+> 门 22 脚注（2026-09-29，门表文字按 :9 不改）：superseded on 2026-09-29 by Decision Register R-28: the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. 被取代的只是投影里的 `'requiredFeature' in meta === false`（现为 `meta.requiredFeature === 'tasks'`，见 `apps/web/tests/tasks-routes.spec.ts`）；各格的 stub 上下文 `hasFeature` 为真，判定不变。门 21 的 G 集暂缺两个新 spec，见 R-28。
+
 门 2、13 与 `task-*.db.test.ts` 的证据 lane 是 `tasks-realdb`，门 9 也按 §13-12 (b) 走同一条。把该 job 追加进 main required checks 是合并后的 owner 步骤，这一步完成前不得把 required 执行写成已经发生。非 admin 真机冒烟只作可达性记录。**门 22 必须计分**。§13-9 / §13-10 / §13-11 / §13-12 已于 2026-09-26 落槌。§12 门表仍是 PROPOSED。
 
 **武装表**（键 = 主体首次可跑的里程碑。每门每子集恰一次。M2 退出只取 `M2|` 行）：
@@ -787,6 +792,7 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 **25. 深度含根** — **已定 0..4，来源 计划 v5 §2.1 / §5-5**。
 **37. 焦点白名单** — **缺省不加 `/tasks`，来源 计划 v5 §4 / owner 第三轮 #7**。
 **38. requiredFeature 甲/乙** — **缺省乙，来源 计划 v5 §4**。推荐不是启用授权。
+（脚注 2026-09-29：superseded on 2026-09-29 by Decision Register R-28: the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. 即改取甲。）
 **39. attendanceFocused 入口** — **缺省不出现，来源 计划 v5 §4**。
 
 ### L2

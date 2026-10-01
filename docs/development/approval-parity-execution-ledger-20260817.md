@@ -155,14 +155,60 @@ serial.
 Initial values are policy assertions, not live-environment observations. Fill environment evidence only
 during an authorized UAT or rollout.
 
-| Capability | Code default | Staging observed | Production observed | Enable authorization | Rollback verified |
-|---|---|---|---|---|---|
-| Canvas V2 | OFF | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
-| Durable delivery | explicit env gate | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
-| Class A action ledger | explicit env gate | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
-| Class B action ledger | explicit env gate | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
-| FWB | OFF | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
-| Attachments | OFF | NOT RECORDED | NOT RECORDED | NO | NOT RUN |
+**2026-09-30 extension (F2-M2).** Five columns were appended (Env var, Resolver, Payload key, Truth rule,
+Owning line) and eleven rows were added; every `path:line` in this section was re-read at `main@cffd5dacbc`.
+Of the six pre-existing rows only **Code default** was re-verified. Their Staging observed, Production
+observed, Enable authorization and Rollback verified cells are left exactly as found. Canvas V2 therefore
+shows a backend default of ON next to Enable authorization NO: the ON default came from a code change
+(#5169 `5966ec8e87`, 2026-08-26), not from an environment enablement recorded here. Rows owned by another
+line carry `—` in those four columns because this ledger does not track them.
+
+- **Paths**: a bare `.md` name sits in `docs/development/`; a path that starts with `packages/`,
+  `plugins/`, `apps/` or `scripts/` is repo-relative; any other path is relative to
+  `packages/core-backend/src/`. A bare `:NNN` in a cell repeats the path cited just before it in that
+  cell.
+- **Code default**: the value with the env var unset. Where the web client has its own pre-session
+  fallback (`apps/web/src/stores/featureFlags.ts:79-92`, used until the session probe answers), both
+  values are written. After the probe, `resolveFeatures` (`apps/web/src/stores/featureFlags.ts:328-427`)
+  still resolves each `approval*` key, `attendanceGroupEffectivePolicyPanel` and `elearning` to `false`
+  when the session answer does not carry it or the probe fails, unless a local override supplies a
+  boolean (overrides are read only in dev builds or with `VITE_ALLOW_FEATURE_OVERRIDE`,
+  `apps/web/src/stores/featureFlags.ts:131-134`).
+- **Resolver**: the function that turns the raw env value into the flag.
+- **Payload key**: the key of the session `features` object returned by `buildFeaturePayload`
+  (`routes/auth.ts:284-318`), written as one backticked name. A cell that starts with `—` means the
+  capability is not surfaced there. The guard
+  `packages/core-backend/tests/unit/approval-feature-payload-flag-ledger.test.ts` reads every key of that
+  returned object literal from source and fails when one is missing from this column. The approval
+  mobile row is a placeholder: its cell is deliberately not a key, so the guard goes red when F2-M1 adds
+  the key and stays red until that row is filled in.
+- **Truth rule**: which raw values turn the resolver on. The rows are not uniform. Some resolvers trim
+  and lowercase before comparing (so `TRUE` also enables), some accept only the exact literal `true`,
+  and some also accept other truthy spellings. Whether uppercase `TRUE` should enable the lowercasing
+  resolvers is an open item (`approval-remaining-dev-design-report-20260820.md:1268-1269`).
+- An earlier four-row table, `approval-authoring-data-closure-closeout-verification-20260721.md` §5,
+  is not updated here.
+
+| Capability | Code default | Staging observed | Production observed | Enable authorization | Rollback verified | Env var | Resolver | Payload key | Truth rule | Owning line |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Canvas V2 | backend ON (unset ⇒ ON since #5169 `5966ec8e87`, 2026-08-26); web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:87`, pinned by `scripts/ops/approval-canvas-owner-uat-smoke.sh:38-41`) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `APPROVAL_CANVAS_V2_ENABLED` | `services/approval-canvas-flag.ts:6-9` `isApprovalCanvasV2Enabled`; emitted at `routes/auth.ts:304` | `approvalCanvasV2` | unset or empty ⇒ ON; any other value ⇒ ON only when it is exactly `true` (no trim, case-sensitive: `TRUE` and ` true ` ⇒ OFF); `false` selects the operator rollback surface | approval |
+| Durable delivery | OFF (explicit env gate; unset ⇒ OFF) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `AUTOMATION_DURABLE_DELIVERY_ENABLED` | `multitable/automation-durable-delivery.ts:20-22` `isDurableDeliveryEnabled` | — (env only) | trim + lowercase, then equals `true` | approval / automation |
+| Class A action ledger | OFF (explicit env gate; unset ⇒ OFF) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `AUTOMATION_CLASSA_CLAIM_ENABLED` | `multitable/automation-execution-ledger.ts:37-39` `isClassAExecutionClaimEnabled` | — (env only) | exact literal `true` only (no trim, case-sensitive) | approval / automation |
+| Class B action ledger | OFF (explicit env gate; unset ⇒ OFF) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `AUTOMATION_CLASSB_OUTBOUND_ENABLED` | `multitable/automation-outbound-intent.ts:63-65` `isClassBOutboundEnabled` | — (env only) | exact literal `true` only (no trim, case-sensitive) | approval / automation |
+| FWB | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:88`) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `APPROVAL_FWB_WRITEBACK_ENABLED` | `multitable/approval-fwb-activation.ts:145-147` `isFwbWritebackEnabled`; emitted at `routes/auth.ts:308` | `approvalFwbWriteback` | trim + lowercase, then equals `true`; execution also needs Durable delivery ON (`multitable/automation-executor.ts:3937-3946`: FWB OFF ⇒ skipped; FWB ON with durable OFF ⇒ failed) | approval |
+| Attachments | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:86`) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `APPROVAL_ATTACHMENTS_ENABLED` | `routes/approval-attachments.ts:128-130` `isApprovalAttachmentsEnabled`; emitted at `routes/auth.ts:301` | `approvalAttachments` | trim + lowercase, then equals `true` | approval |
+| Approval mobile (placeholder, pending F2-M1) | no backend flag on main; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:85`); the web reader already accepts a backend value (`apps/web/src/stores/featureFlags.ts:247-252`) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | — (pending F2-M1) | — (pending F2-M1) | — (not emitted yet; F2-M1 fills this cell) | — (pending F2-M1) | approval |
+| Leave cancel-round entry (change-request lock, phase 1) | OFF (unset ⇒ fallback `false`) | NOT RECORDED | NOT RECORDED | NO | NOT RUN | `ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED` | `plugins/plugin-attendance/index.cjs:16575-16577` `isAttendanceCancelRoundEntryEnabled`, via `parseBoolean` (`plugins/plugin-attendance/index.cjs:6462-6469`); read on every call | — (not in the session payload; the cancel-round responses carry it as `entryEnabled`, `plugins/plugin-attendance/index.cjs:37187` and `:37287`; the launch gate is `:37217`) | trim + lowercase; `true`, `1`, `yes` ⇒ ON; `false`, `0`, `no` ⇒ OFF; unset or anything else ⇒ OFF | approval (attendance-side entry) |
+| Directory deprovision (drives the departure transfer of approvals) | OFF | — | — | — | — | `DIRECTORY_DEPROVISION_ENABLED` | `directory/directory-sync.ts:1341-1345` `isDirectoryDeprovisionEnabled`; same rule in `directory/deprovision-evidence-api.ts:18-21`; approval departure transfers are dispatched only after an applied deprovision (`directory/directory-sync.ts:4657-4662`) | — (env only) | trim + lowercase; `true`, `1`, `yes` ⇒ ON; anything else ⇒ OFF | directory lifecycle |
+| Attendance entry | derived per session, not an env flag | — | — | — | — | — | `routes/auth.ts:286` | `attendance` | admin role, or any permission that starts with `attendance:` | attendance |
+| Attendance admin | derived per session, not an env flag | — | — | — | — | — | `routes/auth.ts:287` | `attendanceAdmin` | admin role, or the `attendance:admin` permission | attendance |
+| Attendance import | derived per session, not an env flag | — | — | — | — | — | `routes/auth.ts:288` | `attendanceImport` | attendance admin (row above), or the `attendance:write` permission | attendance |
+| Workflow | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:81`) | — | — | — | — | `WORKFLOW_ENABLED` | `config/flags.ts:48` `FEATURE_FLAGS.workflowEnabled`; read at `routes/auth.ts:289` | `workflow` | exact literal `true` only; evaluated once at module load, not per request | workflow |
+| PLM | backend ON unless the product mode is attendance; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:84`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:18-25` `isPlmEnabled` (parser `config/product-mode.ts:3-10`); read at `routes/auth.ts:290` | `plm` | `PRODUCT_MODE` exactly `attendance` or `attendance-focused` (no trim, case-sensitive) ⇒ OFF; otherwise `ENABLE_PLM` trimmed + lowercased: `1`, `true`, `yes`, `on`, `enabled` ⇒ ON; `0`, `false`, `no`, `off`, `disabled` ⇒ OFF; unset or anything else ⇒ ON | PLM / product mode |
+| Product mode | `platform`; web pre-session fallback `platform` (`apps/web/src/stores/featureFlags.ts:91`) | — | — | — | — | `PRODUCT_MODE`, `ENABLE_PLM` | `config/product-mode.ts:34-43` `resolveEffectiveProductMode` (normaliser `config/product-mode.ts:12-16`); read at `routes/auth.ts:291` | `mode` | not a boolean; `PRODUCT_MODE` is matched exactly (no trim, case-sensitive): `attendance` or `attendance-focused` ⇒ `attendance`; `plm-workbench`, `plmWorkbench` or `plm-focused` ⇒ `plm-workbench`; unset or anything else ⇒ `platform`; `plm-workbench` with PLM off ⇒ `platform` | platform |
+| Attendance group effective-policy panel (W6-3) | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:89`) | — | — | — | — | `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED`, `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ORGS` | `attendance/w6-group-effective-policy-panel-flag.ts:52-59` `isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1` (master `:31-35`, allowlist `:38-45`); emitted at `routes/auth.ts:312` with the session `tenantId` | `attendanceGroupEffectivePolicyPanel` | master: trim + lowercase, then equals `true`; AND the session tenant id, trimmed, is non-empty (missing or empty ⇒ OFF, `attendance/w6-group-effective-policy-panel-flag.ts:57-58`) and exactly matches one comma-separated, trimmed allowlist entry (`*` is not a wildcard) | attendance |
+| E-learning | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:90`) | — | — | — | — | `ELEARNING_ENABLED` | `elearning/feature-flags.ts:35-37` `isElearningEnabled`, via `elearning/feature-flags.ts:28-33`; emitted at `routes/auth.ts:315` | `elearning` | exact literal `true` only | e-learning |
+| Tasks (任务 nav entry, pending-count badge, `/tasks` routes) | OFF; web pre-session fallback OFF (`apps/web/src/stores/featureFlags.ts:99` on the #6173 tree) | — | — | — | — | `TASKS_ENABLED` | `tasks/feature-flag.ts:10-12` `isTasksEnabled`, the same predicate as the mount gate `routes/tasks.ts:35` (`tasksRouter()` returns null, so no `/api/tasks/*` route exists while OFF); emitted at `routes/auth.ts:320`; pinned equal by `packages/core-backend/tests/unit/tasks-feature-flag.test.ts` | `tasks` | exact literal `true` only (no trim, case-sensitive: `TRUE`, `1`, ` true` ⇒ OFF); read per request | tasks |
 
 ## 8. Closeout rule
 

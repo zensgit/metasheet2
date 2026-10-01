@@ -6,7 +6,9 @@
  * grep) live in tests/unit/approval-lock9-process-attachment-unit.test.ts.
  *
  * Covers: G-1, G-2, G-4 (through the PRODUCTION wiring, never a stub), G-5, G-6, G-7, G-8, G-11,
- * G-12, G-13, G-14, G-16. Two-point wired: excluded from vitest.config.ts's no-DB job and run as
+ * G-12, G-13, G-14, G-16, plus the `canAttachProcessEvidence` uploader-affordance field (its own
+ * `describe` below — not a Lock-9 gate; it rides this file for the seat fixtures and the lane).
+ * Two-point wired: excluded from vitest.config.ts's no-DB job and run as
  * WHOLE FILES in the standalone .github/workflows/approval-realdb-lock9-process-attachments.yml
  * lane, which arms EXPECT_DB=1. As of #5095, also run (whole file, no EXPECT_DB) in the required
  * plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect this file.
@@ -26,6 +28,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 import { sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
+import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { up as processBindingUp, down as processBindingDown } from '../../src/db/migrations/zzzz20260822130000_approval_attachments_process_binding'
 import { up as createAttachmentsUp } from '../../src/db/migrations/zzzz20260715210000_create_approval_attachments'
 
@@ -765,6 +768,250 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       const strangerToken = await authToken(`l9-stranger-${RUN}`, 'user', 'approvals:act')
       const denied = await uploadProcess(strangerToken, iid)
       expect(denied.status).toBe(403)
+    })
+  })
+
+  // ===============================================================================================
+  // `canAttachProcessEvidence` — the viewer-scoped field the detail view gates the 评论 dialog's
+  // uploader on (together with the attachments flag). NOT a Lock-9 gate: Lock-9 rules the two server
+  // doors (upload fail-fast, bind-time seat check) and says nothing about the client's gate. The
+  // field exists because the client's own `isMyTurn` mirror matches USER seats only, so a
+  // ROLE-seated approver the server accepts was never shown an uploader.
+  //
+  // Value = `decisionDoorIsSeatGated(instance) && resolveCanDecideCurrentNode(...)`, filled by TWO
+  // builders that must agree:
+  //   * `ApprovalBridgeService.getApproval`  — what `GET /api/approvals/:id` serves;
+  //   * `ApprovalProductService.getApproval` — what the create and action responses serve (the web
+  //     store publishes an action response into the slot the detail read fills).
+  // Each builder is pinned separately below, and each on BOTH sides: a lone `true` stays green
+  // under a constant-`true` field and a lone `false` under a constant-`false` one.
+  //
+  // Every case asserts the field as a boolean by VALUE (`toBe(true)` / `toBe(false)`), so an absent
+  // field fails it rather than reading as falsy.
+  // ===============================================================================================
+  describe('canAttachProcessEvidence: the uploader affordance follows the seat, on both DTO builders', () => {
+    const READ_ACT = 'approvals:read,approvals:act'
+
+    interface AffordanceView {
+      canAttachProcessEvidence?: boolean
+      canDecideCurrentNode?: boolean
+    }
+
+    /** `GET /api/approvals/:id` — the ApprovalBridgeService builder. */
+    async function detailFor(token: string, instanceId: string): Promise<AffordanceView> {
+      const detail = await jsonRequest(`/api/approvals/${instanceId}`, token)
+      expect(detail.status, await detail.clone().text()).toBe(200)
+      return (await detail.json()) as AffordanceView
+    }
+
+    /**
+     * `start -> approve_1 (ROLE seat) -> end`, plus a viewer who holds that role and nothing else.
+     * The seat row is written by the runtime from the published graph (not hand-inserted), so the
+     * instance stays decidable end to end. The role rides the token claim (what the decision door
+     * is handed in this harness) and the `users.role` column (what the per-instance read fence
+     * derives from the database).
+     */
+    async function publishRoleSeatTemplate(adminToken: string, label: string): Promise<{ templateId: string; roleName: string; roleHolderToken: string }> {
+      const roleName = `l9-cape-role-${label}-${RUN}`
+      const roleHolder = `l9-cape-roleholder-${label}-${RUN}`
+      const create = await jsonRequest('/api/approval-templates', adminToken, {
+        method: 'POST',
+        body: {
+          key: `l9-cape-${label}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+          name: 'Lock-9 role-seat template',
+          description: 'process-evidence affordance field — role seat',
+          formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+          approvalGraph: {
+            nodes: [
+              { key: 'start', type: 'start', config: {} },
+              { key: 'approve_1', type: 'approval', config: { assigneeType: 'role', assigneeIds: [roleName], approvalMode: 'single' } },
+              { key: 'end', type: 'end', config: {} },
+            ],
+            edges: [
+              { key: 'e1', source: 'start', target: 'approve_1' },
+              { key: 'e2', source: 'approve_1', target: 'end' },
+            ],
+          },
+        },
+      })
+      expect(create.status, await create.clone().text()).toBe(201)
+      const template = (await create.json()) as { id: string }
+      createdTemplateIds.add(template.id)
+      const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+        method: 'POST',
+        body: { policy: { allowRevoke: true } },
+      })
+      expect(publish.status, await publish.clone().text()).toBe(200)
+
+      await ensureUsers(roleHolder)
+      await pool().query('UPDATE users SET role = $2 WHERE id = $1', [roleHolder, roleName])
+      const roleHolderToken = await authToken(roleHolder, roleName, READ_ACT)
+      return { templateId: template.id, roleName, roleHolderToken }
+    }
+
+    /** Fixture check: the node the instance stops on carries the ROLE seat and no user seat. */
+    async function expectRoleSeatOnly(instanceId: string, roleName: string): Promise<void> {
+      const seatRows = await pool().query(
+        `SELECT assignment_type, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND node_key = 'approve_1'`,
+        [instanceId],
+      )
+      expect(seatRows.rows).toEqual([{ assignment_type: 'role', assignee_id: roleName, is_active: true }])
+    }
+
+    it('detail read: a ROLE-seated approver reports true (and the upload route accepts them); a member with no active seat, the requester and a CC recipient report false', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const { templateId, roleName, roleHolderToken } = await publishRoleSeatTemplate(adminToken, 'detail')
+      const iid = await createInstance(requesterToken, templateId)
+      await expectRoleSeatOnly(iid, roleName)
+
+      // POSITIVE — the role seat. The route the uploader posts to agrees with the reported value.
+      // (User-typed seats, which the client-side mirror already covered, are the parallel case below.)
+      const roleView = await detailFor(roleHolderToken, iid)
+      expect(roleView.canAttachProcessEvidence).toBe(true)
+      const roleUpload = await uploadProcess(roleHolderToken, iid)
+      expect(roleUpload.status, await roleUpload.clone().text()).toBe(201)
+      createdAttachmentIds.add(((await roleUpload.json()) as { id: string }).id)
+
+      // NEGATIVE 1 — a member of the instance whose seat at this node is no longer active (readable
+      // through the seat row; seated nowhere the door accepts).
+      const formerSeat = `l9-cape-former-${RUN}`
+      await ensureUsers(formerSeat)
+      await pool().query(
+        `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+         VALUES ($1, 'user', $2, 'approve_1', FALSE)`,
+        [iid, formerSeat],
+      )
+      const formerSeatToken = await authToken(formerSeat, 'user', READ_ACT)
+      const formerView = await detailFor(formerSeatToken, iid)
+      expect(formerView.canAttachProcessEvidence).toBe(false)
+      expect((await uploadProcess(formerSeatToken, iid)).status).toBe(403)
+
+      // NEGATIVE 2 — the requester.
+      const requesterView = await detailFor(requesterToken, iid)
+      expect(requesterView.canAttachProcessEvidence).toBe(false)
+
+      // NEGATIVE 3 — a CC recipient (same seeding as G-16's participant).
+      const ccRecipient = `l9-cape-cc-${RUN}`
+      await ensureUsers(ccRecipient)
+      await pool().query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, from_version, to_version, metadata)
+         VALUES ($1,'cc','system','system','pending','pending',1,1,$2::jsonb)`,
+        [iid, JSON.stringify({ targetType: 'user', targetId: ccRecipient })],
+      )
+      const ccToken = await authToken(ccRecipient, 'user', READ_ACT)
+      const ccView = await detailFor(ccToken, iid)
+      expect(ccView.canAttachProcessEvidence).toBe(false)
+      expect((await uploadProcess(ccToken, iid)).status).toBe(403)
+    })
+
+    it('the value is the seat, not the flag: with the attachments flag OFF the same role-seated approver still reports true', async () => {
+      // The client gates the uploader on the flag AND this field; the field itself never reads the
+      // flag, so turning the pipeline on later needs no second read to become correct.
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const { templateId, roleName, roleHolderToken } = await publishRoleSeatTemplate(adminToken, 'flagoff')
+      const iid = await createInstance(requesterToken, templateId)
+      await expectRoleSeatOnly(iid, roleName)
+
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      let offView: AffordanceView
+      try {
+        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        offView = await detailFor(roleHolderToken, iid)
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      expect(offView.canAttachProcessEvidence).toBe(true)
+      expect((await detailFor(requesterToken, iid)).canAttachProcessEvidence).toBe(false)
+    })
+
+    it('an instance on the door with NO seat gate reports false on BOTH builders, while canDecideCurrentNode reports true for the same viewer', async () => {
+      // A platform row with no published definition: decisions go through the door that has no
+      // assignment gate, so `canDecideCurrentNode` is `true` for a seatless viewer (status quo for
+      // that surface). Process evidence is bound only by the template-runtime dispatch, so the
+      // uploader must NOT follow that `true`. The `canDecideCurrentNode === true` assertions are the
+      // fixture proof that the second conjunct alone would have said yes.
+      const requesterToken = await authToken(REQUESTER)
+      const legacyId = `l9-cape-legacy-${RUN}`
+      createdApprovalIds.add(legacyId)
+      await pool().query(
+        `INSERT INTO approval_instances
+           (id, status, version, source_system, workflow_key, business_key, title,
+            requester_snapshot, subject_snapshot, policy_snapshot, metadata,
+            current_step, total_steps, sync_status, created_at, updated_at)
+         VALUES ($1, 'pending', 0, 'platform', $2, $3, 'no seat gate', $4::jsonb,
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, 0, 0, 'ok', now(), now())`,
+        [legacyId, `l9-cape-wf-${RUN}`, `l9-cape:${legacyId}`, JSON.stringify({ id: REQUESTER, name: REQUESTER })],
+      )
+      const shape = (await pool().query('SELECT published_definition_id FROM approval_instances WHERE id = $1', [legacyId])).rows[0]
+      expect(shape.published_definition_id).toBeNull()
+
+      // Builder 1 — the detail read (ApprovalBridgeService).
+      const bridgeView = await detailFor(requesterToken, legacyId)
+      expect(bridgeView.canDecideCurrentNode).toBe(true)
+      expect(bridgeView.canAttachProcessEvidence).toBe(false)
+      // …and the route the uploader would post to refuses the same viewer on the same instance.
+      expect((await uploadProcess(requesterToken, legacyId)).status).toBe(403)
+
+      // Builder 2 — ApprovalProductService.getApproval, called DIRECTLY. No HTTP path hands this
+      // builder such a row today (its callers are the template-runtime create / dispatch paths), so
+      // this is a service-level pin of the expression, not a claim about a reachable response.
+      const productView = await new ApprovalProductService().getApproval(legacyId, REQUESTER, ['admin'])
+      expect(productView).not.toBeNull()
+      expect(productView!.canDecideCurrentNode).toBe(true)
+      expect(productView!.canAttachProcessEvidence).toBe(false)
+    })
+
+    it('inside a parallel region both branch seat holders report true while the cursor sits on the fork; a viewer seated on neither branch reports false', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const branchAToken = await authToken(APPROVER) // seated at branch_a only
+      const branchBToken = await authToken(OTHER_SEAT) // seated at branch_b only
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const stored = (await pool().query('SELECT current_node_key FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(stored.current_node_key).toBe('fork') // no seat row lives at the stored cursor itself
+
+      expect((await detailFor(branchAToken, iid)).canAttachProcessEvidence).toBe(true)
+      expect((await detailFor(branchBToken, iid)).canAttachProcessEvidence).toBe(true)
+      expect((await detailFor(requesterToken, iid)).canAttachProcessEvidence).toBe(false)
+    })
+
+    it('create and action responses (ApprovalProductService builder): false for the requester on the 201, true for the role-seated approver after a 评论, false once their approve has closed the instance', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const { templateId, roleName, roleHolderToken } = await publishRoleSeatTemplate(adminToken, 'action')
+
+      const create = await jsonRequest('/api/approvals', requesterToken, {
+        method: 'POST',
+        body: { templateId, formData: { reason: 'lock9 affordance field' } },
+      })
+      expect(create.status, await create.clone().text()).toBe(201)
+      const created = (await create.json()) as AffordanceView & { id: string }
+      createdApprovalIds.add(created.id)
+      expect(created.canAttachProcessEvidence).toBe(false)
+      await expectRoleSeatOnly(created.id, roleName)
+
+      // 评论 passes the same seat gate and leaves the actor seated — the response the client
+      // publishes into the detail slot must keep the uploader.
+      const commented = await jsonRequest(`/api/approvals/${created.id}/actions`, roleHolderToken, {
+        method: 'POST',
+        body: { action: 'comment', comment: 'looking at it' },
+      })
+      expect(commented.status, await commented.clone().text()).toBe(200)
+      expect(((await commented.json()) as AffordanceView).canAttachProcessEvidence).toBe(true)
+
+      // The approve spends the seat and closes the single-step instance.
+      const approved = await jsonRequest(`/api/approvals/${created.id}/actions`, roleHolderToken, {
+        method: 'POST',
+        body: { action: 'approve', comment: 'ok' },
+      })
+      expect(approved.status, await approved.clone().text()).toBe(200)
+      expect(((await approved.json()) as AffordanceView).canAttachProcessEvidence).toBe(false)
+      // A fresh detail read agrees with the action response.
+      expect((await detailFor(roleHolderToken, created.id)).canAttachProcessEvidence).toBe(false)
     })
   })
 

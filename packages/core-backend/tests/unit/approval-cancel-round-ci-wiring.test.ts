@@ -72,6 +72,7 @@ const CANCEL_ROUND_REALDB_FILES = [
   'tests/integration/approval-cancel-round-outlet-guards.db.test.ts',
   'tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts',
   'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+  'tests/integration/approval-cancel-round-attendance-entry.db.test.ts',
 ] as const
 
 describe('Approval cancel-round real-DB CI wiring (lane decision 1)', () => {

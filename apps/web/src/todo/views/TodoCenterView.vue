@@ -51,6 +51,12 @@
             >
               <span class="todo-center__item-main">
                 <span class="todo-center__item-title">{{ item.title }}</span>
+                <span
+                  v-if="item.cancelRound"
+                  class="todo-center__pill todo-center__pill--subtype"
+                  data-testid="todo-center-item-subtype"
+                  data-subtype="cancel-round"
+                >{{ cancelRoundSubtypeLabel() }}</span>
               </span>
               <span
                 v-if="item.actionable === false"
@@ -61,6 +67,15 @@
             <router-link v-else :to="item.href" class="todo-center__item-link" data-testid="todo-center-item">
               <span class="todo-center__item-main">
                 <span class="todo-center__item-title">{{ item.title }}</span>
+                <!-- 撤销锁增补 P-11 (b) (owner 2026-09-29 18:3x 「Shown + subtype label (Recommended)」): a cancel
+                     round carries a sub-type label picked by `workflowKey`, never by the title prefix. The
+                     link is the server's `href` (P-11 (a): the original leave), passed through untouched. -->
+                <span
+                  v-if="item.cancelRound"
+                  class="todo-center__pill todo-center__pill--subtype"
+                  data-testid="todo-center-item-subtype"
+                  data-subtype="cancel-round"
+                >{{ cancelRoundSubtypeLabel() }}</span>
                 <!-- F-5 closure (real-browser-acceptance-20260920.md): every item now surfaces its
                      own `updatedAt` (always present, per `PendingItem`) and `dueAt` (optional —
                      rendered only when the source supplies one; today no registered source does,
@@ -192,11 +207,15 @@ import { getTodoItems, type PendingItem, type PendingSourceStatus, type TodoItem
 import { useLocale } from '../../composables/useLocale'
 import { getAuthPrincipalKey, onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useTodoCountsRealtime, type TodoCountsUpdatedPayload } from '../useTodoCountsRealtime'
+import { isCancelRoundWorkflow } from '../../approvals/cancelRound'
 
 interface RenderableItem extends PendingItem {
   // Precomputed once per `applyResult()` call (not re-evaluated per render in the template) —
   // whether `href` is safe to hand to `router-link`. See the HREF GUARD file-level note.
   navigable: boolean
+  // P-11 (b): the item is a cancel round (`workflowKey === 'approval.cancel-round'`). The `href`
+  // is the server's (P-11 (a): the original leave) and is passed through untouched.
+  cancelRound: boolean
 }
 
 interface TodoGroup {
@@ -257,6 +276,10 @@ function dueAtLabel(value: string): string {
   return isZh.value ? `截止 ${stamp}` : `Due ${stamp}`
 }
 
+function cancelRoundSubtypeLabel(): string {
+  return isZh.value ? '撤销申请' : 'Cancellation request'
+}
+
 const SOURCE_LABELS_ZH: Record<string, string> = { approval: '审批' }
 const SOURCE_LABELS_EN: Record<string, string> = { approval: 'Approvals' }
 
@@ -302,7 +325,7 @@ function applyResult(response: TodoItemsResponse | null): void {
           // Discoverable, not silent — see HREF GUARD file-level note.
           console.error(`[todo-center] source "${source}" produced a non-site-relative href; rendering item "${item.id}" inert instead of linking to it: ${item.href}`)
         }
-        return { ...item, navigable }
+        return { ...item, navigable, cancelRound: isCancelRoundWorkflow(item) }
       }),
   }))
 }
@@ -455,5 +478,10 @@ defineExpose({ refresh })
   background: var(--el-fill-color-light, #f0f2f5);
   color: var(--el-text-color-secondary, #666);
   white-space: nowrap;
+}
+
+.todo-center__pill--subtype {
+  align-self: flex-start;
+  color: var(--ms-color-warning);
 }
 </style>

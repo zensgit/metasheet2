@@ -52,6 +52,14 @@ export interface ProductFeatures {
    * an explicit boolean — never inferred from admin role, product mode, or plugin state.
    */
   elearning: boolean
+  /**
+   * Tasks (/tasks, the top-bar 任务 entry and its pending badge). Mirrors the backend's
+   * TASKS_ENABLED switch, the same switch that decides whether /api/tasks is mounted at all.
+   * Default OFF: true only from an explicit boolean in the session payload (or the authorized dev
+   * override). A session payload that carries no tasks value (an older backend) is OFF. Never
+   * inferred from admin role, product mode or plugin state.
+   */
+  tasks: boolean
   mode: ProductMode
 }
 
@@ -88,6 +96,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalFwbWriteback: false,
   attendanceGroupEffectivePolicyPanel: false,
   elearning: false,
+  tasks: false,
   mode: 'platform',
 }
 
@@ -275,6 +284,7 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
     elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
+    tasks: typeof featuresNode.tasks === 'boolean' ? featuresNode.tasks : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -410,6 +420,13 @@ function resolveFeatures(
     backend.elearning,
   )
 
+  // Tasks: same default-OFF discipline. A payload without a tasks boolean (an older backend)
+  // resolves to false here; no admin/mode/plugin inference.
+  const tasks = boolOrDefault(
+    override.tasks,
+    backend.tasks,
+  )
+
   return {
     attendance,
     workflow,
@@ -422,6 +439,7 @@ function resolveFeatures(
     approvalFwbWriteback,
     attendanceGroupEffectivePolicyPanel,
     elearning,
+    tasks,
     mode,
   }
 }
@@ -474,7 +492,13 @@ async function loadProductFeatures(
 
     state.features = resolveFeatures(backendFeatures, overrideFeatures, pluginInference, adminRole)
     state.loaded = true
-    state.sessionAwareLoaded = state.sessionAwareLoaded || requiresSessionProbe
+    // Session-aware means "resolved from THIS session's payload". A load that skipped the session
+    // probe (the login, DingTalk callback and forced-password views run one right after a new token
+    // is set) resolved from an empty payload, so it must clear the mark: otherwise the router
+    // guard's next load returns early and a second sign-in in the same tab keeps features resolved
+    // without its session (tasks/elearning hidden until a hard reload). The guard's re-read hits
+    // the session those views have just primed, so it issues no extra request.
+    state.sessionAwareLoaded = requiresSessionProbe
     state.loading = false
 
     return state.features
