@@ -19690,8 +19690,17 @@ paths:
         global elearning administrator authority and active organization
         membership.
 
-        Administrative setup is available independently of the deployment master
-        flag.
+        Follows the deployment master flag: while it is not exact 'true', GET,
+        POST
+
+        and PUT all answer 404 `{ error: feature_disabled }` right after
+
+        authentication, read and write nothing, and do not reveal whether an
+
+        installation exists. Existing installations are kept and apply again
+        once
+
+        the flag is exact 'true'.
       security:
         - bearerAuth: []
       responses:
@@ -19705,6 +19714,9 @@ paths:
           description: Authentication required.
         '403':
           description: Authoritative organization context required.
+        '404':
+          description: Master flag is not exact 'true' (`feature_disabled`); nothing read.
+          $ref: '#/components/responses/ElearningError'
         '503':
           description: Installation authority unavailable; no fallback enablement.
     post:
@@ -19740,6 +19752,11 @@ paths:
           description: Authentication required.
         '403':
           description: Missing organization, administrator authority, or active membership.
+        '404':
+          description: >-
+            Master flag is not exact 'true' (`feature_disabled`); nothing
+            written.
+          $ref: '#/components/responses/ElearningError'
         '503':
           description: Installation authority unavailable.
     put:
@@ -19784,6 +19801,11 @@ paths:
           description: Authentication required.
         '403':
           description: Missing organization, administrator authority, or active membership.
+        '404':
+          description: >-
+            Master flag is not exact 'true' (`feature_disabled`); nothing
+            written.
+          $ref: '#/components/responses/ElearningError'
         '409':
           description: Application not installed.
         '503':
