@@ -22,9 +22,10 @@
  * Generation-guarded: a response that arrives after a newer request was issued, or
  * after the component owning this composable has unmounted, writes nothing.
  *
- * A 404 means the feature itself is off (there is no `/api/tasks/pending-count` route to ask), not
- * a transient failure — polling every 60s while every attempt still 404s is a request that can
- * never succeed. The polling timer is torn down the first time a 404 lands, the same way
+ * A 404 means the backend has no `/api/tasks/pending-count` route although the session says the
+ * tasks feature is on (the badge is only mounted when it is, see App.vue's `canUseTasks`), e.g. a
+ * tab kept open across a restart that switched TASKS_ENABLED off. It is not a transient failure —
+ * polling every 60s while every attempt still 404s is a request that can never succeed. The polling timer is torn down the first time a 404 lands, the same way
  * `onUnmounted` tears it down; `refresh()` itself stays callable afterward (a `notifyTasksChanged`
  * nudge or a manual retry can still ask once), and if THAT later call comes back `ok`, the steady
  * 60s clock is restarted (see the `timer === null` check in `refresh()`'s `ok` branch) — the route
