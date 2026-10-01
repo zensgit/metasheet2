@@ -65,10 +65,11 @@ const SCAN_TIMEOUT_CEILING_MARGIN_MS = 1_000
 export function resolveElearningAudienceScanTimeoutCeilingMs(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const raw = typeof env.DB_QUERY_TIMEOUT === 'string' ? env.DB_QUERY_TIMEOUT.trim() : ''
-  const poolTimeout = /^[0-9]+$/.test(raw) && Number.isSafeInteger(Number(raw)) && Number(raw) > 0
-    ? Number(raw)
-    : POOL_QUERY_TIMEOUT_DEFAULT_MS
+  // Same reading as the pool itself (integration/db/connection-pool.ts: parseInt(DB_QUERY_TIMEOUT || '30000', 10)),
+  // so '15s', '15000ms' and '+15000' mean the same 15000 ms client timer here as there. NaN or a
+  // non-positive value: the pool would have no usable timer; fall back to its default.
+  const parsed = parseInt(env.DB_QUERY_TIMEOUT || String(POOL_QUERY_TIMEOUT_DEFAULT_MS), 10)
+  const poolTimeout = Number.isFinite(parsed) && parsed > 0 ? parsed : POOL_QUERY_TIMEOUT_DEFAULT_MS
   return Math.max(1, poolTimeout - SCAN_TIMEOUT_CEILING_MARGIN_MS)
 }
 

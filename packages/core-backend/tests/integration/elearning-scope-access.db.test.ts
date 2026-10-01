@@ -950,7 +950,8 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       // transaction gets its previous value back right after the scan. This
       // read-only transaction commits, so a session-level setting would
       // outlive it and show up below.
-      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '60000')
+      // 20 s: a value the ceiling (DB_QUERY_TIMEOUT minus 1000 ms, 29 s by default) leaves as given.
+      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '20000')
       const issued: string[] = []
       let duringScan: string | undefined
       await scanner.query('BEGIN')
@@ -966,7 +967,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
           },
         }, input)).resolves.toEqual([])
         expect(issued.map(audienceTag)).toEqual(SCAN_WITH_TIMEOUT)
-        expect(duringScan).toBe('1min')
+        expect(duringScan).toBe('20s')
         expect(await showTimeout()).toBe(connectionTimeout)
         await scanner.query('COMMIT')
       } catch (error) {
