@@ -34,6 +34,7 @@ import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
+import * as expiredObjectClaim from '../../src/db/migrations/zzzz20261001140000_add_archive_expired_object_claim'
 import * as expiredObjectAdmission from '../../src/db/migrations/zzzz20261001130000_add_archive_expired_object_admission'
 import * as abandonedBindings from '../../src/db/migrations/zzzz20261001120000_add_archive_abandoned_object_bindings'
 import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
@@ -247,6 +248,13 @@ const MIGRATIONS: NamedMigration[] = [
       down: (db) => db.transaction().execute(expiredObjectAdmission.down),
     },
   },
+  {
+    name: 'zzzz20261001140000_add_archive_expired_object_claim',
+    module: {
+      up: (db) => db.transaction().execute(expiredObjectClaim.up),
+      down: (db) => db.transaction().execute(expiredObjectClaim.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -330,6 +338,13 @@ const OWNED_RELATIONS = [
 ]
 
 const OWNED_COLUMNS = [
+  ['meta_recovery_archive_object_deletions', 'store_id'],
+  ['meta_recovery_archive_object_deletions', 'staging_object_id'],
+  ['meta_recovery_archive_object_deletions', 'key_id'],
+  ['meta_recovery_archive_object_deletions', 'provider_version'],
+  ['meta_recovery_archive_object_deletions', 'ciphertext_sha256'],
+  ['meta_recovery_archive_object_deletions', 'size_bytes'],
+  ['meta_recovery_archive_object_deletions', 'object_expires_at'],
   ['meta_records_trash', 'delete_revision_id'],
   ['meta_record_revisions', 'restored_from_version'],
   ['meta_record_revisions', 'seq'],
@@ -381,6 +396,7 @@ const OWNED_INDEXES = [
 ] as const
 
 const OWNED_CONSTRAINTS = [
+  ['meta_recovery_archive_object_deletions', 'chk_archive_object_deletion_binding'],
   ['meta_sheets', 'chk_meta_sheets_recovery_writer_state'],
   ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_kind'],
   ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_tuple'],
@@ -570,6 +586,8 @@ const ARCHIVE_RESTORE_JOB_FUNCTIONS = [
 ]
 
 const OWNED_FUNCTIONS = [
+  'meta_recovery_archive_object_claim_guard',
+  'meta_recovery_archive_object_claim_command',
   'meta_recovery_archive_deletion_complete',
   'meta_recovery_archive_object_deletion_check',
   'meta_recovery_archive_object_deletion_guard',
@@ -675,6 +693,8 @@ const ARCHIVE_RESTORE_JOB_TRIGGERS = [
   'trg_meta_recovery_archive_sync_receipts_reject_truncate',
 ]
 const OWNED_TRIGGERS = [
+  'trg_archive_object_claim_guard',
+  'trg_archive_object_deletion_admission_update_guard',
   'trg_archive_object_deletion_guard',
   'trg_archive_object_deletion_truncate_guard',
   'trg_archive_object_deletion_hold_cancel',
