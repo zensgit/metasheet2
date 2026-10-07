@@ -87,6 +87,6 @@
     "s6aAcceptancePs51Test": "835c7c6ce943d82e0378a40a27c7fd1e8b79b526faa8ca4c8066e4231a4bfb0f",
     "s6aProductRuntimeTest": "1bd015f35eb30e4bc59894abab8d226d871eb06d4838c5d602ddf9af1eae1330",
     "multitableOnpremPackageBuild": "f464702e0fc5e94d92507afa34f3cfd1d45b1625d828ef15c5255a8b4f7a08a2",
-    "pluginTestsWorkflow": "898df5145405bc8dbd2198834243615301b28abddb52de51ad4cbf30a82e7711"
+    "pluginTestsWorkflow": "733d6e1cf4819f129b9750859854c2904e3b6136847102fb3edc73e619aa6cd3"
   }
 }

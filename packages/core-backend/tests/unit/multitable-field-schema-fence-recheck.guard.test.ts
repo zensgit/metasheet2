@@ -226,6 +226,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/recovery-archive-writer-block.ts :: claimArchiveWriterBlock :: prepareArchiveWriterBlockTransaction', '30', 'writes meta_sheets.recovery_writer_* only.'),
   NONWRITER('multitable/recovery-archive-writer-block.ts :: heartbeatArchiveWriterBlock :: <no in-tree call>', '30', 'no in-tree caller; writes meta_sheets.recovery_writer_* only.'),
   NONWRITER('multitable/recovery-archive-writer-block.ts :: releaseArchiveWriterBlock :: <no in-tree call>', '30', 'no in-tree caller; writes meta_sheets.recovery_writer_* only.'),
+  NONWRITER('multitable/recovery-archive-owned-claim.ts :: bindRecoveryArchiveOwnedClaim :: claimInTransaction', '30', 'owned archive claim writes writer ownership, catalog, future reservations, source pin intents and request identity; no meta_records.data write.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: placeRecoveryArchiveLegalHold :: <no in-tree call>', '31', 'no in-tree caller; writes legal-hold tables only.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: releaseRecoveryArchiveLegalHold :: <no in-tree call>', '31', 'no in-tree caller; writes legal-hold tables only.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: expireRecoveryArchiveAfterLegalHoldCheck :: <no in-tree call>', '31', 'no in-tree caller; writes meta_recovery_archives only.'),
