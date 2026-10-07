@@ -184,6 +184,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimOrphanAttachmentForPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-purge-claim.ts :: claimDirectAttachmentPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-metadata-admission.ts :: bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence', '25', 'attachment POST metadata admission: storeAttachment forwards its multitable_attachments INSERT; current field type and row policy are read after the fence, with no meta_records.data write.'),
+  NONWRITER('multitable/meta-tombstone-retention-admission.ts :: sweepProtectedTombstoneRetention :: acquireCanonicalSheetFence', 'new (G3)', 'archive source retention admission: fresh fenced DELETEs target tombstone tables only; no meta_records.data write.'),
   NONWRITER('routes/univer-meta.ts :: POST /sheets/:sheetId/trust-checkpoint-activate :: acquireCanonicalSheetFence', '24', 'writes checkpoint / baseline tables.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/row-level-read-deny :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/conditional-rules :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
@@ -435,6 +436,20 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
     expect(directRecordDataWritesAfterFence(holder)).toEqual([])
     const source = REAL_SOURCES.find((s) => s.rel === 'multitable/attachment-metadata-admission.ts')!
     const anchor = '        const result = await query(sql, params)'
+    expect(source.text.split(anchor)).toHaveLength(2)
+    const text = source.text.replace(anchor,
+      `        await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'synthetic'])\n${anchor}`)
+    const changed = runFenceHolderCensus(REAL_SOURCES.map((s) => s.rel === source.rel ? { ...s, text } : s))
+    expect(nonWriterViolations(changed, FENCE_HOLDER_LEDGER).some((violation) => violation.startsWith(key))).toBe(true)
+  })
+
+  it('G3 tombstone retention admission is a metadata-only holder; a new record-data write reds guard C', () => {
+    const key = 'multitable/meta-tombstone-retention-admission.ts :: sweepProtectedTombstoneRetention :: acquireCanonicalSheetFence'
+    const holder = REAL.holders.find((h) => h.key === key)!
+    expect(REAL.holders.filter((h) => h.key === key)).toHaveLength(1)
+    expect(directRecordDataWritesAfterFence(holder)).toEqual([])
+    const source = REAL_SOURCES.find((s) => s.rel === 'multitable/meta-tombstone-retention-admission.ts')!
+    const anchor = "        const stateResult = await query('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])"
     expect(source.text.split(anchor)).toHaveLength(2)
     const text = source.text.replace(anchor,
       `        await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'synthetic'])\n${anchor}`)
