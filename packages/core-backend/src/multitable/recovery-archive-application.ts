@@ -1,3 +1,4 @@
+import { snapshotRecoveryArchiveCaptureLimits, type RecoveryArchiveCaptureLimits } from './recovery-archive-bounded-source'
 import type {
   RecoveryArchiveRouterDatabaseRuntime,
   UniverMetaRouterOptions,
@@ -43,6 +44,7 @@ export interface RecoveryArchiveApplicationComposition {
   readonly workerIntervalMs: number
   readonly worker: RecoveryArchiveApplicationWorkerDependencies
   readonly manualCapture?: RecoveryArchiveManualAdmissionPolicy
+  readonly manualCaptureLimits?: RecoveryArchiveCaptureLimits
   readonly attachmentStorage?: RecoveryArchivePreviewRuntime['attachmentStorage']
   readonly attachmentCleanupStorage?: { retireRecoveryAttachment(storageKey: string, ownershipKey: string): Promise<void> }
 }
@@ -127,6 +129,7 @@ export function createRecoveryArchiveApplication(
     recoveryArchiveAuditedReplayHorizonMs: composition.auditedReplayHorizonMs,
     recoveryArchiveAsyncResumeHorizonMs: composition.asyncResumeHorizonMs,
     ...(composition.manualCapture ? { recoveryArchiveManualPolicy: composition.manualCapture } : {}),
+    ...(composition.manualCaptureLimits ? { recoveryArchiveManualCaptureLimits: composition.manualCaptureLimits } : {}),
   })
   let workerState: 'idle' | 'started' | 'failed' | 'stopped' = 'idle'
   let workerLoop: RecoveryArchiveRestoreWorkerLoop | null = null
@@ -241,6 +244,7 @@ function snapshotComposition(
     asyncResumeHorizonMs: source.asyncResumeHorizonMs,
     workerIntervalMs: source.workerIntervalMs,
     worker: snapshotWorkerDependencies(source.worker),
+    ...(source.manualCaptureLimits === undefined ? {} : { manualCaptureLimits: snapshotRecoveryArchiveCaptureLimits(source.manualCaptureLimits) }),
     ...(source.manualCapture === undefined ? {} : { manualCapture: snapshotRecoveryArchiveManualPolicy(source.manualCapture) }),
     ...(source.attachmentStorage === undefined ? {} : { attachmentStorage: snapshotAttachmentStorage(source.attachmentStorage) }),
     ...(source.attachmentCleanupStorage === undefined ? {} : { attachmentCleanupStorage: snapshotAttachmentCleanupStorage(source.attachmentCleanupStorage) }),
@@ -306,6 +310,7 @@ function snapshotDatabaseRuntime(
     transaction: source.transaction,
     query: source.query,
     transactionDepthProbe: source.transactionDepthProbe,
+    ...(source.nativePool ? { nativePool: source.nativePool } : {}),
   })
 }
 

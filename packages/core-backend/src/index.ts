@@ -556,6 +556,7 @@ export function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicat
     transaction,
     query,
     transactionDepthProbe: pool.transactionDepthProbe,
+    nativePool: pool.getInternalPool(),
   })
 }
 

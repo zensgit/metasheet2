@@ -81,6 +81,10 @@ const files = [
     sentinel: 'recovery_archive_fresh_writer_admission_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
+    sentinel: 'recovery_archive_owned_composer_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
     sentinel: 'recovery_archive_legal_hold_realdb_harness_missing_database_url',
   },

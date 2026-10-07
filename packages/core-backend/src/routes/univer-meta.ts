@@ -1,3 +1,5 @@
+import type { Pool } from 'pg'
+import type { RecoveryArchiveCaptureLimits } from '../multitable/recovery-archive-bounded-source'
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
 import { bindAttachmentMetadataAdmission, AttachmentMetadataAdmissionError } from '../multitable/attachment-metadata-admission'
@@ -7768,10 +7770,12 @@ export function createRecoveryArchiveManualFinalization(transaction: RecoveryArc
 export function createRecoveryArchiveManualCommand(
   transaction: RecoveryArchivePreparedUploadInput['transaction'], runtime: RecoveryArchivePreviewRuntime,
   policy?: RecoveryArchiveManualAdmissionPolicy,
+  owned?: { pool: Pick<Pool, 'connect' | 'options'>; limits: RecoveryArchiveCaptureLimits },
 ) {
   return bindRecoveryArchiveManualCommand(transaction, bindRecoveryArchiveScopeAuthorization(
     (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
-  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey))
+  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey),
+  owned ? { ...owned, readContentAddressedBounded: (storageKey, maxBytes) => getAttachmentStorageService().readContentAddressedBounded(storageKey, maxBytes) } : undefined)
 }
 
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */
@@ -8195,9 +8199,11 @@ export interface UniverMetaRouterOptions {
   readonly recoveryArchiveAuditedReplayHorizonMs?: number
   readonly recoveryArchiveAsyncResumeHorizonMs?: number
   readonly recoveryArchiveManualPolicy?: RecoveryArchiveManualAdmissionPolicy
+  readonly recoveryArchiveManualCaptureLimits?: RecoveryArchiveCaptureLimits
 }
 
 export interface RecoveryArchiveRouterDatabaseRuntime {
+  readonly nativePool?: Pick<Pool, 'connect' | 'options'>
   readonly transaction: RecoveryArchiveRestoreJobTransaction
   readonly query: RecoveryArchiveRestoreJobQuery
   readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
@@ -13356,7 +13362,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
   const manualCapture = options.recoveryArchiveRuntime
     ? createRecoveryArchiveManualCommand(recoveryArchiveRestoreTransaction, options.recoveryArchiveRuntime,
-        options.recoveryArchiveManualPolicy)
+        options.recoveryArchiveManualPolicy,
+        options.recoveryArchiveDatabaseRuntime?.nativePool && options.recoveryArchiveManualCaptureLimits
+          ? { pool: options.recoveryArchiveDatabaseRuntime.nativePool, limits: options.recoveryArchiveManualCaptureLimits } : undefined)
     : undefined
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,

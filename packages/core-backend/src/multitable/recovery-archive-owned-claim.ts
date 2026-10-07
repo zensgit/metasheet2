@@ -31,6 +31,7 @@ export type RecoveryArchiveCommittedClaimSnapshot = {
   sourcePinIds: string[]
   leaseUntil: string
   expiresAt: string
+  checkpointId: string
   generationClaimedAt: string
   generationCreatedAt: string
   repeat: boolean
@@ -212,7 +213,7 @@ async function claimInTransaction(
   const generationCreatedAt = (generation.rows[0] as { created_at?: unknown } | undefined)?.created_at
   if (generation.rows.length !== 1 || typeof generationCreatedAt !== 'string') fail('RECOVERY_ARCHIVE_CLAIM_UNAVAILABLE')
   return { generationId, candidate: { identity, generationOwner, writerBlock, key: { keyId: policy.keyId, rowVersion: policy.keyRowVersion },
-    reservationPlan, observedHeads, sourcePinIds, leaseUntil, expiresAt, generationClaimedAt: claimedAt, generationCreatedAt, repeat } }
+    reservationPlan, observedHeads, sourcePinIds, leaseUntil, expiresAt, checkpointId, generationClaimedAt: claimedAt, generationCreatedAt, repeat } }
 }
 
 /** No runtime caller: one new owned claim, confirmed COMMIT, then private authority issuance. */
