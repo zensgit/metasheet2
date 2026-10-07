@@ -43,7 +43,7 @@ Guides: `AGENTS.md` (includes Local Dev & Troubleshooting).
 
 - [ ] **改了被 pin 的文件必跑 provenance 测试**：以 `plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs` 的实际清单及 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` 为准（含 review 修正、rebase 合并产生的改动）。
 
-  - 文件示例：`plugins/plugin-integration-core/index.cjs`、`plugins/plugin-integration-core/lib/http-routes.cjs`、`plugins/plugin-integration-core/package.json`、`pnpm-lock.yaml`、`.github/workflows/plugin-tests.yml`；示例不替代完整清单，也不表示同目录所有文件都被 pin。
+  - 文件示例：`plugins/plugin-integration-core/index.cjs`、`plugins/plugin-integration-core/lib/http-routes.cjs`、`plugins/plugin-integration-core/package.json`、`pnpm-lock.yaml`、`.github/workflows/stock-prep-powershell51.yml`；示例不替代完整清单，也不表示同目录所有文件都被 pin。
   - 重打 pin：按最终候选内容更新 `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json`。
   - 完整验证：在符合 `.gitattributes` 的 LF 工作树中执行 `node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs`，校验实际候选树的字节；不得通过在哈希前归一化换行来放行不一致的文件。
   - Windows：先核对被 pin 文件的工作树换行；Windows PowerShell 5.1 不得用 `git show ... | sha256sum` 这类文本管道计算 blob 哈希，因为管道会改变字节。辅助排查单文件时，可明确在 Git Bash 中执行 `git show HEAD:plugins/plugin-integration-core/lib/http-routes.cjs | sha256sum`；它只校验该已提交文件，不能代替上述完整候选树验证。
