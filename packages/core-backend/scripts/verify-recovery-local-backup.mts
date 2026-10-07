@@ -32,6 +32,7 @@ import type {
   ArchiveProcessWorkerMessage,
 } from '../tests/utils/recovery-archive-process-worker'
 const require = createRequire(import.meta.url)
+const { createAndCaptureManualFixture } = require('./verify-recovery-local-manual-http.ts') as typeof import('./verify-recovery-local-manual-http')
 const {
   assertDistinctDirectoryIdentities,
   assertOwnedPrivateDirectory,
@@ -44,12 +45,15 @@ const {
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
 const workerPath = fileURLToPath(new URL('../tests/utils/recovery-archive-process-worker.ts', import.meta.url))
+const manualTargetPath = fileURLToPath(new URL('./verify-recovery-local-manual-target.mts', import.meta.url))
 const runToken = randomUUID().replaceAll('-', '').slice(0, 16)
 const prefix = `tm_local_backup_${runToken}`
 const args = parseRecoveryLocalBackupCli(process.argv.slice(2))
 const names = recoveryLocalBackupDatabaseNames(runToken)
 const sourceUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.source)
 const targetUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.target)
+const sourceAttachmentPath = join(args.workRoot, 'source', 'attachments')
+const targetAttachmentPath = join(args.workRoot, 'target', 'attachments')
 const recoverySecret = randomBytes(32)
 const jwtSecret = randomBytes(48).toString('hex')
 const children = new Set<ChildProcess>()
@@ -72,6 +76,7 @@ Object.assign(process.env, safeEnvironment, {
   MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
   MULTITABLE_ENABLE_WRITER_FENCE: 'true',
   MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+  ATTACHMENT_PATH: sourceAttachmentPath,
 })
 
 type FileStoreProvider = Awaited<ReturnType<typeof import('../src/multitable/recovery-archive-file-store').createRecoveryArchiveFileStoreProvider>>
@@ -85,6 +90,7 @@ let provisionRecoveryArchiveFileRoot: typeof import('../src/multitable/recovery-
 let loadRecoveryArchiveAuthorityInternal: typeof import('../src/multitable/recovery-archive-preview').loadRecoveryArchiveAuthorityInternal
 let RecoveryArchivePreviewErrorClass: typeof import('../src/multitable/recovery-archive-preview').RecoveryArchivePreviewError
 let readRecoveryArchiveCompleteSectionState: typeof import('../src/multitable/recovery-archive-reader').readRecoveryArchiveCompleteSectionState
+let readRecoveryArchiveAttachmentBytes: typeof import('../src/multitable/recovery-archive-reader').readRecoveryArchiveAttachmentBytes
 let RecoveryArchiveReaderErrorClass: typeof import('../src/multitable/recovery-archive-reader').RecoveryArchiveReaderError
 let createLocalCustodyBackup: typeof import('../src/multitable/recovery-local-custody').createLocalCustodyBackup
 let createLocalCustodySession: typeof import('../src/multitable/recovery-local-custody').createLocalCustodySession
@@ -133,6 +139,7 @@ async function loadRuntimeDependencies(): Promise<void> {
   loadRecoveryArchiveAuthorityInternal = preview.loadRecoveryArchiveAuthorityInternal
   RecoveryArchivePreviewErrorClass = preview.RecoveryArchivePreviewError
   readRecoveryArchiveCompleteSectionState = reader.readRecoveryArchiveCompleteSectionState
+  readRecoveryArchiveAttachmentBytes = reader.readRecoveryArchiveAttachmentBytes
   RecoveryArchiveReaderErrorClass = reader.RecoveryArchiveReaderError
   createLocalCustodyBackup = custody.createLocalCustodyBackup
   createLocalCustodySession = custody.createLocalCustodySession
@@ -240,6 +247,21 @@ async function main(): Promise<Record<string, unknown>> {
       expiresAt,
       expectedNonceSections: RECOVERY_ARCHIVE_V1_SECTION_NAMES,
     })
+    const manual = await createAndCaptureManualFixture({
+      runtime: sourceRuntime, workspaceId: fixture.fixture.workspaceId, prefix,
+      attachmentPath: sourceAttachmentPath,
+      archive: { keyCustody: sourceAdmission, objectStore: sourceProvider, transactionDepth: sourceRuntime.depth },
+      keyId: sourceAdmission.keyId,
+    })
+    assert.notEqual(manual.generationId, fixture.fixture.generationId)
+    const sourceCapturedAuthority = await loadAuthority(sourceRuntime, {
+      workspaceId: fixture.fixture.workspaceId, baseId: manual.baseId,
+      sheetId: manual.sheetId, generationId: manual.generationId,
+    })
+    assert.deepEqual((await sourceRuntime.query(
+      'SELECT count(*)::int AS count FROM public.meta_recovery_archives WHERE sheet_id=$1',
+      [manual.sheetId],
+    )).rows[0] as { count: number }, { count: 1 })
     sourceSession.lock()
     assert.equal(sourceSession.isUnlocked(), false)
 
@@ -325,6 +347,62 @@ async function main(): Promise<Record<string, unknown>> {
     targetSession.unlock({ custodyId, recoverySecret, backup: copiedBackup })
     const targetAdmission = targetSession.admitForArchive(custodyId)
     assert.notEqual(targetAdmission.keyId, fixture.archivedKeyId)
+    const capturedAuthority = await loadAuthority(targetRuntime, {
+      workspaceId: fixture.fixture.workspaceId,
+      baseId: manual.baseId,
+      sheetId: manual.sheetId,
+      generationId: manual.generationId,
+    })
+    assert.deepEqual(capturedAuthority.selectedBinding, sourceCapturedAuthority.selectedBinding)
+    assert.deepEqual((await targetRuntime.query(
+      'SELECT count(*)::int AS count FROM public.meta_recovery_archives WHERE sheet_id=$1',
+      [manual.sheetId],
+    )).rows[0] as { count: number }, { count: 1 })
+    const capturedState = await readRecoveryArchiveCompleteSectionState({
+      query: targetRuntime.query,
+      selectedBinding: capturedAuthority.selectedBinding,
+      manifestObject: capturedAuthority.manifestObject,
+      sectionObjects: capturedAuthority.sectionObjects,
+      attachmentObjects: capturedAuthority.attachmentObjects,
+      keyCustody: targetAdmission,
+      objectStore: targetProvider,
+      transactionDepth: targetRuntime.depth,
+    })
+    const capturedData = capturedState.records.get(manual.recordId)?.data
+    assert.deepEqual(Object.keys(capturedData ?? {}).sort(), [manual.fieldId, manual.attachmentFieldId].sort())
+    assert.equal(capturedData?.[manual.fieldId], 'captured')
+    assert.deepEqual(capturedData?.[manual.attachmentFieldId], [manual.attachmentId])
+    assert.deepEqual(readRecoveryArchiveAttachmentBytes(capturedState, manual.attachmentId).bytes, manual.attachmentBytes)
+    const manualRowsBeforeRefusals = await readLiveRows(targetRuntime.query, manual.sheetId)
+    const manualEffectsBeforeRefusals = (await targetRuntime.query(
+      `SELECT (SELECT count(*)::int FROM public.meta_record_revisions WHERE sheet_id=$1) AS revisions,
+              (SELECT count(*)::int FROM public.meta_recovery_archive_jobs WHERE sheet_id=$1) AS jobs`,
+      [manual.sheetId],
+    )).rows
+    const capturedAttachmentObject = capturedAuthority.attachmentObjects?.find(item => item.attachmentId === manual.attachmentId)?.binding
+    assert.ok(capturedAttachmentObject)
+    const attachmentObjectPath = join(targetArchive,
+      `${capturedAttachmentObject.generationId}-${capturedAttachmentObject.objectId}.object`)
+    const missingAttachmentObjectPath = `${attachmentObjectPath}.missing`
+    await rename(attachmentObjectPath, missingAttachmentObjectPath)
+    try {
+      await assert.rejects(readRecoveryArchiveCompleteSectionState({
+        query: targetRuntime.query, selectedBinding: capturedAuthority.selectedBinding,
+        manifestObject: capturedAuthority.manifestObject, sectionObjects: capturedAuthority.sectionObjects,
+        attachmentObjects: capturedAuthority.attachmentObjects,
+        keyCustody: targetAdmission, objectStore: targetProvider, transactionDepth: targetRuntime.depth,
+      }), (error: unknown) => error instanceof RecoveryArchiveReaderErrorClass
+        && error.code === 'RECOVERY_ARCHIVE_READER_OBJECT_STORE_FAILED')
+    } finally {
+      await rename(missingAttachmentObjectPath, attachmentObjectPath)
+    }
+    assert.deepEqual(await readLiveRows(targetRuntime.query, manual.sheetId), manualRowsBeforeRefusals)
+    assert.deepEqual((await targetRuntime.query(
+      `SELECT (SELECT count(*)::int FROM public.meta_record_revisions WHERE sheet_id=$1) AS revisions,
+              (SELECT count(*)::int FROM public.meta_recovery_archive_jobs WHERE sheet_id=$1) AS jobs`,
+      [manual.sheetId],
+    )).rows, manualEffectsBeforeRefusals)
+    await assertPathMissing(targetAttachmentPath)
 
     await runFailClosedNegatives({
       runtime: targetRuntime,
@@ -418,6 +496,23 @@ async function main(): Promise<Record<string, unknown>> {
     }])
     assert.equal(await exactOnceRecordCount(targetRuntime.query, fixture.fixture.sheetId), recoveryLocalBackupRecordCount())
 
+    await assertPathMissing(targetAttachmentPath)
+    const rollbackTableCount = await runManualTargetChild({
+      databaseName: names.target,
+      local: {
+        archivePath: targetArchive, custodyPath: targetCustody, custodyId, storeId,
+        receipt: rotatedReceipt, recoverySecret: Uint8Array.from(recoverySecret),
+      },
+      identity: { sheetId: manual.sheetId, actorId: manual.actorId },
+      password: manual.password,
+      generationId: manual.generationId,
+      recordId: manual.recordId,
+      fieldId: manual.fieldId,
+      attachmentFieldId: manual.attachmentFieldId,
+      attachmentId: manual.attachmentId,
+      attachmentBytes: Uint8Array.from(manual.attachmentBytes),
+    }, targetUrl)
+
     const finalNonces = await readNonceTuples(targetRuntime.query, fixture.fixture.generationId)
     assert.deepEqual(finalNonces, sourceNonces)
     result = {
@@ -429,6 +524,19 @@ async function main(): Promise<Record<string, unknown>> {
       storeIdRetained: true,
       sourceUnavailableBeforeWorker: true,
       targetDatabaseIdentityDistinct: true,
+      manualCapturedArchive: {
+        sameGenerationImportedAndRestored: true,
+        attachmentBytesRecovered: true,
+        sourceUnavailableBeforeRestore: true,
+        freshTargetProcess: true,
+        officialTargetLauncher: true,
+        lockedUntilOperatorUnlock: true,
+        gracefulStopWithNoListener: true,
+        flagOffRollbackHttpParity: true,
+        flagOffRollbackNoWrites: true,
+        flagOffFreshProcesses: 2,
+        flagOffComparedTables: rollbackTableCount,
+      },
       writerBlockReleased: true,
       derivedEffectsDrained: recoveryLocalBackupRecordCount(),
     }
@@ -712,6 +820,83 @@ function createDatabaseRuntime(url: URL, applicationName: string): DatabaseRunti
   }
 }
 
+async function runManualTargetChild(input: {
+  readonly databaseName: string
+  readonly local: {
+    readonly archivePath: string
+    readonly custodyPath: string
+    readonly custodyId: string
+    readonly storeId: string
+    readonly receipt: LocalCustodyReceipt
+    readonly recoverySecret: Uint8Array
+  }
+  readonly identity: { readonly sheetId: string; readonly actorId: string }
+  readonly password: string
+  readonly generationId: string
+  readonly recordId: string
+  readonly fieldId: string
+  readonly attachmentFieldId: string
+  readonly attachmentId: string
+  readonly attachmentBytes: Uint8Array
+}, targetDatabaseUrl: URL): Promise<number> {
+  assert.equal(input.local.archivePath.startsWith(`${args.workRoot}/target/`), true)
+  assert.equal(input.local.custodyPath.startsWith(`${args.workRoot}/target/`), true)
+  const child = fork(manualTargetPath, [], {
+    execArgv: ['--require', require.resolve('tsx/cjs')],
+    serialization: 'advanced',
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      TMPDIR: process.env.TMPDIR,
+      NODE_ENV: 'test',
+      DATABASE_URL: targetDatabaseUrl.href,
+      ATTACHMENT_PATH: targetAttachmentPath,
+      JWT_SECRET: jwtSecret,
+      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+      MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+      MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+    },
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })
+  children.add(child)
+  try {
+    return await new Promise<number>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 240_000)
+      const finish = (work: () => void) => {
+        clearTimeout(timer)
+        work()
+      }
+      child.once('error', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_SPAWN_FAILED'))))
+      child.once('exit', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_EXITED_WITHOUT_RESULT'))))
+      child.on('message', (message: { kind?: string; code?: string; frames?: string[]; rollbackTableCount?: number }) => {
+        if (message.kind === 'manual-target-done') {
+          finish(() => Number.isSafeInteger(message.rollbackTableCount) && (message.rollbackTableCount ?? 0) >= 6
+            ? resolvePromise(message.rollbackTableCount!)
+            : reject(new Error('RECOVERY_LOCAL_ROLLBACK_RESULT_INVALID')))
+        }
+        else if (message.kind === 'manual-target-error') {
+          if (message.frames?.length) console.log(JSON.stringify({ phase: 'manual-target', frames: message.frames }))
+          finish(() => reject(new Error(message.code ?? 'RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_FAILED')))
+        }
+      })
+      child.send(input, (error) => {
+        if (error) finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_SEND_FAILED')))
+      })
+    })
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolvePromise) => {
+        child.once('exit', () => resolvePromise())
+        setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+        }, 5_000)
+      })
+    }
+    children.delete(child)
+    input.local.recoverySecret.fill(0)
+  }
+}
+
 async function runWorker(
   input: Omit<ArchiveProcessWorkerInput, 'applicationName'>,
   targetDatabaseUrl: URL,
@@ -751,6 +936,9 @@ async function runWorker(
         if (message.kind === 'read-object') {
           finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_PARENT_OBJECT_RPC_REFUSED')))
         } else if (message.kind === 'error') {
+          if (/^(?:RECOVERY_ARCHIVE_[A-Z_]+|archive_process_[a-z_]+)$/.test(message.code)) {
+            console.log(JSON.stringify({ phase: input.phase, workerCode: message.code }))
+          }
           finish(() => reject(new Error(message.code)))
         } else {
           finish(() => resolvePromise(message))
@@ -1004,7 +1192,7 @@ try {
   const line = error instanceof Error ? error.stack?.match(/verify-recovery-local-backup\.mts:(\d+):/)?.[1] : undefined
   const sqlState = error && typeof error === 'object' && 'code' in error
     && typeof error.code === 'string' && /^[0-9A-Z]{5}$/.test(error.code) ? error.code : undefined
-  const frames = error instanceof Error ? [...(error.stack ?? '').matchAll(/\/(recovery-[a-z-]+\.ts):(\d+):/g)]
+  const frames = error instanceof Error ? [...(error.stack ?? '').matchAll(/\/((?:recovery-[a-z-]+|verify-recovery-local-manual-http)\.ts):(\d+):/g)]
     .map((match) => `${match[1]}:${match[2]}`) : []
   console.error(JSON.stringify({ result: 'FAIL', code, line, sqlState, frames }))
   process.exitCode = 1
