@@ -183,6 +183,7 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimAttachmentBlobPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimOrphanAttachmentForPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-purge-claim.ts :: claimDirectAttachmentPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
+  NONWRITER('multitable/attachment-metadata-admission.ts :: bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence', '25', 'attachment POST metadata admission: storeAttachment forwards its multitable_attachments INSERT; current field type and row policy are read after the fence, with no meta_records.data write.'),
   NONWRITER('routes/univer-meta.ts :: POST /sheets/:sheetId/trust-checkpoint-activate :: acquireCanonicalSheetFence', '24', 'writes checkpoint / baseline tables.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/row-level-read-deny :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/conditional-rules :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
@@ -425,6 +426,20 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
 
   it('C1-F5. the attachment stage ledger\'s private lockSource (a FOR SHARE row lock, no fence) is not a holder', () => {
     expect(REAL.holders.filter((h) => h.rel === 'multitable/recovery-archive-attachment-stage-ledger.ts')).toEqual([])
+  })
+
+  it('G1 attachment metadata admission is a metadata-only holder; a new record-data write reds guard C', () => {
+    const key = 'multitable/attachment-metadata-admission.ts :: bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence'
+    const holder = REAL.holders.find((h) => h.key === key)!
+    expect(REAL.holders.filter((h) => h.key === key)).toHaveLength(1)
+    expect(directRecordDataWritesAfterFence(holder)).toEqual([])
+    const source = REAL_SOURCES.find((s) => s.rel === 'multitable/attachment-metadata-admission.ts')!
+    const anchor = '        const result = await query(sql, params)'
+    expect(source.text.split(anchor)).toHaveLength(2)
+    const text = source.text.replace(anchor,
+      `        await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'synthetic'])\n${anchor}`)
+    const changed = runFenceHolderCensus(REAL_SOURCES.map((s) => s.rel === source.rel ? { ...s, text } : s))
+    expect(nonWriterViolations(changed, FENCE_HOLDER_LEDGER).some((violation) => violation.startsWith(key))).toBe(true)
   })
 
   it('E. slice 3b: the conversion and its undo are 免检 because they read the field row under a lock after the fence — and they do', () => {

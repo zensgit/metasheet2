@@ -122,3 +122,44 @@ pnpm validate:all
 
 This is not a new-source APFS rehearsal, full archive composer, independent durable/KMS qualification,
 real-data acceptance or production enablement. Retained historical rehearsal and LC1..6 are unchanged.
+
+## Exact-source CI collection correction
+
+The original ordinary run 37562837310 at source `9a07ffd313a8463de59d329ac6901199c1f82f19`
+is terminal FAILURE, not acceptance. Both Node lanes failed the same six cases in the exhaustive
+field-schema fence-holder guard because the new attachment metadata holder was not ledgered.
+Each lane actually ran the new admission unit69, attachment service33 and writer-block10 successfully;
+field-holder guard43 passed/6 failed. The preceding core-backend failure skipped DB migration and
+multitable real-DB steps, so this run did not execute the new whole native43 file. Four other jobs
+succeeded; coverage was metadata-only skipped. Root verified exact source/tree/parent, all18 changed
+Git blobs/bytes and six raw logs with18 continuous206 ranges. Two evidence-index relative path prefixes
+have an additive corrected index/erratum; original receipts, raw failure and source are preserved.
+
+Root reproduced the whole49-case guard at actual exit1,43 PASS/6 FAIL/0 skip before changing it.
+The correction registers only `bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence` as a
+metadata-only holder: its real caller is storeAttachment's multitable_attachments INSERT; it reads
+current field/row authority after the fence and writes no meta_records.data. No scanner assertion,
+region check, existing classification or standing negative was removed. One in-memory real-source
+counterexample adds a record-data UPDATE to that holder and proves guard C rejects the new write.
+The whole guard now has50 cases, with all original49 preserved.
+
+Four focused files now pass162/162,0 skip: admission69 + attachment service33 + writer-block10 +
+field-holder guard50. Removing exactly the new ledger row produces7 named raw AssertionError failures
+in the whole50-case guard, including the new counterexample; restoring exact bytes returns the same
+four whole files to162 PASS/0 skip/actual exit0. All production source and the original native fixture/spec
+remain byte-identical. Original local whole43 native evidence and eight production guard mutations
+remain separately qualified; no test-only collection correction repeats or upgrades that native proof.
+
+Process exits, before/final input SHA, raw logs/reporters and exact restoration are retained under
+`artifacts/tm-attachment-admission-20261007/ci-collection-fix-20261007/`. Independent terminal failure
+readback is `artifacts/tm-attachment-admission-ci-20261007/root-failed-ci-independent-readback-20261007.json`.
+A corrected-source ordinary CI must execute the whole native file; its execution gate remains OPEN
+until the new source's terminal logs are qualified. The failed source run is not retried.
+
+| Additional gate | State |
+| --- | --- |
+| Missing-holder failure reproduced before correction | PASS: original whole49,43 PASS/6 FAIL/0 skip,actual exit1 |
+| Truthful metadata-only census registration with data-write counterexample | PASS: whole50 + unchanged admission/service/writer neighbors,162 PASS/0 skip |
+| Omission refutation and exact restoration | PASS: omitted row7 matching AssertionError RED, restored whole162 PASS |
+| Corrected-source configured validation / source publication / CI | validate:all actual exit0; publication and new-source CI OPEN pending receipts |
+| Complete TM / G2 / G3 / D-H2 / D-L / D7 / owner stages | OPEN |
