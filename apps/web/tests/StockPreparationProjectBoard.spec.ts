@@ -93,8 +93,8 @@ import {
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
-const PROJECT_NO = '230920006'
-const PROJECT_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_NO = '200000006'
+const PROJECT_NAME = '示例乙型容器'
 const SHEET_ID = 'sheet_abcdef0123456789'
 const VIEW_ID = 'view_abcdef0123456789'
 
@@ -1454,7 +1454,7 @@ describe('项目备料页 — the operator project board', () => {
   it('B-15: an in-flight refresh cannot land on a newly opened project', async () => {
     // The refresh's board read is held open; while it is in flight the operator opens ANOTHER
     // project, which resolves first. When the stale answer finally arrives it must be dropped.
-    const OTHER_NO = '230920099'
+    const OTHER_NO = '200000099'
     let releaseStale: (() => void) | null = null
     const stale = new Promise<void>((resolve) => { releaseStale = resolve })
     let boardReads = 0

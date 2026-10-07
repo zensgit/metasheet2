@@ -519,7 +519,7 @@ async function aStoredLargeBomJobIsRunOnlyByItsCreator() {
     routePath: '/api/integration/table-actions/:actionId/large-bom/expansion-jobs',
     user: OPERATOR,
     actionId: pull,
-    body: { parameters: { projectNo: '230920006' } },
+    body: { parameters: { projectNo: '200000006' } },
   })
   assert.equal(started.statusCode, 202, `P-10: the operator starts their own job (got ${JSON.stringify(started.body)})`)
   const jobId = started.body && started.body.data && started.body.data.jobId
@@ -938,7 +938,7 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
 //      quoted from memory. (Inherited verbatim from P-13f, which measured exactly this while the flag
 //      was off; deleting the flag makes it unconditional, not obsolete.)
 //   4. THE MALFORMED-projectNo 400 SURVIVED THE GATE. A `projectNo` that is PRESENT but not a usable
-//      string — {"projectNo": 230920006}, the shape this domain hands out constantly — is refused
+//      string — {"projectNo": 200000006}, the shape this domain hands out constantly — is refused
 //      400 with the downstream validator's own code and field, before the action lookup, the B2a
 //      fence and the source adapter: no external read, no credential decrypt, no audit row. It was
 //      never part of the narrowing (it is the malformed-request answer the request was going to get
@@ -946,7 +946,7 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
 //   5. DRY-RUN AND APPLY ARE UNCHANGED, as they always were.
 // ---------------------------------------------------------------------------
 
-const VISIBLE_PROJECT_NO = '2-20231625'
+const VISIBLE_PROJECT_NO = '2-20000001'
 const FOREIGN_PROJECT_NO = '9-99999999'
 const PROJECT_OBJECT_ID = 'plm_stock_preparation_project'
 // The deleted gate's refusal code, kept as a NAMED constant with no producer anywhere in the tree:

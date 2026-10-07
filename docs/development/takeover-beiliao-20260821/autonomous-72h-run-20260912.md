@@ -41,9 +41,9 @@
 ### 4.1 上机
 
 - **r36(`caf8128ad` = r35 + X5 #5685 + E #5684 + X6 #5686,09-14 09:16 上 222;用户「今天要交出来」⇒ 白天上机)**:备份 `pre-r36-20260914-091630.dump`;维护门 WIRED → 后端直连 attempt 7 → 删 flag → nginx 200;upgrade exit 0;web smoke PASS(bundle 与 r35 相同,三支都是后端/插件改动);标记 X5 `createRowErrorCollector` / E `notification-retention` dist(env 未设 ⇒ 默认关)/ X6 `intakeProvidesField` 全 True;事后错误 0 行、flag 不存在、health 200。
-- **X6 现场实证**:演示项目 2-20241722.1723 dry-run 从 r35 的「update:1(根行永不收敛的空 update)」变为 **update 0 / skip 581 / manual_confirm 0**——全量收敛。
+- **X6 现场实证**:演示项目 <项目号D> dry-run 从 r35 的「update:1(根行永不收敛的空 update)」变为 **update 0 / skip 581 / manual_confirm 0**——全量收敛。
 - **r37(`f2126bc3e` = r36 + #5625,09-14 10:54 上 222)**:备份 `upgrade-backup-20260914-105403`;维护门 WIRED → 后端直连 attempt 6 → 删 flag → nginx 200;migration exit 0;upgrade exit 0;web smoke PASS(bundle 与 r36 相同);backend err 0 行(10:00 起);app.env 37 行未动。标记:X5 / E / X6 True;#5625 第一子标记 True、第二子标记 False——是我猜的子串(`installedFieldProperties: installedFieldProperties`)在代码里不存在,不是包错:222 上 `http-routes.cjs` 的 sha256 前缀 `48452e63…` 与 PR 重钉的 `runtimeFiles.pluginHttpRoutes` pin 逐字相同。
-- **r37 演示 dry-run**:2-20241722.1723 → update 0 / skip 578 / **manual_confirm 3**(r36 时 skip 581 / manual_confirm 0)。r36→r37 的 lib 改动全在大 BOM 路径(演示 largeBom=false),而 222 上 bom备料 在 09:00 时段有 5 行被人工编辑(只读 SQL:updated_at 按小时计数;确认账本仍 6 行未增),与「3 行转人工确认」吻合——这是设计行为(人工改过的格不被来料覆盖,转确认账本),不是回归;未逐格核对是哪 3 行。
+- **r37 演示 dry-run**:<项目号D> → update 0 / skip 578 / **manual_confirm 3**(r36 时 skip 581 / manual_confirm 0)。r36→r37 的 lib 改动全在大 BOM 路径(演示 largeBom=false),而 222 上 bom备料 在 09:00 时段有 5 行被人工编辑(只读 SQL:updated_at 按小时计数;确认账本仍 6 行未增),与「3 行转人工确认」吻合——这是设计行为(人工改过的格不被来料覆盖,转确认账本),不是回归;未逐格核对是哪 3 行。
 
 ### 4.2 用户现场问题(09-14 上午,222 只读 SQL + 代码实读)
 
