@@ -271,14 +271,14 @@ Start-ScheduledTask -TaskName 'metasheet-stock-prep-scheduled-dry-run'
 **(a)在测试库插入一张订单,指向已有 BOM 的零件**(推荐,风险最低,不涉及生产数据):
 
 ```sql
--- 项目 <项目号A> 的节点 15014156;零件 600028853 有 2 个 BOM 表头、118 行明细
-INSERT INTO DN_PDM_OrderHeadInfo (OBJ_ID, path_id) VALUES (<新订单ID>, 15014156);
-INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES (<新订单ID>, 600028853, 1, 1);
+-- 项目 <项目号A> 的节点 <节点ID-1>;零件 <零件ID-1> 有 2 个 BOM 表头、118 行明细
+INSERT INTO DN_PDM_OrderHeadInfo (OBJ_ID, path_id) VALUES (<新订单ID>, <节点ID-1>);
+INSERT INTO DN_PDM_OrderDetailInfo (order_id, part_id, quantity, sort_id) VALUES (<新订单ID>, <零件ID-1>, 1, 1);
 ```
 
 **表头可能还有其它非空列,以客户实际表结构为准,上面两条 INSERT 只给出本方案必须的最小字段集。**
 
-插入后对项目号 `<项目号A>` 跑一次拉取(§6),预计能展开出该 BOM 下的行。**预告**:2026-09-03 对测试库的只读枚举显示,该零件的一张 BOM(bom_id 15013572)59 行明细里有 33 行的子件不在测试库物料表(其它有 BOM 的根零件也普遍缺 40–60%),拉取后这些行会被系统**挂起待人工确认**(`manual_confirm_required`),这是**设计行为,不是故障**——系统对拿不准的行选择停下来问人,不自己猜。具体挂起的子件笔数(任务书口径为"59 个子件里 33 个不在测试库物料表")**待核对**:本次复核的源文档中未找到这一具体计数的逐字出处,已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字(见 `222-deploy-window-runbook-20260901.md` 第 116 条)。
+插入后对项目号 `<项目号A>` 跑一次拉取(§6),预计能展开出该 BOM 下的行。**预告**:2026-09-03 对测试库的只读枚举显示,该零件的一张 BOM(bom_id <BOM-ID-1>)59 行明细里有 33 行的子件不在测试库物料表(其它有 BOM 的根零件也普遍缺 40–60%),拉取后这些行会被系统**挂起待人工确认**(`manual_confirm_required`),这是**设计行为,不是故障**——系统对拿不准的行选择停下来问人,不自己猜。具体挂起的子件笔数(任务书口径为"59 个子件里 33 个不在测试库物料表")**待核对**:本次复核的源文档中未找到这一具体计数的逐字出处,已核实的是同一零件"2 张 BOM 表头 / 118 行明细"这组数字(见 `222-deploy-window-runbook-20260901.md` 第 116 条)。
 
 **(b)提供生产 PLM 只读账号**:凭据由客户/实施在界面当场输入,用后按客户内部安全策略轮换;本文及其他任何交付文档都不记录凭据。选这条需要客户明确同意接入生产库。
 

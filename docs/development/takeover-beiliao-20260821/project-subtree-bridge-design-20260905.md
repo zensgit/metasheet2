@@ -5,7 +5,7 @@
 ## 0. 裁定:实现前必修的三项(来自对抗审查)
 
 1. **越界防护(安全级)**:子树遍历的**每一次** `read(plan.pathInfo.object, {parent: node})` 与 `read(plan.bomHead.object, {path_id: node})` 都必须用 `matchesByField` 做后置过滤,只保留真正匹配过滤键的行——与订单路径 :911 处的做法一致。原因:`bridge:legacy-sql-readonly` 源可能返回 `filtersApplied:false`(全表),`readAll` 不校验过滤是否生效;不后置过滤,一次 BFS 会把全库 PathInfo 当成子节点,继而读到其它项目/共享零件库的 BOM。`visited` 与 `maxSubtreeDepth` 对此无效。
-2. **去重必须覆盖全部已展开零件,不只是根**:维护"本次已展开的 componentSourceId 集合"(含子件),子树根命中即跳过并计数 `subtreeRootsSkippedAlreadyExpanded`。原因:零件 B 既是订单根 A 的子件、又是子树根时,`idempotencyKey` 分别为 `{P,B,"A",["A","B"]}` 与 `{P,B,null,["B"]}`,规划器视为两行,写入后导出双算。另:同一零件在子树内有多张表头(600028853 有 2 张)→ 按 `part_id` 去重并按版本择一,否则同键两根必然 `duplicate_expanded_key` 挂起。
+2. **去重必须覆盖全部已展开零件,不只是根**:维护"本次已展开的 componentSourceId 集合"(含子件),子树根命中即跳过并计数 `subtreeRootsSkippedAlreadyExpanded`。原因:零件 B 既是订单根 A 的子件、又是子树根时,`idempotencyKey` 分别为 `{P,B,"A",["A","B"]}` 与 `{P,B,null,["B"]}`,规划器视为两行,写入后导出双算。另:同一零件在子树内有多张表头(<零件ID-1> 有 2 张)→ 按 `part_id` 去重并按版本择一,否则同键两根必然 `duplicate_expanded_key` 挂起。
 3. **读预算要真的存在**:`maxReadCount`/`maxElapsedMs` 是可选项,222 未设即不生效;`maxPages` 是每次 `readAll` 内部归零的分页数,不是总量。要求:`maxSubtreeDepth ≤ 4`、`maxSubtreeNodes ≤ 2000`、`maxSubtreeRoots ≤ 500` 做**代码硬顶**(normalize 时超顶即拒);**启用 `projectSubtree` 时强制要求计划带 `maxReadCount`**,否则 normalize 报错。超限一律 global error(`subtree_node_limit_exceeded`/`subtree_root_limit_exceeded`/`subtree_cycle_detected`),不进 `LARGE_BOM_BOUNDED_ERROR_TYPES`。
 
 
@@ -186,7 +186,7 @@ makeIdempotencyKey(plugins/plugin-integration-core/lib/stock-preparation-bom-exp
 
 ═══ 二、子树根集合**自身**就会撞 key(方案完全没写这条)═══
 
-方案的 discoverSubtreeRoots 对每个节点读 bomHead,filters 只有 {[pathIdField]: nodeId},**不带 SysVer**;isActiveBomHead(:451-461,注意方案写的 :383 是错的)对 null/'' 一律判 active。实测客户库:零件 600028853 有 **2 张表头**(docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md:116)。两张表头 → 同一个 part_id → 同一个 rootSourceId → 两行 **idempotencyKey 逐字节相同** → defaultPolicy 'hold'(conflict-planner.cjs:755、915)→ plan.valid=false → dryRunStatus 'manual_confirm_required'(table-actions.cjs:1295)。同一装配挂在两个文件夹节点下也一样。方案把去重说成「apply 的前提」,却只防了它想到的那一半。
+方案的 discoverSubtreeRoots 对每个节点读 bomHead,filters 只有 {[pathIdField]: nodeId},**不带 SysVer**;isActiveBomHead(:451-461,注意方案写的 :383 是错的)对 null/'' 一律判 active。实测客户库:零件 <零件ID-1> 有 **2 张表头**(docs/development/takeover-beiliao-20260821/222-deploy-window-runbook-20260901.md:116)。两张表头 → 同一个 part_id → 同一个 rootSourceId → 两行 **idempotencyKey 逐字节相同** → defaultPolicy 'hold'(conflict-planner.cjs:755、915)→ plan.valid=false → dryRunStatus 'manual_confirm_required'(table-actions.cjs:1295)。同一装配挂在两个文件夹节点下也一样。方案把去重说成「apply 的前提」,却只防了它想到的那一半。
 
 ═══ 三、根数量=1 正是 parseQuantity 明文拒绝的那类捏造乘数 ═══
 
@@ -288,7 +288,7 @@ isActiveBomHead 实为 :451-461(方案写 :383);rowFromPart 实为 :612(写 :679
 - 是否值得为「上次同步时间 / 同步失败可见」新增一条审计动作 + 数据库 check 约束迁移?还是先用行级 lastPlmRefreshAt 的最大值凑合(只能证明成功过的那次,记不下失败)?
 
 ## 5. 实测依据(222 → 客户测试 PLM,2026-09-05 只读)
-项目 `<项目号B>` → 节点 15013536,子树 14 节点(深度 0/1/2 = 1/9/4),6 个 BOM 表头全在深度 1,6 个根件全在物料表。逐张(bom_id/明细/缺子件):600028990/15013551 10 行缺 1;600029067/15013552 9 行缺 1;600029077/15013553 4 行缺 2;600029048/15013573 13 行缺 7;600028853/15013572 59 行缺 33;600029083/15013550 14 行全缺。全库 143 表头中 137 挂在无项目祖先节点下(共享零件库)——子树遍历必须限定在项目节点后代内。
+项目 `<项目号B>` → 节点 <节点ID-3>,子树 14 节点(深度 0/1/2 = 1/9/4),6 个 BOM 表头全在深度 1,6 个根件全在物料表。逐张(bom_id/明细/缺子件):<零件ID-2>/<BOM-ID-2> 10 行缺 1;<零件ID-3>/<BOM-ID-3> 9 行缺 1;<零件ID-4>/<BOM-ID-4> 4 行缺 2;<零件ID-5>/<BOM-ID-5> 13 行缺 7;<零件ID-1>/<BOM-ID-1> 59 行缺 33;<零件ID-6>/<BOM-ID-6> 14 行全缺。全库 143 表头中 137 挂在无项目祖先节点下(共享零件库)——子树遍历必须限定在项目节点后代内。
 
 ## 6. 实现后的审查与实证记录(2026-09-05/06)
 
