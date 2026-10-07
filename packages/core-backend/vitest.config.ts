@@ -1505,6 +1505,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',

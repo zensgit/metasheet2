@@ -36,6 +36,7 @@ export type RecoveryArchiveCommittedClaimSnapshot = {
   repeat: boolean
 }
 const claims = new WeakMap<RecoveryArchiveCommittedClaim, RecoveryArchiveCommittedClaimSnapshot>()
+const consumedClaims = new WeakSet<RecoveryArchiveCommittedClaim>()
 
 export type RecoveryArchiveClaimErrorCode =
   | 'RECOVERY_ARCHIVE_CLAIM_INVALID_INPUT'
@@ -68,6 +69,14 @@ export function readRecoveryArchiveCommittedClaim(token: RecoveryArchiveCommitte
   const entry = claims.get(token)
   if (!entry) fail('RECOVERY_ARCHIVE_CLAIM_CAPABILITY_UNAVAILABLE')
   return freeze(structuredClone(entry))
+}
+
+/** Internal phase handoff. Consumption is synchronous, permanent, and never reconstructible from a copy. */
+export function takeRecoveryArchiveCommittedClaim(token: RecoveryArchiveCommittedClaim): RecoveryArchiveCommittedClaimSnapshot {
+  const entry = claims.get(token)
+  if (!entry || consumedClaims.has(token)) fail('RECOVERY_ARCHIVE_CLAIM_CAPABILITY_UNAVAILABLE')
+  consumedClaims.add(token)
+  return entry
 }
 
 function snapshotIdentity(input: RecoveryArchiveManualRequest): Readonly<RecoveryArchiveManualRequest> {
