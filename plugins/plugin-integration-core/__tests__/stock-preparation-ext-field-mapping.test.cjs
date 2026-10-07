@@ -442,7 +442,7 @@ function typeCoercionSucceedsAndRefuses() {
 
 // ── 5b. a non-string SCALAR becomes text losslessly ──────────────────────────
 //
-// 现场（2026-09-10 客户 PLM 真实数据）：项目 2-20241722.1723 试算 1137 行，6 行进确认队列，
+// 现场（2026-09-10 客户 PLM 真实数据）：项目 3-20000001.0001 试算 1137 行，6 行进确认队列，
 // 冲突类型全为 SOURCE_VALUE_NOT_A_STRING —— 客户 PLM 的扩展属性列（数量/尺寸类）经 mssql
 // 驱动回来是 number，落到 pack 声明为 string/select 的 ext_ 列上整格被拒；而确认页只开放
 // duplicate_expanded_key，这几行永远清不掉。转换只改类型不改语义：不本地化、不加千分位、
