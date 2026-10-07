@@ -49,6 +49,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
@@ -283,6 +284,34 @@ test('archive roster contract rejects dropping owned RR capture from no-DB exclu
     '',
   )
   assert.notEqual(dropped, config, 'owned RR capture exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping attachment metadata admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-attachment-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'attachment metadata admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping attachment metadata admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'attachment metadata admission exclusion removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true

@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
+import { bindAttachmentMetadataAdmission, AttachmentMetadataAdmissionError } from '../multitable/attachment-metadata-admission'
 import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
@@ -19758,7 +19759,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           const userIdRaw = req.user?.sub || req.user?.userId || req.user?.id || 'anonymous'
           const userId = typeof userIdRaw === 'number' ? String(userIdRaw) : userIdRaw
           const { row: attachmentRow } = await storeAttachmentShared({
-            query: pool.query.bind(pool),
+            query: bindAttachmentMetadataAdmission({
+              query: pool.query.bind(pool),
+              transaction: (work) => pool.transaction(work),
+              request: req,
+              sheetId,
+              recordId,
+              fieldId,
+              mapFieldType,
+            }),
             storage,
             sheetId,
             recordId,
@@ -19774,6 +19783,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             },
           })
         } catch (err) {
+          if (err instanceof AttachmentMetadataAdmissionError) {
+            return res.status(err.status).json({ ok: false, error: err.error })
+          }
           if (err instanceof ValidationError) {
             return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
           }
