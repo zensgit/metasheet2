@@ -80,9 +80,9 @@
   2. 还有未删除的子任务 ⇒ `{ ok: false, reason: 'has_children' }`,见「假设 A4」;
   3. 否则 `{ ok: true, events: [{ type: 'deleted' }] }`。
 
-## 6. 假设与待 owner 裁定
+## 6. 假设(A1–A7 已于 2026-09-28 接受)
 
-锁在以下几点没有写死。本件按保守、可逆的方向实现,每处在源码里以 `ASSUMPTION(task-c)` 标注,并列入 PR 请 owner 裁:
+锁在以下几点没有写死。本件按保守、可逆的方向实现,每处在源码里以 `ASSUMPTION(task-c)` 标注。**A1–A7 已由 owner 于 2026-09-28 接受**(「按建议执行:A1–A7 接受」,见 `docs/development/task-c-m3-pure-functions-verification-20260928.md` §0/末段)。其中 A6、A7 修改了 main 上的 `task-completion.ts`:
 
 | 编号 | 问题 | 本件的选择 | 理由 |
 |---|---|---|---|
