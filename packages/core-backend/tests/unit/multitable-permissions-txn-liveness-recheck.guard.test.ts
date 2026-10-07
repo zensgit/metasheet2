@@ -116,12 +116,13 @@ const RAW_LOCK_LEDGER = new Map<string, string>([])
  *
  * #6085 follow-up: the recognizer (`censusLocksSheetRow`) is main's plus two additions, (a) the
  * schema-qualified `public.meta_sheets` / `"public"."meta_sheets"` and (b) `JOIN meta_sheets <alias>` locked
- * `FOR … OF <alias>`. The three sites only those additions see are the last three entries, and each carries
- * a liveness verdict (`SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT` / `KNOWN_SHEET_LIVENESS_GAPS` below).
+ * `FOR … OF <alias>`. Every site only those additions see carries an explicit liveness verdict below:
+ * IN-statement, the separately proved owned authority, or `KNOWN_SHEET_LIVENESS_GAPS`.
  */
 const CLEANING_AUTHORITY_JOIN_LOCK = "attendance/attendance-multitable-cleaning-authority.ts :: SELECT sheet.id AS sheet_id, registry.project_id FROM meta_records projection JOIN meta_sheets sheet ON sheet.id = projection.sheet_id AND sheet.deleted_at IS NULL JOIN plugin_multitable_object_registry registry ON registry.sheet_id = sheet.id WHERE projection.id = $1 AND registry.plugin_name = 'plugin-attendance' AND registry.object_id = 'attendance_report_records' AND registry.project_id = $2 FOR SHARE OF sheet, registry"
 const DERIVED_PROCESSOR_SCOPE_LOCK = 'multitable/recovery-archive-derived-processor.ts :: SELECT sheet.id FROM public.meta_sheets sheet JOIN public.meta_bases base ON base.id=sheet.base_id WHERE sheet.id=ANY($1::text[]) AND sheet.deleted_at IS NULL AND base.deleted_at IS NULL ORDER BY base.id,sheet.id FOR SHARE OF base,sheet NOWAIT'
 const RESTORE_JOB_BLOCK_LOCK = "multitable/recovery-archive-restore-jobs.ts :: SELECT id FROM public.meta_sheets WHERE id = $1 AND recovery_writer_state = 'archiving' AND recovery_writer_owner_kind = 'restore_job' AND recovery_writer_owner_id = $2 AND recovery_writer_owner_fence = $3::bigint AND recovery_writer_lease_until > clock_timestamp() FOR UPDATE"
+const OWNED_ARCHIVE_AUTHORITY_LOCK = 'multitable/recovery-archive-owned-authority.ts :: SELECT id FROM public.meta_sheets WHERE id=$1 FOR UPDATE'
 
 const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
   [
@@ -182,12 +183,20 @@ const SHEET_ROW_LOCK_CENSUS = new Map<string, string>([
     + 'owns its writer block (state, owner, fence, lease), else RECOVERY_ARCHIVE_RESTORE_JOB_BLOCK_LOST; a '
     + 'RECORD-restore path, not a permission write. It does not read `deleted_at`: SHEET-LIVENESS-GAP-1 below.',
   ],
+  [
+    OWNED_ARCHIVE_AUTHORITY_LOCK,
+    'Owned archive authority has two calls of this statement: normal recheck reads the shared live binding '
+    + 'after taking this lock, on the same RC query/xid, before any phase write. Exact-owner abandonment '
+    + 'only terminalizes/releases its persisted owner, deliberately without current liveness or admission. '
+    + 'The dedicated AST proof below checks both uses; neither is an IN-statement liveness claim or a GAP.',
+  ],
 ])
 
 /**
  * Verdicts for the sites ONLY (a)/(b) see (#6085 follow-up): does the locking statement itself read or
  * filter the sheet row's `deleted_at`? Each "yes" names the predicate, and a test checks that predicate is
- * in the statement text — a verdict cannot rest on prose alone. Every such site is here or in the GAP ledger.
+ * in the statement text — a verdict cannot rest on prose alone. The one owned-authority statement has a
+ * separate under-lock/cleanup proof below; every other such site is here or in the GAP ledger.
  */
 const SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT = new Map<string, string>([
   [CLEANING_AUTHORITY_JOIN_LOCK, 'sheet.deleted_at IS NULL'],
@@ -727,11 +736,11 @@ describe('#6085 follow-up — the census adds (a) schema-qualified and (b) JOIN 
     expect(mainTree.filter((k) => !tree.includes(k))).toEqual([])
   })
 
-  it('every site only (a)/(b) finds has a verdict: `deleted_at` read IN the locking statement, or a ledgered GAP', () => {
+  it('every site only (a)/(b) finds has a verdict: IN-statement liveness, the proved owned authority, or a ledgered GAP', () => {
     const main = new Set(mainTree)
     const added = tree.filter((k) => !main.has(k))
     const inStatement = [...SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT.keys()]
-    expect(added).toEqual([...inStatement, ...KNOWN_SHEET_LIVENESS_GAPS.map((g) => g.site)].sort())
+    expect(added).toEqual([...inStatement, OWNED_ARCHIVE_AUTHORITY_LOCK, ...KNOWN_SHEET_LIVENESS_GAPS.map((g) => g.site)].sort())
     // A verdict is checked against the statement text, never taken from prose alone.
     for (const [key, predicate] of SHEET_LOCK_READS_DELETED_AT_IN_STATEMENT) {
       expect(predicate).toMatch(/\bdeleted_at\b/)
@@ -755,6 +764,132 @@ describe('#6085 follow-up — the census adds (a) schema-qualified and (b) JOIN 
       expect(gap.fix.length, gap.id).toBeGreaterThan(40)
       expect(['clear', 'owner-ruling']).toContain(gap.decision)
     }
+  })
+})
+
+describe('owned archive authority — the exact shared lock has two mechanically checked uses', () => {
+  const authority = readFileSync(join(SRC, 'multitable/recovery-archive-owned-authority.ts'), 'utf8')
+  const capture = readFileSync(join(SRC, 'multitable/recovery-archive-owned-capture.ts'), 'utf8')
+  const printer = ts.createPrinter({ removeComments: true })
+  const parse = (text: string) => ts.createSourceFile('owned.ts', text, ts.ScriptTarget.Latest, true)
+  const printed = (node: ts.Node, source: ts.SourceFile) => collapse(printer.printNode(ts.EmitHint.Unspecified, node, source))
+  const body = (text: string, name: string): string[] => {
+    const source = parse(text)
+    const fn = source.statements.find((s): s is ts.FunctionDeclaration => ts.isFunctionDeclaration(s) && s.name?.text === name)
+    expect(fn?.parameters[0]?.name.getText(source)).toBe('query')
+    expect(fn?.body).toBeDefined()
+    return fn!.body!.statements.map((s) => printed(s, source))
+  }
+  const initializer = (text: string, name: string): ts.Expression => {
+    const source = parse(text)
+    const declarations = source.statements.filter(ts.isVariableStatement).flatMap((s) => [...s.declarationList.declarations])
+    const matches = declarations.filter((d) => ts.isIdentifier(d.name) && d.name.text === name)
+    expect(matches).toHaveLength(1)
+    expect(matches[0].initializer).toBeDefined()
+    return matches[0].initializer!
+  }
+  const expected = (statements: string) => body(`function proof(query) { ${statements} }`, 'proof')
+
+  function assertNormalRecheck(text: string, captured: string): void {
+    // Compare AST statements, not comments or subsequences: an intervening write/return/foreign query
+    // cannot inherit this verdict. This is deliberately just the owned function's authority prefix.
+    const prefix = expected(`
+      const state = recoveryArchiveOwnedAttempt(token)
+      const claim = state.captured.claim
+      await prepareArchiveWriterBlockTransaction(query, claim.identity.sheetId)
+      const before = (await query(proofSql)).rows[0] as Record<string, unknown> | undefined
+      if (before?.isolation !== 'read committed' || before.read_only !== 'off' || typeof before.xid !== 'string') refuseOwned()
+      await lockActiveRecoveryArchiveKeyForReference(query, { keyId: claim.key.keyId, expectedRowVersion: claim.key.rowVersion })
+      const block = await query(\`SELECT id FROM public.meta_sheets WHERE id=$1 FOR UPDATE\`, [claim.identity.sheetId])
+      if (block.rows.length !== 1) refuseOwned()
+      const generation = await query(\`SELECT generation_id FROM public.meta_recovery_archives WHERE generation_id=$1::uuid FOR UPDATE\`, [claim.generationOwner.generationId])
+      if (generation.rows.length !== 1) refuseOwned()
+      if (!await authorize(query, claim.identity)) refuseOwned()
+      const after = (await query(proofSql)).rows[0] as Record<string, unknown> | undefined
+      if (after?.xid !== before.xid || after.isolation !== 'read committed' || after.read_only !== 'off') refuseOwned()
+      const binding = JSON.stringify(claim)
+      const hash = createHash('sha256').update(JSON.stringify(['recovery-archive-manual-request', 1, claim.identity.actorId,
+        claim.identity.workspaceId, claim.identity.baseId, claim.identity.sheetId])).digest('hex')
+      const check = async (sql: string, params: unknown[]) => {
+        const row = (await query(sql, params)).rows[0] as { matches?: unknown; xid?: unknown } | undefined
+        if (row?.matches !== true || row.xid !== before.xid) refuseOwned()
+      }
+      await check(recoveryArchiveOwnedCaptureAuthoritySql.binding, [binding, hash])
+    `)
+    expect(body(text, 'recheckRecoveryArchiveOwnedAttempt').slice(0, prefix.length)).toEqual(prefix)
+    const proof = initializer(text, 'proofSql')
+    expect(ts.isStringLiteralLike(proof)).toBe(true)
+    expect(collapse((proof as ts.StringLiteralLike).text)).toBe("SELECT pg_current_xact_id()::text AS xid,current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only")
+    const binding = initializer(captured, 'BINDING_SQL')
+    expect(ts.isStringLiteralLike(binding)).toBe(true)
+    const sql = collapse((binding as ts.StringLiteralLike).text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, ''))
+    expect(sql).toContain('JOIN public.meta_sheets s ON s.id=')
+    expect(sql).toContain('JOIN public.meta_bases base ON base.id=s.base_id')
+    expect(sql).toContain('AND s.deleted_at IS NULL AND base.deleted_at IS NULL')
+    expect(sql).not.toMatch(/\bOR\b/i)
+    const exported = initializer(captured, 'recoveryArchiveOwnedCaptureAuthoritySql')
+    expect(printed(exported, exported.getSourceFile())).toBe('Object.freeze({ binding: BINDING_SQL, heads: HEADS_SQL, reservations: RESERVATIONS_SQL, mutablePins: PINS_SQL })')
+  }
+
+  function assertOwnerCleanup(text: string): void {
+    // The complete bodies constrain both write sets and every CAS parameter. Adding a current flag,
+    // permission, key or lease-validity gate here would strand safety cleanup and must also red.
+    expect(body(text, 'abandonRecoveryArchiveOwnedClaim')).toEqual(expected(`
+      await prepareArchiveWriterBlockCleanupTransaction(query, claim.identity.sheetId)
+      await query('SELECT id FROM public.meta_sheets WHERE id=$1 FOR UPDATE', [claim.identity.sheetId])
+      const owner = claim.generationOwner
+      await query(\`UPDATE public.meta_recovery_archives SET build_status='abandoned'
+        WHERE generation_id=$1::uuid AND state='building' AND build_status='active' AND coverage_status='incomplete'
+          AND owner_kind=$2 AND owner_id=$3 AND owner_fence=$4::bigint AND source_vector_hash=$5
+          AND created_at=$6::timestamptz AND lease_expires_at=$7::timestamptz AND expires_at=$8::timestamptz\`,
+      [owner.generationId, owner.ownerKind, owner.ownerId, owner.ownerFence, owner.sourceVectorHash,
+        claim.generationClaimedAt, claim.leaseUntil, claim.expiresAt])
+      await releaseRecoveryArchiveOwnedBlock(query, claim)
+    `))
+    expect(body(text, 'releaseRecoveryArchiveOwnedBlock')).toEqual(expected(`
+      const block = claim.writerBlock
+      const result = await query(\`UPDATE public.meta_sheets SET recovery_writer_state=NULL,recovery_writer_owner_kind=NULL,
+        recovery_writer_owner_id=NULL,recovery_writer_lease_until=NULL,recovery_writer_updated_at=NULL
+        WHERE id=$1 AND recovery_writer_state='archiving' AND recovery_writer_owner_kind=$2 AND recovery_writer_owner_id=$3
+          AND recovery_writer_owner_fence=$4::bigint AND recovery_writer_lease_until=$5::timestamptz AND recovery_writer_updated_at=$6::timestamptz\`,
+      [claim.identity.sheetId, block.ownerKind, block.ownerId, block.fence, block.leaseUntil, block.updatedAt])
+      return result.rowCount ?? 0
+    `))
+  }
+
+  it('normal recheck reads the live binding on the locked RC query/xid before returning to its writer', () => {
+    assertNormalRecheck(authority, capture)
+  })
+
+  it('the only two calls of this lock are the checked normal recheck and exact-owner cleanup', () => {
+    const lock = OWNED_ARCHIVE_AUTHORITY_LOCK.split(' :: ')[1]
+    expect(literalsIn(parse(authority)).filter((l) => l.text === lock)).toHaveLength(2)
+    assertOwnerCleanup(authority)
+  })
+
+  it.each([
+    ['foreign query', 'await query(sql, params)', 'await otherQuery(sql, params)'],
+    ['missing xid refusal', 'row.xid !== before.xid', 'false'],
+    ['missing binding', 'await check(recoveryArchiveOwnedCaptureAuthoritySql.binding, [binding, hash])', ''],
+    ['write before binding', 'await check(recoveryArchiveOwnedCaptureAuthoritySql.binding, [binding, hash])', "await query('UPDATE meta_records SET data = data'); await check(recoveryArchiveOwnedCaptureAuthoritySql.binding, [binding, hash])"],
+  ])('the normal proof rejects %s', (_label, before, after) => {
+    expect(authority.split(before)).toHaveLength(2)
+    expect(() => assertNormalRecheck(authority.replace(before, after), capture)).toThrow()
+  })
+
+  it.each(['s', 'base'])('the binding proof rejects a missing %s liveness predicate', (alias) => {
+    const predicate = `${alias}.deleted_at IS NULL`
+    expect(capture.split(predicate)).toHaveLength(2)
+    expect(() => assertNormalRecheck(authority, capture.replace(predicate, 'true'))).toThrow()
+  })
+
+  it.each([
+    ['lost owner fence', 'AND recovery_writer_owner_fence=$4::bigint', ''],
+    ['current lease gate', "AND state='building' AND build_status='active'", "AND lease_expires_at>clock_timestamp() AND state='building' AND build_status='active'"],
+    ['extra write', 'await releaseRecoveryArchiveOwnedBlock(query, claim)', "await query('UPDATE meta_records SET data = data'); await releaseRecoveryArchiveOwnedBlock(query, claim)"],
+  ])('the cleanup proof rejects %s', (_label, before, after) => {
+    expect(authority.split(before)).toHaveLength(2)
+    expect(() => assertOwnerCleanup(authority.replace(before, after))).toThrow()
   })
 })
 
