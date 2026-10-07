@@ -107,7 +107,7 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 
 ## 4. owner 怎么验证(浏览器)
 
-1. 登录 `http://192.168.1.222/`(管理员账号;密码不在我手里,可用 bootstrap-admin 脚本重置)。
+1. 登录 `http://<222-HOST>/`(管理员账号;密码不在我手里,可用 bootstrap-admin 脚本重置)。
 2. 工作台 → **项目备料页** tab → 项目号 `SYN-PROJ-0001`:看板应显示拉取 7 行、7 行有效、最近导出时间。
 3. 多维表 `备料表(试用)`(base `base_stockprep_trial`):三行有人工列值(见 §3.3);列末尾多了 8 个新字段。
 4. 点导出(或直接 GET `/api/integration/stock-preparation/prep-lines/export?projectNo=SYN-PROJ-0001`):对照 `备料导出-SYN-PROJ-0001-刷新后-20260904.xlsx`。
