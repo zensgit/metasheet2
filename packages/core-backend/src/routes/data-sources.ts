@@ -77,7 +77,7 @@ export function wantsSchemaColumns(query: Record<string, unknown>): boolean {
 
 // A generic (non-coded) data-plane failure must NOT forward the driver's own text to the client:
 // mssql / pg / mysql connect and query errors embed host:port, database name and the login that was
-// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.10.52.16:1433`).
+// tried (`Failed to connect to SQL Server: ConnectionError: Login failed for user 'x' ... 10.99.99.16:1433`).
 // The detail goes to the server log; the client gets a fixed, values-free sentence and can use
 // `POST /:id/test`, the one endpoint that deliberately reports the redacted cause.
 export const SCHEMA_FAILURE_MESSAGE =

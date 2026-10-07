@@ -24,7 +24,7 @@ import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 // #2 VALUES-FREE CONNECT REFUSAL.
 // Before: an unconnected external source + a click on 「结构」/「表」 ran the route's on-demand
 // `connectDataSource`, whose adapter-level failure text (`Failed to connect to SQL Server:
-// ConnectionError: ... 10.10.52.16:1433 ... Login failed for user '...'`) was echoed VERBATIM as a
+// ConnectionError: ... 10.99.99.16:1433 ... Login failed for user '...'`) was echoed VERBATIM as a
 // 500 SCHEMA_ERROR body — leaking host, port, database and login to any reader of the browser
 // console. After: connectDataSource translates every connect failure into a coded 503
 // SOURCE_UNAVAILABLE carrying a fixed sentence, and /schema, /tables/:table, /query, /select and
@@ -33,10 +33,10 @@ import type { DataSourceConfig } from '../../src/data-adapters/BaseAdapter'
 // The driver text used here is the shape mssql actually produces (see MSSQLAdapter.ts:230, which
 // this change deliberately does NOT touch — mssql-adapter-connect-wiring.test.ts pins it).
 const DRIVER_TEXT =
-  "Failed to connect to SQL Server: ConnectionError: Failed to connect to 10.10.52.16:1433 - Login failed for user 'plm_reader'."
+  "Failed to connect to SQL Server: ConnectionError: Failed to connect to 10.99.99.16:1433 - Login failed for user 'plm_reader'."
 // Every fragment of the driver text that must never reach the client.
 const LEAKS = [
-  '10.10.52.16',
+  '10.99.99.16',
   '1433',
   'Login failed',
   'plm_reader',
@@ -55,7 +55,7 @@ const sqlServerConfig = (id: string): DataSourceConfig => ({
   id,
   name: id,
   type: 'sqlserver',
-  connection: { host: '10.10.52.16', port: 1433, database: 'PLM' },
+  connection: { host: '10.99.99.16', port: 1433, database: 'PLM' },
   credentials: { username: 'plm_reader', password: 'secret' },
   options: { autoConnect: false },
 }) as DataSourceConfig
@@ -303,11 +303,11 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
   // sentence and the pre-existing code (SCHEMA_ERROR / TABLE_INFO_ERROR / CONNECTION_ERROR); the
   // cause goes to the server log only.
   const MSSQL_OBJECT_TEXT =
-    "Invalid object name 'PLM.dbo.Bom_ExAttr1'. RequestError at Connection.tds 10.10.52.16:1433"
+    "Invalid object name 'PLM.dbo.Bom_ExAttr1'. RequestError at Connection.tds 10.99.99.16:1433"
   const PG_RELATION_TEXT =
-    'error: relation "plm_stage.stock_prep_orders" does not exist at Parser.parseErrorMessage (host 10.10.52.16:5432)'
+    'error: relation "plm_stage.stock_prep_orders" does not exist at Parser.parseErrorMessage (host 10.99.99.16:5432)'
   const AUDIT_DB_TEXT =
-    'insert into "audit_logs" - connection to server at "10.10.52.16", port 5432 failed: password authentication failed for user "metasheet_rw"'
+    'insert into "audit_logs" - connection to server at "10.99.99.16", port 5432 failed: password authentication failed for user "metasheet_rw"'
 
   // A source whose adapter is CONNECTED — so the route skips connect-on-demand entirely and the
   // failure can only come from the statement itself.
@@ -329,7 +329,7 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     expect(res.status).toBe(500)
     expect(res.body.error.code).toBe('SCHEMA_ERROR')
     expect(res.body.error.message).toBe(SCHEMA_FAILURE_MESSAGE)
-    for (const leak of ['Invalid object name', 'PLM.dbo', 'Bom_ExAttr1', '10.10.52.16', '1433', 'RequestError']) {
+    for (const leak of ['Invalid object name', 'PLM.dbo', 'Bom_ExAttr1', '10.99.99.16', '1433', 'RequestError']) {
       expect(JSON.stringify(res.body)).not.toContain(leak)
     }
   })
@@ -343,7 +343,7 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     expect(res.status).toBe(500)
     expect(res.body.error.code).toBe('TABLE_INFO_ERROR')
     expect(res.body.error.message).toBe(TABLE_INFO_FAILURE_MESSAGE)
-    for (const leak of ['relation', 'plm_stage', 'does not exist', '10.10.52.16', '5432', 'Parser']) {
+    for (const leak of ['relation', 'plm_stage', 'does not exist', '10.99.99.16', '5432', 'Parser']) {
       expect(JSON.stringify(res.body)).not.toContain(leak)
     }
   })
@@ -353,7 +353,7 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     // the body now repeats only the table the caller asked for.
     const id = await makeConnectedSource()
     vi.spyOn(getDataSourceManager().getDataSource(id), 'getTableInfo').mockRejectedValue(
-      new Error('ns not found: plm_stage.Bom_ExAttr1 (10.10.52.16:27017)'),
+      new Error('ns not found: plm_stage.Bom_ExAttr1 (10.99.99.16:27017)'),
     )
 
     const res = await request(pinned.url()).get(`/api/data-sources/${id}/tables/Bom_ExAttr1`)
@@ -361,7 +361,7 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
     expect(res.body.error.message).toBe("Table 'Bom_ExAttr1' not found")
-    for (const leak of ['ns not found', 'plm_stage', '10.10.52.16', '27017']) {
+    for (const leak of ['ns not found', 'plm_stage', '10.99.99.16', '27017']) {
       expect(JSON.stringify(res.body)).not.toContain(leak)
     }
   })
@@ -392,7 +392,7 @@ describe('data-source routes surface the connect refusal as 503 SOURCE_UNAVAILAB
     expect(res.status).toBe(500)
     expect(res.body.error.code).toBe('CONNECTION_ERROR')
     expect(res.body.error.message).toBe(CONNECT_FAILURE_MESSAGE)
-    for (const leak of ['audit_logs', '10.10.52.16', '5432', 'password authentication', 'metasheet_rw']) {
+    for (const leak of ['audit_logs', '10.99.99.16', '5432', 'password authentication', 'metasheet_rw']) {
       expect(JSON.stringify(res.body)).not.toContain(leak)
     }
   })
