@@ -53,6 +53,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
@@ -399,6 +400,34 @@ test('archive roster contract rejects dropping fresh ordinary-writer admission f
     '',
   )
   assert.notEqual(dropped, config, 'fresh ordinary-writer admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned manual generation composer from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-owned-composer-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'owned manual generation composer removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned manual generation composer from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'owned manual generation composer exclusion removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true

@@ -19,6 +19,7 @@ export interface RecoveryArchiveCapturedSourceSnapshot {
     contentSha256: string; contentSizeBytes: string }>
   snapshotXid: string
 }
+const consumedCaptures = new WeakSet<RecoveryArchiveCapturedSource>()
 const captures = new WeakMap<RecoveryArchiveCapturedSource, RecoveryArchiveCapturedSourceSnapshot>()
 const TRANSACTION_SQL = `/* owned-capture:transaction */ SELECT pg_current_xact_id()::text AS xid,
   current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only,
@@ -55,7 +56,9 @@ const BINDING_SQL = `/* owned-capture:binding */ WITH binding AS (SELECT $1::jso
       AND a.state='building' AND a.build_status='active' AND a.coverage_status='incomplete'
       AND a.root_hash IS NULL AND a.coverage_section_hash IS NULL AND a.coverage_row_count IS NULL
       AND a.manifest_mac IS NULL AND a.superseded_by_generation_id IS NULL
+      AND a.checkpoint_id=c->>'checkpointId' AND t.id=c->>'checkpointId'
       AND t.sheet_id=s.id AND t.state='active' AND t.pruned_at IS NULL
+      AND t.trusted_since_seq<=a.anchor_seq
       AND (SELECT count(*) FROM public.meta_history_trust_checkpoints WHERE sheet_id=s.id AND state='active' AND pruned_at IS NULL)=1
       AND r.actor_id=(c#>>'{identity,actorId}')::uuid AND r.request_id=(c#>>'{identity,requestId}')::uuid
       AND r.workspace_id=a.workspace_id AND r.base_id=a.base_id AND r.sheet_id=s.id AND r.request_hash=$2
@@ -124,6 +127,19 @@ export function readRecoveryArchiveCapturedSource(token: RecoveryArchiveCaptured
   if (!value) unavailable()
   return freeze(structuredClone(value))
 }
+
+/** Genuine one-attempt downstream handoff; detached readbacks cannot be consumed. */
+export function takeRecoveryArchiveCapturedSource(token: RecoveryArchiveCapturedSource): RecoveryArchiveCapturedSourceSnapshot {
+  const value = captures.get(token)
+  if (!value || consumedCaptures.has(token)) throw new Error('RECOVERY_ARCHIVE_CAPTURE_CAPABILITY_UNAVAILABLE')
+  consumedCaptures.add(token)
+  captures.delete(token)
+  return value
+}
+
+/** Shared SQL predicates confer no phase capability. */
+export const recoveryArchiveOwnedCaptureAuthoritySql = Object.freeze({ binding: BINDING_SQL,
+  heads: HEADS_SQL, reservations: RESERVATIONS_SQL, mutablePins: PINS_SQL })
 
 /** Internal single-attempt phase handoff; no HTTP caller, provider port, or arbitrary transaction callback. */
 export function bindRecoveryArchiveOwnedCapture(
