@@ -384,6 +384,18 @@ const K3_OPS_SUITE_PATHS = Object.freeze([
   'scripts/ops/resolve-k3wise-smoke-token.test.mjs',
 ])
 
+// The three Bridge Agent contract tests' step, inside this workflow's own job — their only
+// workflow caller. See Pins 19/20 below.
+const BRIDGE_CONTRACTS_STEP_ID = 'bridge-agent-contracts'
+const BRIDGE_CONTRACT_TEST_PATHS = Object.freeze([
+  'scripts/ops/bridge-agent-readonly-contract.test.mjs',
+  'scripts/ops/bridge-agent-readonly-task-contract.test.mjs',
+  'scripts/ops/bridge-agent-driver-smoke-contract.test.mjs',
+])
+// The floor the pinned step declares (MIN_BRIDGE_CONTRACT_TESTS). Pin 20 executes the pinned block
+// at this value and one below it, so the declaration and this constant cannot drift apart.
+const BRIDGE_CONTRACT_MIN_TESTS = 26
+
 // ---------------------------------------------------------------------------
 // EXACT-SHAPE pins (P1 correction, 2026-07-26): each literal below was captured by dumping
 // `JSON.stringify(step.run)` / `JSON.stringify(step.env.X)` straight out of a parsed copy of the
@@ -477,6 +489,11 @@ const CHAIN_COMPLETENESS_RUN_EXACT = "set -euo pipefail\nMIN_CHAINED_SUITES=150\
 // #4802 — the seven K3-line scripts/ops suites' step inside plugin-tests.yml's required `test` job.
 // Captured the same way, from a python3+PyYAML parse of the current .github/workflows/plugin-tests.yml.
 const K3_OPS_SUITES_RUN_EXACT = "node --test \\\n  scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \\\n  scripts/ops/integration-k3wise-signoff-gate.test.mjs \\\n  scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \\\n  scripts/ops/resolve-k3wise-smoke-token.test.mjs\n"
+
+// The Bridge Agent contract tests' step inside integration-guard.yml's own job. Captured by dumping
+// `JSON.stringify(step.run)` from a parse of the current .github/workflows/integration-guard.yml and
+// pasting it verbatim, never hand-typed.
+const BRIDGE_CONTRACTS_RUN_EXACT = "set -euo pipefail\nMIN_BRIDGE_CONTRACT_TESTS=26\nif ! bridge_out=\"$(node --test scripts/ops/bridge-agent-readonly-contract.test.mjs scripts/ops/bridge-agent-readonly-task-contract.test.mjs scripts/ops/bridge-agent-driver-smoke-contract.test.mjs 2>&1)\"; then\n  printf '%s\\n' \"$bridge_out\"\n  echo \"bridge-agent contracts: node --test exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$bridge_out\"\nbridge_tests=\"$(printf '%s\\n' \"$bridge_out\" | sed -nE 's/^.*tests ([0-9]+)$/\\1/p' | tail -n 1)\"\nif [ -z \"$bridge_tests\" ]; then\n  echo \"bridge-agent contracts: no 'tests <N>' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$bridge_tests\" -lt \"$MIN_BRIDGE_CONTRACT_TESTS\" ]; then\n  echo \"bridge-agent contracts: only $bridge_tests tests ran, expected at least $MIN_BRIDGE_CONTRACT_TESTS — an emptied or early-exiting test file reads as one passing test\" >&2\n  exit 1\nfi\necho \"bridge-agent contracts: $bridge_tests tests ran (floor $MIN_BRIDGE_CONTRACT_TESTS).\"\n"
 
 const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
@@ -1295,14 +1312,15 @@ const FLOOR_TAP_SUMMARY = (n) =>
 
 // Runs the EXACT pinned caller block (the same literal Pins 13/14 assert both workflows carry) under
 // bash, with `node` shimmed to emit `stdout` and exit `exitCode`. LC_ALL=C is pinned so the parse is
-// exercised in the byte-oriented locale, where the spec reporter's `ℹ` is three bytes.
-function runPinnedFloorBlock({ stdout, exitCode }) {
+// exercised in the byte-oriented locale, where the spec reporter's `ℹ` is three bytes. `block`
+// defaults to that literal; Pin 20 passes the Bridge Agent step's pinned block instead.
+function runPinnedFloorBlock({ stdout, exitCode, block = CONTRACT_RUN_EXACT }) {
   const dir = mkdtempSync(join(tmpdir(), 'ig-floor-shim-'))
   try {
     const shim = join(dir, 'node')
     writeFileSync(shim, `#!/bin/sh\ncat <<'__IG_FIXTURE_EOF__'\n${stdout}\n__IG_FIXTURE_EOF__\nexit ${exitCode}\n`)
     chmodSync(shim, 0o755)
-    const result = spawnSync('bash', ['-c', CONTRACT_RUN_EXACT], {
+    const result = spawnSync('bash', ['-c', block], {
       cwd: repoRoot,
       encoding: 'utf8',
       env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, LC_ALL: 'C' },
@@ -2191,6 +2209,150 @@ test('plugin-tests.yml required test job runs all seven K3-line ops suites, id: 
     assert.ok(
       existsSync(join(repoRoot, suite)),
       `${suite} must exist on disk — a wired path that no longer resolves runs nothing`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Pin 19 — THE BRIDGE AGENT CONTRACT TESTS' EXECUTION ENTRY (modelled on Pins 16 and 18).
+//
+// scripts/ops/bridge-agent-readonly-contract.test.mjs pins the Bridge Agent scripts by whole-file
+// digest; its two siblings check the scheduled-task helper and the driver smoke script. No workflow
+// ran any of the three, and the readonly contract stayed red on main for months with nothing
+// noticing. The `bridge-agent-contracts` step in this workflow's own job — the REQUIRED
+// `integration-guard` context — is now their only workflow caller. This pin stops that step being
+// deleted, gated or softened in silence.
+//
+// WHY UNGATED IS THE LOAD-BEARING PART. The guarded-path roster has no Bridge entry, so a PR that
+// changes only a scripts/ops/bridge-agent*.ps1 file (or one of the three tests) classifies as
+// relevant=false and runs the no-op branch. Any `if:` on this step — including
+// `steps.changes.outputs.relevant == 'true'` — would therefore skip it on exactly the PR it exists
+// to catch, and a skipped step reports success. So the step must carry NO `if` key at all.
+//
+// PINNED HERE: the step exists by exact `id:`; no `if`; no `continue-on-error`; `shell: bash` (the
+// `run:` block uses `set -o pipefail` and an `if !` compound); the `run:` text BYTE-IDENTICAL to
+// BRIDGE_CONTRACTS_RUN_EXACT (exact equality catches a file dropped from the command, a `|| true`
+// appended, or an extra line); and its position ABOVE `resolve-diff`, for the same reason as Pin 16.
+// ---------------------------------------------------------------------------
+
+test('integration-guard.yml runs the three Bridge Agent contract tests as its own step, id: bridge-agent-contracts, ungated, above resolve-diff', () => {
+  const job = requireJob()
+  const step = stepById(job, BRIDGE_CONTRACTS_STEP_ID)
+  assert.ok(
+    step,
+    `job.${JOB_ID} must have a step with id: ${BRIDGE_CONTRACTS_STEP_ID} — without it no workflow runs ` +
+      `the Bridge Agent contract tests, and a changed agent script passes every required check`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'if'),
+    false,
+    `the ${BRIDGE_CONTRACTS_STEP_ID} step must carry NO \`if\` key at all — a PR that changes only a ` +
+      `Bridge Agent script classifies as relevant=false, so any gate would skip the step on exactly ` +
+      `that PR, and a skipped step reports success`,
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(step, 'continue-on-error'),
+    false,
+    `the ${BRIDGE_CONTRACTS_STEP_ID} step must not carry continue-on-error — a red Bridge Agent ` +
+      `contract must fail the required context, not be logged and swallowed`,
+  )
+  assert.equal(
+    step.shell,
+    'bash',
+    `the ${BRIDGE_CONTRACTS_STEP_ID} step must declare \`shell: bash\` — the pinned run: text is ` +
+      `bash-specific, and another shell could change its behaviour with every text pin still green`,
+  )
+  assert.equal(
+    step.run,
+    BRIDGE_CONTRACTS_RUN_EXACT,
+    `the ${BRIDGE_CONTRACTS_STEP_ID} step's run: text must be byte-identical to the pinned literal — ` +
+      `exact equality catches a test file dropped from the command, a \`|| true\` appended, or an ` +
+      `extra line that neuters the invocation`,
+  )
+
+  const steps = stepsOf(job)
+  const bridgeIndex = steps.findIndex((s) => isPlainObject(s) && s.id === BRIDGE_CONTRACTS_STEP_ID)
+  const resolveDiffIndex = steps.findIndex((s) => isPlainObject(s) && s.id === RESOLVE_DIFF_STEP_ID)
+  assert.ok(resolveDiffIndex >= 0, `the ${RESOLVE_DIFF_STEP_ID} step must exist to compare against`)
+  assert.ok(
+    bridgeIndex < resolveDiffIndex,
+    `the ${BRIDGE_CONTRACTS_STEP_ID} step (index ${bridgeIndex}) must run BEFORE ` +
+      `${RESOLVE_DIFF_STEP_ID} (index ${resolveDiffIndex}) — every un-\`if\`'d step still carries ` +
+      `GitHub's implicit \`if: success()\`, so a position after the fail-closed resolve-diff step ` +
+      `means the step is SKIPPED (not run) on exactly the path where resolve-diff fails`,
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Pin 20 — the pinned Bridge Agent block really runs all three files and really fails.
+//
+// Pin 19 proves the workflow carries the pinned text. This pin proves what that text does, reading
+// it back out of the literal rather than re-typing it: exactly one `node --test` invocation, whose
+// whole-file arguments are exactly the three contract files, each existing on disk; and, executed
+// under bash with a `node` shim (the same no-recursion technique as Door E — the real test files
+// never run here), the block passes a healthy run at the floor, and FAILS a non-zero node --test, a
+// zero-exit run that reports only one test (a test file that exits 0 before declaring its tests),
+// a run one below the floor, and an unparseable summary. Executing at BRIDGE_CONTRACT_MIN_TESTS and
+// one below it pins the declared floor to that constant from both sides.
+// ---------------------------------------------------------------------------
+
+const BRIDGE_SPEC_SUMMARY = (n) =>
+  `✔ digest pin: bridge-agent-readonly.ps1 is the reviewed version, byte for byte (1ms)\nℹ tests ${n}\nℹ suites 0\nℹ pass ${n}\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1`
+
+const BRIDGE_TAP_SUMMARY = (n) =>
+  `TAP version 13\nok 1 - digest pin: bridge-agent-readonly.ps1 is the reviewed version, byte for byte\n1..${n}\n# tests ${n}\n# suites 0\n# pass ${n}\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 1`
+
+test('the pinned Bridge Agent step runs all three contract files as whole-file node --test arguments, and fails a failing or collapsed run', () => {
+  const invocations = [
+    ...BRIDGE_CONTRACTS_RUN_EXACT.matchAll(/^if ! bridge_out="\$\(node --test ([^")]+) 2>&1\)"; then$/gm),
+  ]
+  assert.equal(
+    invocations.length,
+    1,
+    'the pinned run: text must carry exactly one `node --test` invocation whose output the floor ' +
+      'check reads — a decoy invocation ahead of the real one could carry the full file list while ' +
+      'the one that runs names fewer',
+  )
+  const args = invocations[0][1].trim().split(/\s+/)
+  assert.deepEqual(
+    args.slice().sort(),
+    [...BRIDGE_CONTRACT_TEST_PATHS].sort(),
+    'the pinned invocation must carry EXACTLY the three Bridge Agent contract files as whole-file ' +
+      'arguments — no fewer (a file dropped back into the state where nothing runs it), no more',
+  )
+  for (const path of BRIDGE_CONTRACT_TEST_PATHS) {
+    assert.ok(
+      existsSync(join(repoRoot, path)),
+      `${path} must exist on disk — a wired path that no longer resolves runs nothing`,
+    )
+  }
+
+  for (const [label, summary] of [
+    ['tap, at the floor', BRIDGE_TAP_SUMMARY(BRIDGE_CONTRACT_MIN_TESTS)],
+    ['spec, at the floor', BRIDGE_SPEC_SUMMARY(BRIDGE_CONTRACT_MIN_TESTS)],
+  ]) {
+    const r = runPinnedFloorBlock({ stdout: summary, exitCode: 0, block: BRIDGE_CONTRACTS_RUN_EXACT })
+    assert.equal(r.status, 0, `the pinned Bridge block must PASS a healthy ${label} run. stderr: ${r.stderr}`)
+    assert.match(
+      r.stdout,
+      new RegExp(`bridge-agent contracts: ${BRIDGE_CONTRACT_MIN_TESTS} tests ran \\(floor \\d+\\)\\.`),
+      `the pinned Bridge block must report the count it parsed on the ${label} success path`,
+    )
+  }
+
+  for (const [label, run] of [
+    ['node --test exited 1', { stdout: BRIDGE_TAP_SUMMARY(BRIDGE_CONTRACT_MIN_TESTS), exitCode: 1 }],
+    ['tap, collapsed to 1 test', { stdout: BRIDGE_TAP_SUMMARY(1), exitCode: 0 }],
+    ['spec, collapsed to 1 test', { stdout: BRIDGE_SPEC_SUMMARY(1), exitCode: 0 }],
+    ['tap, one below the floor', { stdout: BRIDGE_TAP_SUMMARY(BRIDGE_CONTRACT_MIN_TESTS - 1), exitCode: 0 }],
+    ['no summary line', { stdout: '', exitCode: 0 }],
+  ]) {
+    const r = runPinnedFloorBlock({ ...run, block: BRIDGE_CONTRACTS_RUN_EXACT })
+    assert.notEqual(
+      r.status,
+      0,
+      `the pinned Bridge block must FAIL when ${label} — a zero exit here is a green required ` +
+        `context over Bridge Agent tests that failed or did not run. stdout: ${r.stdout}`,
     )
   }
 })

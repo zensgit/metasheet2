@@ -1403,6 +1403,16 @@ export default defineConfig({
       // arms EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-comments.db.test.ts',
+      // P3-3 `approval_form_drafts` — server-side approval form draft storage (owner-gated DDL, not
+      // applied to any shared database). Contract §4 A (user_id-only auth), B (org-mutation
+      // non-leakage, inverted assertion), D (DB-failure safe-degrade), E (per-user row-cap
+      // prune-on-write, self-healing), F (payload-cap two-layer enforcement), plus the empty-draft
+      // DELETE path and the TTL-sweep function. Real DB. Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-form-drafts.yml lane, which arms EXPECT_DB=1. NOT
+      // promoted into plugin-tests.yml's required run-list (unlike approval-comments post-#5095):
+      // owner ruling Q9 ⑤ (2026-10-01) keeps this suite reference-only, not a required check.
+      'tests/integration/approval-form-drafts.db.test.ts',
       // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
       // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-
       // scoped caps, GC reuse, and the flag-OFF byte-for-byte no-op (G-12), real DB. Excluded here so
@@ -1857,6 +1867,10 @@ export default defineConfig({
       // CI-executed lane to land in without a workflow edit, which this change deliberately does not
       // make). That wiring is a disclosed follow-up, not a silent gap.
       'tests/integration/b2a-operation-claim-078-realdb.test.ts',
+      // Private-database backend drain proof. Requires a throwaway database.
+      // Excluded here so the no-DB job cannot skip-green it. Wired as a whole
+      // file in plugin-tests.yml step "Run private-db backend drain proof".
+      'tests/integration/timemachine-private-db-backend-drain.db.test.ts',
       // Approval cancel-round WI-0 lock-order census (Q-A, slice 1) — two real Postgres
       // connections constructing the class-`00` rollout advisory lock (real production key
       // derivation) against a real `approval_instances` row lock, both the §9-4 forward order
@@ -1961,6 +1975,13 @@ export default defineConfig({
       // required `test (20.x)` "Run approval real-DB integration" step (sibling entry to the
       // seven cancel-round files above, no EXPECT_DB).
       'tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts',
+      // Cancel-round product entry v2 (lock v5.9 header RATIFY 追记 2026-09-28), phase A: the
+      // attendance-side `GET`/`POST /api/attendance/requests/:id/cancel-round` acceptance — real
+      // DB, real running server with plugin-attendance, real login tokens, RBAC_BYPASS='false'.
+      // Excluded here so `describeIfDatabase` cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into `plugin-tests.yml`'s required `test (20.x)` "Run approval real-DB
+      // integration" step (sibling of the cancel-round files above; s6a pin recomputed with it).
+      'tests/integration/approval-cancel-round-attendance-entry.db.test.ts',
       // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 1 real-DB
       // acceptance (normal-pool half: A/A'/A''/A'''/B/B'/B''/F/G/H/I'). Requires real PostgreSQL
       // (composite-FK archive/reattach concurrency, org-scoped uniqueness). DATABASE_URL-gated;
@@ -2001,6 +2022,73 @@ export default defineConfig({
       // feature into the one real-DB step that runs on the required `test (20.x)` leg.
       // DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
       'tests/integration/approval-template-groups-reorder.db.test.ts',
+      // Approval form grouping — design lock v2.13 (RATIFIED 2026-09-18), phase 2 slice A-3
+      // ("backfill by existing category") batch-bookkeeping DDL
+      // (`zzzz20260919090000_create_approval_template_group_backfill_batches.ts`), amended by the
+      // independent design-gate verdict `design-gate-A3-phase2-20260918.md` (a private review
+      // record, not tracked in this repository) folded into
+      // `docs/development/approval-template-groups-phase2-backfill-design-20260918.md` §13.
+      // Schema-only (exercises the DDL, not the W7/W8/W9 route/service layer, which has since
+      // landed — see the sibling `backfill-{preview,execute,rollback}.db.test.ts` suites) but
+      // real-Postgres-required: it proves the gate's changesRequired #4 fix (`atgbbl_link_fk`
+      // CASCADE, not the proposal's original NO
+      // ACTION — real-DB finding M6) is load-bearing at the catalog level via a positive control,
+      // a same-transaction mutation negative control that reverts the constraint and observes the
+      // pre-fix deadlock, and composite-FK org-consistency checks. DATABASE_URL-gated; excluded
+      // here so the no-DB job cannot skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-schema-ci-wiring.test.mjs` guard (unlike the two phase
+      // 1 files above, which rely only on the step's bash `:?` — a disclosed residual, see this
+      // design doc's §13.6 PR-body checklist item citing P3-2).
+      'tests/integration/approval-template-groups-backfill-schema.db.test.ts',
+      // Same slice, W7 preview unit: `previewApprovalTemplateGroupBackfill`
+      // (`src/routes/approvals.ts`) — read-only, takes no lock, calls into real Postgres via the
+      // exported `query()` helper (same style as the schema suite above rather than an HTTP round
+      // trip — the write-endpoint guard mechanism is already proven end-to-end by the phase 1
+      // lifecycle suite). DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green it.
+      // Has its own dedicated `approval-template-groups-backfill-preview-ci-wiring.test.mjs` guard
+      // (same rationale as the schema suite's own dedicated guard, above).
+      'tests/integration/approval-template-groups-backfill-preview.db.test.ts',
+      // Same slice, W8 execute unit: `executeApprovalTemplateGroupBackfill`
+      // (`src/routes/approvals.ts`) — the single `transaction()` callback composing
+      // `createApprovalTemplateGroupWithClient` / `linkApprovalTemplateToGroupWithClient` on one
+      // connection (§3.1/§13.2). DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-execute-ci-wiring.test.mjs` guard (same convention as
+      // the two suites above).
+      'tests/integration/approval-template-groups-backfill-execute.db.test.ts',
+      // Same slice, W9 rollback unit: `rollbackApprovalTemplateGroupBackfillBatch`
+      // (`src/services/ApprovalTemplateGroupService.ts` — unlike preview/execute, rollback needs
+      // no template-visibility actor, so it lives in the service file rather than
+      // `routes/approvals.ts`). Covers §4.2's set-based token-match rollback and §4.3's
+      // created_new/remaining=0 archive precision. DATABASE_URL-gated; excluded here so the no-DB
+      // job cannot skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-rollback-ci-wiring.test.mjs` guard (same convention as
+      // the three suites above).
+      'tests/integration/approval-template-groups-backfill-rollback.db.test.ts',
+      // Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5, 2026-09-18):
+      // `listApprovalTemplateGroupBackfillBatches`
+      // (`src/services/ApprovalTemplateGroupService.ts`) — read-only, takes no lock. Proves
+      // `created_at DESC` ordering + limit/offset pagination against directly-inserted rows with
+      // controlled timestamps, the `rolledBackAt` null-vs-set round trip through the real rollback
+      // code path, and org scoping. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-batches-list-ci-wiring.test.mjs` guard (same convention
+      // as the four sibling backfill suites' own guards).
+      'tests/integration/approval-template-groups-backfill-batches-list.db.test.ts',
+      // Same slice, `down()` data-retention guard on the batch DDL (candidate, not yet ratified —
+      // see the migration file's own doc comment for the full provenance chain). Round-2
+      // implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): the round-1
+      // guard's own real-DB suite existed but was deliberately left out of both this exclude list
+      // and the plugin-tests.yml real-DB step (registered instead as a dated, reviewable
+      // allowlist exemption in `approval-ci-coverage-allowlist.ts`) while this round's own hard
+      // constraint required plugin-tests.yml/s6a to stay byte-identical. That constraint no
+      // longer applies to THIS round, so the deferred two-point wiring lands here, together with
+      // the allowlist exemption's removal and the s6a re-pin, in one commit per this repo's
+      // new-file census convention. DATABASE_URL-gated; excluded here so the no-DB job cannot
+      // skip-green it. Has its own dedicated
+      // `approval-template-groups-backfill-down-guard-ci-wiring.test.mjs` guard (same convention
+      // as the five sibling backfill suites' own guards).
+      'tests/integration/approval-template-groups-backfill-down-guard.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

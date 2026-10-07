@@ -489,20 +489,24 @@ export const appRoutes: RouteRecordRaw[] = [
     component: () => import('../views/ElearningManualGradingView.vue'),
     meta: { title: 'Manual Grading', titleZh: '人工阅卷', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:grade'] }
   },
-  // Task feature line M2 skeleton (design lock §5.2): both routes are gated on tasks:read only —
-  // deliberately NO requiredFeature. §13-38 缺省乙 renders "not enabled / unsupported" off a plain
-  // 404 from GET /api/tasks/context instead of a second flag-driven route gate.
+  // Task feature line M2 skeleton (design lock §5.2), gated on the tasks feature AND tasks:read.
+  // The M2 skeleton had tasks:read only and relied on §13-38 缺省乙 (TasksView renders "not enabled"
+  // off a 404 from GET /api/tasks/context). After R61 that left an administrator on a server with
+  // TASKS_ENABLED unset looking at a nav entry that led nowhere; the session now carries `tasks`
+  // (true only when TASKS_ENABLED is exactly 'true'), so with it off /tasks redirects home like the
+  // other feature-gated routes. The 缺省乙 rendering still covers a feature-on session whose
+  // backend nevertheless answers 404.
   {
     path: '/tasks',
     name: 'tasks',
     component: () => import('../views/tasks/TasksView.vue'),
-    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
   {
     path: '/tasks/:id',
     name: 'task-detail',
     component: () => import('../views/tasks/TasksView.vue'),
-    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, permissions: ['tasks:read'] }
+    meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
   {
     path: '/:pathMatch(.*)*',

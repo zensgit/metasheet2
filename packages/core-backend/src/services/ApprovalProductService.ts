@@ -59,6 +59,7 @@ import {
 } from './approval-effective-node-operations'
 import {
   assignmentMatchesActor,
+  decisionDoorIsSeatGated,
   readParallelBranchStates,
   resolveCanDecideCurrentNode,
 } from './approval-seat-authorization'
@@ -70,7 +71,16 @@ import {
   HANDLER_NODE_OPERATION_POLICY_KEYS,
   NODE_FIELD_ACCESS_VALUES,
   NODE_FIELD_ACCESS_WRITABLE_VALUES,
+  isApprovalAddSignAggregation,
+  isApprovalAddSignMode,
+  type ApprovalAddSignAggregation,
+  type ApprovalAddSignMode,
 } from '../types/approval-product'
+import {
+  ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
+  buildAddSignAppendedRoundMetadata,
+  readAddSignAppendedRound,
+} from './approval-add-sign-after'
 import {
   ApprovalGraphExecutor,
   type ApprovalGraphAssignment,
@@ -829,6 +839,33 @@ type AdminJumpEventPayload = {
 type ApprovalDbClient = {
   query: typeof pool.query
   release: () => void
+}
+
+/**
+ * Lock-5 L5-B gate B-3 — an accepted after-sign (后加签) request, carried from the `add_sign`
+ * validation branch into the approve pipeline of the SAME dispatch. `aggregation` governs the
+ * appended round (OD-L5-5(a)); a single addee defaults to `'all'`, which one seat satisfies.
+ */
+interface AfterSignPlan {
+  targetUserIds: string[]
+  aggregation: ApprovalAddSignAggregation
+}
+
+/**
+ * Owner disposition (1) on the ledger's "OD-L5-4(b) — four enumerated completions" row
+ * (2026-10-01): an after-sign whose approval does NOT complete the node's current round is refused.
+ * Raised INSIDE the engine's own partial-vote branches (sequential head with a queue behind it, 会签
+ * with undecided siblings, threshold still short with siblings left) so the judgment is the one the
+ * engine already makes for a plain approve — never a second copy of the completion rule. The throw
+ * rolls the whole transaction back, so no seat, epoch, version or audit row survives (§2.4: 3-arg,
+ * values-free — the member knows which node and which button).
+ */
+function afterSignRoundIncomplete(): ServiceError {
+  return new ServiceError(
+    'After-mode add_sign requires the current round to complete with this approval',
+    409,
+    'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE',
+  )
 }
 
 function throwAsServiceError(error: unknown): never {
@@ -5902,6 +5939,20 @@ export interface ApprovalRoutePreviewResult {
   truncated: boolean
 }
 
+/**
+ * 撤销锁增补 P-11 (c) — the lock §14.1 seat-arm fence: the ONLY seat arms a cancel round may carry.
+ * `source_queue` is excluded on purpose (the todo-center lock records that arm's decision door,
+ * read admission and badge disagreeing), so the cancel line cannot inherit that disagreement.
+ */
+export const CANCEL_ROUND_ALLOWED_SEAT_ARMS: ReadonlySet<string> = new Set(['user', 'role'])
+
+export function cancelRoundSeatArmsWithinFence(assignments: ReadonlyArray<{ assignmentType?: unknown }>): boolean {
+  return assignments.every(
+    (assignment) =>
+      typeof assignment.assignmentType === 'string' && CANCEL_ROUND_ALLOWED_SEAT_ARMS.has(assignment.assignmentType),
+  )
+}
+
 export class ApprovalProductService {
   /**
    * Wave 2 WP5 slice 1 — optional metrics service injection so tests can
@@ -9475,6 +9526,19 @@ export class ApprovalProductService {
           'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
         )
       }
+      // 增补 P-11 (c), lock §14.1 seat-arm fence (RATIFY 追记 2026-09-28, owner 「Adopt all 3, split
+      // locks (Recommended)」): a cancel round's seats may only be `user` / `role` arms, never
+      // `source_queue`. The seed graph seats people by id, so this is a fail-closed trip-wire for a
+      // future graph / resolver edit, answered like the backstop above (same registered code, no new
+      // one) and BEFORE any write. This path is the only writer of a cancel round's seats: §9-9 /
+      // §14.3 refuse every verb or job that could change one afterwards.
+      if (!cancelRoundSeatArmsWithinFence(initial.assignments)) {
+        throw new ServiceError(
+          'Cancel round could not be started: no eligible approver seat could be resolved',
+          409,
+          'CANCEL_ROUND_NO_ELIGIBLE_APPROVER',
+        )
+      }
 
       const requestNo = await this.allocateRequestNo()
       const title = `撤销「${original.title ?? documentId}」`
@@ -9729,6 +9793,44 @@ export class ApprovalProductService {
       definitionPolicy: original.policy_snapshot,
       roundPolicy: { windowDays, suite },
     })
+
+    // C-3 row 4 「最终评估:业务不可逆」 — the ORIGINAL document (held `FOR UPDATE` above) is no longer
+    // an approved document, so there is nothing left for this round to cancel. This is the creation
+    // path's own precondition (`createCancelRoundInstance`: `original.status !== 'approved'` ⇒ 409
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`) evaluated again at the decision point, which is what
+    // §2-G4 「双时点按当前策略评估」 asks of every creation-time predicate — and it answers with the
+    // SAME code, exactly as the two policy codes above do when re-derivation fails here.
+    //
+    // It closes as `blocked` (persisted in this transaction by the C-3 closer), NOT as a throw:
+    // falling through to redemption would hand C-1 a document it can no longer cancel, and the
+    // resulting error would roll the whole transaction back and leave the round `pending` with its
+    // seats — a state no retried approve can ever leave, because the document does not become
+    // approved again (only a reject or the requester's withdraw would end the round).
+    // It also must not be `expired`: the window is not why this round cannot proceed.
+    //
+    // Precedence, deliberately: after the policy derivation (so the decision snapshot is the normal
+    // one whenever the policy itself is readable; a policy that cannot be derived still reports its
+    // own code), and BEFORE the window query, so a document that is both no longer approved and past
+    // its window reports the reason that holds regardless of the clock, and the retryable
+    // `CANCEL_ROUND_WINDOW_ANCHOR_MISSING` throw below can never pre-empt a closure that no retry
+    // could change. `detail` carries the observed status beside the bounded reason (never projected
+    // to any read surface — see `projectCancelRoundCloseReasonForReadV1`).
+    //
+    // Implementer choice, FLAGGED for owner registration: the code is the existing
+    // `CANCEL_ROUND_DOCUMENT_NOT_APPROVED`, reused in the open `business_blocked:<code>` domain
+    // (P-7) — no new code, and the P-8 registry is unchanged.
+    if (original.status !== 'approved') {
+      return {
+        roundId: round.id,
+        documentId: round.document_id,
+        evaluation: {
+          decision: 'blocked',
+          code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+          detail: typeof original.status === 'string' ? original.status : null,
+        },
+        policySnapshotAtDecision,
+      }
+    }
 
     // §2-G2 「时间锚固定为首次对应时间(撤销:初始轮 `approved_at`)」 — the FIRST approved transition
     // on the original document, read off its own audit trail (`approval_instances` has no
@@ -12020,6 +12122,12 @@ export class ApprovalProductService {
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
+      // Lock-5 L5-B gate B-3 — the after-sign (后加签) plan. Set ONLY by an `add_sign` with
+      // `addSignMode:'after'` that passed the add-sign branch's own validation below; the branch then
+      // does NOT return, and the approve pipeline further down carries this plan through the node's
+      // own round-completion judgment (see the three partial-vote branches and the resolution site).
+      let afterSign: AfterSignPlan | null = null
+
       if (request.action === 'add_sign') {
         // P1-B 加签 — pull additional active co-signer(s) into the actor's
         // current approval node. Completion auto-extends from the LIVE
@@ -12027,7 +12135,21 @@ export class ApprovalProductService {
         if (!currentNodeKey) {
           throw new ServiceError('Approval does not have an active node', 409, APPROVAL_ERROR_CODES.INVALID_STATUS_TRANSITION)
         }
-        const addSignMode: 'before' | 'parallel' = request.addSignMode === 'before' ? 'before' : 'parallel'
+        // Lock-5 gate B-1 (SERVICE door): the mode is explicit here too. `undefined` keeps today's
+        // `parallel` default; `before` / `parallel` / `after` pass through unchanged; anything else
+        // is a values-free 400 — the old `=== 'before' ? 'before' : 'parallel'` coercion is what
+        // made `'after'` unreachable (§0.1) and is retired with the route filter in the same slice.
+        // Direct (non-HTTP) callers get the same refusal, so reverting the route door alone cannot
+        // reopen the flatten.
+        if (request.addSignMode !== undefined && !isApprovalAddSignMode(request.addSignMode)) {
+          throw new ServiceError(
+            'addSignMode must be before, parallel, or after',
+            400,
+            'APPROVAL_ADD_SIGN_MODE_INVALID',
+            { nodeKey: currentNodeKey, operation: request.action },
+          )
+        }
+        const addSignMode: ApprovalAddSignMode = request.addSignMode ?? 'parallel'
         const targetUserIds = (request.targetUserIds ?? [])
           .filter((value): value is string => typeof value === 'string')
           .map((value) => value.trim())
@@ -12040,44 +12162,75 @@ export class ApprovalProductService {
         // region rather than silently misrouting the new approver to the wrong
         // branch frontier. `parallel`-mode is scoped to the actor's resolved
         // branch node (`currentNodeKey`) and is allowed.
-        if (isInParallelRegion && addSignMode === 'before') {
+        // Lock-5 gate B-4: `after` is refused here too, reusing the SAME code — the appended round
+        // would have to be reconciled with the branch frontier and the join, which OD-L5-4(b)'s
+        // "existing machinery" does not cover. The `before` message is byte-identical to before.
+        if (isInParallelRegion && addSignMode !== 'parallel') {
           throw new ServiceError(
-            'before-mode add_sign is not supported inside a parallel branch',
+            `${addSignMode}-mode add_sign is not supported inside a parallel branch`,
             409,
             'APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED',
           )
         }
-        // MUTATION (nodeEntryEpoch §4·B): add-sign extends the CURRENT round — the added co-signer's
-        // approve must count toward the same quorum, so preserve the node's current epoch (its active
-        // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
-        const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
-        const createdTaskEvents = await this.insertAssignments(
-          client,
-          id,
-          executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
-          addSignEntryEpoch,
-        )
-        await client.query(
-          `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
-          [id, nextVersion],
-        )
-        await this.insertApprovalRecord(client, id, {
-          action: 'add_sign',
-          actorId: actor.userId,
-          actorName,
-          comment: request.comment || null,
-          fromStatus: instance.status,
-          toStatus: instance.status,
-          fromVersion: instance.version,
-          toVersion: nextVersion,
-          metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
-          targetUserId: targetUserIds[0],
-        }, actor)
-        // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the add_sign txn.
-        await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
-        await client.query('COMMIT')
-        await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
-        return (await this.getApproval(id, actor.userId, actor.roles))!
+        if (addSignMode === 'after') {
+          // Lock-5 OD-L5-5(a) / gate B-5: with two or more addees the appended round's aggregation
+          // MUST be chosen at action time — `all` (every addee) or `any` (the first). One addee needs
+          // no choice (one seat completes under either), so the key is optional there; when present
+          // it must still be one of the two values. `before` / `parallel` never read this key.
+          if (request.addSignAggregation !== undefined && !isApprovalAddSignAggregation(request.addSignAggregation)) {
+            throw new ServiceError('addSignAggregation must be all or any', 400, 'VALIDATION_ERROR')
+          }
+          if (targetUserIds.length >= 2 && request.addSignAggregation === undefined) {
+            throw new ServiceError(
+              'addSignAggregation is required when after-mode add_sign adds two or more approvers',
+              400,
+              'VALIDATION_ERROR',
+            )
+          }
+          // OD-L5-4(b), owner disposition (1) 2026-10-01: the actor's seat is consumed AS AN
+          // APPROVAL. That judgment — "does this approval complete the node's current round?" — is
+          // the engine's own, made in the approve pipeline below by the very branches that decide
+          // it for a plain approve (sequential queue head, 会签 siblings, threshold tally). This
+          // branch therefore does NOT return: it records the plan and falls through. Every
+          // pre-approve gate between here and there applies unchanged (`pending` status, the
+          // §1.3 comment requirement on the approve side, the active-node check).
+          afterSign = { targetUserIds, aggregation: request.addSignAggregation ?? 'all' }
+        } else {
+          // `before` / `parallel` — the pre-B-3 body, unchanged (gate B-1's positive control: "the
+          // change is value-selected"; gate B-2's identity pin still holds against it).
+          //
+          // MUTATION (nodeEntryEpoch §4·B): add-sign extends the CURRENT round — the added co-signer's
+          // approve must count toward the same quorum, so preserve the node's current epoch (its active
+          // siblings still hold it here — no deactivation precedes this insert); NEVER bump the seq.
+          const addSignEntryEpoch = await this.currentNodeEntryEpoch(client, id, currentNodeKey)
+          const createdTaskEvents = await this.insertAssignments(
+            client,
+            id,
+            executor.buildAddSignAssignments(currentNodeKey, targetUserIds, actor.userId),
+            addSignEntryEpoch,
+          )
+          await client.query(
+            `UPDATE approval_instances SET version = $2, updated_at = now() WHERE id = $1`,
+            [id, nextVersion],
+          )
+          await this.insertApprovalRecord(client, id, {
+            action: 'add_sign',
+            actorId: actor.userId,
+            actorName,
+            comment: request.comment || null,
+            fromStatus: instance.status,
+            toStatus: instance.status,
+            fromVersion: instance.version,
+            toVersion: nextVersion,
+            metadata: { nodeKey: currentNodeKey, addSignMode, addedUserIds: targetUserIds },
+            targetUserId: targetUserIds[0],
+          }, actor)
+          // P1#2e REPLACE (family 1) — flag-ON in-txn task_created enqueue at the END of the add_sign txn.
+          await this.enqueueApprovalTaskCreatedEventsInTxn(client, id, createdTaskEvents)
+          await client.query('COMMIT')
+          await this.emitApprovalTaskCreatedEventsPostCommit(id, createdTaskEvents) // A-2a
+          return (await this.getApproval(id, actor.userId, actor.roles))!
+        }
       }
 
       if (request.action === 'reduce_sign') {
@@ -12279,7 +12432,11 @@ export class ApprovalProductService {
       // ERROR-CODE CONTRACT (§1.3): the REJECT side keeps emitting `REJECT_COMMENT_REQUIRED` because
       // existing clients key on it; the APPROVE side gets a NEW `APPROVAL_COMMENT_REQUIRED`, so no
       // shipped client's error handling changes meaning.
-      if (request.action === 'reject' || request.action === 'approve') {
+      //
+      // Lock-5 gate B-3: an after-sign consumes the actor's seat AS AN APPROVAL, so the approve-side
+      // rule (`'always'`) binds it too — otherwise 后加签 would be a comment-free approve at an
+      // `'always'` node, a bypass of the ratified switch. The reject side is untouched.
+      if (request.action === 'reject' || request.action === 'approve' || afterSign) {
         const commentPolicy = effectiveCommentRequired(
           nodeOperationPolicyAt(runtimeGraph as NodeOperationGraphView, currentNodeKey),
           instance.policy_snapshot,
@@ -12288,7 +12445,7 @@ export class ApprovalProductService {
         if (request.action === 'reject' && !hasComment && commentPolicy !== 'never') {
           throw new ServiceError('Rejection comment is required', 400, APPROVAL_ERROR_CODES.REJECT_COMMENT_REQUIRED)
         }
-        if (request.action === 'approve' && !hasComment && commentPolicy === 'always') {
+        if ((request.action === 'approve' || afterSign) && !hasComment && commentPolicy === 'always') {
           // §2.4 / X-1 values-free: `{ nodeKey }` only — never the actor, the comment, or the form.
           throw new ServiceError(
             'An approval comment is required at this node',
@@ -12753,7 +12910,6 @@ export class ApprovalProductService {
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }
 
-      const approvalMode = executor.getApprovalMode(currentNodeKey)
       // nodeEntryEpoch (§5): capture the current node's entry epoch NOW — while the resolving
       // actor's assignment is still active (every mode below deactivates it) so the DISTINCT read
       // is authoritative and fails closed on empty/mixed. Reused by the threshold tally (null =>
@@ -12762,6 +12918,13 @@ export class ApprovalProductService {
       const currentNodeEpoch = currentNodeKey
         ? await this.currentNodeEntryEpoch(client, id, currentNodeKey)
         : null
+      // Lock-5 L5-B gate B-5: when THIS round is an appended (后加签) round — the instance carries an
+      // `addSignAppendedRound` entry whose node AND epoch match the live round — its action-time
+      // aggregation (`all` | `any`) governs completion instead of the node's authored mode. Keyed on
+      // the epoch, so an ordinary re-activation of the same node (return, jump) falls back to the
+      // authored mode by construction. Read off the already-loaded instance row: no extra query.
+      const appendedRound = readAddSignAppendedRound(instance.metadata, currentNodeKey, currentNodeEpoch)
+      const approvalMode: ApprovalMode = appendedRound ? appendedRound.aggregation : executor.getApprovalMode(currentNodeKey)
       // Approval aggregation semantics:
       //   'sequential': complete only the active head and promote exactly one queued successor.
       //   'all'    (会签): deactivate only the actor's assignment, short-circuit if siblings remain.
@@ -12786,6 +12949,9 @@ export class ApprovalProductService {
           currentNodeEpoch,
         )
         if (queueAdvance.remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): the queue is not empty after this head, so an
+          // after-sign cannot open its round here — refuse (rolls back the head advance above).
+          if (afterSign) throw afterSignRoundIncomplete()
           await client.query(
             `UPDATE approval_instances
              SET version = $2,
@@ -12824,6 +12990,10 @@ export class ApprovalProductService {
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
         const remainingAssignments = currentNodeAssignments.length - actorAssignments.length
         if (remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): undecided 会签 siblings remain, so this approval does
+          // not complete the round — an after-sign is refused here (the deactivation above rolls
+          // back with the transaction; no cross-epoch state is ever written).
+          if (afterSign) throw afterSignRoundIncomplete()
           await client.query(
             `UPDATE approval_instances
              SET version = $2,
@@ -12965,6 +13135,9 @@ export class ApprovalProductService {
           )
         }
         if (distinctApproverCount < threshold && remainingAssignments > 0) {
+          // Lock-5 B-3 / owner disposition (1): the threshold is still short after this approval, so
+          // an after-sign is refused here (same rollback discipline as the 会签 branch).
+          if (afterSign) throw afterSignRoundIncomplete()
           // Threshold not yet reached and still-pending siblings remain — record this partial
           // approval and keep the node pending (mirrors 'all' short-circuit; siblings stay active).
           await client.query(
@@ -13035,10 +13208,35 @@ export class ApprovalProductService {
         }
       }
 
-      let resolution = isInParallelRegion && parallelState && actorBranchNodeKey
-        ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
-        : executor.resolveAfterApprove(currentNodeKey)
-      if (runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
+      // Lock-5 L5-B gate B-3 — OD-L5-4(b)'s deferred same-node round. Reaching this line means the
+      // engine's own branches above judged the actor's approval to COMPLETE the current round (every
+      // partial-vote branch either returned or, for an after-sign, threw). An after-sign now stays at
+      // the SAME node instead of resolving forward: the addees are seated by the shipped
+      // `buildAddSignAssignments` (stamped `addSign:true`, so 减签 can still find them) under the
+      // FRESH epoch minted at the activation site below, and `current_step` / `total_steps` are
+      // unchanged. No auto-approval cascade runs on the appended round: the addees were chosen by
+      // name for this exact round, so merging or deduping them away would empty the round the actor
+      // just asked for. The node advances only when the appended round completes — through this
+      // same pipeline, under the appended round's own aggregation (`readAddSignAppendedRound`).
+      const appendedRoundAssignments = afterSign
+        ? executor.buildAddSignAssignments(currentNodeKey, afterSign.targetUserIds, actor.userId)
+        : []
+      let resolution: ApprovalGraphResolution = afterSign
+        ? {
+            status: 'pending',
+            currentNodeKey,
+            currentStep: instance.current_step,
+            totalSteps: instance.total_steps,
+            assignments: [],
+            ccEvents: [],
+            autoApprovalEvents: [],
+            aggregateMode: approvalMode,
+            aggregateComplete: true,
+          }
+        : isInParallelRegion && parallelState && actorBranchNodeKey
+          ? executor.resolveAfterApproveInParallel(actorBranchNodeKey, parallelState)
+          : executor.resolveAfterApprove(currentNodeKey)
+      if (!afterSign && runtimeGraphHasAutoApprovalPolicy(runtimeGraph)) {
         const approvalHistory = await this.loadApprovalHistory(client, id)
         approvalHistory.push({
           nodeKey: currentNodeKey,
@@ -13238,8 +13436,18 @@ export class ApprovalProductService {
       // The resolving approve record below stays on the CURRENT node's epoch (`currentNodeEpoch`,
       // captured before any deactivation); only the newly-inserted assignments + the cascade at the
       // next node carry `advanceEntryEpoch`.
+      // For an after-sign the "next node" IS this node and the bump mints the appended round's epoch
+      // (OD-L5-4(b): "a fresh nodeEntryEpoch round at the SAME node"); the addees are inserted under
+      // it, and the actor's own approve record below keeps the OLD epoch, exactly as on a forward
+      // advance. The sibling seats of an `any`/threshold round were already cancelled above, so the
+      // node's live seats after this insert all carry the new epoch — the mixed-epoch invariant holds.
       const advanceEntryEpoch = await this.bumpNodeActivationSeq(client, id)
-      const createdTaskEvents = await this.insertAssignments(client, id, resolution.assignments, advanceEntryEpoch)
+      const createdTaskEvents = await this.insertAssignments(
+        client,
+        id,
+        afterSign ? appendedRoundAssignments : resolution.assignments,
+        advanceEntryEpoch,
+      )
       const approveRecordMetadata: Record<string, unknown> = {
         nodeKey: currentNodeKey,
         nextNodeKey: resolution.currentNodeKey,
@@ -13248,6 +13456,9 @@ export class ApprovalProductService {
         // A-4: server-side channel attribution (card wrapper only; never request-sourced over HTTP).
         ...(request.channelOrigin ? { channel: request.channelOrigin.channel, cardDeliveryId: request.channelOrigin.cardDeliveryId } : {}),
         ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+        // Lock-5 B-3: this approve closed the round but NOT the node — readers that infer "node
+        // decided" from `aggregateComplete` alone can tell the two apart by this marker.
+        ...(afterSign ? { addSignAfter: true, appendedNodeEntryEpoch: advanceEntryEpoch } : {}),
       }
       if (isInParallelRegion) {
         approveRecordMetadata.parallelNodeKey = parallelState?.parallelNodeKey
@@ -13293,6 +13504,49 @@ export class ApprovalProductService {
         toVersion: nextVersion,
         metadata: approveRecordMetadata,
       }, actor)
+      if (afterSign) {
+        // Lock-5 B-3: the `add_sign` audit row for the appended round — the SAME shape the
+        // `parallel`/`before` branch writes (`nodeKey`, `addSignMode`, `addedUserIds`, `targetUserId`)
+        // plus the round triple that makes the appended round reconstructible from audit rows alone:
+        // the epoch the actor decided in, the epoch the addees were seated under, and the
+        // aggregation that governs it. The instance's `addSignAppendedRound` carrier (read by the
+        // approve path's mode resolution) is merged in the same transaction — a jsonb `||`, never a
+        // rewrite, so `parallelBranchStates` and the designated-fallback snapshot are untouched.
+        await this.insertApprovalRecord(client, id, {
+          action: 'add_sign',
+          actorId: actor.userId,
+          actorName,
+          comment: request.comment || null,
+          fromStatus: instance.status,
+          toStatus: instance.status,
+          fromVersion: instance.version,
+          toVersion: nextVersion,
+          metadata: {
+            nodeKey: currentNodeKey,
+            addSignMode: 'after',
+            addedUserIds: afterSign.targetUserIds,
+            addSignAggregation: afterSign.aggregation,
+            ...(currentNodeEpoch !== null ? { nodeEntryEpoch: currentNodeEpoch } : {}),
+            appendedNodeEntryEpoch: advanceEntryEpoch,
+          },
+          targetUserId: afterSign.targetUserIds[0],
+        }, actor)
+        await client.query(
+          `UPDATE approval_instances
+              SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb),
+                  updated_at = now()
+            WHERE id = $1`,
+          [
+            id,
+            ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
+            JSON.stringify(buildAddSignAppendedRoundMetadata({
+              nodeKey: currentNodeKey,
+              entryEpoch: advanceEntryEpoch,
+              aggregation: afterSign.aggregation,
+            })),
+          ],
+        )
+      }
       if ((approvalMode === 'any' || approvalMode === 'threshold') && aggregateCancelledAssigneeIds.length > 0) {
         // One 'sign' audit row describing the aggregation cancellation — lets the timeline UI
         // render a muted "已被 {approver} 的决定覆盖" line without mining assignment metadata.
@@ -13384,10 +13638,21 @@ export class ApprovalProductService {
 
       // Wave 2 WP5 slice 1 — emit metrics after commit so rollback failures
       // never leave dangling breakdown entries. All hooks are guarded.
-      this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
+      //
+      // Lock-5 B-3 metrics reading for an appended round: it is a NEW ACTIVATION of the same node
+      // (the epoch was bumped), so it is recorded exactly like the `return` branch's same-node
+      // re-entry — the decided round's breakdown entry is CLOSED (awaited, H-1 P1-1: close and
+      // re-activation contend for one `approval_metrics` row and the order must be a fact of the
+      // code path) and a fresh entry for the appended round is opened, which also re-arms the
+      // node's timeout from now. The node's wall-clock therefore reads as two entries under one
+      // `nodeKey`, one per round, never as one entry spanning both.
+      if (afterSign) await this.settleNodeDecisionMetric(id, currentNodeKey, actor.userId)
+      else this.emitNodeDecisionMetric(id, currentNodeKey, actor.userId)
       if (completionEvent) {
         emitApprovalCompletionEvent(completionEvent)
         this.emitTerminalMetric(id, 'approved')
+      } else if (afterSign) {
+        await this.emitNodeActivationMetric(id, currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, currentNodeKey))
       } else if (resolution.currentNodeKey && resolution.currentNodeKey !== currentNodeKey) {
         await this.emitNodeActivationMetric(id, resolution.currentNodeKey, resolveCalendarSlaOrgId(toNullableRecord(instance.requester_snapshot)), nodeTimeoutForKey(runtimeGraph, resolution.currentNodeKey))
       }
@@ -13638,12 +13903,19 @@ export class ApprovalProductService {
     // detail read: the FE store publishes an action response into the slot the detail read fills,
     // so omitting it here would flip the field to `undefined` (its older-backend fallback) the
     // moment an approver acts.
-    dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+    const canDecideCurrentNode = resolveCanDecideCurrentNode({
       instance: row,
       assignments: assignmentsResult.rows,
       viewerUserId: viewerUserId ?? null,
       viewerRoles: viewerRoles ?? null,
     })
+    dto.canDecideCurrentNode = canDecideCurrentNode
+    // Process-evidence (过程附件) uploader affordance — the identical expression
+    // `ApprovalBridgeService.getApproval` (the detail read) carries: the seat answer above,
+    // restricted to the seat-gated door. Filled HERE too for the same reason as the field above: the
+    // FE store publishes an action response into the slot the detail read fills, so a builder that
+    // omitted it would take the uploader away from a seated approver the moment they post a 评论.
+    dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
 
     // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
     // 暴露整个 metadata。」 The REFRESH half of the cancel-round outcome: a reader who reloads

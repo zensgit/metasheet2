@@ -25,6 +25,9 @@
     <p v-if="store.error" class="data-sources__error" data-testid="ds-error" role="alert">
       {{ store.error }}
     </p>
+    <p v-if="store.notice" class="data-sources__notice" data-testid="ds-notice" role="status">
+      {{ store.notice }}
+    </p>
 
     <form v-if="formOpen" class="data-sources__form" data-testid="ds-create-form" @submit.prevent="submit">
       <div class="data-sources__grid">
@@ -94,6 +97,9 @@
       <p v-if="formMode === 'credentials'" class="data-sources__muted" data-testid="ds-credential-note">
         仅更新填写的凭据字段;留空字段保持不变,不会作为空字符串提交。
       </p>
+      <p v-if="formMode === 'credentials' && resealing" class="data-sources__muted" data-testid="ds-reseal-note">
+        该数据源已保存的凭据无法用当前密钥解密。请重新输入凭据;连接配置与所有者保持不变。
+      </p>
 
       <label v-if="formMode !== 'credentials'" class="data-sources__checkbox">
         <input v-model="form.readOnly" type="checkbox" data-testid="ds-field-readonly" />
@@ -131,10 +137,10 @@
 
     <div class="data-sources__list" data-testid="ds-list">
       <p v-if="store.loading" class="data-sources__muted" data-testid="ds-loading">加载中…</p>
-      <p v-else-if="store.items.length === 0" class="data-sources__muted" data-testid="ds-empty">
+      <p v-else-if="store.items.length === 0 && store.loadFailed.length === 0" class="data-sources__muted" data-testid="ds-empty">
         还没有数据源。点击「新建数据源」连接一个。
       </p>
-      <table v-else class="data-sources__table">
+      <table v-else-if="store.items.length > 0" class="data-sources__table">
         <thead>
           <tr><th>名称</th><th>类型</th><th>状态</th><th>被引用</th><th>连接测试</th><th></th></tr>
         </thead>
@@ -227,6 +233,56 @@
           </tr>
         </tbody>
       </table>
+
+      <!-- 无法装载 (#6079): sources that EXIST but the server could not load. A separate group, never
+           rows of the table above — nothing here has an adapter behind it, so test / edit / delete
+           are shown disabled, and the only action is re-entering credentials, offered solely for
+           the states a credential can fix. -->
+      <section
+        v-if="!store.loading && store.loadFailed.length > 0"
+        class="data-sources__load-failed"
+        data-testid="ds-load-failed"
+      >
+        <component :is="embedded ? 'h4' : 'h2'">无法装载</component>
+        <p class="data-sources__muted">以下数据源已保存,但服务端当前无法装载,因此不能测试、预览、编辑或删除。</p>
+        <table class="data-sources__table">
+          <thead>
+            <tr><th>名称</th><th>类型</th><th>状态</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="entry in store.loadFailed"
+              :key="entry.id"
+              data-testid="ds-load-failed-row"
+              :data-ds-id="entry.id"
+            >
+              <td>{{ entry.name }}<br /><small class="data-sources__muted">{{ entry.id }}</small></td>
+              <td>{{ typeLabel(entry.type) }}</td>
+              <td>
+                <span
+                  class="data-sources__status is-fail"
+                  data-testid="ds-load-failed-badge"
+                  :data-load-state="entry.loadState"
+                >{{ loadFailedBadgeText(entry.loadState) }}</span>
+              </td>
+              <td>
+                <div class="data-sources__actions">
+                  <button
+                    v-if="canResealLoadFailed(entry.loadState)"
+                    type="button"
+                    class="data-sources__btn data-sources__btn--primary"
+                    data-testid="ds-reseal"
+                    @click="openResealForm(entry)"
+                  >重新输入凭据</button>
+                  <button type="button" class="data-sources__btn" data-testid="ds-load-failed-test" disabled>测试连接</button>
+                  <button type="button" class="data-sources__btn" data-testid="ds-load-failed-edit" disabled>编辑</button>
+                  <button type="button" class="data-sources__btn data-sources__btn--danger" data-testid="ds-load-failed-delete" disabled>删除</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
 
       <section v-if="activeSchemaId" class="data-sources__preview" data-testid="ds-schema-panel">
         <header class="data-sources__preview-header">
@@ -391,11 +447,13 @@ import {
   DATA_SOURCE_TYPE_LABELS,
   type DataSourceColumnInfo,
   type DataSourceDetail,
+  type DataSourceLoadFailedItem,
   type DataSourceTableInfo,
   type DataSourceType,
 } from '../../data-sources/types'
 import { buildCreatePayload, buildCredentialRotationPayload, buildUpdatePayload } from '../../data-sources/buildPayload'
 import { deleteConfirmMessage } from '../../data-sources/deleteRefusalCopy'
+import { canResealLoadFailed, loadFailedBadgeText } from '../../data-sources/loadFailedCopy'
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
@@ -421,6 +479,10 @@ const store = useDataSourcesStore()
 const formOpen = ref(false)
 const formMode = ref<'create' | 'edit' | 'credentials'>('create')
 const editingId = ref<string | null>(null)
+// The credential form was opened for a source the server could NOT load (re-seal). There is no
+// detail to load for it (GET /:id is 404 by design) and no connection on the client, so the form
+// sends credentials only and skips the connection-dependent checks/tests.
+const resealing = ref(false)
 const submitting = ref(false)
 const detailLoading = ref(false)
 const activeSchemaId = ref<string | null>(null)
@@ -477,7 +539,9 @@ const submitLabel = computed(() => {
 // for edit (no secret available → would false-fail); the row-level GET /:id/test stays for saved sources.
 const canDraftTest = computed(() => {
   if (formMode.value === 'edit') return false
-  if (formMode.value === 'credentials') return credentialFieldsFilled.value
+  // Re-seal: the client holds no connection for a load-failed source, so a draft test could only
+  // false-fail. The server rebuilds the connection from its own row.
+  if (formMode.value === 'credentials') return !resealing.value && credentialFieldsFilled.value
   return true
 })
 
@@ -625,8 +689,10 @@ function toggleCreateForm(): void {
   resetForm()
   formMode.value = 'create'
   editingId.value = null
+  resealing.value = false
   formOpen.value = true
   store.error = null
+  store.notice = null
 }
 
 function resetForm(): void {
@@ -661,6 +727,7 @@ async function openEditForm(id: string): Promise<void> {
     fillFormFromDetail(detail)
     formMode.value = 'edit'
     editingId.value = id
+    resealing.value = false
     formOpen.value = true
   } finally {
     detailLoading.value = false
@@ -675,17 +742,40 @@ async function openCredentialForm(id: string): Promise<void> {
     fillFormFromDetail(detail)
     formMode.value = 'credentials'
     editingId.value = id
+    resealing.value = false
     formOpen.value = true
   } finally {
     detailLoading.value = false
   }
 }
 
+/**
+ * Re-seal a source the server could not load: the SAME credential form and the SAME
+ * PUT /:id/credentials call, opened from the list entry itself — there is no detail to fetch
+ * (GET /:id answers 404 for a load-failed source, by design).
+ */
+function openResealForm(entry: DataSourceLoadFailedItem): void {
+  resetForm()
+  form.id = entry.id
+  form.name = entry.name
+  form.type = DATA_SOURCE_TYPES.includes(entry.type as DataSourceType)
+    ? entry.type as DataSourceType
+    : 'postgres'
+  formMode.value = 'credentials'
+  editingId.value = entry.id
+  resealing.value = true
+  formOpen.value = true
+  store.error = null
+  store.notice = null
+}
+
 async function submit(): Promise<void> {
   // P2: `server` (SQL Server named instance) is a host alternative ONLY for sqlserver — Postgres
   // ignores it, so Postgres still requires host (UI-1's rule), while SQL Server accepts host OR
   // server (so a server-only source is editable/savable rather than blocked by an empty Host).
-  if (isSql.value) {
+  // A re-seal sends credentials only; the connection stays the server's own row, so there is no
+  // Host on the client to require.
+  if (isSql.value && !resealing.value) {
     const hasHost = !!form.host.trim()
     const hasServer = form.type === 'sqlserver' && !!form.server.trim()
     if (!hasHost && !hasServer) {
@@ -705,6 +795,7 @@ async function submit(): Promise<void> {
       resetForm()
       formMode.value = 'create'
       editingId.value = null
+      resealing.value = false
       formOpen.value = false
     }
   } finally {
@@ -831,6 +922,10 @@ onMounted(() => {
 .data-sources__sub { font-size: 13px; color: #8a8f99; font-weight: 400; }
 .data-sources__lead { color: #6b7280; margin: 0; font-size: 13px; }
 .data-sources__error { background: #fff1f0; border: 1px solid #ffccc7; color: #cf1322; padding: 8px 12px; border-radius: 6px; }
+.data-sources__notice { background: #fffbe6; border: 1px solid #ffe58f; color: #874d00; padding: 8px 12px; border-radius: 6px; }
+.data-sources__load-failed { margin-top: 16px; }
+.data-sources__load-failed h2, .data-sources__load-failed h4 { font-size: 15px; margin: 0 0 4px; }
+.data-sources__status.is-fail { background: #fff1f0; color: #cf1322; }
 .data-sources__form { margin: 16px 0; padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fafafa; }
 .data-sources__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px; }
 .data-sources__grid label, .data-sources__checkbox { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #374151; }

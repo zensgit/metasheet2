@@ -37,6 +37,7 @@ import { createUserSession, getUserSession, listUserSessions, revokeUserSession,
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
 import { isElearningEnabled } from '../elearning/feature-flags'
+import { isTasksEnabled } from '../tasks/feature-flag'
 import { Logger } from '../core/logger'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
@@ -313,6 +314,10 @@ function buildFeaturePayload(authUser: User) {
     // E-learning V0.1 named pilot: master flag only. Never inferred from admin
     // role, product mode, or plugin state.
     elearning: isElearningEnabled(),
+    // Tasks: true only when TASKS_ENABLED is exactly 'true', i.e. exactly when tasksRouter() mounts
+    // /api/tasks. The web hides the 任务 entry, its badge and the /tasks route otherwise, so a
+    // server without the flag issues no /api/tasks request at all. Never inferred from role.
+    tasks: isTasksEnabled(),
     mode,
   }
 }

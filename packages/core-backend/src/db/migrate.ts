@@ -135,7 +135,16 @@ function printHelp(): void {
 Notes:
 - Multiple flags are not supported. The first recognized flag wins.
 - Without --list, the script will mutate the database. Run --list first
-  to preview what's pending before running --latest in production envs.`)
+  to preview what's pending before running --latest in production envs.
+- A small number of individual migrations gate their own destructive down()
+  step behind an additional env var, read inside that migration file (not
+  here), so --rollback/--reset alone do not bypass it. Known example:
+  ALLOW_APPROVAL_TEMPLATE_GROUP_BACKFILL_DROP (zzzz20260919090000_create_
+  approval_template_group_backfill_batches.ts) must be =true to let down()
+  drop the three batch-bookkeeping tables while any of them still holds a
+  row; otherwise --rollback/--reset fails closed on this step and, for
+  --reset, no earlier migration is rolled back either (the whole reset is
+  one transaction).`)
 }
 
 async function main(): Promise<void> {

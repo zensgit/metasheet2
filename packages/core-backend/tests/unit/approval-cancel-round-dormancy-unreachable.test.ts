@@ -92,6 +92,25 @@ import { describe, expect, it } from 'vitest'
  * signature and it turned the raw-mention assertion red for an unrelated reason before the probe was
  * corrected — see the round-2 write-up.) Keep this assertion; it is covering ground the AST layer
  * structurally cannot.
+ *
+ * CENSUS DESIGN UPDATE (round 3 — WIRING DAY, registration item L-4 of the product-entry errata v2;
+ * L-4 is a registration item, not one of the clauses ratified 2026-09-28): the product entry
+ * (phase A, attendance-side routes per the ratified P-1 Q1′ = (i)) now
+ * reaches the method through EXACTLY ONE named production caller, the host→plugin entry port
+ * `ENTRY_PORT_FILE` below. L-4 requires the census to move from 「zero callers」 to 「exactly the
+ * named callers」 in the SAME commit that adds the caller — otherwise the guard is either red forever
+ * or quietly deleted. So the claim is now:
+ *
+ *   CLAIM: the ONLY production source that reaches `createCancelRoundInstance` is `ENTRY_PORT_FILE`,
+ *          through exactly ONE call site; the definition file still declares it once and calls it
+ *          nowhere; no other production file (the attendance plugin included — it calls the port's
+ *          `launch`, never this name) mentions, calls, declares or string-dispatches it; and no HTTP
+ *          route module under `src/routes/` mentions it at all.
+ *
+ * Every pre-existing assertion keeps its mechanism; only the population each 「zero」 is taken over
+ * changes from 「production minus the definition file」 to 「production minus the definition file
+ * minus the one named caller」, and the named caller gets its own exact-count assertions so it cannot
+ * grow a second call site unnoticed.
  */
 
 const REPO_ROOT = join(__dirname, '../../../..')
@@ -154,6 +173,14 @@ const MIN_PRODUCTION_FILES = 1500
 /** The single file allowed to contain the symbol at all, and the exact form it may take. */
 const DEFINITION_FILE = join('packages', 'core-backend', 'src', 'services', 'ApprovalProductService.ts')
 const DEFINITION_FORM = `async ${SYMBOL}(`
+
+/**
+ * Round 3 (L-4): the ONE named production caller — the host→plugin cancel-round entry port that
+ * plugin-attendance's two cancel-round routes reach through `context.services`. Named as DATA and
+ * asserted on below (exact file, exact call-site count), never an ad-hoc filter.
+ */
+const ENTRY_PORT_FILE = join('packages', 'core-backend', 'src', 'approvals', 'approval-cancel-round-entry-port.ts')
+const NAMED_CALLERS: readonly string[] = [ENTRY_PORT_FILE]
 
 function walk(dir: string, out: string[]): void {
   let entries: string[]
@@ -351,7 +378,7 @@ const productionCensus: Map<string, FileCensus> = new Map(
   production.map((rel) => [rel, censusOf(rel, readRel(rel))]),
 )
 
-describe('cancel-round creation path is unreachable from production code (C-1 dormancy condition 2)', () => {
+describe('cancel-round creation path is reachable from production code ONLY through the named entry port (C-1 dormancy condition 2, round 3 / L-4)', () => {
   it('POSITIVE CONTROL: the mechanical scan enumerates a non-trivial production population', () => {
     expect(
       production.length,
@@ -393,17 +420,33 @@ describe('cancel-round creation path is unreachable from production code (C-1 do
     ).toEqual(['.vue'])
   })
 
-  it('STATIC: no production file other than the definition file mentions the symbol in code', () => {
+  it('POSITIVE CONTROL (round 3): the scan actually reaches every named caller', () => {
+    for (const rel of NAMED_CALLERS) {
+      expect(production, `named caller ${rel} is missing from the enumerated production population`).toContain(rel)
+    }
+  })
+
+  it('STATIC: no production file other than the definition file and the named entry port mentions the symbol in code', () => {
     const offenders: string[] = []
     for (const rel of production) {
-      if (rel === DEFINITION_FILE) continue
+      if (rel === DEFINITION_FILE || NAMED_CALLERS.includes(rel)) continue
       const code = stripComments(readRel(rel))
       if (code.includes(SYMBOL)) offenders.push(rel)
     }
     expect(
       offenders,
-      `production files reference ${SYMBOL} outside its definition file: ${JSON.stringify(offenders)}`,
+      `production files reference ${SYMBOL} outside its definition file and the named entry port: ${JSON.stringify(offenders)}`,
     ).toEqual([])
+  })
+
+  it('STATIC (round 3): the named entry port mentions the symbol in code exactly once, and that once is a call', () => {
+    const code = stripComments(readRel(ENTRY_PORT_FILE))
+    expect(occurrencesOf(SYMBOL, code)).toBe(1)
+    const census = productionCensus.get(ENTRY_PORT_FILE)
+    expect(census, `${ENTRY_PORT_FILE} was not found in the production census`).toBeDefined()
+    expect(census!.callSites, 'the named entry port must call the method exactly once').toBe(1)
+    expect(census!.declarations, 'the named entry port must not declare a method of that name').toBe(0)
+    expect(census!.stringDispatch, 'the named entry port must not name the method as a string').toBe(false)
   })
 
   it('STATIC: the definition file contains the symbol exactly once, and that once is the definition', () => {
@@ -472,19 +515,20 @@ describe('cancel-round creation path is unreachable from production code (C-1 do
     expect(astCensus('probe.ts', probe).callSites).toBe(1)
   })
 
-  it('STATIC: no production file — including the definition file — contains a call site of the symbol', () => {
-    // Strictly stronger than round 1's "other than the definition file": under AST semantics the
-    // definition itself is a MethodDeclaration, never a CallExpression, so nobody (including the
-    // method itself, i.e. no self-recursion) may call it anywhere in the production tree.
-    const offenders: string[] = []
+  it('STATIC: the set of production files containing a call site of the symbol is EXACTLY the named callers', () => {
+    // Round 3 (L-4): was 「no production file — including the definition file — contains a call
+    // site」. Under AST semantics the definition itself is a MethodDeclaration, never a
+    // CallExpression, so the definition file (no self-recursion) still calls it nowhere; the ONLY
+    // production file allowed a call site is the named entry port, pinned to exactly one above.
+    const callers: string[] = []
     for (const rel of production) {
-      if ((productionCensus.get(rel)?.callSites ?? 0) > 0) offenders.push(rel)
+      if ((productionCensus.get(rel)?.callSites ?? 0) > 0) callers.push(rel)
     }
     expect(
-      offenders,
-      `production files contain a call site (${SYMBOL}( or .${SYMBOL}() outside its own definition: ` +
-        JSON.stringify(offenders),
-    ).toEqual([])
+      callers.sort(),
+      `production files containing a call site (${SYMBOL}( or .${SYMBOL}() differ from the named callers: ` +
+        JSON.stringify(callers),
+    ).toEqual([...NAMED_CALLERS].sort())
   })
 
   it('STATIC: the definition file declares the method exactly once, and calls it nowhere', () => {
@@ -495,6 +539,7 @@ describe('cancel-round creation path is unreachable from production code (C-1 do
   })
 
   it('STATIC: no production file other than the definition file declares a method/function named the symbol', () => {
+    // Unchanged by round 3: the named entry port CALLS the method, it never declares one.
     const offenders: string[] = []
     for (const rel of production) {
       if (rel === DEFINITION_FILE) continue

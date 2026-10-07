@@ -6,6 +6,7 @@
  * Includes mock fallback for development when backend is not available.
  */
 import { apiFetch, apiGet, apiPost } from '../utils/api'
+import { useLocale } from '../composables/useLocale'
 import type {
   ApprovalTemplateListItemDTO,
   ApprovalTemplateGroupDTO,
@@ -1027,18 +1028,128 @@ export async function listApprovals(
     const start = (page - 1) * pageSize
     return { data: items.slice(start, start + pageSize), total: items.length }
   }
+  const qs = approvalListSearchParams(query, true).toString()
+  return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * The ONE mapping from an `ApprovalListQuery` to `GET /api/approvals` query-string keys, shared by
+ * the JSON list (`listApprovals`) and the CSV export (`exportApprovalsCsv`) so the two can never
+ * drift: a filter added to the list here reaches the export in the same edit. `includePaging` is
+ * the only difference between the two callers — `page`/`pageSize` select a PAGE of the feed, they
+ * are not filters, and the export is "up to N matching rows from the start of the scope".
+ */
+function approvalListSearchParams(query: ApprovalListQuery | undefined, includePaging: boolean): URLSearchParams {
   const params = new URLSearchParams()
   if (query?.tab) params.set('tab', query.tab)
   if (query?.status) params.set('status', query.status)
   if (query?.search) params.set('search', query.search)
-  if (query?.page) params.set('page', String(query.page))
-  if (query?.pageSize) params.set('pageSize', String(query.pageSize))
+  if (includePaging && query?.page) params.set('page', String(query.page))
+  if (includePaging && query?.pageSize) params.set('pageSize', String(query.pageSize))
   if (query?.sourceSystem) params.set('sourceSystem', query.sourceSystem)
   if (query?.templateId) params.set('templateId', query.templateId)
   if (query?.createdFrom) params.set('createdFrom', query.createdFrom)
   if (query?.createdTo) params.set('createdTo', query.createdTo)
-  const qs = params.toString()
-  return apiGet(`/api/approvals${qs ? `?${qs}` : ''}`)
+  return params
+}
+
+// ---------------------------------------------------------------------------
+// CSV export of the approval list — `GET /api/approvals?format=csv`
+// ---------------------------------------------------------------------------
+/** The filters the list is showing. Paging is deliberately not part of an export request. */
+export type ApprovalExportQuery = Omit<ApprovalListQuery, 'page' | 'pageSize'>
+
+/** Used when the response's `Content-Disposition` is absent, unreadable, or not a plain CSV name. */
+export const APPROVAL_EXPORT_DEFAULT_FILE_NAME = 'approvals-export.csv'
+
+/**
+ * CLIENT-side code carried on the `ApprovalApiError` thrown when the server answers 2xx with a body
+ * that is not CSV. Distinct from every server code so a caller can word it as "this server did not
+ * produce an export" rather than as a server-reported failure.
+ */
+export const APPROVAL_EXPORT_UNEXPECTED_RESPONSE = 'APPROVAL_EXPORT_UNEXPECTED_RESPONSE'
+
+export interface ApprovalCsvExportResult {
+  /** The response body, exactly as the server sent it. Never rebuilt, re-encoded or filtered here. */
+  blob: Blob
+  fileName: string
+  /**
+   * The four `X-Approval-Export-*` response headers. `null` means "not readable / not a valid
+   * value", which is NOT the same as zero or `false`: a browser only exposes a cross-origin
+   * response header the server lists as exposed, so a caller must treat `null` as "unknown" and
+   * say so, never as a complete, un-truncated export.
+   */
+  rowCount: number | null
+  rowLimit: number | null
+  rowCap: number | null
+  capped: boolean | null
+}
+
+function readExportCountHeader(response: Response, name: string): number | null {
+  const raw = response.headers.get(name)?.trim()
+  if (!raw || !/^\d+$/.test(raw)) return null
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : null
+}
+
+function readExportFlagHeader(response: Response, name: string): boolean | null {
+  const raw = response.headers.get(name)?.trim()
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  return null
+}
+
+function readExportFileName(response: Response): string {
+  const disposition = response.headers.get('content-disposition') ?? ''
+  // Only a plain `name.csv` token is honoured; anything else falls back to the fixed default, so
+  // no response-supplied path fragment or odd character ever reaches the download attribute.
+  const match = /filename="([A-Za-z0-9][A-Za-z0-9._-]*\.csv)"/i.exec(disposition)
+  return match?.[1] ?? APPROVAL_EXPORT_DEFAULT_FILE_NAME
+}
+
+/**
+ * Downloads the approval list as CSV from the SAME route the list reads (`GET /api/approvals`,
+ * same guard, same filters), with the auth headers `apiFetch` applies to every request.
+ *
+ * There is NO `USE_MOCK` branch and no client-side CSV assembly anywhere on this path, on purpose:
+ * the export's row set, columns and cell encoding are all defined by the server, so a CSV put
+ * together in the browser from the rows the list holds would be a different file under the same
+ * name. With no backend reachable this simply fails, which is the honest outcome.
+ *
+ * What the server decides and this function only reports back: the row ceiling, whether the scoped
+ * query was cut short by it (`capped`), and how many rows were written (`rowCount`, which may be
+ * fewer than the list's total — the export keeps only rows the caller may open).
+ *
+ * A 2xx whose body is not `text/csv` is rejected rather than saved: a server that does not
+ * implement the CSV branch answers the same URL with the JSON list, and handing that to the user
+ * as `approvals-export.csv` would look like a successful export.
+ */
+export async function exportApprovalsCsv(query?: ApprovalExportQuery): Promise<ApprovalCsvExportResult> {
+  const params = approvalListSearchParams(query, false)
+  params.set('format', 'csv')
+  const response = await apiFetch(`/api/approvals?${params.toString()}`, {
+    method: 'GET',
+    headers: { Accept: 'text/csv' },
+  })
+  if (!response.ok) {
+    await approvalRequestError(response)
+  }
+  const contentType = (response.headers.get('content-type') ?? '').trim().toLowerCase()
+  if (!contentType.startsWith('text/csv')) {
+    throw new ApprovalApiError(
+      'The server did not return a CSV export',
+      response.status,
+      APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+    )
+  }
+  return {
+    blob: await response.blob(),
+    fileName: readExportFileName(response),
+    rowCount: readExportCountHeader(response, 'X-Approval-Export-Row-Count'),
+    rowLimit: readExportCountHeader(response, 'X-Approval-Export-Row-Limit'),
+    rowCap: readExportCountHeader(response, 'X-Approval-Export-Row-Cap'),
+    capped: readExportFlagHeader(response, 'X-Approval-Export-Capped'),
+  }
 }
 
 export async function getApproval(id: string): Promise<UnifiedApprovalDTO> {
@@ -1127,13 +1238,16 @@ export class ApprovalApiError extends Error {
  * carrying the server's message verbatim (falling back to a generic status-coded message for a
  * non-JSON or shape-less body). Exported standalone (rather than folded into a fetch wrapper) so
  * it is unit-testable against a fabricated `Response` independent of `USE_MOCK`.
+ *
+ * O-8 / F8-1: only that generic fallback follows the shell locale (read when the error is built);
+ * a server-supplied message is still shown verbatim.
  */
 export async function approvalRequestError(response: Response): Promise<never> {
   const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
   const rawMessage = payload?.error?.message
   const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
     ? rawMessage
-    : `请求失败（${response.status}）`
+    : (useLocale().isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`)
   throw new ApprovalApiError(message, response.status, payload?.error?.code)
 }
 

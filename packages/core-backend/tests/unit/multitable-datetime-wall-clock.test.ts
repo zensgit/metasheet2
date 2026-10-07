@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import {
   dateTimeMinuteKey,
   dateTimeValueToUtcMs,
+  formatDateOnlyValue,
   formatDateTimeValue,
   formatDateTimeWallClock,
   normalizeDateTimeText,
@@ -196,6 +197,42 @@ describe('format ↔ parse (export ↔ import) round trip', () => {
     expect(dateTimeMinuteKey('2026-09-24T01:00:30.000Z', SH)).toBe(dateTimeMinuteKey('2026-09-24 09:00', SH))
     expect(dateTimeMinuteKey('2026-09-24T01:01:00.000Z', SH)).toBe(dateTimeMinuteKey('2026-09-24 09:00', SH)! + 1)
     expect(dateTimeMinuteKey('junk', SH)).toBeNull()
+  })
+})
+
+// #6181 — the day a `date` (date-only) value is exported as: the day the grid shows (#6178's rule).
+describe('formatDateOnlyValue — a day as written keeps its day, an instant takes its day in the zone', () => {
+  it('an instant is the day it falls on in the business zone, never the UTC day', () => {
+    // 2026-09-17T16:00Z = 2026-09-18 00:00 Beijing; its UTC day (the raw text's first ten characters) is 09-17.
+    expect(formatDateOnlyValue('2026-09-17T16:00:00.000Z', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue('2026-09-17T15:59:59.999Z', SH)).toBe('2026-09-17')
+    expect(formatDateOnlyValue('2026-09-18T00:00:00+08:00', SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue(Date.parse('2026-09-17T16:00:00.000Z'), SH)).toBe('2026-09-18')
+    expect(formatDateOnlyValue(new Date('2026-09-17T16:00:00.000Z'), SH)).toBe('2026-09-18')
+    // A zone-less date-time is a wall clock in the zone (the same rule as a dateTime cell).
+    expect(formatDateOnlyValue('2026-09-18 08:00', SH)).toBe('2026-09-18')
+    // The zone decides: the same instant is still 09-17 in New York.
+    expect(formatDateOnlyValue('2026-09-17T16:00:00.000Z', NY)).toBe('2026-09-17')
+  })
+
+  it('a day as written keeps that day in every zone (no zone math); junk / impossible days are null', () => {
+    for (const tz of [SH, NY, 'Pacific/Kiritimati', 'Etc/GMT+12']) {
+      expect(formatDateOnlyValue('2026-09-18', tz)).toBe('2026-09-18')
+      expect(formatDateOnlyValue(' 2026/9/18 ', tz)).toBe('2026-09-18')
+      expect(formatDateOnlyValue('2026年9月18日', tz)).toBe('2026-09-18')
+      expect(formatDateOnlyValue('０００９-０１-０２', tz)).toBe('0009-01-02')
+    }
+    // Why a day as written takes NO zone math: Samoa skipped 2011-12-30 entirely, so reading that day as a wall
+    // clock there lands on 12-31. The day as written is still 12-30.
+    expect(formatDateOnlyValue('2011-12-30', 'Pacific/Apia')).toBe('2011-12-30')
+    expect(formatDateOnlyValue('2026-02-30', SH)).toBeNull()
+    expect(formatDateOnlyValue('2026-09/18', SH)).toBeNull()
+    expect(formatDateOnlyValue('not a date', SH)).toBeNull()
+    expect(formatDateOnlyValue('', SH)).toBeNull()
+    expect(formatDateOnlyValue(null, SH)).toBeNull()
+    expect(formatDateOnlyValue({ day: '2026-09-18' }, SH)).toBeNull()
+    // An epoch no Date can hold is unreadable — never handed to Intl (which would throw and fail the export).
+    expect(formatDateOnlyValue(1e20, SH)).toBeNull()
   })
 })
 

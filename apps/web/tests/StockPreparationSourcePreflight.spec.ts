@@ -25,6 +25,10 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
 //   P-10 THE BINDING HALF: a source only its binder can pull through renders as a refused line AND a
 //        plain-language blocker with the fix in it — never a bare code; a server that does not answer
 //        the question renders a THIRD state rather than borrowing either verdict
+//   P-11 THE ROUTE'S OWN REFUSALS: no organisation membership, another organisation named, a
+//        connection this account may not read through, and a binding lookup that did not answer each
+//        render their own sentence and next step (zh and en) instead of the generic retry line; every
+//        other failure keeps the generic line; the server code is still never painted
 //
 // The mocked route double answers this API's envelope; a 2xx that is not the envelope reads as a
 // failure, exactly as the sibling install spec requires.
@@ -57,6 +61,13 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationInstallView from '../src/components/integration/stockPreparation/StockPreparationInstallView.vue'
+import {
+  STOCK_PREP_READ_FAILED,
+  STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN,
+  stockPrepSourcePreflightRefusalKind,
+  stockPrepSourcePreflightRefusalPlain,
+  type StockPrepSourcePreflightRefusal,
+} from '../src/services/integration/stockPreparation/plainLanguage'
 import {
   STOCK_PREPARATION_SOURCE_PREFLIGHT_ROUTE,
   stockPrepSourceCheckRows,
@@ -473,6 +484,8 @@ function poisonedPayload(): StockPrepSourcePreflight {
 interface RouteBehaviour {
   sourcePayload?: StockPrepSourcePreflight
   sourceStatus?: number
+  /** The refusal's error code; defaults to the 409 "no source" the older cases were written against. */
+  sourceCode?: string
   sourceHtml?: boolean
 }
 
@@ -509,7 +522,7 @@ function installRoutes(behaviour: RouteBehaviour = {}): void {
       if (behaviour.sourceHtml) return new Response('<html>gateway</html>', { status: 200 })
       const status = behaviour.sourceStatus ?? 200
       if (status >= 400) {
-        return new Response(JSON.stringify({ ok: false, error: { code: 'SOURCE_PREFLIGHT_NO_SOURCE' } }), { status })
+        return new Response(JSON.stringify({ ok: false, error: { code: behaviour.sourceCode ?? 'SOURCE_PREFLIGHT_NO_SOURCE' } }), { status })
       }
       return envelope(behaviour.sourcePayload ?? customerShapedPayload())
     }
@@ -1041,5 +1054,108 @@ describe('源就绪预检 + 拓扑自测 (source readiness panel)', () => {
     await runSourceCheck(root)
     expect(root.querySelector('[data-testid="stock-prep-install-preflight-result"]')).toBeTruthy()
     expect(root.querySelector('[data-testid="stock-prep-source-preflight-error"]')).toBeTruthy()
+  })
+
+  // P-11 — 「检查这个源」's OWN REFUSALS --------------------------------------
+  //
+  // The route refuses for four reasons the generic 「没能读到…请稍后再试」 does not name: no
+  // organisation membership, another organisation named, a connection this account may not read
+  // through, and a binding lookup that did not answer. Each gets its own sentence and next step; the
+  // HTTP status stays beside it; the server's code is still never painted.
+  const REFUSAL_CASES: Array<[number, string, StockPrepSourcePreflightRefusal, string, string]> = [
+    // [status, code, kind, a phrase the zh sentence must carry, a phrase the zh next step must carry]
+    [403, 'OPERATOR_SCOPE_TENANT_REQUIRED', 'no-membership', '还没有加入这家工厂的组织', '加入本工厂的组织,然后退出并重新登录'],
+    [403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED', 'no-membership', '还没有加入这家工厂的组织', '加入本工厂的组织,然后退出并重新登录'],
+    [403, 'OPERATOR_SCOPE_TENANT_MISMATCH', 'other-organisation', '不是您账号所属的那一家', '回到您自己工厂的页面'],
+    [403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED', 'other-organisation', '不是您账号所属的那一家', '回到您自己工厂的页面'],
+    [400, 'CONNECTION_CANONICAL_UNAVAILABLE', 'not-connection-owner', '用您自己的账号去读源库', '请这个连接的建立者来做这次检查'],
+    [503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE', 'binding-unavailable', '暂时没有应答', '过一会儿再检查一次'],
+  ]
+
+  it('P-11 names each of the route`s own refusals in words a person can act on, with the status beside it', async () => {
+    const root = await mountView()
+    for (const [status, code, kind, sentence, next] of REFUSAL_CASES) {
+      installRoutes({ sourceStatus: status, sourceCode: code })
+      await runSourceCheck(root)
+      const label = `${status} ${code}`
+      const error = root.querySelector('[data-testid="stock-prep-source-preflight-error"]')
+      expect(error, label).toBeTruthy()
+      expect(error?.textContent, label).toContain(STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN[kind].zh)
+      expect(error?.textContent, label).toContain(sentence)
+      expect(textOf(root, '[data-testid="stock-prep-source-preflight-error-next"]'), label).toContain(next)
+      expect(error?.textContent, label).toContain(String(status))
+      expect(error?.textContent, `${label}: not the generic retry sentence`).not.toContain(STOCK_PREP_READ_FAILED.zh)
+      // The error line itself paints no server code (the page's separate code-reference panel lists
+      // the vocabulary by design, so the assertion is on the error line, not the whole page).
+      expect(error?.textContent, `${label}: the server code is not painted`).not.toContain(code)
+    }
+  })
+
+  it('P-11 speaks English too, and keeps the generic sentence for every other failure', async () => {
+    h.locale = 'en'
+    const root = await mountView()
+    for (const [status, code, kind] of REFUSAL_CASES) {
+      installRoutes({ sourceStatus: status, sourceCode: code })
+      await runSourceCheck(root)
+      const error = root.querySelector('[data-testid="stock-prep-source-preflight-error"]')
+      expect(error?.textContent, `${status} ${code}`).toContain(STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN[kind].en)
+      expect(textOf(root, '[data-testid="stock-prep-source-preflight-error-next"]'), `${status} ${code}`)
+        .toContain(STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN[kind].enNext)
+    }
+    expect(STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN['no-membership'].enNext).toMatch(/add this account to the organisation, then sign out, sign back in/)
+
+    // A missing PERMISSION, an unconfigured deployment, a known code on the wrong status and an
+    // unknown code all keep the generic read-failure sentence: none of them is one of the four.
+    for (const [status, code] of [
+      [403, 'FORBIDDEN'],
+      [409, 'SOURCE_PREFLIGHT_NO_SOURCE'],
+      [403, 'CONNECTION_CANONICAL_UNAVAILABLE'],
+      [400, 'OPERATOR_SCOPE_TENANT_REQUIRED'],
+      [400, 'SOME_FUTURE_CODE'],
+    ] as Array<[number, string]>) {
+      installRoutes({ sourceStatus: status, sourceCode: code })
+      await runSourceCheck(root)
+      const error = root.querySelector('[data-testid="stock-prep-source-preflight-error"]')
+      expect(error?.textContent, `${status} ${code}`).toContain(STOCK_PREP_READ_FAILED.en)
+      expect(error?.textContent, `${status} ${code}`).toContain(String(status))
+    }
+  })
+})
+
+describe('源就绪预检 refusal vocabulary (plainLanguage.ts)', () => {
+  it('maps each (status, code) pair the route produces to exactly one refusal, and nothing else to any', () => {
+    expect(stockPrepSourcePreflightRefusalKind(403, 'OPERATOR_SCOPE_TENANT_REQUIRED')).toBe('no-membership')
+    expect(stockPrepSourcePreflightRefusalKind(403, 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')).toBe('no-membership')
+    expect(stockPrepSourcePreflightRefusalKind(403, 'OPERATOR_SCOPE_TENANT_MISMATCH')).toBe('other-organisation')
+    expect(stockPrepSourcePreflightRefusalKind(403, 'OPERATOR_SCOPE_TENANT_CONTRADICTED')).toBe('other-organisation')
+    expect(stockPrepSourcePreflightRefusalKind(400, 'CONNECTION_CANONICAL_UNAVAILABLE')).toBe('not-connection-owner')
+    expect(stockPrepSourcePreflightRefusalKind(503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE')).toBe('binding-unavailable')
+    for (const [status, code] of [
+      [403, 'FORBIDDEN'],
+      [401, 'UNAUTHENTICATED'],
+      [501, 'OPERATOR_SCOPE_DIRECTORY_UNAVAILABLE'],
+      [500, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE'],
+      [403, ''],
+      [403, null],
+      ['403', 'OPERATOR_SCOPE_TENANT_REQUIRED'],
+      [403, 'toString'],
+    ] as Array<[unknown, unknown]>) {
+      expect(stockPrepSourcePreflightRefusalKind(status, code), `${String(status)} ${String(code)}`).toBeNull()
+      expect(stockPrepSourcePreflightRefusalPlain(status, code)).toBeNull()
+    }
+  })
+
+  it('gives four DIFFERENT sentences, each with a next step, in both languages, naming no value', () => {
+    const entries = Object.values(STOCK_PREP_SOURCE_PREFLIGHT_REFUSAL_PLAIN)
+    expect(entries.length).toBe(4)
+    expect(new Set(entries.map((entry) => entry.zh)).size).toBe(4)
+    expect(new Set(entries.map((entry) => entry.en)).size).toBe(4)
+    for (const entry of entries) {
+      expect(entry.zhNext && entry.zhNext.length > 0).toBe(true)
+      expect(entry.enNext && entry.enNext.length > 0).toBe(true)
+      // None of them tells a person they lack the read PERMISSION: every one of these callers held it.
+      expect(`${entry.zh}${entry.zhNext}`).not.toContain('权限')
+      expect(`${entry.en} ${entry.enNext}`).not.toMatch(/permission/i)
+    }
   })
 })

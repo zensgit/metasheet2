@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -59,6 +60,33 @@ test('online-enrollment manifest provenance names the canonical exported flag', 
 // added to source that matches neither the manifest nor the denylist FAILS this test and forces a human to
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+// Non-boolean e-learning env reads that belong in the manifest, by exact name. A suffix rule such
+// as *_MS would also catch source constants (ELEARNING_MEDIA_FFPROBE_TIMEOUT_MS and friends are
+// not env reads). #6175: the audience catalog scan timeout.
+const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'])
+
+test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
+  assert.ok(spec)
+  assert.equal(spec.type, 'numeric')
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/elearning-audience-resolver.ts#resolveElearningAudienceScanTimeoutMs',
+  )
+  assert.match(spec.activationValue, /default 5000/)
+  assert.match(spec.activationValue, /0 = no scan timeout/)
+  assert.deepEqual(spec.dependsOn, ['ELEARNING_ENABLED'])
+  assert.equal(isActivated(spec, '5000'), false)
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  const resolver = readFileSync(
+    path.join(REPO_ROOT, 'packages/core-backend/src/services/elearning-audience-resolver.ts'),
+    'utf8',
+  )
+  assert.match(resolver, /export function resolveElearningAudienceScanTimeoutMs\(/)
+  assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'/)
+  assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS = 5_000/)
+})
 
 // MAINTAINER NOTE: these are PREFIX families — a future flag that shares one of these prefixes is
 // auto-denied (treated as out of scope) WITHOUT failing this test. That is correct today (no recovery/
@@ -165,8 +193,10 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !NON_GH_PREFIXES.some((p) => t.startsWith(p)))
     .filter((t) => !NON_GH_EXACT.has(t))
   // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
-  // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
-  const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags,
+  // plus the exact non-boolean names in ELEARNING_NON_BOOLEAN_FLAGS.
+  const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+')
+    .filter((t) => t.endsWith('_ENABLED') || ELEARNING_NON_BOOLEAN_FLAGS.has(t))
   // DingTalk todo-mirror (plan B, #5772/#5768) flags live in this same operator registry (AGENTS.md:
   // every new env flag). Unlike the elearning family both real flags are needed (ENABLED and the
   // worker's INTERVAL_MS), so this is NOT restricted to *_ENABLED; DINGTALK_TODO_MIRROR_STATUSES (the
@@ -357,9 +387,9 @@ test('R4 isMisconfiguredTruthy is false for empty/absent values (nothing to warn
   assert.equal(isMisconfiguredTruthy(retentionSpec, 'false'), false)
 })
 
-// ── D2a: archive contract-only flag ────────────────────────────────────────────────────────────────
+// ── Recovery archive runtime gate ───────────────────────────────────────────────────────────────────
 
-test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
+test('recovery archive flag is exact-case-sensitive, fence-dependent, and has no retention conflict', () => {
   const archive = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
   assert.deepEqual(
     {
@@ -387,9 +417,30 @@ test('D2a recovery archive flag is exact-case-sensitive, fence-dependent, and ha
   for (const value of [undefined, 'false', 'TRUE', ' true ', 'true ', ' true']) {
     assert.equal(isActivated(archive, value), false, `archive flag must remain OFF for ${String(value)}`)
   }
-  assert.match(archive.purpose, /no production caller/i)
-  assert.match(archive.purpose, /later D2 caller/i)
+  assert.match(archive.purpose, /dedicated local launcher/i)
+  assert.match(archive.purpose, /ordinary server startup without an injected archive composition refuses ON/i)
   assert.match(archive.purpose, /no retention conflict/i)
+})
+
+test('recovery archive requires the exact writer-fence literal used by its worker', () => {
+  const fence = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_WRITER_FENCE
+  assert.equal(isActivated(fence, 'TRUE'), true)
+  for (const value of [undefined, 'false', 'TRUE', ' true ']) {
+    const violations = evaluateFlagRules({
+      MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+      MULTITABLE_ENABLE_WRITER_FENCE: value,
+    })
+    assert.deepEqual(violations.map(({ id, flag, missing }) => ({ id, flag, missing })), [{
+      id: 'archive-without-exact-writer-fence',
+      flag: 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED',
+      missing: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+    }], String(value))
+  }
+  assert.deepEqual(evaluateFlagRules({
+    MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
+    MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+  }), [])
+  assert.deepEqual(evaluateFlagRules({ MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'false' }), [])
 })
 
 // ── Combined ladder rung ───────────────────────────────────────────────────────────────────────────
@@ -493,7 +544,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })

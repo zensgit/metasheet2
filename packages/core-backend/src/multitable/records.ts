@@ -34,6 +34,10 @@ import {
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromFields,
+} from './field-schema-fence-recheck'
+import {
   assertLinkWriterFencePlanMatchesFieldGuards,
   enterLinkWriterFencePlan,
   enterRecordLinkDeleteFencePlan,
@@ -577,6 +581,15 @@ export async function patchRecord(
       }])),
     )
   }
+  // Field retype slice 3a (ADR §3.11 row 2): `fields` may come from the request-scoped metadata cache, i.e. a
+  // snapshot older than the fence. Re-read the touched fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on
+  // any type / option drift. No query unless the conversion flag AND the writer fence are both on.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.changes),
+  )
 
   // Liveness already proven by loadSheetAndFields above in this same flow.
   const existing = await loadRecordRowForLiveSheet({
@@ -718,6 +731,13 @@ export async function createRecord(
       }])),
     )
   }
+  // Field retype slice 3a (ADR §3.11 row 3): same cached-snapshot hazard as patchRecord above.
+  await assertFieldSchemaUnchangedAfterFence(
+    query,
+    input.sheetId,
+    fieldSchemaSnapshotFromFields(fields),
+    Object.keys(input.data),
+  )
 
   const { patch, linkUpdates } = await buildNormalizedPatch(
     query,

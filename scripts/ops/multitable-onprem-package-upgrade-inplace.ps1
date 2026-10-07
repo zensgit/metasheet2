@@ -38,6 +38,11 @@
        MAINTENANCE_GATE_NOT_WIRED. Diagnostic only, never blocks the upgrade --
        without it "maintenance flag: ... (removed)" would read like proof the
        window was shielded on a host where the flag is inert.
+       Right before the stop (RestartService other than 0) it also asks the
+       backend-direct URL once, silently (Test-BackendAnswersNow): whether the
+       backend answered there is the only evidence the failure handler has
+       that the installed files are a version that runs (see NO ROLLBACK
+       AUTOMATION below). It prints nothing and decides nothing on success.
        Every pm2 call (this stop, the step 7 restart and its fallback kill,
        the failure-handler stop) runs under ONE resolved, fully qualified
        PM2_HOME (Resolve-Pm2Home: -Pm2Home > the PM2_HOME already in the
@@ -52,7 +57,9 @@
        node_modules) to a timestamped folder. Prints the backup path. Every
        path step 4 replaces or overlays must be in -BackupPaths: a run whose
        lists disagree is refused before anything is touched
-       (RESTORE_PATH_NOT_BACKED_UP, Assert-ReplacedPathsBackedUp).
+       (RESTORE_PATH_NOT_BACKED_UP, Assert-ReplacedPathsBackedUp). A failed
+       backup starts the backend again when it answered before the step 2
+       stop (see NO ROLLBACK AUTOMATION below).
     4. Extract the package to a staging dir. Replace
        packages/core-backend/dist, apps/web/dist,
        packages/core-backend/migrations, and plugins/ -- plugins by walking
@@ -100,14 +107,34 @@
        health, and the exact operator commands to run next (preflight +
        acceptance bootstrap).
 
-  NO ROLLBACK AUTOMATION in this MVP. Steps 4-7 (the entire mutation window,
-  from the first file replaced through the health check) run inside ONE
-  failure handler: ANY exception there -- a mid-swap failure, a failed
-  assertion, a failed migration, a failed pm2 restart, or a failed
-  healthcheck -- stops pm2 (so a broken build is never left running), prints
-  a clearly-boxed restore block naming the backup path and the exact
-  copy-back command for every replaced path, then rethrows. It never
-  continues past a failure in that window.
+  NO ROLLBACK AUTOMATION in this MVP. Steps 3-7 (everything after the step 2
+  stop: the backup, then the entire mutation window through the health
+  check) run inside ONE failure handler, which decides on one fact recorded
+  when it happens: has any file of the installed version been replaced yet
+  (Register-LiveTreeReplacement marks it right before the first write to a
+  live path)?
+    - Nothing replaced (the backup, the extract, or a package check before
+      the first write failed): this run changed no file and ran no
+      migration. If the backend answered right before the step 2 stop, the
+      handler starts it again the way step 7 does (pm2 restart, then the
+      scheduled-task fallback) and polls it directly. If it did NOT answer
+      there, nothing shows the installed files are a version that runs -- an
+      earlier run that printed RESTORE REQUIRED and was never restored leaves
+      exactly that: a stopped backend on a half-replaced tree, which this
+      run's in-memory journal cannot see -- so it is NOT started, and the
+      block says to restore that run first. Either way the handler prints an
+      UPGRADE NOT APPLIED block with the backend's state in plain words (and
+      the commands to start it by hand, pm2 home first, whenever it is not
+      answering), then rethrows. Before this, a failed backup left the site
+      down with neither a restart nor a word (#6079, 2026-09-28).
+    - Anything replaced (a mid-swap failure, a failed assertion, a failed
+      migration, a failed pm2 restart, or a failed healthcheck): it stops pm2
+      (so a broken build is never left running), prints a clearly-boxed
+      restore block naming the backup path and the exact copy-back command
+      for every replaced path, then rethrows. It never starts the backend
+      then: new code on an old schema, or the reverse, is worse than a
+      stopped site.
+  It never continues past a failure in that window.
   The restore block deletes a live path only when the backup holds a copy
   of it (a replace-in-full dir listed in -BackupPaths and present in the
   backup folder), and never deletes plugins/: the backup skips
@@ -1024,6 +1051,31 @@ function Resolve-PackageRoot {
   throw "PACKAGE_ROOT_AMBIGUOUS: expected exactly one top-level directory under $ExtractRoot, found $(@($entries).Count)"
 }
 
+function Register-LiveTreeReplacement {
+  <#
+    THE FACT MAIN'S FAILURE HANDLER DECIDES ON. Update-ReplaceDirs and
+    Update-Plugins call this immediately BEFORE their first write to a live
+    path (a delete, a copy, a directory created). From that instant
+    $Journal.Replaced is $true and any failure is "replaced": the handler
+    never starts the backend (new code on an old schema, or the reverse, is
+    worse than a stopped site) and prints the restore block. Until then a
+    failure -- the backup, the extract, a package check that throws before
+    any write -- is "nothing replaced": this run changed nothing, and the
+    handler starts the backend again if it answered before the step 2 stop
+    (Start-BackendAfterUnappliedUpgrade). The journal lives for one run: a
+    tree an EARLIER run half-replaced is not in it, which is why the start
+    also needs that pre-stop answer.
+    Recorded BEFORE the write, never after it: a delete or copy that fails
+    half-way has already changed the installed version.
+    $Journal $null (a direct call, as the unit tests make) records nothing.
+  #>
+  param([hashtable]$Journal)
+
+  if ($null -ne $Journal) {
+    $Journal.Replaced = $true
+  }
+}
+
 function Update-ReplaceDirs {
   <#
     Full delete-then-copy for build-artifact directories that never carry
@@ -1034,7 +1086,10 @@ function Update-ReplaceDirs {
   param(
     [string]$PackageRoot,
     [string]$RootDir,
-    [string[]]$RelativeDirs
+    [string[]]$RelativeDirs,
+    # Main's replace journal, marked before the first live write
+    # (Register-LiveTreeReplacement).
+    [hashtable]$Journal = $null
   )
 
   foreach ($rel in $RelativeDirs) {
@@ -1043,6 +1098,7 @@ function Update-ReplaceDirs {
       throw "PACKAGE_MISSING_REPLACE_DIR: $rel not found under extracted package"
     }
     $dst = Join-Path $RootDir $rel
+    Register-LiveTreeReplacement -Journal $Journal
     if (Test-Path -LiteralPath $dst) {
       Remove-Item -LiteralPath $dst -Recurse -Force
     }
@@ -1074,7 +1130,10 @@ function Update-Plugins {
   #>
   param(
     [string]$PackageRoot,
-    [string]$RootDir
+    [string]$RootDir,
+    # Main's replace journal, marked before the first live write
+    # (Register-LiveTreeReplacement).
+    [hashtable]$Journal = $null
   )
 
   $packagePluginsDir = Join-Path $PackageRoot 'plugins'
@@ -1083,6 +1142,7 @@ function Update-Plugins {
   }
 
   $livePluginsDir = Join-Path $RootDir 'plugins'
+  Register-LiveTreeReplacement -Journal $Journal
   New-Item -ItemType Directory -Force -Path $livePluginsDir | Out-Null
 
   # Loose files directly at plugins/ (not inside any plugin subdirectory) are
@@ -1653,6 +1713,30 @@ function Wait-ForHealthOk {
   return [pscustomobject]@{ Ok = $false; Attempt = $Attempts; StatusCode = $null; Body = $null }
 }
 
+function Test-BackendAnswersNow {
+  <#
+    ONE request to the backend-direct URL, made by step 2 right before its
+    stop. $true only for a 2xx answer (what Wait-ForHealthOk counts as
+    answered); $false for anything else -- another status, a refused
+    connection, a timeout, an empty URL. Never throws and prints nothing: on
+    the success path it changes no output, and nothing but the failure
+    handler reads it (Start-BackendAfterUnappliedUpgrade: no answer here, no
+    automatic start). The header only tags the request for the test
+    fixtures; the backend ignores it.
+  #>
+  param([string]$HealthUrl = '')
+
+  if ([string]::IsNullOrWhiteSpace($HealthUrl)) {
+    return $false
+  }
+  try {
+    $response = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 5 -Headers @{ 'X-Upgrade-Prestop-Probe' = '1' }
+    return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300)
+  } catch {
+    return $false
+  }
+}
+
 # -- Failure handling: the restore block -------------------------------------
 
 function Write-RestoreBlock {
@@ -1661,7 +1745,10 @@ function Write-RestoreBlock {
     path plus an exact per-directory copy-back command for every path this
     script may have replaced. Called from the SINGLE outer failure handler
     that wraps the entire mutation window (extract through health check) in
-    Main below, so ANY exception in that window prints this -- not just the
+    Main below, once anything has been replaced (Register-LiveTreeReplacement;
+    before that the handler prints UPGRADE NOT APPLIED instead, starting the
+    backend again only if it answered before the step 2 stop, and prints no
+    restore block), so ANY exception in that window prints this -- not just the
     handful of specific assertions that used to print their own ad-hoc
     message. Before this existed, a mid-swap failure (for example, a thrown
     error from inside Update-ReplaceDirs/Update-Plugins themselves) died
@@ -1735,6 +1822,26 @@ function Write-RestoreBlock {
     Write-Host ("  Remove-Item -LiteralPath {0} -Recurse -Force -ErrorAction SilentlyContinue" -f $liveLiteral)
     Write-Host ("  Copy-Item -LiteralPath {0} -Destination {1} -Recurse -Force" -f $backupLiteral, $liveLiteral)
   }
+  Write-BackendStartCommands -Pm2AppName $Pm2AppName -Pm2Home $Pm2Home -ScheduledTaskName $ScheduledTaskName -ScheduledTaskPath $ScheduledTaskPath
+  Write-Host '=========================================================================='
+  Write-Host ''
+}
+
+function Write-BackendStartCommands {
+  <#
+    The commands that start the backend by hand, as the restore block and the
+    UPGRADE NOT APPLIED block print them: the pm2 home this run used, the pm2
+    restart, and on a pm2-runtime host (a non-empty -ScheduledTaskName) the
+    pm2 kill + Start-ScheduledTask by the task's folder. Single-quoted
+    literals throughout.
+  #>
+  param(
+    [string]$Pm2AppName = 'metasheet-backend',
+    [string]$Pm2Home = '',
+    [string]$ScheduledTaskName = '',
+    [string]$ScheduledTaskPath = '\'
+  )
+
   if (-not [string]::IsNullOrWhiteSpace($Pm2Home)) {
     Write-Host ("  `$env:PM2_HOME = {0}" -f (ConvertTo-PsSingleQuotedLiteral -Value $Pm2Home))
   }
@@ -1749,8 +1856,147 @@ function Write-RestoreBlock {
     Write-Host '  pm2 kill'
     Write-Host ("  Start-ScheduledTask -TaskName {0} -TaskPath {1}" -f (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskName), (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskPath))
   }
+}
+
+function Start-BackendAfterUnappliedUpgrade {
+  <#
+    Main's failure handler calls this, and only this, when the run failed
+    after the step 2 stop but BEFORE anything of the installed version was
+    replaced (Register-LiveTreeReplacement never marked the journal): the
+    backup, the extract, or a package check that throws before the first
+    write. This run changed no file and ran no migration (step 6 comes after
+    the replace). Nothing is restored and no restore block is printed: a
+    backup this run made may be incomplete and must never be copied over the
+    install.
+
+    Whether the backend is started again rests on a second fact, recorded by
+    step 2 right before its stop: did the backend answer there
+    ($BackendAnsweredBeforeStop, Test-BackendAnswersNow)?
+      - It answered: the installed files are the version that was serving,
+        so the backend step 2 stopped is started again exactly the way step
+        7 starts it -- Restart-Pm2AppOrScheduledTask: pm2 restart, and on a
+        pm2-runtime host the pm2 kill + scheduled-task fallback -- and the
+        backend-direct URL is polled the way step 7 polls it.
+      - It did not: nothing shows the installed files are a version that
+        runs. The journal lives for one run only, so a tree an EARLIER run
+        half-replaced (it printed RESTORE REQUIRED, stopped pm2, and nobody
+        restored) looks exactly like an intact one from here; starting it
+        would bring up new code on an old schema, or the reverse (review F1).
+        So nothing is started; the block says the site is down, to restore
+        such a run first, and prints the commands to start it by hand.
+    -RestartService '0' (the operator told this script never to start the
+    backend) starts nothing either; the block says so and prints the
+    commands.
+
+    Prints the UPGRADE NOT APPLIED block: what failed, that this run changed
+    nothing, and the backend's state in plain words -- started and
+    answering; started but not answering; NOT started. In every state but
+    the first the site is down, and the block says so and prints the start
+    commands with the pm2 home first (Write-BackendStartCommands; a pm2
+    command without it can start an empty daemon in the operator's session,
+    review F2). Never throws. Returns 'answered', 'not-answering',
+    'start-failed', 'not-answering-before-stop' or 'not-started'. The caller
+    rethrows the original error, so the run still exits non-zero.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Pm2Command,
+    [Parameter(Mandatory = $true)][string]$Name,
+    [string]$Pm2Home = '',
+    [string]$ScheduledTaskName = '',
+    [string]$RestartService = '1',
+    # Step 2's pre-stop answer (Test-BackendAnswersNow). Mandatory: every
+    # caller must say what it saw; only $true lets the backend be started.
+    [Parameter(Mandatory = $true)][bool]$BackendAnsweredBeforeStop,
+    [string]$BackendHealthUrl = '',
+    [int]$HealthcheckAttempts = 12,
+    [int]$HealthcheckDelaySec = 5,
+    [string]$MaintenanceFlagPath = '',
+    [string]$BackupRoot = ''
+  )
+
+  $outcome = 'not-started'
+  $startedVia = ''
+  $startError = ''
+  $answeredOn = 0
+  if ($RestartService -eq '0') {
+    Write-Info 'NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version. RestartService=0: the backend is NOT started.'
+  } elseif (-not $BackendAnsweredBeforeStop) {
+    $outcome = 'not-answering-before-stop'
+    Write-Info "NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version. The backend did not answer $BackendHealthUrl right before step 2 stopped it, so it is NOT started: nothing shows the installed files are a version that runs."
+  } else {
+    Write-Info 'NOTHING_REPLACED: the upgrade failed before this run replaced any file of the installed version, and the backend answered right before step 2 stopped it. Starting it again, the way step 7 starts it.'
+    try {
+      $startedVia = Restart-Pm2AppOrScheduledTask -Pm2Command $Pm2Command -Name $Name -Pm2Home $Pm2Home -ScheduledTaskName $ScheduledTaskName
+      $backendHealth = Wait-ForHealthOk -HealthUrl $BackendHealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Backend-direct healthcheck'
+      if ($backendHealth.Ok) {
+        $outcome = 'answered'
+        $answeredOn = $backendHealth.Attempt
+      } else {
+        $outcome = 'not-answering'
+      }
+    } catch {
+      $outcome = 'start-failed'
+      $startError = $_.Exception.Message
+      Write-Err "starting the backend again failed: $startError"
+    }
+  }
+
+  # The task that the printed commands start, looked up the way the restore
+  # block's is (never throws). Every state but 'answered' prints them.
+  $manualTaskName = ''
+  $manualTaskPath = '\'
+  if ($outcome -ne 'answered') {
+    $manualTask = Get-Pm2ScheduledTask -TaskName $ScheduledTaskName
+    if ($null -ne $manualTask) {
+      $manualTaskName = [string]$manualTask.TaskName
+      $manualTaskPath = Get-ScheduledTaskPathOrRoot -Task $manualTask
+    }
+  }
+
+  Write-Host ''
+  Write-Host '========================== UPGRADE NOT APPLIED =========================='
+  Write-Host 'The upgrade failed (see the ERROR above) before it replaced any file.'
+  Write-Host 'This run changed no file of the installed version and ran no migration: nothing THIS run did needs to be restored.'
+  switch ($outcome) {
+    'answered' {
+      Write-Host ("Backend: started again ({0}) and answered {1} on attempt {2}." -f $startedVia, $BackendHealthUrl, $answeredOn)
+      Write-Host 'The site serves the installed version again once this script has deleted the maintenance flag.'
+    }
+    'not-answering' {
+      Write-Host ("Backend: started again ({0}), but it did NOT answer {1} in {2} attempts." -f $startedVia, $BackendHealthUrl, $HealthcheckAttempts)
+      Write-Host 'THE SITE IS DOWN until the backend answers. It may still be starting; ask it again first (this starts nothing):'
+      Write-Host ("  Invoke-WebRequest -UseBasicParsing -Uri {0}" -f (ConvertTo-PsSingleQuotedLiteral -Value $BackendHealthUrl))
+      Write-Host 'If it still does not answer, start it by hand, in this order:'
+      Write-BackendStartCommands -Pm2AppName $Name -Pm2Home $Pm2Home -ScheduledTaskName $manualTaskName -ScheduledTaskPath $manualTaskPath
+    }
+    'start-failed' {
+      Write-Host ("Backend: NOT started -- starting it again failed: {0}" -f $startError)
+      Write-Host 'THE SITE IS DOWN until the backend is started. Start it by hand:'
+      Write-BackendStartCommands -Pm2AppName $Name -Pm2Home $Pm2Home -ScheduledTaskName $manualTaskName -ScheduledTaskPath $manualTaskPath
+    }
+    'not-answering-before-stop' {
+      Write-Host ("Backend: NOT started -- it did not answer {0} right before step 2 stopped it, so nothing shows the installed files are a version that runs." -f $BackendHealthUrl)
+      Write-Host 'THE SITE IS DOWN until the backend is started.'
+      Write-Host 'If an earlier upgrade run printed RESTORE REQUIRED and that restore was not done, restore from THAT run''s backup first (its RESTORE REQUIRED block names the backup and prints the commands).'
+      Write-Host 'Then start it by hand:'
+      Write-BackendStartCommands -Pm2AppName $Name -Pm2Home $Pm2Home -ScheduledTaskName $manualTaskName -ScheduledTaskPath $manualTaskPath
+    }
+    default {
+      Write-Host 'Backend: NOT started (-RestartService 0). THE SITE IS DOWN until the backend is started. Start it by hand:'
+      Write-BackendStartCommands -Pm2AppName $Name -Pm2Home $Pm2Home -ScheduledTaskName $manualTaskName -ScheduledTaskPath $manualTaskPath
+    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($MaintenanceFlagPath)) {
+    Write-Host "Maintenance flag: $MaintenanceFlagPath"
+    Write-Host '  This script deletes it on exit. If the site still answers 503 afterwards, delete it by hand.'
+  }
+  if (-not [string]::IsNullOrWhiteSpace($BackupRoot)) {
+    Write-Host "Backups: an upgrade-backup-* folder this run left under $BackupRoot may be incomplete; do not restore from it."
+  }
+  Write-Host 'Fix the cause of the error, then run the upgrade again.'
   Write-Host '=========================================================================='
   Write-Host ''
+  return $outcome
 }
 
 # -- Main (skipped when dot-sourced, so tests can load the functions above
@@ -1809,6 +2055,12 @@ if ($MyInvocation.InvocationName -ne '.') {
   Write-Info '=== Step 2/8: stop pm2 app (maintenance gate raised first) ==='
 
   $maintenanceGate = 'UNKNOWN'
+  # Marked by Register-LiveTreeReplacement right before the first write to a
+  # live path; the failure handler below decides on it.
+  $replaceJournal = @{ Replaced = $false }
+  # Set by step 2's silent probe right before the stop; only $true lets the
+  # failure handler start the backend again (review F1).
+  $backendAnsweredBeforeStop = $false
   try {
     # The gate goes up BEFORE the backend goes down, so no request can land in
     # the gap between "pm2 stopped" and "nginx answering 503": that gap is the
@@ -1833,24 +2085,44 @@ if ($MyInvocation.InvocationName -ne '.') {
     # that drops the flag.
     $maintenanceGate = Test-MaintenanceGateWired -ProbeUrl $HealthUrl -FlagPath $maintenanceFlagPath
 
+    # Ask the backend DIRECTLY once, silently, right before it is stopped: the
+    # only evidence the failure handler has that the installed files are a
+    # version that runs. A run's replace journal cannot see a tree an earlier
+    # failed run half-replaced and nobody restored; such a backend does not
+    # answer here, so it is never started again below (review F1). Prints
+    # nothing, never throws, decides nothing on the success path. Skipped
+    # with RestartService=0, which never starts the backend anyway.
+    if ($RestartService -ne '0') {
+      $backendAnsweredBeforeStop = Test-BackendAnswersNow -HealthUrl $resolvedBackendHealthUrl
+    }
     Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home
 
-    Write-Info '=== Step 3/8: back up current install ==='
-    $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
-    Write-Host "BACKUP_PATH=$backupPath"
-
-    # THE MUTATION WINDOW. From here through the health check, ANY exception --
-    # a mid-swap failure inside Update-ReplaceDirs/Update-Plugins, a failed
-    # F22/hash assertion, a failed migration, a failed pm2 restart, or a failed
-    # healthcheck (raised as an exception below, deliberately, so it flows
-    # through this SAME handler instead of a second, easily-forgotten copy of
-    # this logic) -- is caught by the single handler at the bottom of this
-    # block. That handler stops pm2 (a broken deployment must not be left
-    # running; Stop-Pm2App tolerates pm2 already being stopped, which is the
-    # normal case for every failure point except a failed healthcheck) and
-    # prints the restore block, then rethrows. Nothing past step 3 may fail
-    # without telling the operator where the backup is.
+    # THE BACKEND IS DOWN FROM HERE, AND THE MUTATION WINDOW FOLLOWS. From the
+    # backup through the health check, ANY exception -- a failed backup, a
+    # failed extract, a mid-swap failure inside Update-ReplaceDirs/
+    # Update-Plugins, a failed F22/hash assertion, a failed migration, a
+    # failed pm2 restart, or a failed healthcheck (raised as an exception
+    # below, deliberately, so it flows through this SAME handler instead of a
+    # second, easily-forgotten copy of this logic) -- is caught by the single
+    # handler at the bottom of this block, which decides on ONE recorded fact,
+    # $replaceJournal.Replaced (set right before the first write to a live
+    # path, never guessed from the step):
+    #   - nothing replaced: this run changed nothing, so -- if the backend
+    #     answered right before the stop above -- it is started again the way
+    #     step 7 starts it, and the operator is told the backend's state
+    #     (Start-BackendAfterUnappliedUpgrade). Before this, a failed backup
+    #     left the site down with no word (#6079);
+    #   - replaced: the handler stops pm2 (a broken deployment must not be left
+    #     running; Stop-Pm2App tolerates pm2 already being stopped, which is
+    #     the normal case for every failure point except a failed healthcheck)
+    #     and prints the restore block. It never starts the backend.
+    # Either way it rethrows: nothing after the stop may fail without telling
+    # the operator the state of the backend.
     try {
+      Write-Info '=== Step 3/8: back up current install ==='
+      $backupPath = New-TimestampedBackup -RootDir $resolvedRoot -BackupRoot $resolvedBackupRoot -RelativePaths $BackupPaths
+      Write-Host "BACKUP_PATH=$backupPath"
+
       Write-Info '=== Step 4/8: extract + replace runtime paths ==='
       $stagingBase = Resolve-StagingBase -Candidate $StagingRoot
       $extractRoot = New-ShortTempDirectory -Prefix 'mspui' -BaseRoot $stagingBase
@@ -1860,8 +2132,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         $packageRoot = Resolve-PackageRoot -ExtractRoot $extractRoot
         Write-Info "Extracted package root: $packageRoot"
 
-        Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs
-        Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot
+        Update-ReplaceDirs -PackageRoot $packageRoot -RootDir $resolvedRoot -RelativeDirs $ReplaceDirs -Journal $replaceJournal
+        Update-Plugins -PackageRoot $packageRoot -RootDir $resolvedRoot -Journal $replaceJournal
 
         Write-Info '=== Step 5/8: assert must-exist files (F22 tripwire) + per-file hash verification ==='
         Assert-MustExistFiles -RootDir $resolvedRoot -RelativePaths $MustExistManifest | Out-Null
@@ -1971,6 +2243,14 @@ if ($MyInvocation.InvocationName -ne '.') {
       }
     } catch {
       Write-Err $_.Exception.Message
+      if (-not $replaceJournal.Replaced) {
+        # This run replaced nothing: start the backend again if it answered
+        # right before the step 2 stop (otherwise, or with RestartService=0,
+        # say it is down, why, and how to start it), report its state, and
+        # fail the run. Never throws.
+        $null = Start-BackendAfterUnappliedUpgrade -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -ScheduledTaskName $Pm2ScheduledTaskName -RestartService $RestartService -BackendAnsweredBeforeStop $backendAnsweredBeforeStop -BackendHealthUrl $resolvedBackendHealthUrl -HealthcheckAttempts $HealthcheckAttempts -HealthcheckDelaySec $HealthcheckDelaySec -MaintenanceFlagPath $maintenanceFlagPath -BackupRoot $resolvedBackupRoot
+        throw
+      }
       # Get-Pm2ScheduledTask never throws, so it cannot keep the stop or the
       # restore block below from running. Looked up first: a pm2-runtime host
       # (exactly one such task) also gets its daemon killed after the stop.

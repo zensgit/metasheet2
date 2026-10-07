@@ -3,14 +3,16 @@
  * DATABASE_URL is mandatory; missing infrastructure must not produce green.
  */
 import { randomUUID } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
+import { Logger } from '../../src/core/logger'
 import {
   ELEARNING_AUDIENCE_RULE_SCAN_LIMIT,
+  ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV,
   listElearningAudienceCourseMatches,
   resolveElearningAudienceMembers,
 } from '../../src/services/elearning-audience-resolver'
@@ -108,6 +110,58 @@ async function expectSqlState(
   await client.query(`RELEASE SAVEPOINT ${savepoint}`)
   expect(caught).toBeDefined()
   expect((caught as { code?: string }).code).toBe(expected)
+}
+
+// The catalog-scan fixture is bulk-loaded inside a transaction that is rolled
+// back, so autovacuum never analyzes it. Without this, the planner uses the
+// statistics that earlier files left behind. If an autovacuum pass saw one of
+// these tables empty with a page still allocated (reltuples = 0, relpages >= 1),
+// the planner applies a density of 0 to every page it finds and plans the
+// 10,000-row joins as ~1 row. The result is a nested loop with a join filter
+// that compares 10,000 x 10,000 rows. ANALYZE inside the transaction counts the
+// transaction's own rows, so every statement is planned for the catalog size
+// the fixture really has. The pg_statistic rows roll back with the
+// transaction. PostgreSQL writes the pg_class page and tuple counts in place;
+// until autovacuum cleans the rolled-back rows, those counts can only make
+// later plans expect a larger table. ANALYZE inside the transaction also
+// updates the tables' activity counters, which live outside the transaction,
+// so autovacuum's own analyze of the five catalog tables is postponed; after
+// the rollback the pg_class page and tuple counts stay too high until
+// autovacuum removes the dead rows. In three CI runs the 39 files that run
+// after this one all passed, and the step took no longer.
+async function analyzeBulkFixture(
+  client: PoolClient,
+  tables: readonly string[],
+): Promise<void> {
+  await client.query(`ANALYZE ${tables.join(', ')}`)
+}
+
+// The catalog scan is one statement between its statement-timeout set and
+// restore (ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS, issue #6175).
+const SCAN_WITH_TIMEOUT = [
+  'elearning-audience:scan-timeout-set',
+  'elearning-audience:list-course-matches',
+  'elearning-audience:scan-timeout-restore',
+] as const
+
+function audienceTag(statement: string): string | null {
+  return /\/\* (elearning-audience:[a-z-]+) \*\//.exec(statement)?.[1] ?? null
+}
+
+interface ExplainPlanNode {
+  'Node Type': string
+  'Subplan Name'?: string
+  'Actual Rows'?: number
+  Plans?: ExplainPlanNode[]
+}
+
+function findCtePlan(node: ExplainPlanNode, cteName: string): ExplainPlanNode | undefined {
+  if (node['Subplan Name'] === `CTE ${cteName}`) return node
+  for (const child of node.Plans ?? []) {
+    const found = findCtePlan(child, cteName)
+    if (found) return found
+  }
+  return undefined
 }
 
 interface CourseSeed {
@@ -628,11 +682,67 @@ describe('elearning L1 scope/access gate (real DB)', () => {
     })
   })
 
-  it('bounds the real catalog scan at 10,000 active scope rules', async () => {
-    await withRolledBackDb(async (client, db) => {
-      const orgId = actor('org-scan-boundary')
-      const userId = actor('scan-learner')
-      const fixtureTable = 'elearning_audience_scan_fixture'
+  describe('bounds the real catalog scan at 10,000 active scope rules', () => {
+    // Setup is kept apart from the measured calls. beforeAll builds the whole
+    // fixture in one transaction under its own hook budget, the tests only call
+    // the resolver, and afterAll rolls the transaction back.
+    //
+    // The fixture has SCAN_LIMIT + 2 active 'all' rules, one per published
+    // course version. Excluding versions moves the visible count across the
+    // boundary. At 10,000 visible rules the call must match. At 10,001 and
+    // 10,002 it must fail closed, and at 10,002 the candidate CTE must hand
+    // over SCAN_LIMIT + 1 rows. That caps the rows the matcher sees, not the
+    // rows the scan reads: every active rule of the org is still read.
+    const orgId = actor('org-scan-boundary')
+    const userId = actor('scan-learner')
+    const fixtureTable = 'elearning_audience_scan_fixture'
+    const catalogTables = [
+      'elearning_courses',
+      'elearning_course_versions',
+      'elearning_scopes',
+      'elearning_scope_revisions',
+      'elearning_scope_revision_rules',
+    ] as const
+    // Setup takes about 1.5 s and gets its own hook budget. Each measured call
+    // takes about 20 to 100 ms with fresh statistics and 15 s or more on the
+    // quadratic plan, so 10 s is generous but still catches a relapse.
+    const SETUP_BUDGET_MS = 60_000
+    const CALL_BUDGET_MS = 10_000
+    let scanClient: PoolClient | undefined
+    let scanDb: TransactionalClientDb
+    let firstVersionIds: string[] = []
+
+    function recordingDb() {
+      const statements: Array<{ sql: string; params: unknown[] }> = []
+      return {
+        statements,
+        db: {
+          query: (statement: string, params?: unknown[]) => {
+            statements.push({ sql: statement, params: params ?? [] })
+            return scanDb.query(statement, params)
+          },
+        },
+      }
+    }
+
+    beforeAll(async () => {
+      const client = await pool.connect()
+      scanClient = client
+      await client.query('BEGIN')
+      scanDb = new TransactionalClientDb(client)
+      // Triage evidence only: the planner statistics this fixture starts from.
+      // reltuples = 0 with relpages >= 1 is the state that made the scan
+      // quadratic before the fixture analyzed its own rows.
+      const foundStatistics = await client.query(
+        `SELECT t.name, c.reltuples, c.relpages
+           FROM unnest($1::text[]) WITH ORDINALITY AS t(name, position)
+           JOIN pg_class c ON c.oid = to_regclass(t.name)
+          ORDER BY t.position`,
+        [catalogTables],
+      )
+      console.info(`[catalog-scan fixture] planner statistics found (reltuples/relpages): ${
+        foundStatistics.rows.map((row) => `${row.name}=${row.reltuples}/${row.relpages}`).join(' ')
+      }`)
       await seedActiveMembership(client, userId, orgId)
       await client.query(
         `CREATE TEMP TABLE ${fixtureTable} ON COMMIT DROP AS
@@ -644,7 +754,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
            md5($1 || ':revision:' || n)::uuid AS revision_id,
            md5($1 || ':rule:' || n)::uuid AS rule_id
          FROM generate_series(1, $2::integer) AS series(n)`,
-        [orgId, ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1],
+        [orgId, ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 2],
       )
       await client.query(
         `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
@@ -652,6 +762,9 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      // Each bulk-written table is analyzed before the next statement plans
+      // against it (foreign-key checks included). See analyzeBulkFixture.
+      await analyzeBulkFixture(client, [fixtureTable, 'elearning_courses'])
       await client.query(
         `INSERT INTO elearning_course_versions (
            id, org_id, course_id, version, status, title, created_by
@@ -660,25 +773,21 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
-      // The publish guard requires a video and an exam per version. This fixture
-      // only needs published rows so the catalog scan can see them. ALTER TABLE
-      // DISABLE TRIGGER takes ShareRowExclusiveLock, which waits on autovacuum's
-      // ShareUpdateExclusiveLock (including VacuumTruncate). That wait does not
-      // resolve inside the 30s budget: passing runs of this test are ~1.3–1.7s,
-      // and the failures stop at exactly 30000ms.
-      // session_replication_role = replica skips that user trigger and does not
-      // take the lock. It also disables foreign-key checks for this UPDATE,
-      // because PostgreSQL implements foreign keys as triggers. The UPDATE sets
-      // only status and updated_at; it does not modify the FK columns org_id
-      // and course_id. The role is restored to origin before the following
-      // statements, so only those inserts (and the later scope/course updates)
-      // get normal foreign-key checks. withRolledBackDb rolls this transaction
-      // back, so the skipped checks do not persist. Setting the parameter
-      // requires a superuser on PostgreSQL 14, which is what CI runs. On
+      await analyzeBulkFixture(client, ['elearning_course_versions'])
+      // The publish guard requires a video and an exam per version. This
+      // fixture only needs published rows that the catalog scan can see, so the
+      // UPDATE runs with session_replication_role = replica. That skips the
+      // user trigger without the table lock of ALTER TABLE ... DISABLE TRIGGER.
+      // It also skips foreign-key checks for this UPDATE, because PostgreSQL
+      // implements foreign keys as triggers. The UPDATE sets only status and
+      // updated_at, not the FK columns org_id and course_id. The role is back
+      // to origin before the next statement, so the following inserts and
+      // updates get normal foreign-key checks, and afterAll rolls the
+      // transaction back. Setting the parameter requires a superuser on
+      // PostgreSQL 14, which is what CI runs; CI connects as the bootstrap
+      // superuser postgres (ankane/setup-postgres user: postgres). On
       // PostgreSQL 15+ a role can instead be granted SET ON PARAMETER
-      // session_replication_role. CI connects as the bootstrap superuser
-      // postgres (ankane/setup-postgres user: postgres; DATABASE_URL user
-      // postgres).
+      // session_replication_role.
       await client.query(`SET LOCAL session_replication_role = replica`)
       try {
         await client.query(
@@ -696,6 +805,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          SELECT scope_id, $1, $2 FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      await analyzeBulkFixture(client, ['elearning_scopes'])
       await client.query(
         `INSERT INTO elearning_scope_revisions (
            id, org_id, scope_id, revision, actor_id, reason
@@ -704,6 +814,7 @@ describe('elearning L1 scope/access gate (real DB)', () => {
          FROM ${fixtureTable}`,
         [orgId, actor('scan-author')],
       )
+      await analyzeBulkFixture(client, ['elearning_scope_revisions'])
       await client.query(
         `INSERT INTO elearning_scope_revision_rules (
            id, org_id, scope_revision_id, subject_type, subject_ref, include_children
@@ -731,26 +842,183 @@ describe('elearning L1 scope/access gate (real DB)', () => {
           WHERE course.org_id = $1 AND course.id = fixture.course_id`,
         [orgId],
       )
-      const firstVersion = await client.query(
+      // The final pass sees the linked scope, revision and version columns.
+      await analyzeBulkFixture(client, catalogTables)
+      const firstVersions = await client.query(
         `SELECT version_id::text AS version_id
          FROM ${fixtureTable}
-         WHERE n = 1`,
+         WHERE n <= 2
+         ORDER BY n`,
       )
-      const excludedVersionId = String(firstVersion.rows[0]?.version_id)
+      firstVersionIds = firstVersions.rows.map((row) => String(row.version_id))
+      expect(firstVersionIds).toHaveLength(2)
+    }, SETUP_BUDGET_MS)
 
-      await expect(listElearningAudienceCourseMatches(db, {
+    afterAll(async () => {
+      if (!scanClient) return
+      try {
+        await scanClient.query('ROLLBACK')
+      } finally {
+        scanClient.release()
+      }
+    })
+
+    it('matches when exactly 10,000 active rules are visible, in one statement', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
         orgId,
         userId,
-        excludedCourseVersionIds: [excludedVersionId],
+        excludedCourseVersionIds: firstVersionIds,
         limit: 1,
       })).resolves.toHaveLength(1)
-      await expect(listElearningAudienceCourseMatches(db, {
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
+    }, CALL_BUDGET_MS)
+
+    it('fails closed as unavailable when 10,001 active rules are visible', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
+        orgId,
+        userId,
+        excludedCourseVersionIds: [firstVersionIds[0]!],
+        limit: 1,
+      })).rejects.toMatchObject({ code: 'unavailable' })
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
+    }, CALL_BUDGET_MS)
+
+    it('caps the candidate CTE at 10,001 rows when 10,002 active rules are visible', async () => {
+      const recorder = recordingDb()
+      await expect(listElearningAudienceCourseMatches(recorder.db, {
         orgId,
         userId,
         excludedCourseVersionIds: [],
         limit: 1,
       })).rejects.toMatchObject({ code: 'unavailable' })
-    })
+      expect(recorder.statements.map((statement) => audienceTag(statement.sql)))
+        .toEqual(SCAN_WITH_TIMEOUT)
+
+      // Re-run the exact statement and parameters under EXPLAIN ANALYZE to
+      // count the rows each bounded stage produced. The row counts do not
+      // depend on the plan shape or on wall-clock time.
+      const issued = recorder.statements.find(
+        (statement) => audienceTag(statement.sql) === 'elearning-audience:list-course-matches',
+      )
+      const explained = await scanClient!.query(
+        `EXPLAIN (ANALYZE, TIMING OFF, FORMAT JSON) ${issued!.sql}`,
+        issued!.params as never,
+      )
+      const plan = (explained.rows[0]?.['QUERY PLAN'] as Array<{ Plan: ExplainPlanNode }>)[0]!.Plan
+      const candidateScan = findCtePlan(plan, 'bounded_course_rules')
+      const matcherInput = findCtePlan(plan, 'active_course_rules')
+      expect(candidateScan, 'bounded_course_rules must stay a materialized CTE').toBeDefined()
+      expect(matcherInput, 'active_course_rules must stay a materialized CTE').toBeDefined()
+      expect(candidateScan!['Actual Rows']).toBe(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1)
+      expect(matcherInput!['Actual Rows']).toBeLessThanOrEqual(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT)
+    }, CALL_BUDGET_MS)
+  })
+
+  it('runs the catalog scan under its own transaction-local timeout and fails closed without a retry when it fires (#6175)', async () => {
+    // Two dedicated connections. A canceled statement aborts its transaction,
+    // so this case cannot share the catalog fixture's transaction. Instead of
+    // racing a fast scan against a tiny timeout, a second session holds a lock
+    // on one table the scan reads. The scan then waits on that lock at parse
+    // time until its statement timeout cancels it (57014), whatever the machine
+    // speed. Nothing here measures wall-clock time.
+    const scanner = await pool.connect()
+    let blocker: PoolClient
+    try {
+      blocker = await pool.connect()
+    } catch (error) {
+      scanner.release(true)
+      throw error
+    }
+    const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const showTimeout = async () => String(
+      (await scanner.query('SHOW statement_timeout')).rows[0]?.statement_timeout,
+    )
+    const input = {
+      orgId: actor('org-scan-timeout'),
+      userId: actor('scan-timeout-learner'),
+      excludedCourseVersionIds: [],
+      limit: 1,
+    }
+    try {
+      const connectionTimeout = await showTimeout()
+
+      // A generous value is what the scan statement runs under, and the
+      // transaction gets its previous value back right after the scan. This
+      // read-only transaction commits, so a session-level setting would
+      // outlive it and show up below.
+      // 20 s: a value the ceiling (DB_QUERY_TIMEOUT minus 1000 ms, 29 s by default) leaves as given.
+      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '20000')
+      const issued: string[] = []
+      let duringScan: string | undefined
+      await scanner.query('BEGIN')
+      try {
+        await expect(listElearningAudienceCourseMatches({
+          query: async (statement: string, params?: unknown[]) => {
+            issued.push(statement)
+            if (audienceTag(statement) === 'elearning-audience:list-course-matches') {
+              duringScan = await showTimeout()
+            }
+            const result = await scanner.query(statement, params as never)
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+          },
+        }, input)).resolves.toEqual([])
+        expect(issued.map(audienceTag)).toEqual(SCAN_WITH_TIMEOUT)
+        expect(duringScan).toBe('20s')
+        expect(await showTimeout()).toBe(connectionTimeout)
+        await scanner.query('COMMIT')
+      } catch (error) {
+        await scanner.query('ROLLBACK')
+        throw error
+      }
+      expect(await showTimeout()).toBe(connectionTimeout)
+
+      await blocker.query('BEGIN')
+      await blocker.query(`SET LOCAL lock_timeout = '10s'`)
+      await blocker.query('LOCK TABLE directory_integrations IN ACCESS EXCLUSIVE MODE')
+      vi.stubEnv(ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV, '200')
+      const canceled: string[] = []
+      await scanner.query('BEGIN')
+      // Backstop only: if the statement timeout were not applied, the scan
+      // would end on this lock timeout (55P03, which logs nothing) instead of
+      // waiting on the lock forever.
+      await scanner.query(`SET LOCAL lock_timeout = '15s'`)
+      try {
+        await expect(listElearningAudienceCourseMatches({
+          query: async (statement: string, params?: unknown[]) => {
+            canceled.push(statement)
+            const result = await scanner.query(statement, params as never)
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+          },
+        }, input)).rejects.toMatchObject({ code: 'unavailable' })
+      } finally {
+        try {
+          await scanner.query('ROLLBACK')
+        } finally {
+          await blocker.query('ROLLBACK')
+        }
+      }
+      // No retry, no restore: the scan ran once and the rollback dropped the
+      // transaction-local value. The connection keeps its own timeout.
+      expect(canceled.map(audienceTag)).toEqual(SCAN_WITH_TIMEOUT.slice(0, 2))
+      expect(await showTimeout()).toBe(connectionTimeout)
+      // The log line is written only for query_canceled (57014).
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledWith('elearning_audience_scan_canceled', {
+        orgId: input.orgId,
+        scanTimeoutMs: 200,
+      })
+    } finally {
+      vi.unstubAllEnvs()
+      warn.mockRestore()
+      // Destroy rather than return both connections, so no setting, open
+      // transaction or lock this case touched can reach a later test.
+      scanner.release(true)
+      blocker.release(true)
+    }
   }, 30_000)
 
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {

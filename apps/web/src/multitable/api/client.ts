@@ -100,7 +100,7 @@ import type {
   MetaRecordApprovalDrift,
 } from '../types'
 import { apiFetch } from '../../utils/api'
-import { apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
+import { apiCodeOwnedErrorMessage, apiDefaultErrorMessage, apiFieldValidationFallback } from '../utils/meta-api-error-labels'
 import type { ConditionalRuleDTO } from '../utils/conditional-rule-ops'
 // S3a (comments shared FE kit extraction): the comment normalizer family moved verbatim to
 // shared/comments/normalize.ts. Imported here (for this file's own internal use in
@@ -223,7 +223,9 @@ async function parseJson<T>(res: Response, isZh = false): Promise<T> {
   const body = raw ? safeParseJson(raw) : null
   if (!res.ok) {
     const payload = normalizeApiErrorPayload(body, isZh)
-    const error = new Error(firstFieldError(payload.fieldErrors) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
+    // A code the client owns the copy for (today: FIELD_SCHEMA_CHANGED) is shown in the user's language even when
+    // the server sent its own sentence; every other code keeps the server's message, as before.
+    const error = new Error(firstFieldError(payload.fieldErrors) ?? apiCodeOwnedErrorMessage(payload.code, isZh) ?? payload.message ?? apiDefaultErrorMessage(payload.code, res.status, isZh)) as Error & {
       status?: number
       code?: string
       fieldErrors?: Record<string, string>
@@ -474,6 +476,8 @@ export function normalizeCopySheetDryRun(body: unknown): CopySheetDryRunResult {
   return {
     rowCount: copySheetCount(data.rowCount),
     fieldCount: copySheetCount(data.fieldCount),
+    builtFieldCount: copySheetCount(data.builtFieldCount),
+    viewCount: copySheetCount(data.viewCount),
     overLimit: data.overLimit === true || data.exceedsLimit === true,
     rowLimit: copySheetCount(limits.maxRows) ?? copySheetCount(data.rowLimit) ?? copySheetCount(data.limit),
     fieldDisclosures,
