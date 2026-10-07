@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| 演示机运行版本 | **r61** = `bf648922a`（tag `onprem-r61`，2026-09-29 18:04 上机；记录见 `r61-deploy-record-20260929.md`）。r60 = `583dfdf1a`、r59 = `05461c739` 已被替换 |
+| 演示机运行版本 | **r62** = `8b2094471`（tag `onprem-r62`，2026-10-07 08:27 上机，所有新开关关闭；记录见 `r62-deploy-record-20261007.md`）。r61 = `bf648922a`、r60 = `583dfdf1a`、r59 = `05461c739` 已被替换 |
 | 打包 | CI run `35956537159`，包 `metasheet-multitable-onprem-v2.5.0-r59.zip` |
 | 迁移 | r58 之后新增 9 条全部执行（`kysely_migration` 计数 = 9） |
 | 上机前备份 | `pre-r59-20260924-124617.dump`（演示机 `output\backups\`）+ 升级脚本自己的 `upgrade-backup-20260924-124620` |
