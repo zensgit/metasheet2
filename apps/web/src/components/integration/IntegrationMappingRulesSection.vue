@@ -46,21 +46,89 @@
             <span>目标字段</span>
             <input v-model="mapping.targetField" :data-testid="`target-field-${index}`" placeholder="例如 FNumber" />
           </label>
-          <label>
-            <span>转换</span>
-            <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
-              <option v-for="option in transformOptions" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-            <small class="integration-workbench__field-help">只允许 trim、upper、lower、toNumber、dictMap；不允许用户脚本或 raw SQL。</small>
-            <textarea
-              v-if="mapping.transformFn === 'dictMap'"
-              v-model="mapping.dictMapText"
-              :data-testid="`dict-map-${index}`"
-              placeholder="EA=Pcs&#10;KG=Kg"
-            ></textarea>
-          </label>
+          <div class="integration-workbench__transform-cell">
+            <label>
+              <span>转换</span>
+              <select v-model="mapping.transformFn" :data-testid="`transform-fn-${index}`">
+                <option v-for="option in transformOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+              <small class="integration-workbench__field-help">
+                只允许 trim、upper、lower、toNumber、toDate、defaultValue、concat、dictMap 这 8 种白名单转换；不允许用户脚本或 raw SQL。
+              </small>
+              <textarea
+                v-if="mapping.transformFn === 'dictMap'"
+                v-model="mapping.dictMapText"
+                :data-testid="`dict-map-${index}`"
+                placeholder="EA=Pcs&#10;KG=Kg"
+              ></textarea>
+              <IntegrationMappingTransformArgs
+                :fn="mapping.transformFn"
+                :args="mapping.transformArgs"
+                :testid-prefix="`transform-args-${index}`"
+                :has-field-options="hasSourceFieldOptions"
+                :field-options="sourceFieldOptionsForMapping(mapping)"
+                :field-option-text="sourceFieldOptionText"
+              />
+            </label>
+
+            <!-- G27 transform CHAIN: steps 2..n. Step 1 stays above so a single-step row keeps
+                 emitting the legacy single-object payload. -->
+            <div
+              v-for="(step, stepIndex) in mapping.extraSteps"
+              :key="step.id"
+              class="integration-workbench__transform-step"
+              :data-testid="`transform-step-${index}-${stepIndex}`"
+            >
+              <label>
+                <span>第 {{ stepIndex + 2 }} 步</span>
+                <select v-model="step.fn" :data-testid="`transform-step-fn-${index}-${stepIndex}`">
+                  <option v-for="option in transformOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+                <textarea
+                  v-if="step.fn === 'dictMap'"
+                  v-model="step.dictMapText"
+                  :data-testid="`transform-step-dict-map-${index}-${stepIndex}`"
+                  placeholder="EA=Pcs&#10;KG=Kg"
+                ></textarea>
+                <IntegrationMappingTransformArgs
+                  :fn="step.fn"
+                  :args="step.args"
+                  :testid-prefix="`transform-args-${index}-${stepIndex}`"
+                  :has-field-options="hasSourceFieldOptions"
+                  :field-options="sourceFieldOptionsForMapping(mapping)"
+                  :field-option-text="sourceFieldOptionText"
+                />
+              </label>
+              <button
+                type="button"
+                class="integration-workbench__icon-button"
+                :data-testid="`remove-transform-step-${index}-${stepIndex}`"
+                @click="removeTransformStep(mapping, stepIndex)"
+              >
+                删除这一步
+              </button>
+            </div>
+
+            <button
+              type="button"
+              class="integration-workbench__icon-button"
+              :data-testid="`add-transform-step-${index}`"
+              @click="addTransformStep(mapping)"
+            >
+              再加一步
+            </button>
+            <small
+              v-if="mapping.extraSteps.length > 0"
+              class="integration-workbench__field-help"
+              :data-testid="`transform-chain-help-${index}`"
+            >
+              转换链按顺序执行：上一步的输出就是下一步的输入；留空的步骤会被忽略。
+            </small>
+          </div>
           <div>
             <label class="integration-workbench__mapping-check">
               <input v-model="mapping.required" type="checkbox" :data-testid="`required-${index}`" />
@@ -69,6 +137,30 @@
             <div class="integration-workbench__mapping-rules">
               <input v-model="mapping.minValueText" :data-testid="`validation-min-${index}`" placeholder="最小值 min" />
               <input v-model="mapping.maxValueText" :data-testid="`validation-max-${index}`" placeholder="最大值 max" />
+            </div>
+            <div class="integration-workbench__mapping-extra">
+              <input
+                v-model="mapping.patternText"
+                :data-testid="`validation-pattern-${index}`"
+                placeholder="正则 pattern，例如 ^MAT-[0-9]+$"
+              />
+              <input
+                v-model="mapping.enumText"
+                :data-testid="`validation-enum-${index}`"
+                placeholder="枚举 enum，逗号分隔，例如 active,inactive"
+              />
+              <input
+                v-model="mapping.defaultValueText"
+                :data-testid="`mapping-default-value-${index}`"
+                placeholder="缺值默认值（来源缺失/null/空字符串时生效）"
+              />
+              <!-- F04/F08: the engine's isBlank() is undefined/null/'' ONLY — a whitespace-only
+                   source value does NOT trigger the mapping-level default (the defaultValue
+                   STEP does, because it also checks isBlankAfterTrim). Say so instead of the
+                   ambiguous "取到空值". -->
+              <small class="integration-workbench__field-help" :data-testid="`mapping-rules-help-${index}`">
+                正则与枚举只在填写时才下发；默认值在来源为缺失/null/空字符串时生效，纯空格不算，需要请改用 defaultValue 转换步骤；值按字符串写入，随后仍会进入转换链。
+              </small>
             </div>
           </div>
           <button type="button" class="integration-workbench__icon-button" @click="removeMapping(index)">删除</button>
@@ -91,6 +183,13 @@
 // no different from the pre-extraction behavior where the same array was rendered inline. This
 // file is not part of `apps/web`'s lint file list (see `package.json`'s `lint` script), so the
 // nested-prop-mutation pattern carries no lint-gate risk either.
+//
+// G27 (docs/development/integration-mapping-transform-ui-parity-design-20260910.md): this section
+// now reaches the FULL engine whitelist — toDate / defaultValue / concat argument controls, a
+// multi-step transform chain, and the pattern / enum validation rules. The chain's push/splice
+// stay in the view (`addTransformStep` / `removeTransformStep` props) for the same reason
+// `addMapping` / `removeMapping` do: the view owns the array, this file owns the markup.
+import IntegrationMappingTransformArgs from './IntegrationMappingTransformArgs.vue'
 import type { EditableMapping, SourceFieldOption, TransformFn } from './integrationWorkbenchSectionTypes'
 
 defineProps<{
@@ -103,6 +202,8 @@ defineProps<{
   mappingDetail: (mapping: EditableMapping) => string
   addMapping: () => void
   removeMapping: (index: number) => void
+  addTransformStep: (mapping: EditableMapping) => void
+  removeTransformStep: (mapping: EditableMapping, stepIndex: number) => void
 }>()
 </script>
 
@@ -239,6 +340,29 @@ defineProps<{
   grid-template-columns: repeat(2, minmax(72px, 1fr));
   gap: 6px;
   margin-top: 6px;
+}
+
+/* G27: pattern / enum / mapping-level default stack under the min/max pair. */
+.integration-workbench__mapping-extra {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+/* G27: the transform column is now a cell (step 1 + chained steps + "再加一步"), so the editor
+   grid still has exactly five children and the delete button keeps its column. */
+.integration-workbench__transform-cell {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.integration-workbench__transform-step {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px dashed var(--ms-border-light);
+  border-radius: 6px;
 }
 
 .integration-workbench__field-help {
