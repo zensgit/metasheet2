@@ -946,7 +946,7 @@ async function theLegacyTiersAreExactlyWhatTheyWere() {
 //   5. DRY-RUN AND APPLY ARE UNCHANGED, as they always were.
 // ---------------------------------------------------------------------------
 
-const VISIBLE_PROJECT_NO = '2-20231625'
+const VISIBLE_PROJECT_NO = '2-20000001'
 const FOREIGN_PROJECT_NO = '9-99999999'
 const PROJECT_OBJECT_ID = 'plm_stock_preparation_project'
 // The deleted gate's refusal code, kept as a NAMED constant with no producer anywhere in the tree:

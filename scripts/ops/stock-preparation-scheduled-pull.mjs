@@ -132,7 +132,7 @@ Required environment variables:
   MS_API          base URL of the MetaSheet API, e.g. http://127.0.0.1:8900
   MS_TOKEN        a Bearer token for an admin service account, BOUND TO THE TARGET TENANT
                    (a tenantless platform-admin token is refused by default — see --allow-tenantless)
-  MS_PROJECT_NOS  comma-separated project numbers to pull, e.g. "2-20231625,200000006"
+  MS_PROJECT_NOS  comma-separated project numbers to pull, e.g. "2-20000001,200000006"
 
 Optional environment variables:
   MS_TENANT_ID         tenant id to operate on (default: "default")
