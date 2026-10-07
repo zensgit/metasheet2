@@ -120,3 +120,33 @@ pnpm validate:all
 Late actual-scope native race, whole-pool RR worker pause, all attachment preparation side effects,
 full restore/runtime composer and new-source APFS remain unqualified. Same-host historical APFS,
 retained LC1..6 and local NON-KMS keys do not establish independent provider durability or KMS readiness.
+
+## Exact-source CI test transport correction
+
+The original ordinary run37567291270 at `24b3b880798247cb5787b45a3e9cb68d3b668ba2` is terminal
+FAILURE. Both Node lanes passed all52 named new admission cases but failed the single global
+supertest app-mode tripwire: this new unit file had one request(app) call site. Each lane reports
+18262 passed/1712 skipped/1 failed tests. The preceding core-backend failure skipped the native
+integration step, so this run did not execute the new whole native25 spec. Four other executed jobs
+succeeded and coverage was metadata-only skipped. Root qualifies all13 source Git blobs and six
+complete raw logs assembled from18 continuous206 ranges; the original failure and source are retained.
+
+Root reproduces the unchanged three-case tripwire at actual exit1, two PASS/one FAIL/zero skip with
+the same named AssertionError. The correction changes only the new unit test transport: one existing
+usePinnedServer instance per file, the same per-case Express app installed through setApp, and
+request(pinned.url()). All52 test cases, app construction, scope/response assertions, guards and the
+permanent zero app-mode baseline remain unchanged. No scanner/allowlist or product source is modified.
+
+Eight whole focused files now pass178/178, zero skip: the prior175 cases plus all three tripwire cases.
+Focused TypeScript and pnpm validate:all exit0, with all frozen product/native inputs unchanged.
+Corrected unit SHA256: `a50789ba4546f03a7289dbc2191aa7939b58268279450be296f35b85274d00b1`.
+Original local native25 evidence and eleven guard refutations remain separately retained; this
+transport correction does not claim a new-source CI native PASS or a current-source APFS rehearsal.
+
+Root failed-CI independent readback SHA256:
+`6629397944b3a5397528d355e4755fd9fc1c519001f4c9cfe2ae61d367b53191`.
+Root corrected focused receipt SHA256:
+`e2159c5afcddf81487d552e0a90e686fca7a8299927e82c089cca962fdd4ab69`.
+Correction evidence: `artifacts/tm-foreign-reset-20261007/ci-app-mode-fix-20261007/`.
+An ordinary run for the new corrected source is required; the old failed run is not retried.
+Draft/HOLD, full G3/D-H2/D-L/D7 and all owner stages remain OPEN.

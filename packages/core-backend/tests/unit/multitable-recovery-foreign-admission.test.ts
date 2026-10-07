@@ -17,6 +17,9 @@ import { mintExactAnchorRecoveryIdentity } from '../../src/multitable/restore-pr
 import { SheetWriterBlockedError, __resetRecoveryWriterStateColumnProbe } from '../../src/multitable/canonical-sheet-fence'
 import { registerRecoveryArchiveRestoreOwnerRoutes } from '../../src/routes/recovery-archive-restore-owner'
 import type { QueryFn } from '../../src/multitable/permission-service'
+import { usePinnedServer } from '../utils/pinned-server'
+
+const pinned = usePinnedServer()
 
 beforeEach(() => {
   vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
@@ -248,7 +251,8 @@ describe('selected recovery foreign admission', () => {
       },
     })
     app.use(router)
-    const response = await request(app).post('/sheets/b/recovery-archive/execute').send({ previewIdentity: 'synthetic', scope: { kind: 'whole_sheet' } })
+    pinned.setApp(app)
+    const response = await request(pinned.url()).post('/sheets/b/recovery-archive/execute').send({ previewIdentity: 'synthetic', scope: { kind: 'whole_sheet' } })
     expect(response.status).toBe(selected ? 409 : 500)
     expect(response.body).toEqual(selected
       ? { ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } }
