@@ -69,6 +69,10 @@ const files = [
     sentinel: 'recovery_archive_attachment_admission_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
+    sentinel: 'recovery_archive_foreign_reset_admission_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
     sentinel: 'recovery_archive_legal_hold_realdb_harness_missing_database_url',
   },
