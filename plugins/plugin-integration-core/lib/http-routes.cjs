@@ -9936,11 +9936,11 @@ function requireStockPreparationAudit() {
       return sendOk(res, proposal)
     },
 
-    // 列映射副驾 CONFIRM — take the HUMAN-confirmed semantics and write a DETERMINISTIC vendor preset
+    // 列映射副驾 CONFIRM — take the HUMAN-confirmed semantics and return a DETERMINISTIC vendor preset
     // (the #5385 schema), validated by validateVendorPreset. THIS is the authoritative artifact, NOT the
     // AI text. confirmedBy is SERVER-STAMPED (never request-supplied); the base skeleton is loaded from
     // the server catalog by presetId (never trusted from the request). A confirmed mapping that fails
-    // deterministic validation is refused (422) — a confirmation can never write an invalid preset.
+    // deterministic validation is refused (422) — a confirmation can never return an invalid preset.
     async schemaMappingCopilotConfirm(req, res) {
       const user = requireAccess(req, 'admin')
       const body = requestBody(req)
