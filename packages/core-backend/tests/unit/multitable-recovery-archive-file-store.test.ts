@@ -11,6 +11,10 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...await importOriginal<typeof import('node:fs/promises')>(),
 }))
+vi.mock('../../src/multitable/recovery-local-filesystem', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/multitable/recovery-local-filesystem')>(),
+}))
+import * as filesystem from '../../src/multitable/recovery-local-filesystem'
 
 import {
   createRecoveryArchiveFileStoreProvider,
@@ -332,8 +336,7 @@ describe('persistent local archive object store', () => {
     vi.spyOn(options.transactionDepth, 'currentTransactionDepth').mockReturnValue(1)
     await expect(store.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE_CALL_IN_TRANSACTION')
     vi.restoreAllMocks()
-    const statfs = fs.statfs
-    vi.spyOn(fs, 'statfs').mockImplementation(async (target) => ({ ...await statfs(target), type: 0x6969 }))
+    vi.spyOn(filesystem, 'assertRecoveryLocalFilesystem').mockRejectedValue(new Error('RECOVERY_LOCAL_FILESYSTEM_REFUSED'))
     await expect(store.put(object)).rejects.toThrow('RECOVERY_ARCHIVE_OBJECT_STORE')
     expect(await fs.readdir(options.basePath)).toEqual(before)
   })

@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
+import { assertRecoveryLocalFilesystem } from './recovery-local-filesystem'
 import {
   RecoveryArchiveObjectStoreError,
   RecoveryArchiveLocalBindingMismatchError,
@@ -52,12 +53,7 @@ async function checkedDirectory(configuredPath: string): Promise<Root> {
   const stat = await fs.lstat(configuredPath, { bigint: true })
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== BigInt(process.getuid()) || (stat.mode & 0o077n) !== 0n) refuse()
   const realPath = await fs.realpath(configuredPath)
-  const filesystem = await fs.statfs(realPath)
-  // Network/unknown filesystems need a separate durability and mount-loss acceptance contract.
-  const supported = process.platform === 'linux'
-    ? [0xef53, 0x58465342, 0x9123683e]
-    : process.platform === 'darwin' ? [25] : []
-  if (!supported.includes(filesystem.type)) refuse()
+  await assertRecoveryLocalFilesystem(realPath)
   return { configuredPath, realPath, dev: stat.dev, ino: stat.ino }
 }
 
