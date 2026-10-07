@@ -1,7 +1,7 @@
 # 备料(stock-preparation)客户交付说明(2026-09-04)
 
 > 读者:客户 IT + 我方现场实施。
-> 值面纪律:本文**不含任何账号 / 密码 / token / 内部 IP**。测试 PLM 地址仅保留 `10.10.52.16`(客户已知悉的测试库),其余主机一律用占位符 `<部署主机>` / `<PLM主机>`。账号、密码全部由客户/实施在界面当场输入,本文不记录。
+> 值面纪律:本文**不含任何账号 / 密码 / token / 内部 IP**。测试 PLM 地址仅保留 `<测试实例地址>`(客户已知悉的测试库),其余主机一律用占位符 `<部署主机>` / `<PLM主机>`。账号、密码全部由客户/实施在界面当场输入,本文不记录。
 > 来源纪律:本文每一步均核对自 `222-deploy-window-runbook-20260901.md`(含文末"2026-09-03 r7 实际执行记录与订正"一节,**订正优先于正文**)、`222-rehearsal-full-run-20260904.md`、`222-rehearsal-day-checklist-20260903.md`、`scripts/ops/multitable-onprem-package-upgrade-inplace.ps1`、`scripts/ops/stock-preparation-sandbox-add-missing-template-fields.cjs`,以及 `plugins/plugin-integration-core/lib/http-routes.cjs`、`packages/core-backend/src/routes/{admin-users,permissions}.ts` 的路由定义。不确定处标"待核对",不猜测、不编造。
 
 ---
@@ -188,7 +188,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 
 | # | 步骤 | 动作 |
 |---|---|---|
-| 1 | 新建外接数据源(SQL Server 只读) | 顶部导航「**外接数据源**」页新建一个只读 SQL Server 连接,地址、账号、密码**由客户/实施在界面当场输入**,本文不记录、不留存。测试库地址为 `10.10.52.16`(生产库地址由客户提供,现场输入,不写入任何文档)。**具体菜单入口待核对**(本次复核的源文档未截图此界面,只核实了其后端约束,见下一步)。 |
+| 1 | 新建外接数据源(SQL Server 只读) | 顶部导航「**外接数据源**」页新建一个只读 SQL Server 连接,地址、账号、密码**由客户/实施在界面当场输入**,本文不记录、不留存。测试库地址为 `<测试实例地址>`(生产库地址由客户提供,现场输入,不写入任何文档)。**具体菜单入口待核对**(本次复核的源文档未截图此界面,只核实了其后端约束,见下一步)。 |
 | 2 | 外部系统绑定该连接 | 该连接对应的"外部系统"记录,`kind` 必须是 `data-source:sql-readonly`,且其 `connectionId` 必须非空并指向第 1 步新建的连接(#5452 起的约束)。若沿用一条历史遗留的外部系统记录(未打 `dataSourceOwnerId` 标记),source-preflight 会报 `CONNECTION_LEGACY_FALLBACK_DENIED`;修法:`GET /api/integration/external-systems/:id` 取出原样公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`),补上 `connectionId = config.dataSourceId` 后 `POST /api/integration/external-systems` 回写(需 admin token + `x-tenant-id` 请求头)。 |
 | 3 | 源绑定切换 | `POST /api/integration/stock-preparation/source-binding`,body 只能带一个字段:<br>`{ "externalSystemId": "<第 2 步的外部系统 id>" }`<br>需要 `integration:admin` 权限。响应 `takesEffectWithoutRestart: true`,**不需要 `pm2 restart`**,立即生效。 |
 | 4 | 验证绑定生效 | `GET /api/integration/stock-preparation/source-binding` 应读到新值;`GET /api/integration/stock-preparation/audit` 应能看到一条 `action: 'source_binding_set'` 的记录。 读审计时**不要带 `workspaceId`**:审计行的 workspace 一律为空,带了就按等值过滤成 0 行(界面本来就不带,只有手写探针会踩)。 |
@@ -264,7 +264,7 @@ Start-ScheduledTask -TaskName 'metasheet-stock-prep-scheduled-dry-run'
 
 ## 4. 数据前置(客户侧必做)
 
-**测试库现状**(2026-09-03 现场核实):`10.10.52.16` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
+**测试库现状**(2026-09-03 现场核实):`<测试实例地址>` 上的测试库只有 1 张订单,其明细指向的零件全部不在物料表(`PartLibraryInfo`)——这不是映射或配置问题,是测试库数据本身残缺:该库里另有几个零件挂着完整 BOM 树(例如某零件有 2 张 BOM 表头、118 行明细),但没有任何订单引用它们。因此**任何项目号在测试库上现状都走不完整链**,第 2 步(从 PLM 拉取)演不出效果。
 
 客户在测试环境验证前,需二选一:
 
