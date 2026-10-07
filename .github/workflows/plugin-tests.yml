@@ -130,7 +130,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        # Node 18 reached end-of-life on 2025-04-30 and everything this repo ships runs on Node 20
+        # (Dockerfile.backend / Dockerfile.frontend are node:20-slim; the on-prem runbooks require
+        # Node 20). The 18.x leg cost ~27 runner-minutes per run and was never a required check;
+        # `test (20.x)` is. It stays a one-entry matrix on purpose: the produced check name must
+        # remain exactly `test (20.x)` (branch protection names it), and a plain job would be
+        # reported as `test`. Dropped 2026-10-07 when the repository went private and Actions
+        # minutes started to bill.
+        node-version: [20.x]
 
     steps:
       - name: Checkout repository
@@ -542,7 +549,7 @@ jobs:
       # Corp-scope Phase B cannot migrate until staging proves its only managed
       # backend and the only container publishing 18900 are the exact Phase A
       # image. Both matrix legs execute the behavior suite; branch protection
-      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # currently requires test (20.x); the matrix has no other leg since 2026-10-07.
       # Run the wiring guard in this same job. The wiring and behavior suites
       # assert each other's invocation, so removing either step turns the
       # required Node 20 context red.
@@ -596,7 +603,7 @@ jobs:
             scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
 
       # The production monitor invokes the same state helper covered here.
-      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # Keep this in the required `test` matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
@@ -1834,8 +1841,6 @@ jobs:
           kill $(cat server.pid) || true
 
       - name: Build web app
-        # Skip on Node 18 - @vitejs/plugin-vue@6.x requires Node 20+ (crypto.hash API)
-        if: matrix.node-version != '18.x'
         run: |
           pnpm --filter @metasheet/web build
 
@@ -1843,7 +1848,7 @@ jobs:
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
         # title-prefix anchoring. Deliberately NO `if:` pin added here — this
-        # step already runs UNCONDITIONALLY on both matrix legs (18.x/20.x);
+        # step already runs UNCONDITIONALLY on every matrix leg (only 20.x since 2026-10-07);
         # copying the `if: matrix.node-version == '20.x'` pin from the
         # approval/multitable siblings would NARROW coverage to one leg, a
         # real behaviour change this round does not make. The wiring guard's
