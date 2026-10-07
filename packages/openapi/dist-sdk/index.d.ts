@@ -12630,6 +12630,24 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
+                /** @description RECOVERY_IN_PROGRESS. With archive source protection selected, the sheet is blocked for writes or protected metadata admission cannot safely proceed. No attachment row was inserted; cleanup of the newly uploaded object is best effort. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
+                /** @description DB_NOT_READY. Attachment metadata could not be confirmed. A failure after COMMIT may leave a committed row and retained object; this response does not prove that nothing was written and must not alone trigger an automatic retry. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
             };
         };
         delete?: never;
