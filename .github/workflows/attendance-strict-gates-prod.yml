@@ -290,6 +290,7 @@ jobs:
       REQUIRE_BATCH_RESOLVE: ${{ inputs.require_batch_resolve || 'false' }}
       REQUIRE_IMPORT_JOB_RECOVERY: ${{ inputs.require_import_job_recovery || 'false' }}
       REQUIRE_ADMIN_SETTINGS_SAVE: ${{ inputs.require_admin_settings_save || 'true' }}
+      REQUIRE_DELEGATED_ATTENDANCE_ADMIN: 'true'
       STRICT_RETRY_ON_RATE_LIMITED: ${{ inputs.retry_on_rate_limited || 'true' }}
       HEADLESS: 'true'
     steps:

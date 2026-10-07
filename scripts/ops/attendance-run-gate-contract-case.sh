@@ -93,6 +93,7 @@ if [[ "$CASE_ID" == "strict" ]]; then
   node --test \
     ./scripts/ops/attendance-acceptance-preflight.test.mjs \
     ./scripts/ops/attendance-acceptance-wiring.test.mjs \
+    ./scripts/ops/attendance-delegated-admin-contract.test.mjs \
     ./scripts/ops/attendance-provision-user.test.mjs \
     ./scripts/ops/attendance-verifier-contract.test.mjs \
     ./scripts/ops/attendance-auth-scripts.test.mjs \
