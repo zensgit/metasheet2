@@ -23,14 +23,14 @@
 # (a single env var, as inherited by this process) contained 3 hardcoded filenames. It now
 # reads the actual workflow files and migration-provider.ts directly and checks:
 #   A. every item in every CI-gate/replay MIGRATION_EXCLUDE occurrence against the full known
-#      baseline (7 items since the 2026-07-13 #4162 re-enable; was 11, originally 3) — anything extra is reported as a possibly-undocumented new
+#      baseline (4 items since the 2026-07-14 #4162 tail re-enable; was 7, then 11) — anything extra is reported as a possibly-undocumented new
 #      exclusion;
 #   B. every occurrence-to-occurrence divergence within those seven occurrences (5 files:
 #      plugin-tests x2, migration-replay x2, observability-e2e/strict, safety-guard-e2e) against a table
 #      of KNOWN, already-reviewed divergences (see MIGRATION_EXCLUDE_TRACKING.md) — anything
 #      not in that table is reported as new/undocumented drift;
 #   C. the overlap between MIGRATION_EXCLUDE and SUPERSEDED_LEGACY_SQL_MIGRATIONS against the
-#      known 3-item overlap (042a/048/049) — a new overlap item, or a missing expected one, is
+#      known 2-item overlap (048/049) — a new overlap item, or a missing expected one, is
 #      reported;
 #   D. a size canary + doc-pointer presence check on SUPERSEDED_LEGACY_SQL_MIGRATIONS itself.
 #
@@ -48,33 +48,30 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 WORKFLOWS_DIR="${WORKFLOWS_DIR:-$REPO_ROOT/.github/workflows}"
 PROVIDER_FILE="${PROVIDER_FILE:-$REPO_ROOT/packages/core-backend/src/db/migration-provider.ts}"
 
-# Known baseline: the union of every item that has appeared, with review, in any CI
-# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-13.
+# Known baseline: the union of every item that remains, with review, in any CI
+# per-PR-gate / migration-replay MIGRATION_EXCLUDE occurrence as of 2026-07-14.
 # (#4162 follow-up, 2026-07-13: 20250924120000_create_views_view_states.ts and the three
 # snapshot-cluster migrations — 20251117000001_add_snapshot_labels.ts,
 # 20251117000002_create_protection_rules.ts, 20251201000001_create_change_management_tables.ts —
 # were RE-ENABLED across all five workflow lists at once and removed from this baseline; if one
-# of them reappears in a list, this guard now reports it as a possibly-undocumented NEW exclusion.)
+# of them reappears in a list, this guard now reports it as a possibly-undocumented NEW exclusion.
+# The 2026-07-14 tail also re-enabled 042a_core_model_views.sql,
+# 20250924140000_create_gantt_tables.ts, and 20250925_create_view_tables.sql everywhere.)
 KNOWN_BASELINE_ITEMS='008_plugin_infrastructure.sql
 048_create_event_bus_tables.sql
 049_create_bpmn_workflow_tables.sql
-042a_core_model_views.sql
-20250924140000_create_gantt_tables.ts
-20250925_create_view_tables.sql
 zzzz20260114110000_create_user_orgs_table.ts'
 
 # Known, reviewed occurrence-to-occurrence divergences: "<item>|<workflow-file-basename that
 # is known to OMIT it, while the rest of the baseline occurrences include it>". See
 # packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md for the full per-row explanation
 # (git-blame-verified commits/PRs, not guessed).
-KNOWN_DIVERGENCES='20250925_create_view_tables.sql|migration-replay.yml
-zzzz20260114110000_create_user_orgs_table.ts|plugin-tests.yml'
+KNOWN_DIVERGENCES='zzzz20260114110000_create_user_orgs_table.ts|plugin-tests.yml'
 
 # Known, reviewed overlap between MIGRATION_EXCLUDE (mechanisms #1/#2) and
 # SUPERSEDED_LEGACY_SQL_MIGRATIONS (mechanism #3) — confirmed intentional/harmless by the
 # 2026-07-10 audit (docs/development/superseded-legacy-migrations-gap-audit-20260710.md §0).
-KNOWN_SUPERSEDED_OVERLAP='042a_core_model_views
-048_create_event_bus_tables
+KNOWN_SUPERSEDED_OVERLAP='048_create_event_bus_tables
 049_create_bpmn_workflow_tables'
 
 # The array has 30 entries as of 2026-07-12 (counted directly from migration-provider.ts, not
@@ -264,7 +261,7 @@ $stripped"
         overlap_found="$overlap_found
 $stripped"
         if ! item_in_list "$stripped" "$KNOWN_SUPERSEDED_OVERLAP"; then
-          warn "'$stripped' appears in BOTH MIGRATION_EXCLUDE (CI-gate/replay) AND SUPERSEDED_LEGACY_SQL_MIGRATIONS, which is not in this guard's KNOWN_SUPERSEDED_OVERLAP table (042a/048/049 only). Double-listing is usually harmless (belt-and-suspenders) but should be a reviewed, cited decision, not a silent accident."
+          warn "'$stripped' appears in BOTH MIGRATION_EXCLUDE (CI-gate/replay) AND SUPERSEDED_LEGACY_SQL_MIGRATIONS, which is not in this guard's KNOWN_SUPERSEDED_OVERLAP table (048/049 only). Double-listing is usually harmless (belt-and-suspenders) but should be a reviewed, cited decision, not a silent accident."
         fi
       fi
     done <<< "$uniq_baseline_stripped"
@@ -274,9 +271,9 @@ $stripped"
       expected_overlap_item="$(trim "$expected_overlap_item")"
       [[ -z "$expected_overlap_item" ]] && continue
       if ! item_in_list "$expected_overlap_item" "$superseded_list"; then
-        warn "Expected overlap item '$expected_overlap_item' is no longer in SUPERSEDED_LEGACY_SQL_MIGRATIONS — the known 3-item overlap with MIGRATION_EXCLUDE (042a/048/049) has changed; re-verify against docs/development/superseded-legacy-migrations-gap-audit-20260710.md."
+        warn "Expected overlap item '$expected_overlap_item' is no longer in SUPERSEDED_LEGACY_SQL_MIGRATIONS — the known 2-item overlap with MIGRATION_EXCLUDE (048/049) has changed; re-verify against docs/development/superseded-legacy-migrations-gap-audit-20260710.md."
       elif ! item_in_list "$expected_overlap_item" "$uniq_baseline_stripped"; then
-        warn "Expected overlap item '$expected_overlap_item' is no longer excluded by any CI-gate/replay MIGRATION_EXCLUDE occurrence — the known 3-item overlap has changed; re-verify."
+        warn "Expected overlap item '$expected_overlap_item' is no longer excluded by any CI-gate/replay MIGRATION_EXCLUDE occurrence — the known 2-item overlap has changed; re-verify."
       fi
     done <<< "$KNOWN_SUPERSEDED_OVERLAP"
 
@@ -293,10 +290,10 @@ $stripped"
   # --- Always-on informational note: the asymmetry this guard does not, and cannot, close --
   info "Known asymmetry (not a bug this guard can catch): production/on-prem 'db:migrate' runs"
   info "with NO MIGRATION_EXCLUDE at all. Only CI's per-PR gate trims the list above. #4162"
-  info "follow-up (2026-07-13): views/view_states + the snapshot/protection-rule/change-management"
-  info "migrations are re-enabled in CI and now DO get per-PR green runs; the still-excluded"
-  info "remainder (008/048/049, 042a, gantt, 20250925) keeps this gap. Do not close it by"
-  info "editing this script."
+  info "follow-up (2026-07-14): views/view_states, the snapshot cluster, 042a, gantt, and"
+  info "20250925 are re-enabled in CI. The still-excluded remainder (008/048/049, plus"
+  info "user_orgs outside plugin-tests) keeps this narrower gap. Do not close it by editing"
+  info "this script."
 }
 
 # main() is the only thing in this file that calls exit. It is intentionally NOT wired into any
