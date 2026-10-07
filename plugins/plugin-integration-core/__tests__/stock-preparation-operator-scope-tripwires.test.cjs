@@ -28,7 +28,7 @@
 //        (satisfiesStockPrepAccess short-circuits on it) — stated here as an intended property with
 //        its two real limits, not left to be discovered.
 //   S-06 THE AUDIT ROW CARRIES NO PROJECT NUMBER, and that is a CHOICE rather than an accident of
-//        validation: the audit store's SAFE_STRING_PATTERN would happily accept `230920006`.
+//        validation: the audit store's SAFE_STRING_PATTERN would happily accept `200000006`.
 //   S-07 NO AUDIT STORE, NO VALUES. `requireStockPreparationAudit`'s 501 was untested on this route.
 //   S-09 THE SPLIT. The tenant half of the scope is exported as `resolveProvenOwnTenant` for the
 //        source preflight, which rides an integration tier. Over a matrix of principals, claims,
@@ -121,8 +121,8 @@ const STAGING_A = `${TENANT_A}:integration-core`
 const PROJECT_SHEET_A = 'sheet_project_a'
 const LEDGER_SHEET_A = 'sheet_ledger_a'
 
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 
 // THE PROJECTION CANARIES. `owner` is a real field of the frozen project template that the operator
@@ -832,7 +832,7 @@ async function main() {
     assert.equal(res.statusCode, 200)
     assert.equal(auditAppends.length, 1)
     const entry = auditAppends[0]
-    // The audit store's own validator WOULD have taken it — `230920006` is a perfectly legal
+    // The audit store's own validator WOULD have taken it — `200000006` is a perfectly legal
     // SAFE_STRING. So its absence is this route's decision, not a rule it merely failed to break.
     const SAFE_STRING_PATTERN = auditStoreModule.__internals && auditStoreModule.__internals.SAFE_STRING_PATTERN
     assert.ok(SAFE_STRING_PATTERN, 'the audit store exposes its value pattern')

@@ -106,8 +106,8 @@ const LEDGER_SHEET_A = 'sheet_ledger_a'
 
 // Tenant A's real-shaped project: the number an operator would otherwise have to memorise, and the
 // name that makes memorising it unnecessary.
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 // A second tenant-A project with NOTHING pending — G-10's "genuinely nothing pending" case.
 const PROJECT_A2_NO = '230920007'
@@ -1398,8 +1398,8 @@ async function main() {
     // this feature goes through — coerces a number to its string, and a business number arriving out
     // of a spreadsheet cell as a number is ordinary. The sentinel rule tightens the EMPTY cases; it
     // does not invent a stricter type discipline than the rest of the module keeps.
-    assert.equal((await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, 230920006)).ready, true)
-    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: '230920006' })
+    assert.equal((await scanPullTargetProjects(recordsApi, ownSheet, BOUND_TARGET_A, 200000006)).ready, true)
+    assert.deepEqual(seen.at(-1), { [MAIN_FIELD_ID_MAP.projectNo]: '200000006' })
 
     // The case this rule exists for: a caller that MEANT to narrow and lost its number. Widening to
     // the whole sheet here would report the whole table's rows and max timestamp under one project's

@@ -98,7 +98,7 @@
     <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
          The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
          and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
-         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         who only remembers 「示例乙型」 finds 200000006 without being told it, and the trained
          operator who types the number keeps the path they already use. -->
     <div class="sp-board__search" :class="{ 'sp-board__search--home': showHome }">
       <label class="sp-board__field">

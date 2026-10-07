@@ -193,7 +193,7 @@ const ROUTES = [
   // values-free '/stock-preparation/projects' route above, never a widening of it: that one keeps its
   // byte-identical values-free projection for the platform/admin workspace, this one carries the
   // caller's OWN tenant's project NUMBER and NAME so a floor operator can find their project by name
-  // instead of memorising that 230920006 is the RY2 注射水缓冲罐部件. VALUE-BEARING, so it rides
+  // instead of memorising that 200000006 is the 示例乙型容器. VALUE-BEARING, so it rides
   // stock-prep:operate (the same tier as value-entry and the Excel export), and its tenant is derived
   // from the AUTHENTICATED principal with the host vouching for the pairing — see the handler.
   ['GET', '/api/integration/stock-preparation/operator/projects', 'stockPreparationOperatorProjectDirectory'],
@@ -2054,7 +2054,7 @@ const VALID_STOCK_PREPARATION_HANDOFF_ADVANCE_BODY_KEYS = new Set([
 //
 // NEITHER DOES `workspaceId`, AND THAT IS THE POINT. It used to be forwarded verbatim into the audit
 // row's `workspace_id`, which made this route's "the trail never carries the projectNo" claim
-// depend on the caller not putting it there: `?workspaceId=230920006` wrote the number to a column
+// depend on the caller not putting it there: `?workspaceId=200000006` wrote the number to a column
 // no gate looked at. This plugin has no workspace registry to validate it against, so the honest
 // answer is to select nothing from it — the key stays accepted for shape compatibility with the rest
 // of this family (and so a client that sends it is not 400'd), exactly like `tenantId`.
@@ -6223,7 +6223,7 @@ function requireStockPreparationAudit() {
       // buy nothing.
       //
       // "NO projectNo" MEANS ABSENT, NOT "not a string". `firstString` accepts only
-      // `typeof 'string'`, so `{"projectNo": 230920006}` — a shape this domain hands out constantly,
+      // `typeof 'string'`, so `{"projectNo": 200000006}` — a shape this domain hands out constantly,
       // since project numbers look like integers — leaves `reconcileProjectNo` null and lets the
       // request run on to the action lookup, the B2a fence and the source adapter before the
       // downstream validator refuses it 400. The ledger is not actually reachable that way today,
@@ -6242,7 +6242,7 @@ function requireStockPreparationAudit() {
       // the SAME EXPRESSION, with the same `legacyGate` value, that `requireTableActionAccess`
       // admits on FIRST — so the two cannot disagree about which branch a caller took. (That helper
       // RETURNS THE USER; it does not return from this route. Nothing else here excuses an admin.)
-      // Delete the conjunct and a platform admin who sends `{"projectNo": 230920006}` stops getting
+      // Delete the conjunct and a platform admin who sends `{"projectNo": 200000006}` stops getting
       // the late downstream 400 it gets today and starts getting an early one from here — a
       // behaviour change on the branch this whole route promises to leave byte-for-byte alone.
       const reconcileParameters = body.parameters

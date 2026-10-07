@@ -8,7 +8,7 @@ import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vu
  * request URL as `${path}${query}` — `buildQueryString` (workbench.ts) returns a BARE
  * `a=1&b=2` querystring with no leading `?`, and `apiFetch` (utils/api.ts) does no normalization
  * (`fetch(\`${base}${path}\`)`), so a non-empty query merged straight into the path with no separator,
- * e.g. `/api/.../confirmation-decisionsprojectNo=230920006` — a guaranteed 404. `projectNo` is
+ * e.g. `/api/.../confirmation-decisionsprojectNo=200000006` — a guaranteed 404. `projectNo` is
  * REQUIRED on the list call and `decisionId` is required on the value-entry call, so those two were
  * ALWAYS broken; the readiness call broke only when tenantId/workspaceId were set.
  *
@@ -87,14 +87,14 @@ describe('confirmationQueue request URLs (O1 — the query string must be separa
       data: { rowCount: 0, byStatus: {}, byResolutionAction: {}, parkedCount: 0, rows: [] },
     }))
 
-    await listStockPreparationDecisions({ projectNo: '230920006' })
+    await listStockPreparationDecisions({ projectNo: '200000006' })
 
     expect(apiFetchMock).toHaveBeenCalledTimes(1)
     const url = apiFetchMock.mock.calls[0]?.[0] as string
-    expect(url).toBe('/api/integration/stock-preparation/confirmation-decisions?projectNo=230920006')
+    expect(url).toBe('/api/integration/stock-preparation/confirmation-decisions?projectNo=200000006')
     expect(url).toContain('?projectNo=')
     // The historical bug's exact shape — never regress to this.
-    expect(url).not.toBe('/api/integration/stock-preparation/confirmation-decisionsprojectNo=230920006')
+    expect(url).not.toBe('/api/integration/stock-preparation/confirmation-decisionsprojectNo=200000006')
   })
 
   it('readStockPreparationValueEntry: a decisionId (ALWAYS present — required on this call) is joined with "?", not concatenated bare onto the path', async () => {
@@ -150,7 +150,7 @@ describe('confirmationQueue request URLs (O1 — the query string must be separa
 describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
-  const PROJECT_NO = '230920006'
+  const PROJECT_NO = '200000006'
 
   function directoryPayload(): Record<string, unknown> {
     return { tenantId: 'default', directoryReady: true, ledgerReady: true, projectCount: 0, pendingProjectCount: 0, projects: [] }
@@ -346,7 +346,7 @@ describe('P0-8 — 对账(reconcile)成功后队列自动重读,失败不重读'
 describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoardView\'s Panel 2)', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
-  const PROJECT_NO = '230920006'
+  const PROJECT_NO = '200000006'
 
   function ok(data: unknown): Response {
     return new Response(JSON.stringify({ ok: true, data }), { status: 200 })
@@ -362,7 +362,7 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
       projects: [{
         projectId: 'stockprep_project_a1',
         projectNo: PROJECT_NO,
-        projectName: 'RY2注射水缓冲罐部件',
+        projectName: '示例乙型容器',
         projectStatus: 'active',
         lastSyncRunId: null,
         snapshotBatchCount: 0,
@@ -612,7 +612,7 @@ describe('P1-2 — the `embedded` prop (composed by StockPreparationProjectBoard
 describe('2026-09-10: export failure names the actual reason, not the generic write-shaped fallback', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
-  const PROJECT_NO = '230920006'
+  const PROJECT_NO = '200000006'
 
   function ok(data: unknown): Response {
     return new Response(JSON.stringify({ ok: true, data }), { status: 200 })

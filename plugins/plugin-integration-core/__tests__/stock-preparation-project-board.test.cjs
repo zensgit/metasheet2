@@ -106,8 +106,8 @@ const MAIN_FIELD_ID_MAP = Object.freeze({
 })
 
 
-const PROJECT_A_NO = '230920006'
-const PROJECT_A_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_A_NO = '200000006'
+const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 
 // Tenant B's project number is a string that appears NOWHERE in tenant A's fixture, so a single
@@ -741,7 +741,7 @@ async function theAuditRowIsValuesFreeAndPrecedesTheValues() {
   //
   // `?workspaceId` used to be forwarded verbatim into the audit row's `workspace_id`, which made the
   // "the row never carries the projectNo" claim depend on the caller not putting it there: send
-  // `?workspaceId=230920006` and the number was on the trail, in a column no gate looked at. The
+  // `?workspaceId=200000006` and the number was on the trail, in a column no gate looked at. The
   // board route now selects nothing from it at all (the key stays in the allowlist for shape
   // compatibility with the rest of this family, exactly like `tenantId`, and steers nothing), and
   // the store gates the column besides. Asserted on BOTH branches, because a miss writes a row too.

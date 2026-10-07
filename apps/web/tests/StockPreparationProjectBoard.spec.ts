@@ -93,8 +93,8 @@ import {
 const backendAccess = require('../../../plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs')
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
-const PROJECT_NO = '230920006'
-const PROJECT_NAME = 'RY2注射水缓冲罐部件'
+const PROJECT_NO = '200000006'
+const PROJECT_NAME = '示例乙型容器'
 const SHEET_ID = 'sheet_abcdef0123456789'
 const VIEW_ID = 'view_abcdef0123456789'
 
