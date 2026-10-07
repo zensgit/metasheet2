@@ -6,7 +6,7 @@ This document specifies the minimal REST API and runtime behavior for the Kanban
 - GET `/api/kanban/:viewId`
   - Returns board config and user state: `{ columns, cards?, state, version?, etag }`.
   - Caching: responds with `ETag`; supports `If-None-Match` → `304`.
-  - Auth: Bearer JWT (dev/test may whitelist).
+  - Auth: Bearer JWT, required unconditionally — `/api/kanban` is not in the global session gate's exception list (`auth/api-path-policy.ts`); there is no dev/test whitelist.
 - POST `/api/kanban/:viewId/state`
   - Body: `{ state: JsonObject, version?: number }`
   - Persists user drag/sort filters to `view_states` (upsert by `(view_id,user_id)`).
@@ -40,7 +40,7 @@ const state = await db.selectFrom('view_states')
 - Permissions: `websocket.broadcast` / `websocket.broadcastTo` when emitting from backend.
 
 ## Auth, Rate Limit, Cache
-- Auth: JWT middleware on `/api/*` with test whitelist.
+- Auth: global session JWT middleware on `/api/*`; `/api/kanban` carries no test whitelist or `KANBAN_AUTH_REQUIRED`-gated fallback — a request without a valid JWT gets 401 regardless of environment. `x-user-id` in `getUserId()` (`routes/kanban.ts:23-33`) is a dead fallback that never actually activates.
 - Rate limit: per `userId+viewId` (e.g., 60/min) on POST.
 - Cache: `GET` emits `ETag`; use strong etags based on hash(view.config + user.state).
 
@@ -57,8 +57,8 @@ const state = await db.selectFrom('view_states')
 - apps/web/docs/KANBAN_UI.md
 
 ## Validation (Manual)
-- GET: `curl -i -s $API/api/kanban/board1 | jq`
-- ETag: `ETAG=\$(curl -sI $API/api/kanban/board1 | awk -F': ' '/^ETag/{print $2}') && curl -i -H "If-None-Match: $ETAG" $API/api/kanban/board1`
-- POST state: `curl -s -X POST $API/api/kanban/board1/state -H 'Content-Type: application/json' -H 'x-user-id: dev' -d '{"state":{"columns":[{"id":"todo","cards":["1"]}]}}' -i`
+- GET: `curl -i -s -H "Authorization: Bearer $TOKEN" $API/api/kanban/board1 | jq`
+- ETag: `ETAG=\$(curl -sI -H "Authorization: Bearer $TOKEN" $API/api/kanban/board1 | awk -F': ' '/^ETag/{print $2}') && curl -i -H "Authorization: Bearer $TOKEN" -H "If-None-Match: $ETAG" $API/api/kanban/board1`
+- POST state: `curl -s -X POST $API/api/kanban/board1/state -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"state":{"columns":[{"id":"todo","cards":["1"]}]}}' -i`
 
-Notes: set `API=${VITE_API_URL:-http://localhost:8900}`
+Notes: set `API=${VITE_API_URL:-http://localhost:8900}`; for local dev, mint `$TOKEN` via `GET /api/auth/dev-token` (non-production only, `routes/auth.ts:63`).

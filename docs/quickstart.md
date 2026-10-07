@@ -28,7 +28,7 @@ export VITE_API_URL=$API
 pnpm -F @metasheet/web dev
 
 Notes
-- Auth: by default, Kanban endpoints accept dev tokens or `x-user-id`. Set `KANBAN_AUTH_REQUIRED=true` to enforce JWT.
+- Auth: Kanban endpoints always require a JWT — `/api/kanban` sits behind the global session gate and is not in its exception list (`packages/core-backend/src/auth/api-path-policy.ts`). The `KANBAN_AUTH_REQUIRED` env var is parsed into config but no route reads it, so it has no effect. For local dev, mint a token with `GET /api/auth/dev-token` (non-production only, `packages/core-backend/src/routes/auth.ts:63`) and send it as `Authorization: Bearer <token>`; the `x-user-id` header is only a dead fallback in `routes/kanban.ts` and is never actually used.
 - WebSocket: `WS_REDIS_ENABLED=true` only toggles visibility in `/health` for now (no Redis wiring yet).
 ```
 
