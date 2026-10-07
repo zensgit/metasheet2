@@ -1099,7 +1099,7 @@ async function theBoardReflectsThePullRatherThanTheAdminsArchive() {
 // this pins BOTH, because a claim that only ever gets tested on its comfortable side is not pinned.
 async function theBoundSheetsTenantModelHoldsFromBothSides() {
   const CANONICAL_SHEET = ownSheetIdFor(STAGING_A, MAIN_OBJECT_ID)
-  const NEIGHBOUR_PROJECT_NO = '230920007'
+  const NEIGHBOUR_PROJECT_NO = '200000007'
 
   // HALF ONE — THE OWNER READS THE WHOLE SHEET, and that is what "owning" means here. Two different
   // project numbers living in tenant A's own bound sheet are BOTH tenant A's data by definition:
@@ -1594,7 +1594,7 @@ async function theBoardRefusesBeforeItsAuditActionCanBeStored() {
 // ever breaks — every project's rows counted under whichever project the operator happens to open,
 // and a 「上次从 PLM 拉过」 stamp that belongs to somebody else's pull.
 async function oneProjectsNumbersAreReadOutOfASheetThatHoldsMany() {
-  const OTHER_PROJECT_NO = '230920099'
+  const OTHER_PROJECT_NO = '200000099'
   const OURS = '2026-09-01T00:00:00.000Z'
   const THEIRS = '2026-09-05T00:00:00.000Z'
   const boundTarget = {

@@ -123,7 +123,7 @@ const A_MATERIAL = 'A项目部件一'
 const A_PROJECT_NAME = '示例乙型容器'
 
 const PROJECT_NO_A = '200000006'
-const PROJECT_NO_B = '230920099'
+const PROJECT_NO_B = '200000099'
 const DECISION_A = 'decision_a_1'
 const DECISION_B = 'decision_b_1'
 const FINGERPRINT = 'sha16:0123456789abcdef'

@@ -110,8 +110,8 @@ const PROJECT_A_NO = '200000006'
 const PROJECT_A_NAME = '示例乙型容器'
 const PROJECT_A_ID = 'stockprep_project_a1'
 // A second tenant-A project with NOTHING pending — G-10's "genuinely nothing pending" case.
-const PROJECT_A2_NO = '230920007'
-const PROJECT_A2_NAME = 'RY2纯化水储罐部件'
+const PROJECT_A2_NO = '200000007'
+const PROJECT_A2_NAME = '示例甲型支架'
 const PROJECT_A2_ID = 'stockprep_project_a2'
 
 // ---------------------------------------------------------------------------
@@ -132,8 +132,8 @@ const MAIN_FIELD_ID_MAP = Object.freeze({
 })
 
 /** Two projects that exist ONLY in the pull target — the self-service main line F1 describes. */
-const PROJECT_A3_NO = '230920008'
-const PROJECT_A4_NO = '230920009'
+const PROJECT_A3_NO = '200000008'
+const PROJECT_A4_NO = '200000009'
 
 /**
  * A PART NAME planted in the pull target's own `componentName` column.

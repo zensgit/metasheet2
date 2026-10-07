@@ -86,7 +86,7 @@ const QUEUE_URL = '/api/integration/stock-preparation/confirmation-decisions'
 
 // The real shape of the problem: a number nobody remembers, and the name everybody uses.
 const P1 = { no: '200000006', name: '示例乙型容器' }
-const P2 = { no: '230920007', name: 'RY2纯化水储罐部件' }
+const P2 = { no: '200000007', name: '示例甲型支架' }
 
 function project(entry: { no: string; name: string }, pendingDecisionCount: number) {
   return {

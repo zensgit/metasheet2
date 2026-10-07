@@ -1454,7 +1454,7 @@ describe('项目备料页 — the operator project board', () => {
   it('B-15: an in-flight refresh cannot land on a newly opened project', async () => {
     // The refresh's board read is held open; while it is in flight the operator opens ANOTHER
     // project, which resolves first. When the stale answer finally arrives it must be dropped.
-    const OTHER_NO = '230920099'
+    const OTHER_NO = '200000099'
     let releaseStale: (() => void) | null = null
     const stale = new Promise<void>((resolve) => { releaseStale = resolve })
     let boardReads = 0
