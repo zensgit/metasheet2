@@ -112,3 +112,44 @@ The constructed native writer is ordinary view PATCH, with common assertion/cens
 not a new native race qualification for every writer. Dead legacy claim/set exports, bypass options,
 owner release protocol and runtime pool options remain unchanged. No full backup/restore, new-source
 APFS, independent provider/KMS, Ready, merge, enablement, deployment or staging acceptance is claimed.
+
+## Ordinary CI cleanup-fixture correction
+
+Run37573708592 at original head `0e8f5c26c552df350c70c81a4f6729efa346350d` is terminal
+FAILURE. Both Node lanes actually passed the new115 named admission cases, but each failed the same
+nine existing `multitable-attachment-cleanup.test.ts` cases. Each core unit summary is9 failed,
+18403 passed and1712 skipped. The core failure skipped the manual-checkpoint and multitable real-DB
+steps: no whole archive/native16 execution is claimed from this run. Four other executed jobs
+succeeded; coverage was a seventh metadata-only skip. Root independently verified all11 source
+blobs, immutable commit/tree and exact checkouts, all6 full continuous206 raw logs and actual
+failures. Original source/failure receipts remain retained; no old-run retry.
+
+The cleanup cases supply their own transaction query mocks. Eight handlers answer the fence/state/
+attachment/pin queries but throw on the new SHOW isolation and two native-xid proof queries. The
+fresh admission guard correctly closes before attachment inspection. Root reproduced the whole
+original16 file as7 PASS/9 matching FAIL, then added only16 mock-reply lines: RC and one stable xid
+per supplied transaction. All16 original cases, assertions, error/negative branches and ordering
+remain byte-identical after removal of those replies. No guard, product, native fixture/test,
+workflow, provenance pin or baseline scanner changed.
+
+The exact previous nine whole focused files plus cleanup16 now pass441 assertions in10 files,
+zero skips, actual exit0. An initial command selected a wrong writer-closure filename and generic
+provisioning29 instead of the required writer-closure20/provisioning-writer-fence21: its actual
+429 PASS in9 files is preserved and is not441 evidence. The corrected collection explicitly checks
+all10 existing paths and each whole-file count. Production/fresh-admission targeted TypeScript,
+`pnpm validate:all` and `git diff --check` exit0. A separate standalone check of the old cleanup
+fixture has the same11 diagnostics before and after correction: six existing mock-type diagnostics
+and five project request-augmentation diagnostics. It is not a clean TypeScript result; original
+and corrected compiler logs/source archives remain retained, with no new diagnostic introduced.
+
+The native16/5 refutations and official stopped-PG evidence above stay source-valid; the runtime and
+native inputs are unchanged and the cluster is not restarted for this unit-fixture correction.
+A unique ordinary run on the corrected commit is still required. Draft/HOLD and all overall
+TM/APFS/owner gates remain OPEN.
+
+Original ordinary CI evidence index SHA256:
+`74d659881dba82deb634ab04f68908f1c76fb68586e56c005f1efce4a378984d`.
+Root failed-CI readback SHA256:
+`53a89f12ade9ff5c2e52e2521b147d0602e03d41d8b7c28e49d8a22fac80c889`.
+Correction commands and preserved intermediate failures are under
+`artifacts/tm-fresh-writer-admission-20261007/ci-cleanup-mock-fix-20261007/`.
