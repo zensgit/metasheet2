@@ -857,9 +857,11 @@ jobs:
       - name: Run type checking
         if: matrix.node-version == '20.x'
         env:
-          # `vue-tsc -b` on apps/web ran out of Node's default (~2 GB) heap twice on 2026-10-07,
-          # ~50 minutes into the job, on two unrelated PRs. The GitHub-hosted runner has 7 GB;
-          # give the type checker 4 GB so a borderline heap does not throw away the whole job.
+          # GitHub-hosted runners for a PRIVATE repository are 2 vCPU / 8 GB (public ones were
+          # 4 / 16), so Node's default heap dropped to ~2 GB and `vue-tsc -b` on apps/web began to
+          # OOM here on 2026-10-07, the day the repository went private. 4 GB covers the three
+          # vue-tsc runs of `pnpm type-check`; apps/web's `build` script sets its own heap, which
+          # also fixes the seven other workflows that build the web app.
           NODE_OPTIONS: --max-old-space-size=4096
         run: |
           pnpm type-check
