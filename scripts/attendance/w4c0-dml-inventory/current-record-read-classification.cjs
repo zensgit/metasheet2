@@ -10,6 +10,38 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // #4840: operator, QA, and staging reads use exact path/symbol identity and pinned multiplicity.
+  entry('scripts/attendance/execute-ops-retirement-cleanup.cjs', 'main', 1, 'operator_cleanup'),
+  entry('scripts/attendance/generate-cleanup-sql.cjs', 'buildCleanupSql', 1, 'operator_cleanup'),
+  entry('scripts/attendance/w4c2-qa/qa-residue-check.sql', '(module-scope)', 2, 'qa_read_check'),
+  entry('scripts/attendance/w4c2-qa/w4c2-roster-read-side-reconciliation.sql', '(module-scope)', 1, 'qa_read_check'),
+  entry('scripts/ops/attendance-staging-window-runner-remote.sh', '(module-scope)', 16, 'staging_window_verification'),
+  entry('scripts/ops/attendance-staging-window-runner-remote.sh', 'pg', 5, 'staging_window_verification'),
+  entry('scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs', 'recordById', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs', 'residueCounts', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-ae4-result-edit-smoke.mjs', 'row', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-auto-shift-a2-smoke.mjs', 'cleanup', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-dispatch-d5-smoke.mjs', 'residue', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-dispatch-d5-smoke.mjs', 'row', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs', 'cleanup', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-inout-merge-s2-3-smoke.mjs', 'rec', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs', 'row', 2, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-makeup-punch-mp6-smoke.mjs', 'runApprovalAdjustedRecord', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs', 'row', 2, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-multi-shift-m5-smoke.mjs', 'residueCounts', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs', 'assertSettlementPopulationSynthetic', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-overtime-bank-v18-smoke.mjs', 'row', 3, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-overtime-segmentation-o6-smoke.mjs', 'cleanup', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-report-sync-a2-smoke.mjs', 'preflightNoExistingResidue', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-report-sync-a2-smoke.mjs', 'residueCounts', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs', 'detail', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs', 'main', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs', 'residue', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-shift-swap-sw5-smoke.mjs', 'row', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-temporary-shift-t6-smoke.mjs', 'residue', 1, 'staging_smoke_verification'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'cleanupStagingAttendanceScope', 2, 'staging_teardown'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'countW4ImmutableAttendanceRows', 1, 'staging_teardown'),
+  entry('scripts/ops/staging-attendance-tooling-teardown.mjs', 'runStagingAttendanceRecordTeardown', 1, 'staging_teardown'),
   // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),
@@ -91,10 +123,6 @@ function classifyAttendanceRecordReadSites(
   for (const site of sites) {
     if (site.table === 'attendance_current_records') {
       classifiedSites.push({ ...site, posture: 'current', role: 'ordinary_current_view' })
-      continue
-    }
-    if (site.relPath.startsWith('scripts/')) {
-      classifiedSites.push({ ...site, posture: 'historical', role: 'operator_fixture_or_audit' })
       continue
     }
     if (site.relPath.includes('/migrations/')) {
