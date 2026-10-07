@@ -68,4 +68,7 @@ jobs:
           tests/integration/task-read-path.db.test.ts
           tests/integration/task-completion-grid.db.test.ts
           tests/integration/task-rbac-trust.db.test.ts
+          tests/integration/task-m3-tree.db.test.ts
+          tests/integration/task-m3-membership.db.test.ts
+          tests/integration/task-m3-comments-deletion.db.test.ts
           --reporter=verbose

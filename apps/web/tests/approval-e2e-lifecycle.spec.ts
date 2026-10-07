@@ -50,6 +50,28 @@ vi.mock('vue-router', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// ElMessage stub. A real ElMessage mounts its own toast into document.body (outside `app`, so the
+// afterEach unmount never reaches it) with a ~3 s auto-close timer. On a slow runner that timer
+// fires after this file's jsdom environment is torn down; the toast's leave transition then calls
+// requestAnimationFrame, which no longer exists, and vitest records an unhandled ReferenceError
+// that fails the whole lane although every test passed. No test here asserts on toast DOM, so
+// only ElMessage is replaced; every other export (ElMessageBox, ElSkeleton, ElIcon, …) stays real.
+// ---------------------------------------------------------------------------
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
+    }),
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Approval store mock
 // ---------------------------------------------------------------------------
 const mockActiveApproval = ref<any>(null)
