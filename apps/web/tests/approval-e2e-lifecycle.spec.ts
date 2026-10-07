@@ -55,7 +55,7 @@ vi.mock('vue-router', async () => {
 // fires after this file's jsdom environment is torn down; the toast's leave transition then calls
 // requestAnimationFrame, which no longer exists, and vitest records an unhandled ReferenceError
 // that fails the whole lane although every test passed. No test here asserts on toast DOM, so
-// only ElMessage is replaced; every other export (ElDialog etc.) stays real.
+// only ElMessage is replaced; every other export (ElMessageBox, ElSkeleton, ElIcon, …) stays real.
 // ---------------------------------------------------------------------------
 vi.mock('element-plus', async () => {
   const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
