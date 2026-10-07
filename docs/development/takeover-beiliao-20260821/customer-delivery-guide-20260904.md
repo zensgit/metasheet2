@@ -226,7 +226,7 @@ PathExAttrInfo.FileCode(NodeType=2 项目节点) → PathInfo → OrderHeadInfo 
 
 - `maxReadCount` 在启用该块时必填,否则后端拒绝整份动作配置;三个 `maxSubtree*` 有代码硬顶(深度 4、节点 2000、根 500)。
 - 改完按 §7.1 的写法重载 env 再重启;试算证据里出现 `expansion.summary.subtree`(nodesVisited / rootsDiscovered / rootsExpanded)即生效。
-- 222 实测(2026-09-06,项目 2-20231625):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
+- 222 实测(2026-09-06,项目 <项目号B>):开启前 0 行,开启后 6 张表头全部发现、135 行展开、225 项因缺件挂起。详见 `222-w2-subtree-evidence-20260906.md`。
 - 关闭方法:删掉该块并重启,行为与 r9 逐字节相同。
 
 ### 3.2 每日定时拉取(只试算,不写入)
