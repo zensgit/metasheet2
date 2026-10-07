@@ -53,6 +53,10 @@ const files = [
     sentinel: 'recovery_archive_writer_block_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
+    sentinel: 'recovery_archive_bounded_source_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
     sentinel: 'recovery_archive_legal_hold_realdb_harness_missing_database_url',
   },

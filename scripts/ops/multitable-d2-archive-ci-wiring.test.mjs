@@ -46,6 +46,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
@@ -196,6 +197,34 @@ test('archive roster contract rejects dropping D4 reconstruction from no-DB excl
     '',
   )
   assert.notEqual(dropped, config, 'D4 reconstruction exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping bounded capture from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-bounded-source-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'bounded capture removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping bounded capture from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'bounded capture exclusion removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true
