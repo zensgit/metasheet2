@@ -189,9 +189,15 @@ assert.equal(
 )
 
 // ---------------------------------------------------------------------------
-// 3. Permissions: exactly the frozen set, and zero automatic holders.
+// 3. Permissions: exactly the two enforced vocabularies, and zero automatic holders.
 // ---------------------------------------------------------------------------
 
+// `permissions` is the BOM备料 application's OWN vocabulary and nothing else. It is not a list of
+// every code the plugin's routes happen to check: the delivery UI reads exactly this array to tell a
+// customer admin which codes to put on the 一线 role (installPlan.ts -> permissions.codes, rendered
+// by StockPreparationInstallView 「装好之后谁能做什么」 and GettingStarted 第⑤步「谁能用」, whose
+// copy is hard-coded to 「这三项权限」). Widening it would hand out wrong grant guidance, so the
+// platform tier lives in `platformPermissions` below instead.
 assert.deepEqual(
   [...manifest.permissions].sort(),
   [...STOCK_PREP_PERMISSION_CODES].sort(),
@@ -203,6 +209,63 @@ for (const code of manifest.permissions) {
     `declared permission ${code} is not in the frozen set — the gate would refuse it for everyone, admins included`,
   )
 }
+// G09 — the LEGACY PLATFORM TIER this plugin's routes also gate on. Declared separately from the
+// app's own vocabulary (above) and derived here from the running gate rather than transcribed. Why
+// it matters: an enforced-but-unseeded code cannot be granted at all, because
+// role_permissions/user_permissions carry a FOREIGN KEY onto permissions(code).
+//
+// SCOPE OF THIS TRIPWIRE, stated so nobody reads it as more than it is. It reds when a gate written
+// as a QUOTE-DELIMITED LITERAL (' " `) INSIDE lib/http-routes.cjs grows a new `integration:<action>`
+// that the manifest and the seed migration have not followed. It does NOT see a code assembled at
+// runtime (concatenation, variable, interpolated template), nor one added in any other file of this
+// plugin. Those routes remain possible and would reintroduce the G09 bug silently.
+const INTEGRATION_GATE_SOURCE = fs.readFileSync(path.join(PLUGIN_DIR, 'lib', 'http-routes.cjs'), 'utf8')
+const INTEGRATION_GATE_CODES = [
+  ...new Set(
+    [...INTEGRATION_GATE_SOURCE.matchAll(/['"`](integration:[a-z_]+)['"`]/g)].map((match) => match[1]),
+  ),
+].sort()
+assert.ok(
+  INTEGRATION_GATE_CODES.length > 0,
+  'the integration gate literals must be parseable from lib/http-routes.cjs — an empty parse would make the next assertion vacuous',
+)
+assert.ok(manifest.platformPermissions, 'the manifest must declare the platform tier its routes enforce')
+assert.deepEqual(
+  [...manifest.platformPermissions.codes].sort(),
+  INTEGRATION_GATE_CODES,
+  'platformPermissions.codes must be exactly the integration codes lib/http-routes.cjs compares against',
+)
+assert.ok(
+  fs.existsSync(path.join(REPO_ROOT, manifest.platformPermissions.seededBy)),
+  'platformPermissions.seededBy must name a migration file that exists — an unseeded code is ungrantable',
+)
+const INTEGRATION_SEED_SOURCE = fs.readFileSync(
+  path.join(REPO_ROOT, manifest.platformPermissions.seededBy),
+  'utf8',
+)
+for (const code of manifest.platformPermissions.codes) {
+  assert.ok(
+    INTEGRATION_SEED_SOURCE.includes(`('${code}',`),
+    `${code} is enforced by this plugin but the named migration does not seed it — it would be ungrantable`,
+  )
+}
+assert.deepEqual(
+  manifest.platformPermissions.automaticHolders,
+  [],
+  'seeding the platform tier grants it to NOBODY',
+)
+// The two vocabularies must stay disjoint, and the app array must never absorb the platform tier.
+for (const code of manifest.permissions) {
+  assert.ok(
+    !INTEGRATION_GATE_CODES.includes(code),
+    `${code} is a platform-tier code and must not appear in the app's own permissions array`,
+  )
+}
+assert.ok(
+  !manifest.permissions.some((code) => code.startsWith('data_sources:')),
+  'data_sources:* is gated by the CORE rbacGuard in packages/core-backend/src/routes/data-sources.ts, not by this plugin',
+)
+
 assert.ok(manifest.permissionPolicy, 'the manifest must state who holds these codes on install')
 assert.deepEqual(
   manifest.permissionPolicy.automaticHolders,
