@@ -55,6 +55,28 @@ vi.mock('vue-router', async () => {
   }
 })
 
+// ElMessage stub (same flake and fix as approval-e2e-lifecycle.spec.ts). A real toast is mounted
+// into document.body, outside the test app, and closes itself after ~3 s. When that timer fires
+// after this file's jsdom environment is torn down, the toast's leave transition calls the missing
+// requestAnimationFrame and vitest fails the lane with an unhandled ReferenceError although every
+// test passed. No test here asserts on toast DOM, so only ElMessage is replaced; every other
+// element-plus export stays real.
+// The `vi.spyOn(ElMessage, 'error')` tests below spy on this stub's method, so their call
+// assertions still see every call the views make.
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
+    }),
+  }
+})
+
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({ hasFeature: () => false }),
 }))
