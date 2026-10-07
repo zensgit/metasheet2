@@ -1,0 +1,132 @@
+name: Approval real-DB acceptance (P4(2) phase 0 admin capability resolver)
+
+# EVIDENCE LANE for P4(2) phase 0 — collapsing the approval admin-capability route guards
+# (`approvalTemplateAdminGuard` = `rbacGuardAny([...])`, two bare `rbacGuard('approvals:admin')`)
+# into `resolveApprovalAdminCapability` / `approvalAdminCapabilityGuard`
+# (`services/approval-admin-capability.ts`), per `census-tiered-admin-20260915.md` (Q1) and
+# `p4-2-tiered-admin-design-draft-20260915.md` (§3.2/§3.4/§4).
+#
+#   - tests/integration/approval-admin-capability-resolver-phase0.db.test.ts — real HTTP, real
+#     seeded viewers (DB rows: a `user_roles` admin row, a `user_permissions` row per capability
+#     code, and a bare row) against four representative routes (one per shared guard reference:
+#     template, process, data, and the unchanged member-groups exception as a negative control),
+#     asserting byte-for-byte parity against a frozen transcript of the SAME routes run against the
+#     UNMODIFIED pre-resolver tree. Zero DDL — no migration accompanies this slice.
+#
+# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
+# every edit forces an s6a re-pin and a merge-serialisation race (feedback_s6a_pin_is_a_merge_bottleneck).
+# This mirrors the approval-realdb-comments.yml / approval-realdb-list-scope.yml precedent.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job reports "No test files found" for this path rather than silently
+# skip-greening a describeIfDatabase suite. This workflow is where the suite actually executes,
+# with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the S1/S2 precedent: a `merge_group` event does not
+  # honour the `paths` filter the way `pull_request` does.
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/services/approval-admin-capability.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/routes/approval-metrics.ts'
+      - 'packages/core-backend/src/routes/admin-users.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/tests/integration/approval-admin-capability-resolver-phase0.db.test.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-admin-capability-resolver.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/services/approval-admin-capability.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/routes/approval-metrics.ts'
+      - 'packages/core-backend/src/routes/admin-users.ts'
+      - 'packages/core-backend/src/rbac/rbac.ts'
+      - 'packages/core-backend/src/rbac/service.ts'
+      - 'packages/core-backend/src/rbac/namespace-admission.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/tests/integration/approval-admin-capability-resolver-phase0.db.test.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-admin-capability-resolver.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-admin-capability-resolver:
+    name: approval-realdb-admin-capability-resolver
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run P4(2) phase 0 admin-capability-resolver real-DB acceptance (whole file)
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-admin-capability-resolver-phase0.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-admin-capability-resolver-phase0.db.test.ts"
+            echo "scope=P4(2) phase 0 — approval admin capability resolver collapse, zero-behavior-change parity across template/process/data guard sites plus the member-groups negative control"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+            echo "ddl=NONE"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
