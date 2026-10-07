@@ -18,12 +18,16 @@
  */
 
 import { Logger } from '../core/logger'
-import { query as dbQuery } from '../db/pg'
+import { query as dbQuery, transaction as dbTransaction } from '../db/pg'
 // 缺表/缺列守卫改用 utils/database-errors 的共享实现:SQLSTATE 主判 + 只用 message 核对
 // 标识符。原来的列守卫把 code 与英文散文 `message.startsWith('column ')` 做 AND,中文
 // locale(PG lc_messages=Chinese)下散文是「字段 x 不存在」,AND 恒为 false,pre-migration
 // 的清理任务会直接抛错而不是降级返回 0。
 import { isUndefinedColumnError, isUndefinedTableError } from '../utils/database-errors'
+import { archiveSourceProtectionEnabled } from './attachment-purge-claim'
+import { sweepProtectedTombstoneRetention, type RetentionTransactionRunner, type TombstoneRetentionTable } from './meta-tombstone-retention-admission'
+
+export type { RetentionTransactionRunner } from './meta-tombstone-retention-admission'
 
 export type RetentionQueryFn = (
   sql: string,
@@ -219,11 +223,15 @@ export const META_LINK_TOMBSTONE_RETENTION_TABLE = 'meta_link_tombstones'
 async function sweepTombstoneTableRetention(
   query: RetentionQueryFn,
   config: MetaRevisionRetentionConfig,
-  table: string,
+  table: TombstoneRetentionTable,
+  transaction?: RetentionTransactionRunner,
 ): Promise<number> {
   if (!config.enabled) return 0
   const batchSize = Math.max(1, Math.floor(config.batchSize))
   const days = Math.max(META_REVISION_RETENTION_MIN_DAYS, Math.floor(config.retentionDays))
+  if (archiveSourceProtectionEnabled()) {
+    return sweepProtectedTombstoneRetention(query, { days, batchSize }, table, transaction)
+  }
   const anchorColumn = table === META_LINK_TOMBSTONE_RETENTION_TABLE ? 'source_revision_id' : 'config_revision_id'
   try {
     // 4c-3 §6 — WHOLE-GROUP pruning (fixes 4c-2's torn-set defect): the old shape
@@ -319,15 +327,17 @@ async function sweepTombstoneTableRetention(
 export async function sweepFieldValueTombstoneRetention(
   query: RetentionQueryFn,
   config: MetaRevisionRetentionConfig,
+  transaction?: RetentionTransactionRunner,
 ): Promise<number> {
-  return sweepTombstoneTableRetention(query, config, META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE)
+  return sweepTombstoneTableRetention(query, config, META_FIELD_VALUE_TOMBSTONE_RETENTION_TABLE, transaction)
 }
 
 export async function sweepLinkTombstoneRetention(
   query: RetentionQueryFn,
   config: MetaRevisionRetentionConfig,
+  transaction?: RetentionTransactionRunner,
 ): Promise<number> {
-  return sweepTombstoneTableRetention(query, config, META_LINK_TOMBSTONE_RETENTION_TABLE)
+  return sweepTombstoneTableRetention(query, config, META_LINK_TOMBSTONE_RETENTION_TABLE, transaction)
 }
 
 /** Default sweep cadence (24h), env-overridable, clamped to [1m, 24h]. */
@@ -342,6 +352,7 @@ function resolveIntervalMs(raw: string | undefined): number {
 export interface MetaRevisionRetentionSchedulerOptions {
   logger?: Logger
   query?: RetentionQueryFn
+  transaction?: RetentionTransactionRunner
   intervalMs?: number
   env?: NodeJS.ProcessEnv
 }
@@ -362,6 +373,7 @@ export function startMetaRevisionRetention(options: MetaRevisionRetentionSchedul
     return () => {}
   }
   const queryFn = options.query ?? (dbQuery as unknown as RetentionQueryFn)
+  const transaction = options.transaction ?? (options.query ? undefined : dbTransaction as RetentionTransactionRunner)
   const intervalMs = options.intervalMs ?? resolveIntervalMs(env.MULTITABLE_META_REVISION_RETENTION_INTERVAL_MS)
   const runSweep = () => {
     // T9 D4: one knob ages BOTH append-only logs. Sweep record revisions AND config/schema
@@ -379,11 +391,11 @@ export function startMetaRevisionRetention(options: MetaRevisionRetentionSchedul
     // 4c-2 C6: the two tombstone tables age under the SAME knob (always keep-days — see sweepTombstoneTableRetention
     // doc-comment), isolated from the two sweeps above and from each other.
     void Promise.resolve()
-      .then(() => sweepFieldValueTombstoneRetention(queryFn, config))
+      .then(() => sweepFieldValueTombstoneRetention(queryFn, config, transaction))
       .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} field-value tombstone(s)`) })
       .catch((error) => logger.warn('Field-value tombstone retention sweep failed', error as Error))
     void Promise.resolve()
-      .then(() => sweepLinkTombstoneRetention(queryFn, config))
+      .then(() => sweepLinkTombstoneRetention(queryFn, config, transaction))
       .then((deleted) => { if (deleted > 0) logger.info(`Meta-revision retention pruned ${deleted} link tombstone(s)`) })
       .catch((error) => logger.warn('Link tombstone retention sweep failed', error as Error))
   }

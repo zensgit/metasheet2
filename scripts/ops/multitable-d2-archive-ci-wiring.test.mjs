@@ -51,6 +51,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
@@ -341,6 +342,34 @@ test('archive roster contract rejects dropping foreign-sheet recovery admission 
     '',
   )
   assert.notEqual(dropped, config, 'foreign-sheet recovery admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping tombstone retention admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-retention-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'tombstone retention admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping tombstone retention admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'tombstone retention admission exclusion removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true
