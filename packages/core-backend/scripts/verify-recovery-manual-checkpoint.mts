@@ -778,6 +778,13 @@ try {
   await db.transaction().execute(manualRequestMigration.up)
   console.log('PASS: immutable manual request binding; new-connection lookup; two-connection retry; actor isolation and scope/generation conflict; transaction and nonempty-down guards')
   const admissionPolicy = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 3600, expiresAfterSeconds: 7200 }
+  // Explicit synthetic acceptance policy, never production fallback values.
+  const manualCaptureLimits = { maxBytes: 64 * 1024 * 1024, timeoutMs: 60000 }
+  const manualOwned = { pool: downloadPool.getInternalPool(), limits: manualCaptureLimits }
+  const readWriterBlock = async (sheetId: string) => (await query(`SELECT recovery_writer_state AS state,
+    recovery_writer_owner_kind AS kind,recovery_writer_owner_id AS id,recovery_writer_owner_fence::text AS fence,
+    recovery_writer_lease_until::text AS lease,recovery_writer_updated_at::text AS updated
+    FROM meta_sheets WHERE id=$1`, [sheetId])).rows[0]
   const admit = createRecoveryArchiveManualAdmission(uploadInput.transaction, admissionPolicy)
   const admissionRequest = { ...request, requestId: randomUUID(), sheetId: 'no-genesis' }
   const generationCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archives')).rows[0].n as number
@@ -1319,7 +1326,7 @@ try {
           return { ...stored, bytes }
         } }, transactionDepth: first.transactionDepth }
       const command = createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
-        { ...admissionPolicy, keyId: capability.keyId })
+        { ...admissionPolicy, keyId: capability.keyId }, manualOwned)
       const commandIdentity = { ...localInput.identity, requestId: randomUUID() }
       const archiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       const fenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
@@ -1329,6 +1336,20 @@ try {
         process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
         await assert.rejects(createRecoveryArchiveManualCommand(uploadInput.transaction, runtime).capture(commandIdentity),
           { message: 'RECOVERY_ARCHIVE_MANUAL_POLICY_UNAVAILABLE' })
+        const unownedEffectsSql = `SELECT
+          (SELECT count(*) FROM meta_recovery_archives)::int AS generations,
+          (SELECT count(*) FROM meta_recovery_archive_manual_requests)::int AS requests,
+          (SELECT count(*) FROM meta_recovery_archive_attachment_refs)::int AS pins,
+          (SELECT count(*) FROM meta_recovery_archive_nonce_reservations)::int AS nonces,
+          (SELECT count(*) FROM meta_recovery_archive_prepared_captures)::int AS prepared,
+          (SELECT count(*) FROM meta_recovery_archive_objects)::int AS objects`
+        const beforeUnowned = (await query(unownedEffectsSql)).rows
+        const blockBeforeUnowned = await readWriterBlock(commandIdentity.sheetId)
+        await assert.rejects(createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
+          { ...admissionPolicy, keyId: capability.keyId }).capture(commandIdentity),
+        { message: 'RECOVERY_ARCHIVE_CAPTURE_POLICY_INVALID' })
+        assert.deepEqual((await query(unownedEffectsSql)).rows, beforeUnowned)
+        assert.deepEqual(await readWriterBlock(commandIdentity.sheetId), blockBeforeUnowned)
         await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_NOT_FOUND' })
         const completed = await command.capture(commandIdentity)
         assert.deepEqual(completed, { requestId: commandIdentity.requestId, generationId: completed.generationId, state: 'recoverable' })
@@ -1337,18 +1358,44 @@ try {
         assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
           [completed.generationId])).rows[0].n, 11)
         const interruptedIdentity = { ...commandIdentity, requestId: randomUUID() }
+        let interruptedPuts = 0
+        let interruptedBlock: Awaited<ReturnType<typeof readWriterBlock>>
         const interruptedCommand = createRecoveryArchiveManualCommand(uploadInput.transaction,
-          { ...runtime, objectStore: { ...localProvider, async put() { throw new Error('SYNTHETIC_COMMAND_UPLOAD_INTERRUPTION') } } },
-          { ...admissionPolicy, keyId: capability.keyId })
-        await assert.rejects(interruptedCommand.capture(interruptedIdentity))
+          { ...runtime, objectStore: { ...localProvider, async put() {
+            interruptedPuts++
+            interruptedBlock = await readWriterBlock(interruptedIdentity.sheetId)
+            throw new Error('SYNTHETIC_COMMAND_UPLOAD_INTERRUPTION')
+          } } }, { ...admissionPolicy, keyId: capability.keyId }, manualOwned)
+        await assert.rejects(interruptedCommand.capture(interruptedIdentity),
+          { message: 'RECOVERY_ARCHIVE_OWNED_GENERATION_REFUSED' })
         const interruptedStatus = await command.read(interruptedIdentity)
-        assert.equal(interruptedStatus.state, 'pending')
-        const payloadBefore = (await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
-          [interruptedStatus.generationId])).rows[0].payload_sha256
-        assert.deepEqual(await command.capture(interruptedIdentity), { ...interruptedStatus, state: 'recoverable' })
-        assert.equal((await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
-          [interruptedStatus.generationId])).rows[0].payload_sha256, payloadBefore)
+        assert.equal(interruptedStatus.state, 'incomplete')
+        assert.equal(interruptedPuts, 1)
+        assert.equal(interruptedBlock.state, 'archiving')
+        assert.equal(interruptedBlock.kind, 'archive_generation')
+        assert.equal(interruptedBlock.id, interruptedStatus.generationId)
+        const releasedBlock = { state: null, kind: null, id: null, fence: interruptedBlock.fence, lease: null, updated: null }
+        assert.deepEqual(await readWriterBlock(interruptedIdentity.sheetId), releasedBlock)
+        const failedStateSql = `SELECT state,build_status,coverage_status,root_hash,manifest_mac
+          FROM meta_recovery_archives WHERE generation_id=$1::uuid`
+        const failedState = { state: 'building', build_status: 'abandoned', coverage_status: 'incomplete', root_hash: null, manifest_mac: null }
+        assert.deepEqual((await query(failedStateSql, [interruptedStatus.generationId])).rows, [failedState])
+        const payloadSql = 'SELECT payload,payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid'
+        const payloadBefore = (await query(payloadSql, [interruptedStatus.generationId])).rows
+        assert.equal(payloadBefore.length, 1)
+        const nonceSql = `SELECT * FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid ORDER BY section_name`
+        const noncesBefore = (await query(nonceSql, [interruptedStatus.generationId])).rows
+        assert.deepEqual(await interruptedCommand.capture(interruptedIdentity), interruptedStatus)
+        assert.deepEqual(await command.capture(interruptedIdentity), interruptedStatus)
+        assert.equal(interruptedPuts, 1, 'duplicate owned requests are status-only after handled failure')
+        assert.deepEqual((await query(payloadSql, [interruptedStatus.generationId])).rows, payloadBefore)
+        assert.deepEqual((await query(nonceSql, [interruptedStatus.generationId])).rows, noncesBefore)
         assert.equal(await nonceCount(interruptedStatus.generationId), 10)
+        assert.deepEqual((await query(failedStateSql, [interruptedStatus.generationId])).rows, [failedState])
+        assert.deepEqual(await readWriterBlock(interruptedIdentity.sheetId), releasedBlock)
+        assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
+          [interruptedStatus.generationId])).rows[0].n, 0)
+        console.log('PASS: handled owned PUT failure abandons only its generation, releases its block, retains prepared ciphertext/nonces, and duplicate requests remain status-only')
         await assert.rejects(command.read({ ...commandIdentity, sheetId: 's' }), { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
         await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
         await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
@@ -1376,11 +1423,12 @@ try {
           next()
         })
         // Browser status/catalog requests overlap: each transaction owns its connection.
-        const httpPool = new Pool({ ...connection, database, max: 4 })
+        const httpPool = new Pool({ ...connection, database, max: 4, connectionTimeoutMillis: 5000 })
         const httpDepth = new AsyncLocalStorage<number>()
         const httpProbe = { currentTransactionDepth: () => httpDepth.getStore() ?? 0 }
         const httpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
           query: (text, params) => httpPool.query(text, params),
+          nativePool: httpPool,
           transactionDepthProbe: httpProbe,
           async transaction(work) {
             const owned = await httpPool.connect()
@@ -1398,7 +1446,8 @@ try {
         httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: { ...runtime, transactionDepth: httpProbe },
           recoveryArchiveDatabaseRuntime: httpDatabase,
           recoveryArchiveAuditedReplayHorizonMs: 60000, // Synthetic fixture policy, never a runtime default.
-          recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId } }))
+          recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId },
+          recoveryArchiveManualCaptureLimits: manualCaptureLimits }))
         const httpServer = httpApp.listen(0, '127.0.0.1')
         try {
           await new Promise<void>((resolve, reject) => { httpServer.once('listening', resolve); httpServer.once('error', reject) })
@@ -1949,7 +1998,10 @@ try {
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
-        admissionPolicy, async (key) => { commandSourceReads++; return sourceStorage.readContentAddressed(key) })
+        admissionPolicy, undefined, { ...manualOwned, readContentAddressedBounded: async (key, maxBytes) => {
+          commandSourceReads++
+          return sourceStorage.readContentAddressedBounded(key, maxBytes)
+        } })
       const commandRequest = { ...admissionRequest, requestId: randomUUID() }
       const commandStatus = await attachmentCommand.capture(commandRequest)
       assert.equal(commandStatus.state, 'recoverable')
@@ -1994,11 +2046,12 @@ try {
         const injector = new Injector([[ICommentService, { useValue: comments }]])
         attachmentApp.use(commentsRouter(injector))
       }
-      const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
+      const attachmentHttpPool = new Pool({ ...connection, database, max: 4, connectionTimeoutMillis: 5000 })
       const attachmentHttpDepth = new AsyncLocalStorage<number>()
       const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
       const attachmentHttpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
         query: (text, params) => attachmentHttpPool.query(text, params),
+        nativePool: attachmentHttpPool,
         transactionDepthProbe: attachmentHttpProbe,
         async transaction(work) {
           const owned = await attachmentHttpPool.connect()
@@ -2018,6 +2071,7 @@ try {
         recoveryArchiveDatabaseRuntime: attachmentHttpDatabase,
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
+        recoveryArchiveManualCaptureLimits: manualCaptureLimits,
       }))
       attachmentApp.use('/api/multitable', createMultitableAiRoutes())
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
@@ -2489,7 +2543,7 @@ try {
                 createRecoveryArchiveComposition: () => ({
                   keyCustody: attachmentCustody, objectStore: attachmentProvider, attachmentStorage: sourceStorage,
                   auditedReplayHorizonMs: 60000, asyncResumeHorizonMs: 60000, workerIntervalMs: 60000,
-                  manualCapture: admissionPolicy,
+                  manualCapture: admissionPolicy, manualCaptureLimits,
                   worker: { ...createRecoveryArchiveWorkerCallbacks(resolveRecoveryArchiveMainPoolRuntime()),
                     leaseMs: 30000, replayHorizonMs: 60000, sweepLimit: 1, maxChunksPerRun: 1,
                     workerOwnerId: 'synthetic-full-app-worker' },
@@ -2540,13 +2594,18 @@ try {
         await rename(sourcePath, parkedPath)
         try {
           const unavailableRequest = randomUUID()
+          const blockBeforeUnavailable = await readWriterBlock(commandRequest.sheetId)
+          assert.equal(blockBeforeUnavailable.state, null)
           const unavailable = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ requestId: unavailableRequest }) })
           assert.equal(unavailable.status, 503)
           const failedGeneration = await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query,
             { ...commandRequest, requestId: unavailableRequest }))
           assert.ok(failedGeneration)
-          const failed = (await query('SELECT state,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [failedGeneration])).rows[0]
-          assert.deepEqual(failed, { state: 'building', coverage_status: 'incomplete' })
+          const failed = (await query('SELECT state,build_status,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [failedGeneration])).rows[0]
+          assert.deepEqual(failed, { state: 'building', build_status: 'abandoned', coverage_status: 'incomplete' })
+          assert.deepEqual(await readWriterBlock(commandRequest.sheetId), {
+            state: null, kind: null, id: null, fence: String(BigInt(blockBeforeUnavailable.fence) + 1n), lease: null, updated: null,
+          })
           assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1', [failedGeneration])).rows[0].n, 0)
           const retained = await pins(failedGeneration)
           assert.equal(retained.length, syntheticAttachments.length)
