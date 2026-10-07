@@ -155,12 +155,19 @@ not-yet-applied tail:
   outcome `already_applied` (distinct from `success`/`skipped` so the run detail is honest).
 - **Never claim** CONTROL-FLOW / INERT actions (`condition_branch`, `parallel_branch`, `wait_for_callback`,
   `record_click`) — they are pure/repeatable and must re-run to re-derive routing.
-- **Documented residual gap (accept, do not over-engineer in v1):** the mark is written *after* a successful
-  dispatch, so a crash in the narrow window `dispatched-OK → before-mark` can let one action re-fire on a
-  later retry. This is the **at-most-once-favoured** trade (same philosophy as the T2-6 claim-then-fire
-  at-most-once note at `automation-service.ts:1554`). `confirmSideEffects` still gates the human, and the
-  window is bounded to a single action. Stronger cross-target idempotency (webhook `Idempotency-Key`, DingTalk
-  dedup) is OUT OF SCOPE v1 (§10).
+- **Documented residual gap** — **⚠ CORRECTED 2026-07-12 (see the Rev-2 refresh `…-design-refresh-20260712.md`
+  §4 C2/C4, which is the authoritative amendment):** the mark is written *after* a successful dispatch, so a
+  crash in the narrow window `dispatched-OK → before-mark` leaves the row unmarked and the next retry
+  **re-fires** that one action. That is **at-LEAST-once (a bounded single-action *duplicate* window)** — the
+  original text here wrongly called it "at-most-once-favoured" and compared it to the T2-6 *claim-then-fire*
+  idiom; claim-*before*-fire would be at-most-once and would risk a silent *skip* (the opposite failure), so
+  the comparison was also wrong. The **choice of durability trade is re-opened** (mark-after-success
+  at-least-once ∣ claim-before-fire at-most-once ∣ two-phase claim→commit) as Rev-2 **Q3** — do not treat
+  mark-after-success as settled. Also **⚠**: the `action_key = reuse computeActionFingerprint` note above is
+  insufficient — `computeActionFingerprint` hashes only the *sequence of action types* (no config, no
+  per-action position, no branch/parallel `step_key`); Rev-2 **§4 C4** replaces it with a normalized
+  structural step path + canonical config hash. `confirmSideEffects` still gates the human; stronger
+  cross-target idempotency (webhook `Idempotency-Key`, DingTalk dedup) stays OUT OF SCOPE v1 (§10).
 
 **L4.3 `confirmSideEffects` (keep).** The route keeps requiring `confirmSideEffects === true` (else `400
 CONFIRM_SIDE_EFFECTS_REQUIRED`). The confirm UX MUST state that retry re-fires only the **not-yet-applied**
