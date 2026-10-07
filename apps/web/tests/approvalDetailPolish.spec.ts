@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { ElMessage } from 'element-plus'
 
 // ---------------------------------------------------------------------------
 // B3-13 (batch-3 approval FE polish) — ApprovalDetailView behavior contracts:
@@ -223,7 +224,17 @@ describe('ApprovalDetailView — B3-13 curated FE polish', () => {
     document.body.appendChild(container)
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    // This file keeps the REAL ElMessage: three tests read the toast text out of document.body. A
+    // toast lives outside `app` and closes itself after ~3 s; if that timer fires after this file's
+    // jsdom environment is torn down, its leave transition calls the missing requestAnimationFrame
+    // and vitest fails the lane with an unhandled ReferenceError although every test passed. So each
+    // test closes its toasts here and lets the leave transition run to the end (two frames + one
+    // macrotask) while the environment is still alive. This also keeps one test's toast text from
+    // leaking into the next test's document.body assertions.
+    ElMessage.closeAll()
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0))))
     if (app) app.unmount()
     if (container) container.remove()
     app = null
