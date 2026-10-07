@@ -11,7 +11,7 @@
 | 5 | 另存模板想选整表/单视图；「使用模板」后出现多个同名 Base | **功能项 + 幂等缺口** | 222 上 4 个不同 base 各含一张模板生成的 `bom备料`；DELETE 无响应后重复点击 + 服务端无幂等 | #5861 |
 | 6 | 字段类型只支持文本↔长文本；面板高度不可调 | **功能项** | 转换矩阵未定义 | #5864 |
 | 7 | 冻结只有列没有行；冻结列后该列首行被固定 | **bug + 功能项** | 前端网格冻结实现 | #5863 |
-| 8/9 | 换项目号重拉后 All Records 对、三个视图仍是旧项目 | **设计与用法冲突** | 表 `bom备料2-20251773` 内：587 行旧项目 `有效=true` + 652 行新项目；`readExistingStockPreparationRows` 按 projectNo 读现有行，`mark_inactive` 只扫同项目；填充视图按 parentComponentCode 排序，旧行排前 | #5860（owner 三选一：表级守卫 / 替换项目模式 / 视图加项目过滤） |
+| 8/9 | 换项目号重拉后 All Records 对、三个视图仍是旧项目 | **设计与用法冲突** | 表 `bom备料<项目号E>` 内：587 行旧项目 `有效=true` + 652 行新项目；`readExistingStockPreparationRows` 按 projectNo 读现有行，`mark_inactive` 只扫同项目；填充视图按 parentComponentCode 排序，旧行排前 | #5860（owner 三选一：表级守卫 / 替换项目模式 / 视图加项目过滤） |
 
 ## 探针（可复跑，均只读）
 

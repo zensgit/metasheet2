@@ -16,7 +16,7 @@
 6. **定时拉取的服务账号必须租户绑定**:`requireTableActionAccess` 对持 integration legacyGate 的用户直接放行、跳过 operator-scope 租户校验,只剩 `resolveTenantId`;无租户声明的 token 会被 `x-tenant-id` 请求头决定租户。脚本发请求前解码(不验签)JWT payload,无 `tenantId` 声明即拒绝运行(`--allow-tenantless` 显式放开,默认关);runbook 同样写明。
 7. **`lastPulledAt` 的静默偏差**:`readPullTargetRowFacts` 分页到 `PULL_TARGET_MAX_PAGES` 后返回 `bounded:true`,此时对子集取 max 偏小且不可见。`bounded===true` 时不报 max:`lastPulledAt=null` + `lastPulledAtBounded:true`,前端显示"行数超过看板上限,未统计"。
 
-审查里被实证**推翻**的一条:第 10 条"仓库内无证据表明 `BomHeadInfo.path_id` 存在" —— 2026-09-05 在客户测试 PLM 上只读执行 `SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` 与 `SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` 均成功,列名以此为准(夹具同名)。第 12 条"缺件行不阻止 apply、静默丢 40–60%"与 222 实测不符:缺件行由规划器以 hold 进入确认队列,`plan.valid=false` → `manual_confirm_required`,apply 被挡(2026-09-04 项目 1-20232045 实测);保留为待复核而非事实。
+审查里被实证**推翻**的一条:第 10 条"仓库内无证据表明 `BomHeadInfo.path_id` 存在" —— 2026-09-05 在客户测试 PLM 上只读执行 `SELECT bom_id, part_id, path_id, SysVer FROM DN_PDM_BomHeadInfo` 与 `SELECT OBJ_ID, Parent_OBJ_ID FROM DN_PDM_PathInfo` 均成功,列名以此为准(夹具同名)。第 12 条"缺件行不阻止 apply、静默丢 40–60%"与 222 实测不符:缺件行由规划器以 hold 进入确认队列,`plan.valid=false` → `manual_confirm_required`,apply 被挡(2026-09-04 项目 <项目号C> 实测);保留为待复核而非事实。
 
 ## 1. 子树桥接方案
 
