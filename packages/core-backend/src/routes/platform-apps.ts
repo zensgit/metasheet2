@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { poolManager } from '../integration/db/connection-pool'
 import { tenantContext } from '../db/sharding/tenant-context'
 import { isElearningGlobalAdminRequest } from './elearning-admin-access'
+import { isElearningEnabled } from '../elearning/feature-flags'
 import { matchesAnyPermission, normalizePermissionCodes } from '../auth/permission-match'
 import type { PluginLoader } from '../core/plugin-loader'
 import {
@@ -26,8 +27,15 @@ type PlatformAppResponse = PlatformAppSummary & {
   instance: PlatformAppInstanceRecord | null
 }
 
+/**
+ * 云课堂 visibility. The master switch comes first and has no exception: while ELEARNING_ENABLED is
+ * not exactly 'true' every /api/elearning/* route is unmounted (index.ts), so a card would lead
+ * nowhere -- for a global administrator exactly as for anyone else. Keyed on the app id, so it holds
+ * whatever the manifest declares and whether or not a catalog predicate was injected.
+ */
 function visibleInstallation(req: Request, app: PlatformAppResponse): boolean {
   if (app.id !== 'elearning') return true
+  if (!isElearningEnabled()) return false
   const orgId = req.authenticatedTenantId
   if (typeof orgId !== 'string' || !orgId) return false
   if (isElearningGlobalAdminRequest(req)) return true
@@ -133,11 +141,12 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
 
   router.get('/', async (req: Request, res: Response) => {
     try {
+      // The injected predicate is authoritative for every caller. No role may turn its `false` into
+      // `true`: that override once showed global admins the elearning card with the switch off.
       const catalog = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
-        isCatalogFeatureEnabled: (flag) => flag === 'elearning' && isElearningGlobalAdminRequest(req)
-          ? true : options.isCatalogFeatureEnabled?.(flag),
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
       // Permission filter FIRST, before any instance lookup: an app the caller may not see must not
       // even reach the tenant-scoped `platform_app_instances` query as an id.
@@ -185,8 +194,7 @@ export function createPlatformAppsRouter(options: PlatformAppsRouterOptions): Ro
       const apps = await collectPlatformApps({
         loadedPlugins: options.pluginLoader.getPlugins().values(),
         pluginStatus: options.pluginStatus,
-        isCatalogFeatureEnabled: (flag) => flag === 'elearning' && isElearningGlobalAdminRequest(req)
-          ? true : options.isCatalogFeatureEnabled?.(flag),
+        isCatalogFeatureEnabled: options.isCatalogFeatureEnabled,
       })
       const app = apps.find((item) => item.id === req.params.appId)
       // No existence oracle: "you may not see it" and "it is not there" are the SAME 404 with the

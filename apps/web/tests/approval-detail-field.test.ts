@@ -631,7 +631,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000 }, { item_name: '', amount: 500 }],
-    })
+    }, true)
     expect(violations).toEqual(['"报销明细" 第 2 行缺少 "项目"'])
   })
 
@@ -639,7 +639,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '', amount: undefined }, { item_name: '酒店', amount: 300 }],
-    })
+    }, true)
     expect(violations).toEqual([
       '"报销明细" 第 1 行缺少 "项目"',
       '"报销明细" 第 1 行缺少 "金额"',
@@ -650,26 +650,26 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     const violations = validateDetailRows(expenseSchema, {
       reason: '出差',
       items: [{ item_name: '机票', amount: 1000, note: '' }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
   it('a non-detail field (even top-level required) is never checked here — that is el-form’s job', () => {
-    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] })
+    const violations = validateDetailRows(expenseSchema, { reason: '', items: [] }, true)
     expect(violations).toEqual([])
   })
 
   it('no rows at all (empty array, or missing entirely) -> no violations', () => {
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x' })).toEqual([])
-    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' })).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: [] }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x' }, true)).toEqual([])
+    expect(validateDetailRows(expenseSchema, { reason: 'x', items: 'not-an-array' }, true)).toEqual([])
   })
 
   it('a detail field with no required columns is skipped without inspecting rows', () => {
     const noRequiredSchema: FormSchema = {
       fields: [{ id: 'items', type: 'detail', label: '明细', columns: [{ id: 'note', type: 'text', label: '备注' }] }],
     }
-    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] })).toEqual([])
+    expect(validateDetailRows(noRequiredSchema, { items: [{ note: '' }, {}] }, true)).toEqual([])
   })
 
   it('a cell hidden for THIS row by its own visibilityRule is never flagged, even if required and empty', () => {
@@ -688,7 +688,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // an 'other' row -> flagged.
     const violations = validateDetailRows(gatedSchema, {
       items: [{ kind: 'normal', note: undefined }, { kind: 'other', note: undefined }],
-    })
+    }, true)
     expect(violations).toEqual(['"明细" 第 2 行缺少 "备注"'])
   })
 
@@ -715,7 +715,7 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
     // into it directly, so it must never be the reported violation even though it's still empty.
     const violations = validateDetailRows(derivedSchema, {
       items: [{ qty: 2, price: 10, subtotal: undefined }],
-    })
+    }, true)
     expect(violations).toEqual([])
   })
 
@@ -728,7 +728,19 @@ describe('validateDetailRows (UX B2-15 item 3 — client-side detail-row require
         columns: [{ id: 'col_a', type: 'text', label: '', required: true }],
       }],
     }
-    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] })
+    const violations = validateDetailRows(noLabelSchema, { items: [{ col_a: '' }] }, true)
     expect(violations).toEqual(['"items" 第 1 行缺少 "col_a"'])
+  })
+})
+
+// O-8 / F8-1: the same violation in English (ApprovalNewView follows the shell locale).
+describe('validateDetailRows — en (O-8 / F8-1)', () => {
+  it('names the table, the 1-based row and the column in English', () => {
+    const schema: FormSchema = {
+      fields: [{ id: 'items', type: 'detail', label: 'Expenses', columns: [{ id: 'amount', type: 'number', label: 'Amount', required: true }] }],
+    }
+    const violations = validateDetailRows(schema, { items: [{ amount: 1 }, { amount: undefined }] }, false)
+    expect(violations).toEqual(['"Expenses" row 2 is missing "Amount"'])
+    expect(violations.join(' ')).not.toMatch(/[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/)
   })
 })

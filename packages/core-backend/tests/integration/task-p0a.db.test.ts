@@ -439,6 +439,16 @@ describe('tasks P0-A real db', () => {
       assignees: [{ userId: userB, completedAt: null }],
       canComplete: true,
       canReopen: true,
+      // M3 additions (task-m3-backend-design-20260928.md §3.2).
+      followers: [follower],
+      canEdit: true,
+      canDelete: false,
+      canComment: true,
+      canLeave: false,
+      version: 1,
+      parentId: null,
+      depth: 0,
+      children: [],
     })
     const asCreator = await getTask({ orgId, actorId: userA, taskId: created.id })
     expect(asCreator.canComplete).toBe(true)

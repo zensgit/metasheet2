@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
 /**
@@ -49,6 +50,28 @@ vi.mock('vue-router', async () => {
       query: {},
       get path() { return `/approvals/${mockRouteId.value}` },
       meta: {},
+    }),
+  }
+})
+
+// ElMessage stub (same flake and fix as approval-e2e-lifecycle.spec.ts). A real toast is mounted
+// into document.body, outside the test app, and closes itself after ~3 s. When that timer fires
+// after this file's jsdom environment is torn down, the toast's leave transition calls the missing
+// requestAnimationFrame and vitest fails the lane with an unhandled ReferenceError although every
+// test passed. No test here asserts on toast DOM, so only ElMessage is replaced; every other
+// element-plus export stays real.
+// The `vi.spyOn(ElMessage, 'error')` tests below spy on this stub's method, so their call
+// assertions still see every call the views make.
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
     }),
   }
 })
@@ -253,6 +276,12 @@ const SEATED = { assignments: MY_TURN_ASSIGNMENTS, canAttachProcessEvidence: tru
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () => {
   let app: VueApp<Element> | null = null

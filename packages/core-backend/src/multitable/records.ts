@@ -583,7 +583,7 @@ export async function patchRecord(
   }
   // Field retype slice 3a (ADR §3.11 row 2): `fields` may come from the request-scoped metadata cache, i.e. a
   // snapshot older than the fence. Re-read the touched fields FOR SHARE and refuse 409 FIELD_SCHEMA_CHANGED on
-  // any type / option drift. No query unless the convert flag is 'true'.
+  // any type / option drift. No query unless the conversion flag AND the writer fence are both on.
   await assertFieldSchemaUnchangedAfterFence(
     query,
     input.sheetId,

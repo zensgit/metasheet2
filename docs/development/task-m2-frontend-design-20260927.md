@@ -16,6 +16,8 @@
 | 缺组织时的引导提示 | 路由 `requiredFeature`,以及对 `guardPolicy.ts` / `router/types.ts` 的改动(锁 §13-38 缺省乙) |
 | 路由权限门的 spec 与 CI 接线 | 任何 mock 数据或 `USE_MOCK` 分支 |
 
+> 脚注（2026-09-29，上表「不做」栏「路由 `requiredFeature`，以及对 `guardPolicy.ts` / `router/types.ts` 的改动」一条）：superseded on 2026-09-29 by Decision Register R-28 (`docs/development/takeover-beiliao-20260821/decision-register.md`): the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off.
+
 ## 2. 模块
 
 | 文件 | 职责 |
@@ -70,6 +72,7 @@
 - 常驻的 `<span data-testid="tasks-todo-badge" :data-state :data-count>`,三态:`loading`、`ready`、`unavailable`。
 - `unavailable` 与 `loading` 的 `data-count` 为空串,显示文本与 aria-label 里都不出现数字。「读失败」绝不渲染成 0;这是锁 §5.2 的明文要求。
 - 每 60 秒轮询,页面隐藏时跳过这次请求。遇到 404 停止轮询,因为功能关闭时继续轮询永远不会成功;之后任一次刷新成功就恢复轮询。403 与 org_missing 继续轮询。
+  - 脚注（2026-09-29）：superseded on 2026-09-29 by Decision Register R-28: the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. 此后功能关闭时红点根本不挂载；404 表示会话说开而后端没有该路由（例如开关在重启时被关掉、标签页未刷新），404 停止轮询的行为不变。
 - 401 不跳转登录页:轮询是后台行为,不该在用户没有操作时把人踢出去。401 按 unavailable 处理。
 - 请求带 `x-viewer-time-zone` 头,取浏览器时区。
 - 代次守卫:晚到的旧响应不覆盖新结果,组件卸载后到达的响应也不写入、不重启定时器。

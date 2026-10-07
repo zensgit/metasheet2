@@ -17,6 +17,7 @@ import {
 } from './api'
 import type { TemplateListQuery } from './api'
 import { readAuthSessionSignature } from '../composables/authPrincipal'
+import { useLocale } from '../composables/useLocale'
 
 /**
  * What one `loadTemplates()` call did to the shared slots, told to its own caller.
@@ -30,6 +31,8 @@ import { readAuthSessionSignature } from '../composables/authPrincipal'
 export type ApprovalTemplateListOutcome = 'applied' | 'failed' | 'superseded'
 
 export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
+  // O-8 / F8-1: fallback error copy follows the shell locale (see approvals/store.ts).
+  const { isZh } = useLocale()
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
@@ -113,7 +116,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
       return 'applied'
     } catch (e: any) {
       if (!isCurrent()) return 'superseded'
-      error.value = e.message ?? '加载审批表单列表失败'
+      error.value = e.message ?? (isZh.value ? '加载审批表单列表失败' : 'Failed to load approval forms')
       return 'failed'
     } finally {
       if (ownsLoadingSlot()) loading.value = false
@@ -134,7 +137,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
       activeTemplate.value = detail
     } catch (e: any) {
       if (!isCurrent()) return
-      error.value = e.message ?? '加载审批表单详情失败'
+      error.value = e.message ?? (isZh.value ? '加载审批表单详情失败' : 'Failed to load the approval form')
     } finally {
       if (ownsLoadingSlot()) loading.value = false
     }
@@ -154,7 +157,7 @@ export const useApprovalTemplateStore = defineStore('approvalTemplate', () => {
       activeVersion.value = version
     } catch (e: any) {
       if (!isCurrent()) return
-      error.value = e.message ?? '加载表单版本失败'
+      error.value = e.message ?? (isZh.value ? '加载表单版本失败' : 'Failed to load the form versions')
     } finally {
       if (ownsLoadingSlot()) loading.value = false
     }

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, type App as VueApp, type Slot } from 'vue'
-import type { DelegationRecord } from '../src/approvals/delegations'
+import type { DelegationRecord, OwnDelegationForm } from '../src/approvals/delegations'
 import { useLocale } from '../src/composables/useLocale'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
@@ -324,5 +324,190 @@ describe('MyDelegationView (self-service 我的委托) — B2-05 status tag + di
     for (const fakeName of ['张三', '李四', '王五', '赵六']) {
       expect(src, `should not contain fake fixture name "${fakeName}"`).not.toContain(fakeName)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of MyDelegationView: rows in every
+// status (incl. the expiring-soon hint and a form-scoped row), the create dialog open with the
+// form-scope input shown, and the disable confirm's message-box copy. ASCII fixtures; the whole
+// container (text + every attribute value) must carry no CJK; zh-CN then shows Chinese and a flip
+// back restores English. Local stub variants surface copy the shared passthroughs drop (dialog
+// title, form-item label, placeholders, option labels, table empty text). The only CJK left is the
+// Chinese-spelled status KEY in StatusTag's data-status attribute (named exceptions below).
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — MyDelegationView English render scan', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const ScanElTable = defineComponent({
+    name: 'ElTable',
+    props: { data: { type: Array, default: () => [] }, emptyText: String },
+    setup(props, { slots }) {
+      const registry = reactive<ColumnRegistry>({ columns: [], register(entry) { registry.columns.push(entry) } })
+      provide(COLUMN_REGISTRY_KEY, registry)
+      return () => {
+        const columnInstances = slots.default?.() ?? []
+        const rows = (props.data as DelegationRecord[] | undefined) ?? []
+        return h('div', { 'data-el-table': 'true', 'data-empty-text': props.emptyText }, [
+          h('div', { style: 'display:none' }, columnInstances),
+          ...rows.map((row, index) =>
+            h('div', { 'data-el-row': String(index) },
+              registry.columns.map((column) =>
+                h('div', { 'data-el-cell': column.label ?? column.key }, column.defaultSlot ? column.defaultSlot({ row }) : ''),
+              ),
+            ),
+          ),
+        ])
+      }
+    },
+  })
+  const ScanElDialog = defineComponent({
+    name: 'ElDialog',
+    props: { modelValue: Boolean, title: String, width: String },
+    setup(props, { slots }) {
+      return () => (props.modelValue
+        ? h('div', { 'data-el-dialog': 'open' }, [h('header', props.title ?? ''), slots.default?.(), slots.footer?.()])
+        : null)
+    },
+  })
+  const ScanElFormItem = defineComponent({
+    name: 'ElFormItem',
+    props: { label: String },
+    setup(props, { slots }) {
+      return () => h('div', [h('label', props.label ?? ''), slots.default?.()])
+    },
+  })
+  const scanField = (name: string, tag: 'input' | 'select') => defineComponent({
+    name,
+    props: { modelValue: null as never, placeholder: String },
+    emits: ['update:modelValue'],
+    setup(props, { slots, emit }) {
+      return () => h(tag, {
+        placeholder: props.placeholder,
+        onChange: (e: Event) => emit('update:modelValue', (e.target as HTMLSelectElement).value),
+      }, tag === 'select' ? slots.default?.() : undefined)
+    },
+  })
+  const ScanElOption = defineComponent({
+    name: 'ElOption',
+    props: { label: String, value: String },
+    setup(props) {
+      return () => h('option', { value: props.value }, props.label ?? '')
+    },
+  })
+
+  // Not visible copy: delegationStatus.ts's status values are machine keys spelled in Chinese
+  // (`DelegationDisplayStatus`, delegationStatus.ts:20); StatusTag.vue:6 writes the key into its
+  // `data-status` attribute, which this scan reads (it reads every attribute). The visible label is
+  // resolved per locale by utils/statusDomains.ts. Counts: one row per status, 生效中 twice.
+  const STATUS_KEY_SOURCE = 'apps/web/src/approvals/delegationStatus.ts:20 via apps/web/src/components/status/StatusTag.vue:6 (data-status attribute)'
+  const EXCEPTIONS = [
+    { text: '未开始', count: 1, source: STATUS_KEY_SOURCE },
+    { text: '生效中', count: 2, source: STATUS_KEY_SOURCE },
+    { text: '已过期', count: 1, source: STATUS_KEY_SOURCE },
+    { text: '已停用', count: 1, source: STATUS_KEY_SOURCE },
+  ]
+
+  beforeEach(() => {
+    useLocale().setLocale('en')
+    listOwnDelegationsSpy.mockReset()
+    confirmSpy.mockReset().mockRejectedValue(new Error('cancel'))
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([{ id: 'bob', name: 'Bob Example' }])
+    __resetResolvedDirectoryNamesForTests()
+    columnSeq = 0
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    useLocale().setLocale('zh-CN')
+  })
+
+  it('table, create dialog and disable confirm are English only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const now = Date.now()
+    listOwnDelegationsSpy.mockResolvedValue([
+      fixtureRow({ id: 'not-started', startAt: new Date(now + HOUR).toISOString(), endAt: new Date(now + 2 * HOUR).toISOString() }),
+      fixtureRow({ id: 'expiring', startAt: new Date(now - HOUR).toISOString(), endAt: new Date(now + HOUR).toISOString() }),
+      fixtureRow({ id: 'expired', startAt: new Date(now - 2 * HOUR).toISOString(), endAt: new Date(now - HOUR).toISOString() }),
+      fixtureRow({ id: 'disabled', active: false }),
+      fixtureRow({ id: 'scoped', scope: 'template', scopeTemplateId: 'tpl_1', endAt: new Date(now + 200 * HOUR).toISOString() }),
+    ])
+    const { default: MyDelegationView } = await import('../src/views/approval/MyDelegationView.vue')
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(MyDelegationView)
+    app.component('ElTable', ScanElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElButton', ElButton)
+    app.component('ElDialog', ScanElDialog)
+    app.component('ElForm', ElForm)
+    app.component('ElFormItem', ScanElFormItem)
+    app.component('ElInput', scanField('ElInput', 'input'))
+    app.component('ElSelect', scanField('ElSelect', 'select'))
+    app.component('ElOption', ScanElOption)
+    app.component('ElDatePicker', scanField('ElDatePicker', 'input'))
+    app.directive('loading', {})
+    app.mount(container)
+    await flushUi()
+
+    expect(container.querySelectorAll('[data-el-row]').length).toBe(5)
+    ;(container.querySelector('[data-testid="my-delegation-new"]') as HTMLButtonElement).click()
+    await flushUi()
+    const scope = container.querySelector('[data-testid="my-delegation-scope"]') as HTMLSelectElement
+    scope.value = 'template'
+    scope.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container.querySelector('[data-testid="my-delegation-template"]'), 'form-scope input shown').toBeTruthy()
+    // Saving the empty form surfaces validateOwnDelegationForm's message as a toast (delegations.ts).
+    const { ElMessage } = await import('element-plus')
+    ;(container.querySelector('[data-testid="my-delegation-submit"]') as HTMLButtonElement).click()
+    await flushUi()
+    const warnings = vi.mocked(ElMessage.warning).mock.calls.map((call) => String(call[0]))
+    expect(warnings.length, 'validation toast shown').toBe(1)
+    expect(CJK.test(warnings[0]!), `validation toast copy: ${warnings[0]}`).toBe(false)
+    const statusKeys = Array.from(container.querySelectorAll('[data-status]')).map((el) => el.getAttribute('data-status'))
+    expect(statusKeys, 'the status keys sit in data-status only').toEqual(['未开始', '生效中', '已过期', '已停用', '生效中'])
+    expect(CJK.test(container.textContent ?? ''), 'visible text has no CJK').toBe(false)
+    expectNoCjkOutside(renderedTextAndAttributes(container), EXCEPTIONS, 'my delegation (en)')
+
+    ;(container.querySelector('[data-testid="my-delegation-disable"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const [message, title, options] = confirmSpy.mock.calls[0] as [string, string, Record<string, string>]
+    expect(CJK.test([message, title, options.confirmButtonText, options.cancelButtonText].join(' ')), 'disable confirm copy').toBe(false)
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(CJK.test(renderedTextAndAttributes(container))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expectNoCjkOutside(renderedTextAndAttributes(container), EXCEPTIONS, 'my delegation (en again)')
+  })
+})
+
+// O-8 / F8-1: validateOwnDelegationForm in English, the helper behind the toast the scan above
+// triggers once (empty form). Kept in this file because it runs on the required web lane (the
+// helper's zh-CN cases sit in myDelegationForm.spec.ts).
+describe('O-8 / F8-1 — validateOwnDelegationForm in English', () => {
+  it('returns null for a valid form and an English message for each failure', async () => {
+    const { CJK } = await import('./helpers/approvalLocaleScan')
+    const { validateOwnDelegationForm } = await import('../src/approvals/delegations')
+    const base: OwnDelegationForm = { delegateeUserId: 'B', scope: 'all', scopeTemplateId: '', startAt: '2026-06-22T00:00', endAt: '2026-06-23T00:00' }
+    expect(validateOwnDelegationForm(base, false)).toBeNull()
+    const messages = [
+      validateOwnDelegationForm({ ...base, delegateeUserId: '  ' }, false),
+      validateOwnDelegationForm({ ...base, scope: 'template' }, false),
+      validateOwnDelegationForm({ ...base, startAt: '2026-06-23T00:00', endAt: '2026-06-22T00:00' }, false),
+      validateOwnDelegationForm({ ...base, endAt: '' }, false),
+    ]
+    expect(messages.every((m) => typeof m === 'string' && m.length > 0)).toBe(true)
+    expect(new Set(messages).size, 'one message per failure').toBe(4)
+    expect(messages.join(' ')).not.toMatch(CJK)
   })
 })

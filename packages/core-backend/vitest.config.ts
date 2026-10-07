@@ -1403,6 +1403,16 @@ export default defineConfig({
       // arms EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
       // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
       'tests/integration/approval-comments.db.test.ts',
+      // P3-3 `approval_form_drafts` — server-side approval form draft storage (owner-gated DDL, not
+      // applied to any shared database). Contract §4 A (user_id-only auth), B (org-mutation
+      // non-leakage, inverted assertion), D (DB-failure safe-degrade), E (per-user row-cap
+      // prune-on-write, self-healing), F (payload-cap two-layer enforcement), plus the empty-draft
+      // DELETE path and the TTL-sweep function. Real DB. Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-form-drafts.yml lane, which arms EXPECT_DB=1. NOT
+      // promoted into plugin-tests.yml's required run-list (unlike approval-comments post-#5095):
+      // owner ruling Q9 ⑤ (2026-10-01) keeps this suite reference-only, not a required check.
+      'tests/integration/approval-form-drafts.db.test.ts',
       // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
       // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-
       // scoped caps, GC reuse, and the flag-OFF byte-for-byte no-op (G-12), real DB. Excluded here so
@@ -1844,6 +1854,9 @@ export default defineConfig({
       'tests/integration/task-read-path.db.test.ts',
       'tests/integration/task-completion-grid.db.test.ts',
       'tests/integration/task-rbac-trust.db.test.ts',
+      'tests/integration/task-m3-tree.db.test.ts',
+      'tests/integration/task-m3-membership.db.test.ts',
+      'tests/integration/task-m3-comments-deletion.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

@@ -5,15 +5,25 @@ const h = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   listTasks: vi.fn(),
   getTask: vi.fn(),
+  // M3: a detail-route mount now also reads comments and resolves the viewer's own id — neither
+  // is exercised by this file's own assertions (they live in tasks-detail-m3.spec.ts), so both
+  // are stubbed to harmless defaults purely so a detail-route mount does not throw.
+  listComments: vi.fn(),
+  getCurrentUserId: vi.fn(),
   route: { params: {} as Record<string, string> },
+  router: { push: vi.fn() },
 }))
 
 // M2: TasksView now also reads the route (to tell `/tasks` apart from `/tasks/:id`, both of which
 // load this same component per tasks-routes.spec.ts) and, for the ready + list route case, the
 // tasksApi list read; the ready + detail route case reads `getTask` instead. All are mocked here
 // the same way tasksContext already is.
+// M3: `useRouter` added — TasksView's delete-task action pushes `/tasks` on success (its own
+// coverage is in tasks-detail-m3.spec.ts); this file never triggers it, but the composable is
+// called unconditionally at setup, so it must resolve to SOMETHING or every mount here throws.
 vi.mock('vue-router', () => ({
   useRoute: () => h.route,
+  useRouter: () => h.router,
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -23,9 +33,16 @@ vi.mock('../src/tasks/tasksContext', () => ({
 vi.mock('../src/tasks/tasksApi', () => ({
   listTasks: h.listTasks,
   getTask: h.getTask,
+  listComments: h.listComments,
   createTask: vi.fn(),
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
+}))
+
+// M3: `useAuth().getCurrentUserId()` is called once a detail route is entered (own-comment /
+// leave-button gating, covered in tasks-detail-m3.spec.ts). Defaults to an unresolved id here.
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({ getCurrentUserId: h.getCurrentUserId }),
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
@@ -52,6 +69,9 @@ beforeEach(() => {
   h.route.params = {}
   h.listTasks.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
   h.getTask.mockReset().mockResolvedValue({ kind: 'not_found' })
+  h.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
+  h.getCurrentUserId.mockReset().mockResolvedValue(null)
+  h.router.push.mockReset()
 })
 
 afterEach(() => {

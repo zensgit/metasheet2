@@ -8491,7 +8491,11 @@ export interface paths {
          * @description Organization and actor come only from the authenticated session. Missing
          *     instance means not-installed. canManage is server-derived from hydrated
          *     global elearning administrator authority and active organization membership.
-         *     Administrative setup is available independently of the deployment master flag.
+         *     Follows the deployment master flag: while it is not exact 'true', GET, POST
+         *     and PUT all answer 404 `{ error: feature_disabled }` right after
+         *     authentication, read and write nothing, and do not reveal whether an
+         *     installation exists. Existing installations are kept and apply again once
+         *     the flag is exact 'true'.
          */
         get: operations["getElearningAppInstallation"];
         /**
@@ -12933,7 +12937,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -13019,7 +13023,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Version conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -13256,7 +13260,7 @@ export interface paths {
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
-                /** @description Conflict */
+                /** @description Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled. */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -22511,6 +22515,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing read. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable; no fallback enablement. */
             503: {
                 headers: {
@@ -22566,6 +22572,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Application not installed. */
             409: {
                 headers: {
@@ -22625,6 +22633,8 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Master flag is not exact 'true' (`feature_disabled`); nothing written. */
+            404: components["responses"]["ElearningError"];
             /** @description Installation authority unavailable. */
             503: {
                 headers: {

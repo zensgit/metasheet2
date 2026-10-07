@@ -93,6 +93,13 @@ describe('listTasks', () => {
 })
 
 describe('getTask', () => {
+  // This fixture is the M2 wire shape (what today's backend sends). The parser fills the M3 tree
+  // fields with root-task defaults when all three are absent — asserted via `withTreeDefaults`.
+  // Coverage for M3-shaped bodies lives in tasks-api-m3.spec.ts.
+  function withTreeDefaults(body: Record<string, unknown>): Record<string, unknown> {
+    return { ...body, parentId: null, depth: 0, children: [] }
+  }
+
   function fullTaskBody(over: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       id: 't1',
@@ -115,7 +122,7 @@ describe('getTask', () => {
     h.apiFetch.mockResolvedValue(jsonResponse(200, fullTaskBody({ id: 't 1' })))
     const result = await getTask('t 1')
     expect(lastCall()[0]).toBe('/api/tasks/t%201')
-    expect(result).toEqual({ kind: 'ok', task: fullTaskBody({ id: 't 1' }) })
+    expect(result).toEqual({ kind: 'ok', task: withTreeDefaults(fullTaskBody({ id: 't 1' })) })
   })
 
   it('resolves ok with a populated assignees array, each carrying userId and completedAt', async () => {
@@ -126,7 +133,7 @@ describe('getTask', () => {
       ],
     })
     h.apiFetch.mockResolvedValue(jsonResponse(200, body))
-    await expect(getTask('t1')).resolves.toEqual({ kind: 'ok', task: body })
+    await expect(getTask('t1')).resolves.toEqual({ kind: 'ok', task: withTreeDefaults(body) })
   })
 
   it('resolves forbidden for a 403', async () => {
@@ -222,6 +229,11 @@ describe('createTask', () => {
   it('resolves org_missing for a 422 with error.code ORG_MISSING', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'ORG_MISSING' } }))
     await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'org_missing' })
+  })
+
+  it('resolves invalid_title for a 422 INVALID_TITLE', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(422, { error: { code: 'INVALID_TITLE' } }))
+    await expect(createTask({ title: 'x' })).resolves.toEqual({ kind: 'invalid_title' })
   })
 
   it('resolves error (NOT org_missing) for a 422 with a different error code', async () => {

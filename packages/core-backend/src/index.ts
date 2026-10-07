@@ -255,6 +255,7 @@ import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
 import { approvalCommentsRouter } from './routes/approval-comments'
+import { approvalFormDraftsRouter } from './routes/approval-form-drafts'
 import {
   setApprovalCommentMentionDelivery,
   setApprovalCommentNotifyChecker,
@@ -335,7 +336,11 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
-import { createElearningAppInstallationRouter, requireElearningAppInstallation } from './routes/elearning-app-installation'
+import {
+  createElearningAppInstallationRouter,
+  requireElearningAppInstallation,
+  requireElearningEnabled,
+} from './routes/elearning-app-installation'
 import { authenticate as authenticateElearningApp } from './middleware/auth'
 import { methodOverrideMiddleware } from './middleware/method-override'
 import { methodProbeRouter } from './routes/method-probe'
@@ -343,6 +348,7 @@ import {
   isElearningAssignmentSurfaceEnabled,
   isElearningAnalyticsSurfaceEnabled,
   isElearningContentSurfaceEnabled,
+  isElearningEnabled,
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
   resolveElearningCatalogFeature,
@@ -1718,7 +1724,13 @@ export class MetaSheetServer {
       this.app.use(elearningMediaPlaybackRouter)
     }
 
-    this.app.use(createElearningAppInstallationRouter({ getDb: () => poolManager.get() }))
+    // Installation writes follow the same master switch as the business routes below: while
+    // ELEARNING_ENABLED is off every method on this path answers 404 feature_disabled after
+    // authentication and touches no table (routes/elearning-app-installation.ts).
+    this.app.use(createElearningAppInstallationRouter({
+      getDb: () => poolManager.get(),
+      featureGate: requireElearningEnabled(),
+    }))
     if (process.env.ELEARNING_ENABLED === 'true') {
       this.app.use('/api/elearning', authenticateElearningApp,
         requireElearningAppInstallation({ getDb: () => poolManager.get() }))
@@ -1869,6 +1881,16 @@ export class MetaSheetServer {
     // 路由：认证（登录/注册/token管理）
     this.app.use('/api/auth', authRouter)
 
+    // 路由：审批填单草稿（P3-3，服务端存储）— registered BEFORE approvalsRouter() below: its list
+    // endpoint is `GET /api/approvals/form-drafts` (a single literal path segment), which would
+    // otherwise be SHADOWED by approvalsRouter's own generic `GET /api/approvals/:id` (Express
+    // matches routers in `app.use()` registration order, and `:id` matches the literal
+    // 'form-drafts' just as readily as a real approval id) — the same reasoning approvals.ts's own
+    // 'directory' / 'record-link-options' sub-routes document for why THEY must precede `:id`
+    // within that file. The `/api/approvals/form-drafts/:templateId` item routes have an extra path
+    // segment and never collided, but ordering this whole router first is simpler than special-
+    // casing just the list route, and cannot regress anything registered after it.
+    this.app.use(approvalFormDraftsRouter())
     // 路由：审批（示例）
     this.app.use(approvalsRouter({
       injector: this.injector,
@@ -3377,6 +3399,12 @@ export class MetaSheetServer {
     const context = this.createPluginContext(loaded)
     try {
       await pluginInstance.activate(context)
+      // plugin-elearning's activate() returns before registering any route, service or timer while
+      // its master switch is off (plugins/plugin-elearning/index.cjs, same exact-'true' rule as
+      // isElearningEnabled). Call that what it is -- loaded, inactive -- instead of 'active'.
+      if (name === 'plugin-elearning' && !isElearningEnabled(process.env)) {
+        return this.setPluginRuntimeState(name, 'inactive')
+      }
       return this.setPluginRuntimeState(name, 'active')
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -4576,6 +4604,7 @@ export class MetaSheetServer {
       const { YjsSyncService } = await import('./collab/yjs-sync-service')
       const { YjsWebSocketAdapter } = await import('./collab/yjs-websocket-adapter')
       const { YjsRecordBridge } = await import('./collab/yjs-record-bridge')
+      const { createYjsInvalidator, createFieldSchemaRefusalHandler } = await import('./collab/yjs-invalidation')
       const { canReadEveryYjsFieldForUser } = await import('./collab/yjs-field-read-access')
       const { RecordWriteService } = await import('./multitable/record-write-service')
       const { loadSheetMemberUserIdSet, loadFieldPermissionScopeMap } = await import('./multitable/permission-service')
@@ -4845,15 +4874,12 @@ export class MetaSheetServer {
         // pending flushes FIRST — without that a 200–500ms debounced
         // bridge write would re-materialize the stale Yjs-cached value
         // on top of the just-committed REST change.
-        const yjsInvalidate = async (recordIds: string[]) => {
-          if (recordIds.length === 0) return
-          yjsBridge.cancelPending(recordIds)
-          try {
-            await yjsSyncService.invalidateDocs(recordIds)
-          } finally {
-            yjsWsAdapter.notifyInvalidated(recordIds)
-          }
-        }
+        const yjsInvalidate = createYjsInvalidator({ bridge: yjsBridge, syncService: yjsSyncService, adapter: yjsWsAdapter })
+        // Field retype slice 3b: a realtime edit refused because its column changed type while the flush waited
+        // (409 FIELD_SCHEMA_CHANGED) is no longer dropped in silence — the record's document is invalidated, so
+        // its editors are told with the message they already handle. Inert unless the conversion flag AND the
+        // writer fence are on; every other refusal on the bridge is left as it was.
+        yjsBridge.setRefusalHandler(createFieldSchemaRefusalHandler(yjsInvalidate))
         recordWriteService.setPostCommitHooks([
           createYjsInvalidationPostCommitHook(yjsInvalidate),
         ])

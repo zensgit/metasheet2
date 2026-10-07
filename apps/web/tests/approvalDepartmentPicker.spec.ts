@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, nextTick, type App as VueApp } from 'vue'
 
 const searchSpy = vi.fn()
@@ -51,6 +52,12 @@ async function flushUi(cycles = 6): Promise<void> {
     await nextTick()
   }
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDepartmentPicker', () => {
   let app: VueApp<Element> | null = null

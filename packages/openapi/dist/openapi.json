@@ -28114,7 +28114,7 @@
       "get": {
         "operationId": "getElearningAppInstallation",
         "summary": "Read organization cloud-classroom installation",
-        "description": "Organization and actor come only from the authenticated session. Missing\ninstance means not-installed. canManage is server-derived from hydrated\nglobal elearning administrator authority and active organization membership.\nAdministrative setup is available independently of the deployment master flag.\n",
+        "description": "Organization and actor come only from the authenticated session. Missing\ninstance means not-installed. canManage is server-derived from hydrated\nglobal elearning administrator authority and active organization membership.\nFollows the deployment master flag: while it is not exact 'true', GET, POST\nand PUT all answer 404 `{ error: feature_disabled }` right after\nauthentication, read and write nothing, and do not reveal whether an\ninstallation exists. Existing installations are kept and apply again once\nthe flag is exact 'true'.\n",
         "security": [
           {
             "bearerAuth": []
@@ -28136,6 +28136,10 @@
           },
           "403": {
             "description": "Authoritative organization context required."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing read.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "503": {
             "description": "Installation authority unavailable; no fallback enablement."
@@ -28182,6 +28186,10 @@
           },
           "403": {
             "description": "Missing organization, administrator authority, or active membership."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing written.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "503": {
             "description": "Installation authority unavailable."
@@ -28239,6 +28247,10 @@
           },
           "403": {
             "description": "Missing organization, administrator authority, or active membership."
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' (`feature_disabled`); nothing written.",
+            "$ref": "#/components/responses/ElearningError"
           },
           "409": {
             "description": "Application not installed."
@@ -37483,7 +37495,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Version conflict",
+            "description": "Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled.",
             "content": {
               "application/json": {
                 "schema": {
@@ -37511,6 +37523,18 @@
                       }
                     }
                   ]
+                },
+                "examples": {
+                  "field_schema_changed": {
+                    "summary": "A touched field changed type while the write waited",
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "FIELD_SCHEMA_CHANGED",
+                        "message": "A field this write touches changed type or options while the write was waiting; reload and retry"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -37733,7 +37757,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Version conflict",
+            "description": "Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled.",
             "content": {
               "application/json": {
                 "schema": {
@@ -37761,6 +37785,18 @@
                       }
                     }
                   ]
+                },
+                "examples": {
+                  "field_schema_changed": {
+                    "summary": "A touched field changed type while the write waited",
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "FIELD_SCHEMA_CHANGED",
+                        "message": "A field this write touches changed type or options while the write was waiting; reload and retry"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -38168,7 +38204,7 @@
             "$ref": "#/components/responses/NotFound"
           },
           "409": {
-            "description": "Conflict",
+            "description": "Conflict. The `error.code` says which one. `VERSION_CONFLICT`: the record changed since `expectedVersion` (carries `serverVersion`). `RECOVERY_IN_PROGRESS`: a recovery holds the sheet. `LINK_WRITER_FENCE_PLAN_CHANGED`: the set of sheets a link write locks changed while it waited. `FIELD_SCHEMA_CHANGED`: a field this write touches changed type or options while the write was waiting (a field type conversion committed first). Nothing was written; reload the sheet's fields and send the write again. `FIELD_SCHEMA_CHANGED` is only returned by a server running with field type conversion and the writer fence both enabled.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38196,6 +38232,18 @@
                       }
                     }
                   ]
+                },
+                "examples": {
+                  "field_schema_changed": {
+                    "summary": "A touched field changed type while the write waited",
+                    "value": {
+                      "ok": false,
+                      "error": {
+                        "code": "FIELD_SCHEMA_CHANGED",
+                        "message": "A field this write touches changed type or options while the write was waiting; reload and retry"
+                      }
+                    }
+                  }
                 }
               }
             }

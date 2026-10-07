@@ -196,9 +196,13 @@ const canUseApprovals = computed(() => {
   void route.fullPath
   return hasPermission('approvals:read')
 })
+// The tasks feature must be switched on (session `tasks`, from the server's TASKS_ENABLED) AND the
+// caller must hold tasks:read. Without the feature check an administrator saw 任务 with a "!" badge
+// on a server where /api/tasks is not mounted, and every page load issued a 404 pending-count read.
+// The feature is checked first so that, while it is off, nothing about tasks renders or polls.
 const canUseTasks = computed(() => {
   void route.fullPath
-  return hasPermission('tasks:read')
+  return hasFeature('tasks') && hasPermission('tasks:read')
 })
 const isLoggedIn = computed(() => {
   void route.fullPath

@@ -25,6 +25,24 @@ vi.mock('../src/utils/api', () => ({
   apiGet: (...args: unknown[]) => apiGetMock(...args),
 }))
 
+// The session's product features as the router guard has loaded them. Only `elearning` is steered,
+// defaulting to the real store's own default (off); every other feature keeps the real answer.
+const productFeatures = vi.hoisted(() => ({ elearning: false }))
+vi.mock('../src/stores/featureFlags', async () => {
+  const actual = await vi.importActual<typeof import('../src/stores/featureFlags')>('../src/stores/featureFlags')
+  return {
+    ...actual,
+    useFeatureFlags: () => {
+      const real = actual.useFeatureFlags()
+      return {
+        ...real,
+        hasFeature: (feature: Parameters<typeof real.hasFeature>[0]) =>
+          feature === 'elearning' ? productFeatures.elearning : real.hasFeature(feature),
+      }
+    },
+  }
+})
+
 function createInstanceApp(overrides: Partial<PlatformAppSummary> = {}): PlatformAppSummary {
   return {
     id: 'after-sales',
@@ -222,6 +240,62 @@ describe('PlatformAppLauncherView', () => {
 
     expect(container.querySelectorAll('.platform-app-launcher__card')).toHaveLength(1)
     expect(container.textContent).toContain('After Sales')
+  })
+
+  /**
+   * 云课堂 master switch, launcher side. The server drops the app from `GET /api/platform/apps`
+   * while the switch is off (routes/platform-apps.ts); this pins the browser's second line for a list
+   * that still carries it (served before the switch changed, or by an older backend): no card, and
+   * the other apps are untouched. Keyed on the manifest's `featureFlags: ['elearning']`, the same
+   * key the server's catalog gate reads.
+   */
+  function elearningSummary(): PlatformAppSummary {
+    return createInstanceApp({
+      id: 'elearning',
+      pluginId: 'plugin-elearning',
+      pluginName: 'plugin-elearning',
+      displayName: '学习中心',
+      runtimeBindings: undefined,
+      permissions: ['elearning:read', 'elearning:write', 'elearning:grade', 'elearning:stats', 'elearning:admin'],
+      featureFlags: ['elearning'],
+      entryPath: '/learn',
+      instance: null,
+    })
+  }
+
+  async function mountWith(list: PlatformAppSummary[]) {
+    localStorage.setItem('user_permissions', JSON.stringify(['elearning:admin']))
+    apiGetMock.mockResolvedValueOnce({ list })
+    const View = (await import('../src/views/PlatformAppLauncherView.vue')).default
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(View as Component)
+    app.mount(container)
+    await flushUi(6)
+    return container
+  }
+
+  it('elearning switch off: no 学习中心 card, the other cards stay', async () => {
+    productFeatures.elearning = false
+    try {
+      const root = await mountWith([createInstanceApp({ runtimeBindings: undefined }), elearningSummary()])
+      expect(root.querySelectorAll('.platform-app-launcher__card')).toHaveLength(1)
+      expect(root.textContent).toContain('After Sales')
+      expect(root.textContent).not.toContain('学习中心')
+    } finally {
+      productFeatures.elearning = false
+    }
+  })
+
+  it('elearning switch on (positive control): the 学习中心 card is back', async () => {
+    productFeatures.elearning = true
+    try {
+      const root = await mountWith([createInstanceApp({ runtimeBindings: undefined }), elearningSummary()])
+      expect(root.querySelectorAll('.platform-app-launcher__card')).toHaveLength(2)
+      expect(root.textContent).toContain('学习中心')
+    } finally {
+      productFeatures.elearning = false
+    }
   })
 
 })

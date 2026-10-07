@@ -1391,6 +1391,12 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # awaiting the viewer's approval (owner 2026-09-29 16:5x); `cancelRoundEntryTodoCenter` — the todo
 # center's cancel-round sub-type label (P-11 (b)); `cancelRoundEntryContract` — the client↔server
 # cancel-round contract read from the server sources. Same bidirectional scan, recorded in §B2.
+# 服务端填单草稿 F3-D1 (2026-10-01, docs/development/approval-server-form-drafts-replay-20260930.md):
+# ONE token added, `serverFormDraft` — the client wrapper spec (apps/web/tests/serverFormDraft.spec.ts)
+# for the server-side approval form drafts replayed from #5703, paired with the same token on
+# approval-web-guard.yml's targeted run line. It matches exactly one spec file, and a bidirectional
+# substring scan against every token in this file finds no token that contains it or is contained by
+# it (`approval-form-draft` is the closest neighbour and shares no substring relation).
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1765,6 +1771,7 @@ exec npx vitest run \
   routePreviewErrors \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \
+  serverFormDraft \
   SessionOrgSwitcher.spec.ts \
   shared-comments-stub-client \
   statusTag \
@@ -1806,12 +1813,16 @@ exec npx vitest run \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
   stockPrepPermissionMatrix \
+  tasks-api-m3.spec.ts \
   tasks-api.spec.ts \
   tasks-badge.spec.ts \
   tasks-context.spec.ts \
+  tasks-detail-m3.spec.ts \
   tasks-detail-view.spec.ts \
   tasks-list-view.spec.ts \
   tasks-nav-badge.spec.ts \
+  tasks-nav-feature-gate.spec.ts \
+  tasks-nav-relogin.spec.ts \
   tasks-routes.spec.ts \
   tasks-view-transitions.spec.ts \
   tasks-view.spec.ts \

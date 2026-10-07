@@ -19,6 +19,7 @@
  * approvalTemplateGovernance.spec.ts) so the new record table's rows are actually queryable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
@@ -34,6 +35,26 @@ vi.mock('vue-router', async () => {
     ...actual,
     useRouter: () => ({ push: pushSpy, back: vi.fn() }),
     useRoute: () => ({ params: mockRouteParams, query: {}, path: '/approvals/apv_1', meta: {} }),
+  }
+})
+
+// ElMessage stub (same flake and fix as approval-e2e-lifecycle.spec.ts). A real toast is mounted
+// into document.body, outside the test app, and closes itself after ~3 s. When that timer fires
+// after this file's jsdom environment is torn down, the toast's leave transition calls the missing
+// requestAnimationFrame and vitest fails the lane with an unhandled ReferenceError although every
+// test passed. No test here asserts on toast DOM, so only ElMessage is replaced; every other
+// element-plus export stays real.
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
+    }),
   }
 })
 
@@ -359,6 +380,12 @@ function recordTableRows(container: HTMLElement): HTMLElement[] {
   if (!table) return []
   return Array.from(table.querySelectorAll('[data-testid="approval-detail-record-table-row"]'))
 }
+
+// O-8 / F8-1: the approval member surfaces follow the shell locale (useLocale); this suite asserts
+// their zh-CN copy, so pin zh-CN before every test (a describe that needs English sets it itself).
+beforeEach(() => {
+  useLocale().setLocale('zh-CN')
+})
 
 describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record table', () => {
   let app: VueApp<Element> | null = null

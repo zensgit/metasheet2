@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocale } from '../src/composables/useLocale'
 import {
   createApp,
   defineComponent,
@@ -461,6 +462,8 @@ describe('ApprovalCenterView', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    // O-8 / F8-1: the center follows the shell locale; this suite asserts its zh-CN copy.
+    useLocale().setLocale('zh-CN')
     mockPendingApprovals.value = []
     mockMyApprovals.value = []
     mockCcApprovals.value = []
@@ -1243,6 +1246,10 @@ describe('ApprovalCenterView', () => {
     })
 
     afterEach(async () => {
+      // saveExportFile revokes the object URL in a setTimeout(0). Let that timer fire while the stub is
+      // still installed; restoring first leaves jsdom's URL (which has no revokeObjectURL) to take the
+      // call and vitest records an unhandled TypeError that fails the whole lane (#6207).
+      await new Promise((resolve) => setTimeout(resolve, 0))
       anchorClickSpy.mockRestore()
       ;(URL as { createObjectURL?: unknown }).createObjectURL = originalCreateObjectUrl
       ;(URL as { revokeObjectURL?: unknown }).revokeObjectURL = originalRevokeObjectUrl

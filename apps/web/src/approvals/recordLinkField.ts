@@ -22,6 +22,14 @@ export const RECORD_LINK_TARGET_UNAVAILABLE = '目标不可用'
 /** Display when a record is selected but no human summary is available (never raw recordId). */
 export const RECORD_LINK_SELECTED_GENERIC = '已选择记录'
 
+/** O-8 / F8-1: English counterpart of `RECORD_LINK_SELECTED_GENERIC` (same values-free rule). */
+export const RECORD_LINK_SELECTED_GENERIC_EN = 'Record selected'
+
+/** The generic selected-record label for the current shell locale. */
+export function recordLinkSelectedGeneric(isZh: boolean): string {
+  return isZh ? RECORD_LINK_SELECTED_GENERIC : RECORD_LINK_SELECTED_GENERIC_EN
+}
+
 /** Values-free client hint (server re-validates with the same no-oracle shape). */
 export const RECORD_LINK_VALUE_HINT =
   '请选择一条关联记录（仅支持单条；提交时服务端按读权限校验）'
@@ -185,9 +193,9 @@ export function clearStaleRecordLinkDependencies<T extends {
  * Fill / detail display: human label when available; otherwise a generic selected-record
  * label. NEVER falls back to the raw recordId (existence / id oracle surface).
  */
-export function formatRecordLinkDisplay(humanLabel: string | null | undefined): string {
+export function formatRecordLinkDisplay(humanLabel: string | null | undefined, isZh = true): string {
   const label = typeof humanLabel === 'string' ? humanLabel.trim() : ''
-  return label || RECORD_LINK_SELECTED_GENERIC
+  return label || recordLinkSelectedGeneric(isZh)
 }
 
 /**

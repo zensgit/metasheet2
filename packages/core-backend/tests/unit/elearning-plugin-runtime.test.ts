@@ -2,8 +2,10 @@ import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import request from 'supertest'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MetaSheetServer } from '../../src/index'
+import { usePinnedServer } from '../utils/pinned-server'
 import { ELEARNING_FLAG_NAMES, resolveElearningCatalogFeature } from '../../src/elearning/feature-flags'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
 import { parsePlatformAppManifest } from '../../src/platform/app-manifest'
@@ -244,4 +246,71 @@ describe('elearning plugin runtime host (real addRoute seam)', () => {
     expect(indexSource).toMatch(/isCatalogFeatureEnabled:\s*resolveElearningCatalogFeature/)
     expect(indexSource).toContain("from './elearning/feature-flags'")
   })
+})
+
+/**
+ * Plugin inventory truthfulness. While the master switch is off, plugin-elearning's activate()
+ * returns before registering a route, a service or a timer (plugins/plugin-elearning/index.cjs), and
+ * the host used to record that as 'active' -- which GET /api/plugins (no login) and
+ * /api/admin/plugins then printed. It is now 'inactive': loaded, doing nothing. The state vocabulary
+ * is the existing one; no other plugin's state is touched.
+ */
+describe('plugin-elearning runtime state while the master switch is off', () => {
+  const pinned = usePinnedServer()
+  const flagSnapshot = snapshotFlags()
+  let activeServer: MetaSheetServer | undefined
+
+  afterEach(async () => {
+    if (activeServer) {
+      await hostSeam(activeServer).deactivatePluginByName(PLUGIN_NAME)
+      activeServer = undefined
+    }
+    restoreFlags(flagSnapshot)
+  })
+
+  async function activateAndList(flagMap: Record<string, string | undefined>) {
+    setFlags(flagMap)
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    activeServer = server
+    installLoadedPlugin(server, PLUGIN_NAME, plugin as unknown as Record<string, unknown>)
+    const other = { activate: async () => {} }
+    installLoadedPlugin(server, 'plugin-zz-neighbour', other)
+    const seam = hostSeam(server)
+    const returned = await seam.activatePluginByName(PLUGIN_NAME) as { status: string }
+    await seam.activatePluginByName('plugin-zz-neighbour')
+    pinned.setApp((server as unknown as { app: Parameters<typeof pinned.setApp>[0] }).app)
+    const response = await request(pinned.url()).get('/api/plugins')
+    expect(response.status).toBe(200)
+    const list = (response.body as { list: Array<{ name: string; status: string }> }).list
+    return {
+      returned: returned.status,
+      elearning: list.find((item) => item.name === PLUGIN_NAME)?.status,
+      neighbour: list.find((item) => item.name === 'plugin-zz-neighbour')?.status,
+      routes: listPluginRouteRegistrations(server),
+    }
+  }
+
+  it.each([
+    ['unset', {}],
+    ['empty', { ELEARNING_ENABLED: '' }],
+    ['TRUE', { ELEARNING_ENABLED: 'TRUE' }],
+    ['1', { ELEARNING_ENABLED: '1' }],
+    ['leading space', { ELEARNING_ENABLED: ' true' }],
+    ['false', { ELEARNING_ENABLED: 'false' }],
+  ] as const)('master %s: GET /api/plugins lists plugin-elearning as inactive, not active', async (_label, flags) => {
+    const state = await activateAndList(flags)
+    expect(state.routes).toEqual([])
+    expect(state.returned).toBe('inactive')
+    expect(state.elearning).toBe('inactive')
+    // A neighbouring plugin whose activate() also registers nothing keeps the host's usual 'active'.
+    expect(state.neighbour).toBe('active')
+  }, 60_000)
+
+  it('master exact true (positive control): plugin-elearning is active and GET /api/plugins says so', async () => {
+    const state = await activateAndList({ ELEARNING_ENABLED: 'true' })
+    expect(state.routes).toHaveLength(1)
+    expect(state.returned).toBe('active')
+    expect(state.elearning).toBe('active')
+    expect(state.neighbour).toBe('active')
+  }, 60_000)
 })

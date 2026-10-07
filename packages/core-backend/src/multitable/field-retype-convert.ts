@@ -173,12 +173,16 @@ export function deriveFieldRetypeConvertTargetProperty(
 export interface FieldRetypeConvertLiveCell {
   recordId: string
   version: number
+  /** `jsonb_typeof(data) = 'object'`. REQUIRED, and only `true` passes: a row that is not a JSON object rejects the run. */
+  dataIsObject: boolean
   hasKey: boolean
   value: unknown
 }
 
 export interface FieldRetypeConvertTrashCell {
   recordId: string
+  /** `jsonb_typeof(data) = 'object'`, as for a live row. */
+  dataIsObject: boolean
   hasKey: boolean
   value: unknown
 }
@@ -187,6 +191,7 @@ export type FieldRetypeConvertRejectionReason =
   | FieldRetypeConvertCellRejection
   | 'trashed_rows_with_value'
   | 'option_limit_exceeded'
+  | 'record_data_not_object'
 
 /** 每个原因列出**全部** recordId（按码元比较器升序、去重），`recordCount === recordIds.length`。 */
 export interface FieldRetypeConvertRejection {
@@ -218,12 +223,17 @@ const REJECTION_ORDER: readonly FieldRetypeConvertRejectionReason[] = [
   'non_string_value',
   'trashed_rows_with_value',
   'option_limit_exceeded',
+  'record_data_not_object',
 ]
 
 /**
  * 预览计划（纯）。顺序规则（ADR §4）：live 行先按 recordId 的码元比较器排序，再扫描；选项取**首次出现序**，
  * 去重按精确码点相等（大小写敏感、不做 Unicode 归一 —— JS 字符串相等）。不依赖输入顺序：同一行集合的任意排列
  * 得到同一计划。
+ *
+ * 非对象行（ADR 增补 B）：live 行或本表回收站行的 `data` 不是 JSON 对象（数组 / 标量 / JSON null）⇒ 整次 `rejected`，
+ * reason `record_data_not_object`，列出全部 recordId。**不**把它当空格读：对非对象的 jsonb，`data ? F` 问的是「数组里有没有
+ * 这个字符串元素」、`data -> F` 恒为 NULL，读出来的「缺键」是假的；而执行的 `jsonb_set` 在非对象上要么报错要么静默不写。
  */
 export function planFieldRetypeConvert(input: {
   sourceProperty: Readonly<Record<string, unknown>>
@@ -253,6 +263,11 @@ export function planFieldRetypeConvert(input: {
   let converted = 0
   let rejectedCells = 0
   for (const cell of sortedLive) {
+    if (cell.dataIsObject !== true) {
+      rejectedCells += 1
+      addRejection('record_data_not_object', cell.recordId)
+      continue
+    }
     const outcome = classifyFieldRetypeConvertCell(cell.hasKey, cell.value)
     if (outcome.kind === 'empty') {
       empty += 1
@@ -270,6 +285,11 @@ export function planFieldRetypeConvert(input: {
 
   let trashBlocking = 0
   for (const row of sortedTrash) {
+    if (row.dataIsObject !== true) {
+      trashBlocking += 1
+      addRejection('record_data_not_object', row.recordId)
+      continue
+    }
     if (!isFieldRetypeConvertTrashBlocking(row.hasKey, row.value)) continue
     trashBlocking += 1
     addRejection('trashed_rows_with_value', row.recordId)
@@ -283,9 +303,11 @@ export function planFieldRetypeConvert(input: {
 
   const rejections: FieldRetypeConvertRejection[] = []
   for (const reason of REJECTION_ORDER) {
-    const ids = rejected.get(reason)
-    if (!ids) continue
-    rejections.push({ reason, recordCount: ids.length, recordIds: [...ids] })
+    const collected = rejected.get(reason)
+    if (!collected) continue
+    // one reason can now collect ids from BOTH scans (live, then recycle bin): sort and de-duplicate the union
+    const ids = [...new Set(collected)].sort(compareCodeUnits)
+    rejections.push({ reason, recordCount: ids.length, recordIds: ids })
   }
 
   const verdict: 'ok' | 'rejected' = rejectedCells === 0 && trashBlocking === 0 && !optionLimitExceeded ? 'ok' : 'rejected'
