@@ -2,7 +2,7 @@
 
 > **地位**:操作员执行脚本,不是设计文档。逐条编号,每条给动作 + 验证 + 失败处理。
 > **值域纪律**:本文**不含任何凭据 / 真实主机名 / 真实 IP**——一律用占位符
-> `<222-HOST>` / `<PLM-HOST>`。项目号 `230920006`、其名称、行数等是客户已知悉的
+> `<222-HOST>` / `<PLM-HOST>`。项目号 `<项目号A>`、其名称、行数等是客户已知悉的
 > 项目级事实(非凭据、非敏感业务值),按现有姊妹文档(`onsite-connection-test-runbook-20260901.md`
 > 等)同等纪律保留。
 > **前置阅读**:客户侧现场连接测试与 30 秒数据体检的 SQL 见
@@ -104,21 +104,21 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
    ```
 3. **Step 1-2 订正**:222 上 PATH 里没有 `pg_dump`/`psql`,需要用完整路径 `C:\Program Files\PostgreSQL\17\bin\pg_dump.exe`(本地 Postgres 17,监听 5432 端口;`postgresql-x64-17` 服务在服务列表里显示 Stopped,但服务器实际在监听——不要去"启动"它)。今天的 DB 快照:`C:\metasheet\output\backups\upgrade-backup-20260903-135009\pre-upgrade-db.dump`(2.0 MB);脚本自带的代码备份:`upgrade-backup-20260903-140619`(docker/config/dist/web dist/plugins)。
 4. **时间线与验收**:停机 14:06:18 → 健康检查 OK 14:08:55(约 2.5 分钟);F22 must-exist 清单 OK,插件 hash 校验 OK(436 个文件),node_modules 泄漏检查 OK;执行的迁移:`079`、`080`、`081`、`082`、`084`、`085`、`086`,以及 `zzzz20260830200000`/`211000`/`220000`/`230000`、`zzzz20260831090000`、`zzzz20260902120000`;audit CHECK 现在列出 `handoff_advance` 和 `project_board_read`;`integration_stock_prep_handoff` 表存在;`attendance_records`/`approval_instances` 行数不变(0/0)。**in-place 脚本不会刷新 `C:\metasheet\BUILD_PROVENANCE.json`**——升级完成后要手动从包根目录把新的 `BUILD_PROVENANCE.json` 拷过去(旧的已存到备份目录,存为 `BUILD_PROVENANCE.r6.json`),否则 Step 3-1 读到的还是旧提交。
-5. **远程执行注意事项**:一次性 `ssh 192.168.1.222 powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
+5. **远程执行注意事项**:一次性 `ssh <222-HOST> powershell -Command "..."` 遇到引号会出问题;改用 `powershell -NoProfile -EncodedCommand <脚本的 UTF-16LE base64>`(例如用 Node 生成:`Buffer.from(script,'utf16le').toString('base64')`)。
 6. **升级完成后待办(需要 admin Bearer token;preflight 路由在没有 token 时返回 401 UNAUTHORIZED)**:针对**已存在**的 objectId `plm_stock_preparation_sandbox_r6_trial` 重新推导沙箱绑定——调用 `POST /api/integration/stock-preparation/sandbox-target/ensure`(当前绑定的 `sheet_32df959afa3cecfa564e5486` 缺少 #5447 新增的五个部门列 `makeOrBuy`/`procurementDone`/`procurementReplyDate`/`warehouseDone`/`actualArrivalDate`),**不要**把返回的 `data.targetBinding` 直接整段贴进 `INTEGRATION_CORE_STOCK_PREPARATION_TABLE_ACTIONS_JSON`——它只有 33 个 TEMPLATE 字段,不含 customer pack 的 `ext_` 列,直接贴会替换掉旧配置里的 `ext_*` 条目(见下面第 8 条的订正,合并口径 33+21=54),要先按第 8 条合并再贴,再 `pm2 restart metasheet-backend --update-env`,用 `GET /api/integration/stock-preparation/preflight` 确认 `ready:true`。222 上已有一个做这件事的辅助脚本(token 从文件读取,不会回显):`C:\metasheet\output\releases\incoming\222-rebind-sandbox-target.ps1`(**该脚本当天没有做 ext_ 合并**,今天是靠第 8 条另外的一次性合并脚本补上的,下一窗口用它前先确认它是否已经把合并逻辑接进去)。
 
    > **2026-09-10 订正**:本条此前只写"把返回的 `data.targetBinding` 贴进"配置,未提示会丢 `ext_` 列,与本节第 8 条的订正矛盾——已补上合并口径的指向。
 7. **管理员 token 怎么来的**:用仓库自带的 `scripts/ops/attendance-window-runner-mint-token.mjs`(需复制到 `C:\metasheet\packages\core-backend\scripts\` 下,`import('pg')` 才能解析)——先 `node <它> --find-admin` 找到已存在的活跃 admin 账号,再 `node <它> --mint --user-id <id> --roles admin --expires-in 3600 --tenant-id default` 用宿主机自己的 `JWT_SECRET` 现签一份 HS256 token(用完删掉这个脚本副本);全程不碰密码,secret 也不离开宿主机。**用 `--tenant-id default` 签发后,令牌自带 tenant claim**(本次部署的唯一 org id);请求头 `x-tenant-id` 仍可以继续带,但不再是租户来源。等 flag 开启后,不带 tenant claim 的令牌会被备料相关 admin 路由直接 403。
 8. **Step 0-7 订正**:`POST /api/integration/stock-preparation/sandbox-target/ensure` 返回的 `targetBinding` **只有 33 个 TEMPLATE 字段**(20 个 `plm_system` + 13 个人工列,含 #5447 的部门列),**不带** customer pack 的 21 个 `ext_` 列。把它"整段"贴进去会**替换掉**原有 action 配置里的 `fieldIdMap`,`ext_` 列(领料节点/备料日期/毛胚尺寸等)静默变成无法解析。**正确做法是合并**:ensure 返回的映射 + 旧配置里的 `ext_*` 条目(同一张 sheet/objectId ⇒ 旧的物理列 id 依然有效;今天是 33 + 21 = 54)。今天用了一次性 node 脚本做合并(`output/releases/incoming/tools-r7/merge-ext.cjs`);动手前先备份 `app.env`(今天存了两份:`app.env.before-rebind-20260903-143232` 与 `app.env.before-extmerge-20260903063616`)。合并后:`pm2 restart --update-env`,预检确认 `ready:true`、`checks.carryTargetBinding.ownershipState=owned_by_this_project`、没有 `missingHumanFields`。
 9. **#5452(统一 SQL 连接绑定,2026-09-03 已合入)带来一个新 blocker**:`data-source:sql-readonly` 外部系统现在要求 `integration_external_systems.connection_id` 非空;该迁移只回填了 `config` 里带服务端打上的 `dataSourceOwnerId` 那些行——r6 时代的两条(`Customer PLM readonly` `104e9bad`、`Synthetic PLM readonly` `7130b124`)都没有这个标记,于是 source-preflight 报 `CONNECTION_LEGACY_FALLBACK_DENIED`。**修法(走认可路径,带 admin token + `x-tenant-id`)**:先 `GET /api/integration/external-systems/:id`,再用同样的公开字段(`id`/`tenantId`/`name`/`kind`/`role`/`status`/`config`/`capabilities`)加上 `connectionId = config.dataSourceId`(分别是 `customer-plm-test` / `synthetic-plm`)调 `POST /api/integration/external-systems`。用 `select id, connection_id from integration_external_systems` 核验。
-10. **今天 Step 4/5 的结果**:对 `104e9bad` 的 source-binding `POST` 免重启即生效。对客户测试 PLM 的 source-preflight:可达(13 个对象里 12 个通),`BomHeadInfo` 143 行,`BomDetailsInfo` ≥200 行,`projectData.hasProjectNumbers=true`(样例 FileCode 如 `14-2022817`)但 `projectNodeRows=0`(取样范围内没有 `NodeType=2` 的项目节点);结论是 no-go,唯一 blocker 是 `bom_store_signals_conflict`,原因 `volume-undecidable-at-cap`(权威性+结构都指向 BomDetails——也就是当前配置的方案——但 200 行的取样量无法给出量级排序)。**这个僵局没有声明参数可用**(`declaredBridge` 只覆盖 order-module/DesignBom 这条桥,不覆盖这里);operator 按"旧系统口径"规则裁决(`BomHeadInfo`/`BomDetailsInfo` 权威,`DesignBom` 不用),然后继续走 dry-run。
-11. **今天 Step 6-1 的结果**:对 `14-2022817` 和 `14-2023001` 跑 dry-run → `status=ready`、`canApply=true`、`evidence.expansion.status=expanded` 但 `rowsExpanded=0`——测试库里没有带 BOM 树的项目节点。所以彩排单第②步要等客户:要么在测试 PLM 里填一个真实项目,要么把生产 PLM 的只读权限开出来。第①③④步可以照常在已绑定的沙箱表上彩排。
+10. **今天 Step 4/5 的结果**:对 `104e9bad` 的 source-binding `POST` 免重启即生效。对客户测试 PLM 的 source-preflight:可达(13 个对象里 12 个通),`BomHeadInfo` 143 行,`BomDetailsInfo` ≥200 行,`projectData.hasProjectNumbers=true`(样例 FileCode 如 `<项目号F>`)但 `projectNodeRows=0`(取样范围内没有 `NodeType=2` 的项目节点);结论是 no-go,唯一 blocker 是 `bom_store_signals_conflict`,原因 `volume-undecidable-at-cap`(权威性+结构都指向 BomDetails——也就是当前配置的方案——但 200 行的取样量无法给出量级排序)。**这个僵局没有声明参数可用**(`declaredBridge` 只覆盖 order-module/DesignBom 这条桥,不覆盖这里);operator 按"旧系统口径"规则裁决(`BomHeadInfo`/`BomDetailsInfo` 权威,`DesignBom` 不用),然后继续走 dry-run。
+11. **今天 Step 6-1 的结果**:对 `<项目号F>` 和 `<项目号G>` 跑 dry-run → `status=ready`、`canApply=true`、`evidence.expansion.status=expanded` 但 `rowsExpanded=0`——测试库里没有带 BOM 树的项目节点。所以彩排单第②步要等客户:要么在测试 PLM 里填一个真实项目,要么把生产 PLM 的只读权限开出来。第①③④步可以照常在已绑定的沙箱表上彩排。
 12. **只读枚举配方(平台路由 values-free 列不出项目号时用)**:在 222 上以 `app.env` 环境运行一段 node 脚本——用 `pg` 读 `data_sources` 里该数据源的 `config`,用 `packages/core-backend/dist/src/security/encrypted-secrets.js` 的 `decryptStoredSecretValue` 解密 `credentials`,用 `dist/src/data-adapters/MSSQLAdapter.js` 建适配器并 `query(sql)`;只打印结构/计数/项目号,凭据永不打印;脚本留在 222 的 `C:\metasheet\output\releases\incoming\tools-r7\plm-enum.cjs`。**这是运维用的一次性读取,不是产品能力**。
-13. **测试实例事实**:`10.10.52.16` = `LAPTOP-PMD3CA78\TEST1`(客户笔记本上的 SQL Server 测试实例),唯一库 `plm`;71 个项目节点(`NodeType=2`,`FileCode` 如 `230920006`、`230920001`-`005`、`29-2023054`、`1-20232045`、`1-20211987`……;`PathExAttrInfo.Parent_OBJ_ID` 即项目节点 id,如 `230920006` → `15014156`);`BomHeadInfo` 143 行、`BomDetailsInfo` 1319 行、`PathInfo` 1189 行;**订单表头只有 1 张**(`obj_id` `15011146`,挂在项目 `1-20232045` 节点 `15010980` 下,7 行明细)。
-14. **该订单 7 行明细的零件缺失**:这 7 行明细的 `part_id`(`600005707`、`600005716`、`600005731`、`600005743`、`600005769`×2,以及一个 `0`)**全部不存在于 `PartLibraryInfo`**(887 个零件,`OBJ_ID` 范围 `600026018`–`600030571`)。逐跳 dry-run:`PathExAttrInfo`=1 → `PathInfo`=1 → `OrderHeadInfo`=1 → `OrderDetailInfo`=7 → `PartLibraryInfo`=0×7 → 7 条 `missing_component`、`manual_confirm_required`、展开 0 行。有完整 BOM 树的零件是存在的(`600028853`:2 张表头/118 行明细;`600026366`:78 行;`600029769`:45 行;`600030316`:41 行),但没有任何订单引用它们。**结论:测试实例数据残缺(订单引用的零件未同步到零件库),映射与读取计划本身正确**——客户提供的 SQL 走法(`FileCode` → `Parent_OBJ_ID` → `PathInfo` → `OrderHeadInfo.path_id` → `OrderDetailInfo.order_id` → `part_id` → `BomHeadInfo` → `bom_id` → `BomDetailsInfo.bom_pid`)与当前配置逐跳一致;其中出现的 `15031762`/`600057923`/`2-20241722.1723` 这类 id 属于生产库,不在测试库里。
+13. **测试实例事实**:`<测试实例地址>` = `<实例名>`(客户笔记本上的 SQL Server 测试实例),唯一库 `plm`;71 个项目节点(`NodeType=2`,`FileCode` 如 `<项目号A>`、`<项目号区间>`、`<项目号H>`、`<项目号C>`、`<项目号I>`……;`PathExAttrInfo.Parent_OBJ_ID` 即项目节点 id,如 `<项目号A>` → `<节点ID-1>`);`BomHeadInfo` 143 行、`BomDetailsInfo` 1319 行、`PathInfo` 1189 行;**订单表头只有 1 张**(`obj_id` `<订单ID-1>`,挂在项目 `<项目号C>` 节点 `<节点ID-2>` 下,7 行明细)。
+14. **该订单 7 行明细的零件缺失**:这 7 行明细的 `part_id`(`<零件ID-7>`、`<零件ID-8>`、`<零件ID-9>`、`<零件ID-10>`、`<零件ID-11>`×2,以及一个 `0`)**全部不存在于 `PartLibraryInfo`**(887 个零件,`OBJ_ID` 范围 `<零件ID-12>`–`<零件ID-13>`)。逐跳 dry-run:`PathExAttrInfo`=1 → `PathInfo`=1 → `OrderHeadInfo`=1 → `OrderDetailInfo`=7 → `PartLibraryInfo`=0×7 → 7 条 `missing_component`、`manual_confirm_required`、展开 0 行。有完整 BOM 树的零件是存在的(`<零件ID-1>`:2 张表头/118 行明细;`<零件ID-14>`:78 行;`<零件ID-15>`:45 行;`<零件ID-16>`:41 行),但没有任何订单引用它们。**结论:测试实例数据残缺(订单引用的零件未同步到零件库),映射与读取计划本身正确**——客户提供的 SQL 走法(`FileCode` → `Parent_OBJ_ID` → `PathInfo` → `OrderHeadInfo.path_id` → `OrderDetailInfo.order_id` → `part_id` → `BomHeadInfo` → `bom_id` → `BomDetailsInfo.bom_pid`)与当前配置逐跳一致;其中出现的 `<对象ID-1>`/`<对象ID-2>`/`<项目号D>` 这类 id 属于生产库,不在测试库里。
 15. **演第②步的最短路(客户侧,任选其一)**:
-    a. 在测试库为某个已有项目(如 `230920006`,节点 `15014156`)插入一张订单,明细 `part_id` 指向有 BOM 的零件(如 `600028853`),之后对该项目号跑 dry-run 即可展开;
-    b. 把订单 `15011146` 引用的 7 个零件同步进 `PartLibraryInfo`;
+    a. 在测试库为某个已有项目(如 `<项目号A>`,节点 `<节点ID-1>`)插入一张订单,明细 `part_id` 指向有 BOM 的零件(如 `<零件ID-1>`),之后对该项目号跑 dry-run 即可展开;
+    b. 把订单 `<订单ID-1>` 引用的 7 个零件同步进 `PartLibraryInfo`;
     c. 给 222 开生产库的只读连接(由 owner 在工作台新建数据源、录入凭据)。
     另记:源预检的 `bom_store_signals_conflict`(`volume-undecidable-at-cap`)在这个实例上是预期的探测器保守表现,不阻断 dry-run/apply。
 
@@ -165,7 +165,7 @@ git merge-base --is-ancestor <5402 头提交> origin/main # NO
 
 **0-6. owner 预先了解(不是本窗口要执行的操作)FOS-4b-3-prod 生产写入的授权模板**
 - 背景(见 §0.6 D1 裁决):承接生产写入策略的配置键 `context.config.stockPrepApplyProduction` 在今天的 `plugin-runtime-config.ts` 上**没有加载器**,本窗口**不执行**这条路径,标记「设计,未实现」——本条从"预先起草授权记录"降级为"owner 预先读一遍模板,心里有数即可",不产生任何本窗口的配置改动。
-- 动作(可选,不阻塞窗口):owner 按 `data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §2 的模板过一遍眼,了解字段形状(项目 `230920006`、action `plm.stock-preparation.pull-bom.v1`、route、`maxCleanRows`、`expiresWithin` ≤ 7 天),为**未来**(P4 file loader 落地之后的某个窗口)做准备,不是这次窗口的交付物。
+- 动作(可选,不阻塞窗口):owner 按 `data-factory-fos-4b-3-prod-apply-runbook-20260625.md` §2 的模板过一遍眼,了解字段形状(项目 `<项目号A>`、action `plm.stock-preparation.pull-bom.v1`、route、`maxCleanRows`、`expiresWithin` ≤ 7 天),为**未来**(P4 file loader 落地之后的某个窗口)做准备,不是这次窗口的交付物。
 
 **0-7. 配置沙箱落地目标(D1=B 裁决的机械部分,必须在窗口前、在开发机上完成)**
 - 背景:见 §0.6。本窗口的备料落地表是沙箱表,由三个部署时配置项共同决定,**都不需要改代码**。
@@ -545,7 +545,7 @@ POST /api/integration/stock-preparation/source-binding
 **6-1. Dry-run**
 ```
 POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run
-{ "parameters": { "projectNo": "230920006" } }
+{ "parameters": { "projectNo": "<项目号A>" } }
 ```
 **验证(已核对响应实际形状,`status=expanded` 是之前版本的笔误——顶层 `status` 从来没有 `expanded` 这个值,见下)**:
 
@@ -563,12 +563,12 @@ POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/dry-run
 
 ```
 POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/mvp-persist
-{ "parameters": { "projectNo": "230920006" } }
+{ "parameters": { "projectNo": "<项目号A>" } }
 ```
 
 字段白名单在 `plugins/plugin-integration-core/lib/http-routes.cjs:1137`:`VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS = new Set(['parameters'])`,由该路由(`tableActionMvpPersist`,同文件 4974 行)的 `normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_MVP_PERSIST_BODY_KEYS)` 校验;多出的 `confirm` 键会命中 `normalizeTableActionBody` 里"unsupported request field"的分支(同文件约 1458-1464 行),400 `TABLE_ACTION_REQUEST_INVALID`。`confirm`(带 `dryRunToken`)只是**另一个**路由——`/apply`——的字段(`VALID_TABLE_ACTION_APPLY_BODY_KEYS = new Set(['parameters', 'confirm'])`,同文件 1138 行,路由在 5079 行),`mvp-persist` 和 `apply` 是两条不同的写路径,字段形状不能混用。(`onsite-connection-test-runbook-20260901.md` §3 那条"token 放 `confirm.dryRunToken`,放顶层会 400"的教训说的是 `/apply` 路由,不是这里的 `mvp-persist`——两条路由都不接受顶层 `dryRunToken`,但 `mvp-persist` 连 `confirm` 这个外层键都不接受。)
 
-**验证**:响应给出真实的 `snapshotBatchId`;**这一步写入的不是 Step 0-7 配置的那张沙箱主表**,而是 MetaSheet 内部固定的快照表(`plm_stock_preparation_project` / `_bom_snapshot_batch` / `_bom_snapshot_line`,`stock-preparation-sync-run-persist.cjs` 头注释称为"the frozen 9-table set"),不经过 `action.target`,不因 Step 0-7 的 action 绑定改变落点(见 §0.6)。打开工作台确认这批快照里出现了项目 `230920006` 的真实行。真正把行写进 Step 0-7 配置的沙箱表,是 §7.2b 的 `/apply` 调用,不是这一步。
+**验证**:响应给出真实的 `snapshotBatchId`;**这一步写入的不是 Step 0-7 配置的那张沙箱主表**,而是 MetaSheet 内部固定的快照表(`plm_stock_preparation_project` / `_bom_snapshot_batch` / `_bom_snapshot_line`,`stock-preparation-sync-run-persist.cjs` 头注释称为"the frozen 9-table set"),不经过 `action.target`,不因 Step 0-7 的 action 绑定改变落点(见 §0.6)。打开工作台确认这批快照里出现了项目 `<项目号A>` 的真实行。真正把行写进 Step 0-7 配置的沙箱表,是 §7.2b 的 `/apply` 调用,不是这一步。
 
 **失败处理**:400 `TABLE_ACTION_REQUEST_INVALID`(`unsupported request field: confirm` 或类似)→ body 里多带了 `confirm`/`dryRunToken`,去掉,只留 `parameters`。
 
@@ -613,7 +613,7 @@ POST /api/integration/stock-preparation/confirmation-decisions/confirm
    ```
 2. **服务端配置**(不是请求参数,不是 env——按该文档 §3 原样配置到 `context.config.stockPrepApplyProduction`,`authorizedTargetObjectId` 必须是 `plm_stock_preparation_main`,`requireFreshDryRun: true`)。**⚠ 本窗口这一步做不到——见本节顶部的说明,`plugin-runtime-config.ts` 没有为这个键写加载器。**
 3. **验证门确实生效**:非匹配的 apply(错 route/action/target)仍然被拒(`STOCK_PREP_PRODUCTION_APPLY_DENIED`);去掉配置后 canonical 恢复"拒",证明"开关"是真开关。
-4. **全新 dry-run**(不能用 Step 6 的旧 token——`requireFreshDryRun` 会拒绝陈旧/沙箱 token):对项目 `230920006` 重新 dry-run 一次,确认 `cleanCount(add+update) <= maxCleanRows`,`manual_confirm` 行数 = 0(或明确等于本次授权范围之外、保持 held 的那部分)。
+4. **全新 dry-run**(不能用 Step 6 的旧 token——`requireFreshDryRun` 会拒绝陈旧/沙箱 token):对项目 `<项目号A>` 重新 dry-run 一次,确认 `cleanCount(add+update) <= maxCleanRows`,`manual_confirm` 行数 = 0(或明确等于本次授权范围之外、保持 held 的那部分)。
 5. **Apply**(带全新 token,走 §7.2-1 授权的 route):`canonicalWriteExecuted` 只应在这个策略下发生;`manualConfirmRowsWritten` 必须是 `0`;`failed` 应为 `0`。
 6. **立刻退出**:执行完成后,移除 `context.config.stockPrepApplyProduction`(或让它过期)——P2 恢复休眠,canonical 恢复默认拒绝。**不要把这个策略留在配置里过夜。**
 
@@ -628,7 +628,7 @@ POST /api/integration/stock-preparation/confirmation-decisions/confirm
 2. ```
    POST /api/integration/table-actions/plm.stock-preparation.pull-bom.v1/apply
    {
-     "parameters": { "projectNo": "230920006" },
+     "parameters": { "projectNo": "<项目号A>" },
      "confirm": {
        "dryRunToken": "<Step 6-1/7.1 之后最新一次 dry-run 的 token>",
        "acceptManualConfirmHold": true
@@ -637,7 +637,7 @@ POST /api/integration/stock-preparation/confirmation-decisions/confirm
    ```
    （请求体的字段白名单是 `parameters`/`confirm`,`VALID_TABLE_ACTION_APPLY_BODY_KEYS`,`http-routes.cjs:1138`,路由在同文件 5077-5134 行——和 Step 6-2 的 `mvp-persist` 不是同一条白名单,不要把两条路由的 body 形状搞混,见 Step 6-2 的订正说明。`acceptManualConfirmHold: true` 在这批仍有行留在 `manual_hold` 时是必须的(`stock-preparation-table-actions.cjs:1673`);若这批同时存在被解决的重复 key 分组,还要传 `acceptDuplicateResolution: true`,否则 409 `TABLE_ACTION_DUPLICATE_RESOLUTION_REVIEW_REQUIRED`。）
 
-**验证**:响应体顶层 `status` 与 `apply.status`(`summarizeApplyResultForEvidence`,`stock-preparation-apply-writer.cjs:614-627`;取值词表见 `applyStatus`,同文件 501-505 行:`succeeded` | `partial` | `failed` | `held`)应为 `succeeded`(若这批仍有 held 行,预期是 `partial`,不是失败);`apply.written > 0`;`apply.target.objectId` 等于 Step 0-7 配置的沙箱 objectId(用它确认真的写进了预期的那张表,不是别的表——`apply.target` 是写入函数原样回显的目标,同文件 602-606 行);`apply.counts` 里 `created`/`updated` 之和的量级与 dry-run 的 clean 计数(`ADD`+`UPDATE`)一致。打开工作台确认这张沙箱表里出现了项目 `230920006` 的真实行。
+**验证**:响应体顶层 `status` 与 `apply.status`(`summarizeApplyResultForEvidence`,`stock-preparation-apply-writer.cjs:614-627`;取值词表见 `applyStatus`,同文件 501-505 行:`succeeded` | `partial` | `failed` | `held`)应为 `succeeded`(若这批仍有 held 行,预期是 `partial`,不是失败);`apply.written > 0`;`apply.target.objectId` 等于 Step 0-7 配置的沙箱 objectId(用它确认真的写进了预期的那张表,不是别的表——`apply.target` 是写入函数原样回显的目标,同文件 602-606 行);`apply.counts` 里 `created`/`updated` 之和的量级与 dry-run 的 clean 计数(`ADD`+`UPDATE`)一致。打开工作台确认这张沙箱表里出现了项目 `<项目号A>` 的真实行。
 
 **失败处理**:
 - 403 `STOCK_PREP_APPLY_SANDBOX_ONLY`,`reason: prod_canonical` → Step 0-7 的 action 绑定没生效,`target.objectId` 还是默认的 canonical(`normalizeTarget` 的默认值,`stock-preparation-table-actions.cjs:147-157`),回去核对 action 配置里的 `target.objectId` 是不是真的写了沙箱 objectId。
@@ -668,9 +668,9 @@ GET /api/multitable/... (该 sheet 的记录列表,sheetId 取自 Step 0-7 actio
 ```
 
 **验证(具体检查)**
-1. **行数**:项目 `230920006` 对应的行数 > 0,量级接近 §7.2b 那次 `apply` 响应里 `apply.written`(或 `apply.counts` 的 `created`+`updated`)。
+1. **行数**:项目 `<项目号A>` 对应的行数 > 0,量级接近 §7.2b 那次 `apply` 响应里 `apply.written`(或 `apply.counts` 的 `created`+`updated`)。
 2. **抽样一行**,确认四个字段都是真实值而非占位符:
-   - 项目号:`230920006`
+   - 项目号:`<项目号A>`
    - 图号:来自 `IdentityNo`
    - 材料:非空、非 GUID
    - 数量:来自 `Bom_ExAttr` 族第 1 槽,数字合理(不是 0、不是 NULL 转出来的怪值)

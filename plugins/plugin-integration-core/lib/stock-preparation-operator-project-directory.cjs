@@ -12,7 +12,7 @@
 // NOT confer (R-11's mapping is zero-automatic) — and it is values-free by construction, so even an
 // admin sees option labels built from a status, some counts and a runId, with no number and no name.
 // The confirmation queue then demands a hand-typed `projectNo`. Net effect: the operator had to
-// memorise, out of band, that 230920006 is the RY2 注射水缓冲罐部件.
+// memorise, out of band, that 200000006 is the 示例乙型容器.
 //
 // ---------------------------------------------------------------------------
 // WHY THIS IS A NEW MODULE AND NOT A WIDER PROJECTION ON THE OLD ONE

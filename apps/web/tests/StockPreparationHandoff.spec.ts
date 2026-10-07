@@ -91,7 +91,7 @@ import {
 import StockPreparationConfirmationQueueView from '../src/components/integration/stockPreparation/StockPreparationConfirmationQueueView.vue'
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
-const PROJECT_NO = '230920006'
+const PROJECT_NO = '200000006'
 
 const ADVANCE_PATH = '/stock-preparation/handoff/advance'
 const HANDOFF_PATH = '/stock-preparation/handoff'

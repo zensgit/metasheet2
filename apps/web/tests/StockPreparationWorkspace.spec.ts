@@ -1465,7 +1465,7 @@ describe('StockPreparationWorkspace shell', () => {
     answerQueueReads()
     const root = await mountShellOnTheQueue()
     const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
-    input.value = '230920006'
+    input.value = '200000006'
     input.dispatchEvent(new Event('input'))
     await flushUi()
     ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
@@ -1515,7 +1515,7 @@ describe('StockPreparationWorkspace shell', () => {
     })
     const root = await mountShellOnTheQueue()
     const input = root.querySelector('[data-testid="stock-prep-confirmation-project-input"]') as HTMLInputElement
-    input.value = '230920006'
+    input.value = '200000006'
     input.dispatchEvent(new Event('input'))
     await flushUi()
     ;(root.querySelector('[data-testid="stock-prep-confirmation-reconcile"]') as HTMLButtonElement).click()
@@ -1526,7 +1526,7 @@ describe('StockPreparationWorkspace shell', () => {
     // The wording is the CODE's own, not the write-generic every unknown code falls back to.
     expect(notice.textContent).not.toContain('这一步没有保存成功')
     // ...and the number the admin typed is not echoed back into the notice.
-    expect(notice.textContent).not.toContain('230920006')
+    expect(notice.textContent).not.toContain('200000006')
   })
 
   // -------------------------------------------------------------------------
