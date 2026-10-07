@@ -20,6 +20,11 @@ const h_ = vi.hoisted(() => ({
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
   notifyTasksChanged: vi.fn(),
+  // M3: every detail mount now also reads comments and resolves the viewer's own id. This file's
+  // own M2 assertions do not exercise either — that surface lives in tasks-detail-m3.spec.ts —
+  // so both are stubbed to harmless defaults purely so a detail mount does not throw.
+  listComments: vi.fn(),
+  getCurrentUserId: vi.fn(),
 }))
 
 vi.mock('../src/tasks/tasksContext', () => ({
@@ -32,10 +37,19 @@ vi.mock('../src/tasks/tasksApi', () => ({
   createTask: h_.createTask,
   completeTask: h_.completeTask,
   reopenTask: h_.reopenTask,
+  listComments: h_.listComments,
 }))
 
 vi.mock('../src/tasks/tasksBadgeBus', () => ({
   notifyTasksChanged: h_.notifyTasksChanged,
+}))
+
+// M3: `useAuth().getCurrentUserId()` is called once a detail route is entered (own-comment /
+// leave-button gating, covered in tasks-detail-m3.spec.ts). Defaults to an unresolved id here —
+// this file mounts a REAL router, so `useRouter` needs no mock (unlike tasks-view.spec.ts /
+// tasks-list-view.spec.ts, which stub `vue-router` entirely).
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({ getCurrentUserId: h_.getCurrentUserId }),
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
@@ -128,6 +142,8 @@ beforeEach(() => {
   h_.completeTask.mockReset()
   h_.reopenTask.mockReset()
   h_.notifyTasksChanged.mockReset()
+  h_.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
+  h_.getCurrentUserId.mockReset().mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -445,10 +461,10 @@ describe('TasksView detail — complete/reopen actions', () => {
   })
 })
 
-// P2-2: `actionErrorKind` is reset at the START of each detail action (~:400 complete, ~:426
-// reopen) and in the id watch (~:448) — the ONLY three places anything ever clears it back to
-// null (a successful `applyActionOutcome('ok')` does NOT touch it). Each is its own guard; each
-// gets its own test below.
+// P2-2: `actionErrorKind` is reset at the START of each detail action (complete, reopen) and in
+// the id watch; a successful `applyActionOutcome('ok')` does NOT touch it. Each is its own guard;
+// each gets its own test below. The M3 detail actions clear it at their own start as well — those
+// clears are pinned in tasks-detail-m3.spec.ts.
 describe('TasksView detail — actionError resets (P2-2)', () => {
   it('a failed complete, then a successful retry, clears the "操作失败" banner', async () => {
     h_.getTask.mockImplementation(async (id: string) =>
