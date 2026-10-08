@@ -921,7 +921,7 @@ describe('data_sources listing reference counts (batched, values-free)', () => {
     // The driver message can embed host, database and login (see SCHEMA_FAILURE_MESSAGE's own
     // rationale) — the exact thing values-free forbids reaching a log line for this surface.
     const warnSpy = vi.spyOn(Logger.prototype, 'warn')
-    const dbError = Object.assign(new Error('connection reset by peer at 10.10.52.16:5432 login failed'), {
+    const dbError = Object.assign(new Error('connection reset by peer at 10.99.99.16:5432 login failed'), {
       code: '57P01',
     })
     const spy = vi

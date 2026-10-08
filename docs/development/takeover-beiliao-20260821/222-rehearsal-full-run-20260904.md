@@ -18,10 +18,10 @@
 
 ## 1. 为什么用同构合成数据而不是客户测试库
 
-对客户测试 PLM(`<test-plm-host-ip>/plm`)的只读枚举结论(2026-09-03,脚本在 222 `output/releases/incoming/tools-r7/`):
+对客户测试 PLM(`<测试实例地址>/plm`)的只读枚举结论(2026-09-03,脚本在 222 `output/releases/incoming/tools-r7/`):
 
-- 全库**只有 1 张订单**(项目 `1-20232045`),其 7 个明细零件全部不在 `DN_PDM_PartLibraryInfo`;
-- 有 BOM 树的零件(如 600028853)没有任何订单引用;唯一子树里挂着 BOM 的项目 `2-20231625` 的 BOM 也残缺(根零件下 40–60% 子件不在物料表);
+- 全库**只有 1 张订单**(项目 `<项目号C>`),其 7 个明细零件全部不在 `DN_PDM_PartLibraryInfo`;
+- 有 BOM 树的零件(如 <零件ID-1>)没有任何订单引用;唯一子树里挂着 BOM 的项目 `<项目号B>` 的 BOM 也残缺(根零件下 40–60% 子件不在物料表);
 - 客户给的 SQL 走法里的 id 在这个库里 0 命中 → 那段 SQL 跑在另一个库(生产库)。
 
 因此**任何项目在测试库都走不完整链**。仓库夹具 `plugins/plugin-integration-core/fixtures/stock-preparation-synthetic-sql-source/` 按"项目号→PathExAttrInfo.FileCode→PathInfo→OrderHead→OrderDetail→PartLibrary→BomHead→BomDetails(递归)"建表,与客户 SQL 和 222 读取计划 `customer-path-exattr.v1` **逐字段一致**(比对见 §3.1),所以代码路径和客户库完全相同,差异只在数据。
@@ -107,7 +107,7 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 
 ## 4. owner 怎么验证(浏览器)
 
-1. 登录 `http://<demo-server-ip>/`(管理员账号;密码不在我手里,可用 bootstrap-admin 脚本重置)。
+1. 登录 `http://<222-HOST>/`(管理员账号;密码不在我手里,可用 bootstrap-admin 脚本重置)。
 2. 工作台 → **项目备料页** tab → 项目号 `SYN-PROJ-0001`:看板应显示拉取 7 行、7 行有效、最近导出时间。
 3. 多维表 `备料表(试用)`(base `base_stockprep_trial`):三行有人工列值(见 §3.3);列末尾多了 8 个新字段。
 4. 点导出(或直接 GET `/api/integration/stock-preparation/prep-lines/export?projectNo=SYN-PROJ-0001`):对照 `备料导出-SYN-PROJ-0001-刷新后-20260904.xlsx`。
@@ -199,7 +199,7 @@ SYN-A-1000              2     true   add       10 - Q235B   10 - 待备料  2026
 
 **踩坑**:`pm2 restart --update-env` 从**当前 shell 的环境**更新,而不是重读 `app.env`;第一次重启后进程仍带旧 JSON(`pm2 env 0` 可见)。正确做法是升级脚本第 7 步的写法:先把 `app.env` 逐行 `SetEnvironmentVariable(...,'Process')` 装进当前进程,再 `pm2 restart <name> --update-env`。
 
-**验证**:重启后 `pm2 env 0` 含新键;对客户测试 PLM 项目 `2-20231625` 试算一次,证据 `expansion.summary` 出现 `maxReadCount:30000`、`maxElapsedMs:600000`(此前不出现);该项目无订单,`readCount:3`、`rowsExpanded:0`、`status:ready`,与之前行为一致。
+**验证**:重启后 `pm2 env 0` 含新键;对客户测试 PLM 项目 `<项目号B>` 试算一次,证据 `expansion.summary` 出现 `maxReadCount:30000`、`maxElapsedMs:600000`(此前不出现);该项目无订单,`readCount:3`、`rowsExpanded:0`、`status:ready`,与之前行为一致。
 
 ## 10. 2026-09-05 大 BOM 分批路径实测(第一次:不通)
 

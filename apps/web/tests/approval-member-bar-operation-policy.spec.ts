@@ -8,7 +8,7 @@ import { useLocale } from '../src/composables/useLocale'
 // have flaked the REQUIRED web lane on main. The cascade made it worse: a timed-out test never
 // unmounts its app, and the next test then warns "There is already an app instance mounted".
 vi.setConfig({ testTimeout: 15_000 })
-import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
+import { cloneVNode, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
 /**
@@ -55,6 +55,28 @@ vi.mock('vue-router', async () => {
   }
 })
 
+// ElMessage stub (same flake and fix as approval-e2e-lifecycle.spec.ts). A real toast is mounted
+// into document.body, outside the test app, and closes itself after ~3 s. When that timer fires
+// after this file's jsdom environment is torn down, the toast's leave transition calls the missing
+// requestAnimationFrame and vitest fails the lane with an unhandled ReferenceError although every
+// test passed. No test here asserts on toast DOM, so only ElMessage is replaced; every other
+// element-plus export stays real.
+// The `vi.spyOn(ElMessage, 'error')` tests below spy on this stub's method, so their call
+// assertions still see every call the views make.
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
+    }),
+  }
+})
+
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({ hasFeature: () => false }),
 }))
@@ -67,6 +89,10 @@ vi.mock('../src/approvals/permissions', () => ({
 // The real picker is imported directly by the view (not resolved globally), so it must be mocked
 // rather than stubbed via `app.component`. It exposes a button that emits the id the handler needs —
 // without a target, `submitTransfer` early-returns and the catch path is unreachable.
+// F4-S1: the add-sign 后加签 aggregation control only renders with TWO OR MORE addees, and the
+// dialog dedupes picks by id — so the stub picker takes its next id from this hoisted slot
+// (default: the single `user_target` every pre-existing test relies on).
+const pickerState = vi.hoisted(() => ({ nextId: 'user_target' }))
 vi.mock('../src/approvals/components/ApprovalUserPicker.vue', () => ({
   default: {
     name: 'ApprovalUserPicker',
@@ -75,7 +101,7 @@ vi.mock('../src/approvals/components/ApprovalUserPicker.vue', () => ({
     setup(_props: unknown, { emit }: { emit: (e: string, v: unknown) => void }) {
       return () => h('button', {
         'data-testid': 'stub-user-picker',
-        onClick: () => { emit('update:modelValue', 'user_target'); emit('select', { id: 'user_target', name: 'T' }) },
+        onClick: () => { emit('update:modelValue', pickerState.nextId); emit('select', { id: pickerState.nextId, name: 'T' }) },
       }, 'pick')
     },
   },
@@ -996,5 +1022,282 @@ describe('Lock-5 CR-3 (detail dialog) — the comment requirement derives from t
     await mountView()
     await openDialog('reject')
     expect(confirmButton().disabled).toBe(false)
+  })
+})
+
+// -----------------------------------------------------------------------------------------------
+// F4-S1 — Lock-5 L5-B 后加签 (`'after'`) on the member dialog: honest placement copy, the
+// aggregation control that renders only when it governs something, the wire payload, and the
+// server's round-incomplete refusal surfaced INLINE (owner disposition (1), 2026-10-01).
+// Source: `approval-lock5-node-operation-policy-20260817.md` OD-L5-4(b) (`:311-322`), OD-L5-5(a),
+// gates B-1/B-3/B-5; the lock's own honesty constraint on (b): "no copy may claim corpus 后加签
+// semantics (当前节点自动通过并流转至新增节点): the node is not skipped".
+// -----------------------------------------------------------------------------------------------
+describe('F4-S1 (Lock-5 L5-B) — 后加签 on the add-sign dialog', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  // A radio pair that can actually be driven (the generic `stub()` above drops the model): the
+  // group hands each radio its select/current API, each radio renders a button carrying its value.
+  const ElRadioGroup = defineComponent({
+    name: 'ElRadioGroup',
+    props: { modelValue: String },
+    emits: ['update:modelValue'],
+    setup(props, { slots, emit, attrs }) {
+      const api = { select: (value: string) => emit('update:modelValue', value), current: () => props.modelValue }
+      return () => h('div', { ...attrs, 'data-el-radio-group': props.modelValue ?? '' },
+        (slots.default ? slots.default() : []).map((child) => cloneVNode(child, { radioApi: api })))
+    },
+  })
+  const ElRadio = defineComponent({
+    name: 'ElRadio',
+    props: { value: String, radioApi: Object },
+    setup(props, { slots, attrs }) {
+      return () => h('button', {
+        ...attrs,
+        type: 'button',
+        'data-el-radio': props.value,
+        'data-checked': (props.radioApi as any)?.current?.() === props.value ? 'true' : 'false',
+        onClick: () => (props.radioApi as any)?.select?.(props.value),
+      }, slots.default ? slots.default() : [])
+    },
+  })
+  beforeEach(() => {
+    mockActiveApproval.value = baseInstance({ nodeOperations: { ...ALL_ALLOWED } })
+    mockHistory.value = []
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    pickerState.nextId = 'user_target'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    pickerState.nextId = 'user_target'
+    vi.clearAllMocks()
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of [
+      'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
+      'ElForm', 'ElIcon', 'ElTag',
+    ]) {
+      app.component(name, stub(name))
+    }
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.component('ElDialog', ElDialog)
+    app.component('ElInput', ElInput)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.component('ElRadioGroup', ElRadioGroup)
+    app.component('ElRadio', ElRadio)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  async function openAddSign(): Promise<HTMLElement> {
+    ;(q(container!, 'approval-add-sign-button') as HTMLButtonElement).click()
+    await flushUi()
+    const dialog = container!.querySelector('[data-el-dialog="加签"]') as HTMLElement
+    expect(dialog.getAttribute('data-dialog-visible')).toBe('true')
+    return dialog
+  }
+
+  async function pick(dialog: HTMLElement, id: string): Promise<void> {
+    pickerState.nextId = id
+    ;(dialog.querySelector('[data-testid="stub-user-picker"]') as HTMLButtonElement).click()
+    await flushUi()
+  }
+
+  async function choose(dialog: HTMLElement, testid: string): Promise<void> {
+    ;(dialog.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement).click()
+    await flushUi()
+  }
+
+  it('offers 并加签 (default) and 后加签; the 后加签 arm shows the honest same-node copy and never claims the corpus semantic', async () => {
+    const { ADD_SIGN_MODE_HINT, ADD_SIGN_PLACEMENT_COPY_EN, ADD_SIGN_PLACEMENT_COPY_ZH } = await import('../src/approvals/addSignHonestyCopy')
+    await mountView()
+    const dialog = await openAddSign()
+
+    const group = dialog.querySelector('[data-testid="approval-add-sign-placement"]') as HTMLElement
+    expect(group.getAttribute('data-el-radio-group')).toBe('parallel')
+    expect(dialog.querySelector('[data-testid="approval-add-sign-mode-hint"]')?.textContent).toBe(ADD_SIGN_MODE_HINT)
+    expect(dialog.querySelector('[data-testid="approval-add-sign-after-hint"]')).toBeNull()
+
+    await choose(dialog, 'approval-add-sign-placement-after')
+    expect(group.getAttribute('data-el-radio-group')).toBe('after')
+    const afterHint = dialog.querySelector('[data-testid="approval-add-sign-after-hint"]')?.textContent ?? ''
+    expect(afterHint).toBe(ADD_SIGN_PLACEMENT_COPY_ZH.afterHint)
+    expect(dialog.querySelector('[data-testid="approval-add-sign-mode-hint"]')).toBeNull()
+
+    // The lock's honesty constraint, pinned on BOTH languages: the copy states "same node / new
+    // round / not skipped" and does NOT claim 自动通过 + 流转到新增节点 as what happens.
+    for (const copy of [ADD_SIGN_PLACEMENT_COPY_ZH, ADD_SIGN_PLACEMENT_COPY_EN]) {
+      expect(copy.afterHint).not.toMatch(/前加签|insert(ed)? (a|an) (new )?approval node before/i)
+      // The corpus phrase may only appear NEGATED (「不是…」 / "this is not …").
+      const corpusClaimZh = copy.afterHint.indexOf('当前节点自动通过')
+      if (corpusClaimZh >= 0) expect(copy.afterHint.slice(0, corpusClaimZh)).toMatch(/不是「$/)
+      const corpusClaimEn = copy.afterHint.indexOf('auto-pass the current node')
+      if (corpusClaimEn >= 0) expect(copy.afterHint.slice(0, corpusClaimEn)).toMatch(/this is not "$/)
+    }
+    expect(ADD_SIGN_PLACEMENT_COPY_ZH.afterHint).toContain('同一节点')
+    expect(ADD_SIGN_PLACEMENT_COPY_EN.afterHint).toMatch(/SAME node/)
+  })
+
+  it("sends `addSignMode:'after'` for 后加签, keeps the 并加签 request byte-identical to before (no aggregation key), and asks the aggregation only with two or more addees", async () => {
+    await mountView()
+    const dialog = await openAddSign()
+
+    // 并加签 with one addee — the pre-F4-S1 payload exactly.
+    await pick(dialog, 'user_target')
+    ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(executeActionSpy).toHaveBeenLastCalledWith('apv_1', {
+      action: 'add_sign',
+      comment: undefined,
+      targetUserIds: ['user_target'],
+      addSignMode: 'parallel',
+    })
+    expect(Object.keys(executeActionSpy.mock.calls.at(-1)![1])).not.toContain('addSignAggregation')
+
+    // Re-open: the placement resets to the default each time.
+    const dialog2 = await openAddSign()
+    expect((dialog2.querySelector('[data-testid="approval-add-sign-placement"]') as HTMLElement).getAttribute('data-el-radio-group')).toBe('parallel')
+
+    // 后加签 with ONE addee — no aggregation control, no aggregation key.
+    await choose(dialog2, 'approval-add-sign-placement-after')
+    await pick(dialog2, 'user_target')
+    expect(dialog2.querySelector('[data-testid="approval-add-sign-aggregation"]')).toBeNull()
+    ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(executeActionSpy).toHaveBeenLastCalledWith('apv_1', {
+      action: 'add_sign',
+      comment: undefined,
+      targetUserIds: ['user_target'],
+      addSignMode: 'after',
+    })
+
+    // 后加签 with TWO addees — the control appears (default 会签) and the key is sent.
+    const dialog3 = await openAddSign()
+    await choose(dialog3, 'approval-add-sign-placement-after')
+    await pick(dialog3, 'user_target')
+    await pick(dialog3, 'user_second')
+    const aggregation = dialog3.querySelector('[data-testid="approval-add-sign-aggregation"]') as HTMLElement
+    expect(aggregation).toBeTruthy()
+    expect(aggregation.getAttribute('data-el-radio-group')).toBe('all')
+    await choose(dialog3, 'approval-add-sign-aggregation-any')
+    ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(executeActionSpy).toHaveBeenLastCalledWith('apv_1', {
+      action: 'add_sign',
+      comment: undefined,
+      targetUserIds: ['user_target', 'user_second'],
+      addSignMode: 'after',
+      addSignAggregation: 'any',
+    })
+
+    // …and switching back to 并加签 with two addees hides the control again (it governs nothing there).
+    const dialog4 = await openAddSign()
+    await choose(dialog4, 'approval-add-sign-placement-after')
+    await pick(dialog4, 'user_target')
+    await pick(dialog4, 'user_second')
+    expect(dialog4.querySelector('[data-testid="approval-add-sign-aggregation"]')).toBeTruthy()
+    await choose(dialog4, 'approval-add-sign-placement-parallel')
+    expect(dialog4.querySelector('[data-testid="approval-add-sign-aggregation"]')).toBeNull()
+  })
+
+  it('the round-incomplete 409 renders the honest bilingual copy INLINE, keeps the dialog open (not a policy denial), and never invites a retry', async () => {
+    const { memberActionFailure } = await import('../src/approvals/memberActionErrorCopy')
+    const { ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE, ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN } = await import('../src/approvals/addSignHonestyCopy')
+    const { ElMessage } = await import('element-plus')
+
+    // Pure classification, both languages: not a policy denial (dialog stays open), fixed copy.
+    const refused = Object.assign(new Error('After-mode add_sign requires the current round to complete with this approval'), {
+      status: 409,
+      code: 'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE',
+    })
+    expect(memberActionFailure(refused, '加签失败，请重试', true)).toEqual({ message: ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE, isPolicyDenial: false })
+    expect(memberActionFailure(refused, 'Add-sign failed', false)).toEqual({ message: ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN, isPolicyDenial: false })
+    expect(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE).not.toContain('请重试')
+    expect(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN).not.toMatch(/try again/i)
+
+    // Mounted: the dialog shows it inline and stays open.
+    const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    try {
+      executeActionSpy.mockRejectedValue(refused)
+      await mountView()
+      const dialog = await openAddSign()
+      await choose(dialog, 'approval-add-sign-placement-after')
+      await pick(dialog, 'user_target')
+      ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+      await flushUi(12)
+      expect(executeActionSpy).toHaveBeenCalled()
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect((container!.querySelector('[data-el-dialog="加签"]') as HTMLElement).getAttribute('data-dialog-visible')).toBe('true')
+      expect(dialog.querySelector('[data-testid="approval-action-dialog-error"]')?.textContent).toBe(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE)
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  // O-8 / F8-1: the same surfaces in English. The F8-1 render scan opens this dialog in its default
+  // state only; the after hint and the aggregation control appear once 后加签 is chosen (the
+  // control only with two or more addees), and the round-incomplete copy only on the server's 409.
+  it('in English, 后加签 with two addees renders the after hint, the aggregation control and the round-incomplete 409 INLINE from the _EN copy, and the dialog carries no CJK', async () => {
+    const { expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    const { ADD_SIGN_PLACEMENT_COPY_EN, ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN } = await import('../src/approvals/addSignHonestyCopy')
+    const { MEMBER_ACTION_DIALOG_GRAMMAR_EN } = await import('../src/approvals/memberActionDialogGrammar')
+    const { ElMessage } = await import('element-plus')
+    const refused = Object.assign(new Error('After-mode add_sign requires the current round to complete with this approval'), {
+      status: 409,
+      code: 'APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE',
+    })
+    const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    try {
+      // The describe's afterEach restores zh-CN.
+      useLocale().setLocale('en')
+      executeActionSpy.mockRejectedValue(refused)
+      await mountView()
+      ;(q(container!, 'approval-add-sign-button') as HTMLButtonElement).click()
+      await flushUi()
+      const dialogSelector = `[data-el-dialog="${MEMBER_ACTION_DIALOG_GRAMMAR_EN.add_sign.dialogTitle}"]`
+      const dialog = container!.querySelector(dialogSelector) as HTMLElement
+      expect(dialog.getAttribute('data-dialog-visible')).toBe('true')
+
+      await choose(dialog, 'approval-add-sign-placement-after')
+      await pick(dialog, 'user_target')
+      await pick(dialog, 'user_second')
+      expect(dialog.querySelector('[data-testid="approval-add-sign-after-hint"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.afterHint)
+      expect(dialog.querySelector(`[data-el-form-item-label="${ADD_SIGN_PLACEMENT_COPY_EN.aggregationLabel}"]`)).toBeTruthy()
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-all"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationAll)
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-any"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationAny)
+      expect(dialog.querySelector('[data-testid="approval-add-sign-aggregation-hint"]')?.textContent).toBe(ADD_SIGN_PLACEMENT_COPY_EN.aggregationHint)
+
+      ;(q(container!, 'approval-add-sign-submit') as HTMLButtonElement).click()
+      await flushUi(12)
+      expect(executeActionSpy).toHaveBeenCalled()
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect((container!.querySelector(dialogSelector) as HTMLElement).getAttribute('data-dialog-visible')).toBe('true')
+      expect(dialog.querySelector('[data-testid="approval-action-dialog-error"]')?.textContent).toBe(ADD_SIGN_AFTER_ROUND_INCOMPLETE_MESSAGE_EN)
+      expectNoCjkOutside(renderedTextAndAttributes(dialog), [], 'F4-S1 add_sign dialog, after-sign with two addees and the 409 (en)')
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 })

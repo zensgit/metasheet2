@@ -21,6 +21,11 @@
 # `/tasks/:id` detail surface (all render states, status-gated complete/reopen buttons, the
 # detail-generation stale-response guard, org-guidance/action-error reuse).
 #
+# M3 frontend (backend contract `docs/development/task-m3-backend-design-20260928.md`, not yet
+# implemented — coded only against the contract): `tasks-api-m3.spec.ts` (the new setParent/
+# assignee/follower/comment/delete calls and their code mappings) and `tasks-detail-m3.spec.ts`
+# (subtasks, membership, followers, comments, delete-with-inline-confirm) added.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -91,14 +96,16 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Twelve whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Fourteen whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
             tests/App.spec.ts \
+            tests/tasks-api-m3.spec.ts \
             tests/tasks-api.spec.ts \
             tests/tasks-badge.spec.ts \
             tests/tasks-context.spec.ts \
+            tests/tasks-detail-m3.spec.ts \
             tests/tasks-detail-view.spec.ts \
             tests/tasks-list-view.spec.ts \
             tests/tasks-nav-badge.spec.ts \

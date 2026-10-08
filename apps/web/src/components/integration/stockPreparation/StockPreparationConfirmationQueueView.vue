@@ -19,7 +19,7 @@
       <!-- 项目号 with a NATIVE datalist. The list carries every project in the caller's own tenant,
            each option's VALUE being the number and its LABEL the name, so the browser's own
            type-ahead filters on either — which is the whole point: an operator who only remembers
-           「注射水缓冲罐」 can now find 230920006 without being told it. The input stays a plain text
+           「示例乙型」 can now find 200000006 without being told it. The input stays a plain text
            field, so the hand-typed path a trained operator already uses is unchanged. -->
       <!-- P1-2: EMBEDDED MODE hides this input — the host already knows the project (it passed
            `:project-no`, and this view's own P0-1 watcher keeps `projectNo` in step with it), so a

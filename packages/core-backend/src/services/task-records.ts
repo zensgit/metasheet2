@@ -24,21 +24,30 @@ import {
   type TaskReopenScope,
 } from '../tasks/task-completion'
 import { normalizeUserText } from '../tasks/task-ids'
-import { resolveCreateAssigneeIds } from './task-create'
+import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 
-type Row = Record<string, unknown>
+export type Row = Record<string, unknown>
 
-interface Db {
+export interface Db {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Row[] }>
 }
 
-function fail(status: number, code: string): never {
+export function fail(status: number, code: string): never {
   throw Object.assign(new Error(code), { status, code })
 }
 
 function asQuery(client: { query: TaskAdvisoryQuery }): TaskAdvisoryQuery {
   return (sql, params) => client.query(sql, params)
+}
+
+/** Non-transactional `Db` for read paths that do not need the structure lock
+ * (task-structure.ts's comment reads and parent-candidates). */
+export const plainDb: Db = {
+  query: async (sql, params) => {
+    const result = await query<Row>(sql, params)
+    return { rows: result.rows }
+  },
 }
 
 function sameInstant(left: Date | null, right: Date | null): boolean {
@@ -53,7 +62,7 @@ function changedAssigneeRows(before: TaskAssigneeRow[], after: TaskAssigneeRow[]
 
 // The structure lock is transaction-scoped. Reads of the task, the caller's
 // row role, and assignee rows must happen after it is held, on this client.
-async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): Promise<T> {
+export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): Promise<T> {
   return transaction(async (client) => {
     const db: Db = {
       query: async (sql, params) => {
@@ -76,7 +85,9 @@ export async function createTask(input: {
   completionMode?: unknown
 }): Promise<{ id: string }> {
   const title = normalizeUserText(input.title)
-  if (title === null) fail(422, 'INVALID_TITLE')
+  // A title Postgres cannot store exactly as sent (U+0000, lone surrogate)
+  // is the same 422 as a blank one (M3R3-IN-3, M3R3-IN-4).
+  if (title === null || !isStorableText(title)) fail(422, 'INVALID_TITLE')
   const mode: TaskCompletionMode = input.completionMode === undefined ? 'all' : input.completionMode === 'any' ? 'any' : input.completionMode === 'all' ? 'all' : fail(422, 'INVALID_MODE')
   const assignees = resolveCreateAssigneeIds({ assignees: input.assignees, creatorId: input.creatorId })
   const id = newTaskId()
@@ -89,10 +100,12 @@ export async function createTask(input: {
        VALUES ($1, $2, $3, $4, $5)`,
       [id, input.orgId, title, mode, input.creatorId],
     )
-    for (const userId of assignees) {
+    if (assignees.length > 0) {
+      // One statement for every assignee row (M3R3-IN-2).
       await q(
-        `INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)`,
-        [id, userId, input.creatorId],
+        `INSERT INTO task_assignees (task_id, user_id, assigned_by)
+         SELECT $1, u.user_id, $3 FROM unnest($2::text[]) AS u(user_id)`,
+        [id, assignees, input.creatorId],
       )
     }
     await q(
@@ -164,13 +177,15 @@ export async function listPending(input: { orgId: string; actorId: string; viewe
 }
 
 export async function getTask(input: { orgId: string; actorId: string; taskId: string }): Promise<Row> {
+  // A non-printable id (U+0000 included) can match no row; 404 before SQL.
+  if (!isPrintableId(input.taskId)) fail(404, 'NOT_FOUND')
   const cond = buildTaskScopeCondition({
     view: 'any_role',
     actorParam: input.actorId,
     orgParam: input.orgId,
   })
   const result = await query<Row>(
-    `SELECT id, title, status, completion_mode, created_by, due_at,
+    `SELECT id, title, status, completion_mode, created_by, due_at, parent_id, depth, version,
             due_date::text AS due_date, due_time::text AS due_time, time_zone
      FROM tasks WHERE tasks.id = $3 AND ${cond.sql}`,
     [...cond.params, input.taskId],
@@ -190,19 +205,21 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
         : null,
   }))
   const followers = await query<Row>(
-    `SELECT user_id FROM task_followers WHERE task_id = $1`,
+    `SELECT user_id FROM task_followers WHERE task_id = $1 ORDER BY user_id`,
     [input.taskId],
   )
+  const followerIds = followers.rows.map((entry) => String(entry.user_id))
   const roles = resolveTaskRoles({
     createdBy: String(row.created_by),
     assigneeIds: assignees.map((entry) => entry.userId),
-    followerIds: followers.rows.map((entry) => String(entry.user_id)),
+    followerIds,
   }, input.actorId)
   const dueAt = row.due_at instanceof Date
     ? row.due_at
     : row.due_at
       ? new Date(String(row.due_at))
       : null
+  const children = await loadVisibleChildren(input.orgId, input.taskId, input.actorId)
   return {
     id: String(row.id),
     title: String(row.title),
@@ -219,7 +236,69 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
     })),
     canComplete: can(roles, 'complete'),
     canReopen: can(roles, 'reopen'),
+    followers: followerIds,
+    canEdit: can(roles, 'edit'),
+    canDelete: can(roles, 'delete'),
+    canComment: can(roles, 'comment'),
+    canLeave: can(roles, 'leave'),
+    version: Number(row.version),
+    parentId: row.parent_id === null || row.parent_id === undefined ? null : String(row.parent_id),
+    depth: Number(row.depth),
+    children,
   }
+}
+
+/**
+ * Direct, undeleted, same-org children of `taskId`, each filtered by
+ * `can(resolveTaskRoles(...), 'view')` for `actorId`. Invisible children are
+ * omitted, never turn the parent into a 404 (contract §3.2). Ordered by id
+ * byte order (`COLLATE "C"`, matching the pure `parentCandidates`' sort).
+ */
+async function loadVisibleChildren(orgId: string, taskId: string, actorId: string): Promise<Row[]> {
+  const rows = await query<Row>(
+    `SELECT id, title, status, completion_mode, depth, created_by
+     FROM tasks WHERE parent_id = $1 AND org_id = $2 AND deleted_at IS NULL
+     ORDER BY id COLLATE "C"`,
+    [taskId, orgId],
+  )
+  if (rows.rows.length === 0) return []
+  const ids = rows.rows.map((row) => String(row.id))
+  const [assigneeRows, followerRows] = await Promise.all([
+    query<Row>(`SELECT task_id, user_id FROM task_assignees WHERE task_id = ANY($1)`, [ids]),
+    query<Row>(`SELECT task_id, user_id FROM task_followers WHERE task_id = ANY($1)`, [ids]),
+  ])
+  const assigneesByTask = groupUserIdsByTask(assigneeRows.rows)
+  const followersByTask = groupUserIdsByTask(followerRows.rows)
+  const visible: Row[] = []
+  for (const row of rows.rows) {
+    const id = String(row.id)
+    const roles = resolveTaskRoles({
+      createdBy: String(row.created_by),
+      assigneeIds: assigneesByTask.get(id) ?? [],
+      followerIds: followersByTask.get(id) ?? [],
+    }, actorId)
+    if (!can(roles, 'view')) continue
+    visible.push({
+      id,
+      title: String(row.title),
+      status: String(row.status),
+      completionMode: String(row.completion_mode),
+      depth: Number(row.depth),
+    })
+  }
+  return visible
+}
+
+export function groupUserIdsByTask(rows: Row[]): Map<string, string[]> {
+  const map = new Map<string, string[]>()
+  for (const row of rows) {
+    const taskId = String(row.task_id)
+    const userId = String(row.user_id)
+    const list = map.get(taskId)
+    if (list) list.push(userId)
+    else map.set(taskId, [userId])
+  }
+  return map
 }
 
 export async function countPending(input: { orgId: string; actorId: string; viewerTz: string | null }): Promise<number> {
@@ -236,9 +315,21 @@ export async function countPending(input: { orgId: string; actorId: string; view
   return Number(result.rows[0]?.n ?? 0)
 }
 
-async function loadTask(db: Db, id: string, orgId: string): Promise<{ createdBy: string; mode: TaskCompletionMode; status: string }> {
+export interface LoadedTask {
+  createdBy: string
+  mode: TaskCompletionMode
+  status: string
+  parentId: string | null
+  depth: number
+  version: number
+}
+
+export async function loadTask(db: Db, id: string, orgId: string): Promise<LoadedTask> {
+  // A non-printable id (U+0000 included) can match no row; 404 before SQL,
+  // so the driver never sees a value Postgres rejects as text.
+  if (!isPrintableId(id)) fail(404, 'NOT_FOUND')
   const result = await db.query(
-    `SELECT created_by, completion_mode, status FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+    `SELECT created_by, completion_mode, status, parent_id, depth, version FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL`,
     [id, orgId],
   )
   const row = result.rows[0]
@@ -247,10 +338,13 @@ async function loadTask(db: Db, id: string, orgId: string): Promise<{ createdBy:
     createdBy: String(row.created_by),
     mode: row.completion_mode === 'any' ? 'any' : 'all',
     status: String(row.status),
+    parentId: row.parent_id === null || row.parent_id === undefined ? null : String(row.parent_id),
+    depth: Number(row.depth),
+    version: Number(row.version),
   }
 }
 
-async function assertRowAbility(db: Db, input: {
+export async function assertRowAbility(db: Db, input: {
   taskId: string
   actorId: string
   createdBy: string
@@ -269,7 +363,7 @@ async function assertRowAbility(db: Db, input: {
   if (!can(roles, input.ability)) fail(404, 'NOT_FOUND')
 }
 
-async function loadAssignees(db: Db, taskId: string): Promise<TaskAssigneeRow[]> {
+export async function loadAssignees(db: Db, taskId: string): Promise<TaskAssigneeRow[]> {
   const result = await db.query(
     `SELECT user_id, completed_at FROM task_assignees WHERE task_id = $1`,
     [taskId],
@@ -280,7 +374,7 @@ async function loadAssignees(db: Db, taskId: string): Promise<TaskAssigneeRow[]>
   }))
 }
 
-async function writeChangedAssignees(db: Db, taskId: string, before: TaskAssigneeRow[], after: TaskAssigneeRow[]): Promise<void> {
+export async function writeChangedAssignees(db: Db, taskId: string, before: TaskAssigneeRow[], after: TaskAssigneeRow[]): Promise<void> {
   for (const row of changedAssigneeRows(before, after)) {
     await db.query(
       `UPDATE task_assignees SET completed_at = $3 WHERE task_id = $1 AND user_id = $2`,
@@ -289,7 +383,7 @@ async function writeChangedAssignees(db: Db, taskId: string, before: TaskAssigne
   }
 }
 
-async function writeTaskDoneState(db: Db, taskId: string, done: boolean, now: Date): Promise<void> {
+export async function writeTaskDoneState(db: Db, taskId: string, done: boolean, now: Date): Promise<void> {
   if (done) {
     await db.query(
       `UPDATE tasks SET status = 'done', completed_at = $2, updated_at = now(), version = version + 1 WHERE id = $1`,
@@ -303,7 +397,7 @@ async function writeTaskDoneState(db: Db, taskId: string, done: boolean, now: Da
   )
 }
 
-async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<void> {
+export async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<void> {
   for (const event of events) {
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,

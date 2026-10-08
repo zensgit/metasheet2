@@ -12,3 +12,7 @@ export function newTaskEventId(): string {
 export function newTaskId(): string {
   return generateTaskDomainId('task', randomSuffix)
 }
+
+export function newTaskCommentId(): string {
+  return generateTaskDomainId('comment', randomSuffix)
+}

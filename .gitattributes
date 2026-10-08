@@ -89,6 +89,11 @@ packages/core-backend/tests/integration/sealed-export-s6a-runtime-authority.db.t
 scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1 text eol=lf
 plugins/plugin-integration-core/__tests__/sealed-export-s6a-product-runtime.test.cjs text eol=lf
 scripts/ops/multitable-onprem-package-build.sh text eol=lf
+.github/workflows/stock-prep-powershell51.yml text eol=lf
+
+# No longer a provenance input (its Windows PowerShell 5.1 job moved to
+# stock-prep-powershell51.yml above), but several contract tests parse it line by line,
+# so its checkout stays LF.
 .github/workflows/plugin-tests.yml text eol=lf
 
 # ---------------------------------------------------------------------------

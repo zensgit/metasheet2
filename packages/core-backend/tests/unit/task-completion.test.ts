@@ -382,7 +382,7 @@ describe('task-c A6: any mode follows wasDone so a done task with null rows is n
   })
 })
 
-describe('task-c A7: self reopen of a done all task with all-null rows records the flip', () => {
+describe('task-c A7: self reopen of a done all task whose recompute no longer counts as done records the flip', () => {
   it('actor with a null row, task done (wasDone true), rows all null -> reopened', () => {
     const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: null }]
     const result = applyReopen({ mode: 'all', rows, actorId: 'a', scope: 'self', createdBy: 'c', wasDone: true })

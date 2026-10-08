@@ -56,7 +56,14 @@ test('frontend build gets a bounded build-only heap budget', () => {
 
 test('frontend heap fix retains typecheck before bundling', () => {
   const pkg = JSON.parse(readRepoFile('apps', 'web', 'package.json'))
-  assert.equal(pkg.scripts.build, 'vue-tsc -b && vite build')
+  // Since 2026-10-07 the script itself pins a 4 GB heap for both tools: GitHub-hosted runners of a
+  // private repository are 2 vCPU / 8 GB, where Node's default heap (~2 GB) is too small for
+  // `vue-tsc -b` on apps/web. The contract is unchanged — type-check runs first, the bundler
+  // second, nothing is skipped — and stays byte-pinned so neither half can be dropped quietly.
+  assert.equal(
+    pkg.scripts.build,
+    'node --max-old-space-size=4096 node_modules/vue-tsc/bin/vue-tsc.js -b && node --max-old-space-size=4096 node_modules/vite/bin/vite.js build',
+  )
   const raw = readRepoFile('Dockerfile.frontend')
   assert.match(raw, /^RUN pnpm install --frozen-lockfile$/m)
   assert.doesNotMatch(raw, /--noCheck|SKIP_TYPECHECK|\|\|\s*true/)

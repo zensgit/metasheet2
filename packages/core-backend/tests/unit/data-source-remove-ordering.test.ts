@@ -59,7 +59,7 @@ import { usePinnedServer } from '../utils/pinned-server'
 
 // A driver failure's own text is what must NEVER reach the client (it embeds host,
 // port, database and login). The fake db throws exactly this shape.
-const DRIVER_POISON = 'Login failed for user "svc_plm" at 10.10.52.16:5432 (db=plm_prod)'
+const DRIVER_POISON = 'Login failed for user "svc_plm" at 10.99.99.16:5432 (db=plm_prod)'
 
 /**
  * What `pg` raises when the soft delete trips the PR-B live-connection foreign key on a zh_CN
@@ -399,7 +399,7 @@ describe('removeDataSource — durable write precedes the memory clear (PERM-04)
     expect(error?.status).toBe(500)
     // values-free: the driver's own text stays in the log.
     expect(String(error?.message)).not.toContain(DRIVER_POISON)
-    expect(String(error?.message)).not.toContain('10.10.52.16')
+    expect(String(error?.message)).not.toContain('10.99.99.16')
 
     // not one byte of in-memory state moved
     expect(inMemory(m, 'ds-fail')).toBe(true)
@@ -842,7 +842,7 @@ describe('DELETE /api/data-sources/:id — a failed delete is reported as a fail
     expect(res.status).not.toBe(200)
     expect(res.body.ok).toBe(false)
     expect(res.body.error.code).toBe(DATA_SOURCE_DELETE_NOT_PERSISTED_CODE)
-    expect(JSON.stringify(res.body)).not.toContain('10.10.52.16')
+    expect(JSON.stringify(res.body)).not.toContain('10.99.99.16')
     expect(JSON.stringify(res.body)).not.toContain('Login failed')
 
     // the source is still there — the client's retry has something to retry

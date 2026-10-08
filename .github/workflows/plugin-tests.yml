@@ -124,60 +124,26 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
-  stock-prep-powershell51:
-    name: stock-prep PowerShell 5.1 acceptance
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-
-      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
-      # different native-stderr semantics and cannot stand in for the target shell contract.
-      - name: Run target-shell smoke capture regression
-        shell: powershell
-        run: |
-          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # S6-A win32 artifact-root ACL + attestation (follow-up 1 of
-      # docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md). This is the
-      # only job with a real NTFS volume and a real icacls.exe, so the layer-3 checks (apply, verify,
-      # idempotent re-run, tampered-ACL retraction against a throwaway TEMP directory) can only run
-      # here. Both shells are exercised: the deploy path runs under whichever PowerShell the operator
-      # host provides, and 5.1's native-stderr semantics differ from pwsh 7's.
-      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
-        shell: powershell
-        run: |
-          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   test:
-    runs-on: ubuntu-latest
+    # Runner routing pilot (same shape as PR #4449 for web-tests). Set the repository variable
+    # MS2_PLUGIN_RUNNER to a self-hosted runner label to move this job off GitHub-hosted runners;
+    # unset it for instant fallback to ubuntu-latest. This job is the repository's biggest Actions
+    # consumer (~56 runner-minutes per run on the 20.x leg; ~62% of a busy day's minutes), which
+    # started to bill when the repository went private on 2026-10-07. Default behaviour is
+    # unchanged while the variable is unset.
+    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        # Node 18 reached end-of-life on 2025-04-30 and everything this repo ships runs on Node 20
+        # (Dockerfile.backend / Dockerfile.frontend are node:20-slim; the on-prem runbooks require
+        # Node 20). The 18.x leg cost ~27 runner-minutes per run and was never a required check;
+        # `test (20.x)` is. It stays a one-entry matrix on purpose: the produced check name must
+        # remain exactly `test (20.x)` (branch protection names it), and a plain job would be
+        # reported as `test`. Dropped 2026-10-07 when the repository went private and Actions
+        # minutes started to bill.
+        node-version: [20.x]
 
     steps:
       - name: Checkout repository
@@ -589,7 +555,7 @@ jobs:
       # Corp-scope Phase B cannot migrate until staging proves its only managed
       # backend and the only container publishing 18900 are the exact Phase A
       # image. Both matrix legs execute the behavior suite; branch protection
-      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # currently requires test (20.x); the matrix has no other leg since 2026-10-07.
       # Run the wiring guard in this same job. The wiring and behavior suites
       # assert each other's invocation, so removing either step turns the
       # required Node 20 context red.
@@ -643,7 +609,7 @@ jobs:
             scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
 
       # The production monitor invokes the same state helper covered here.
-      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # Keep this in the required `test` matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
@@ -677,7 +643,8 @@ jobs:
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
-          # ACL layers self-report SKIP. The real-icacls coverage lives in stock-prep-powershell51.
+          # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
+          # job, now in .github/workflows/stock-prep-powershell51.yml.
           ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
       - name: Setup pnpm
@@ -895,6 +862,13 @@ jobs:
 
       - name: Run type checking
         if: matrix.node-version == '20.x'
+        env:
+          # GitHub-hosted runners for a PRIVATE repository are 2 vCPU / 8 GB (public ones were
+          # 4 / 16), so Node's default heap dropped to ~2 GB and `vue-tsc -b` on apps/web began to
+          # OOM here on 2026-10-07, the day the repository went private. 4 GB covers the three
+          # vue-tsc runs of `pnpm type-check`; apps/web's `build` script sets its own heap, which
+          # also fixes the seven other workflows that build the web app.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           pnpm type-check
 
@@ -1682,11 +1656,13 @@ jobs:
         # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were
         # promoted here from a standalone (non-required) `approval-realdb-cancel-round.yml` lane,
         # which is DELETED in the same commit — per the #5095 precedent
-        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1), this is the
-        # one legitimate-touch case for the s6a `pluginTestsWorkflow` pin: the digest below was
-        # recomputed via `computePackageProvenancePinSet(repoRoot)` in the same commit that made
-        # this edit, and verified to be the only key that moved. Keeping both lanes would have run
-        # the same seven files twice per PR for no additional coverage.
+        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1). At the time
+        # this file was the s6a `pluginTestsWorkflow` provenance pin, so that commit recomputed it
+        # via `computePackageProvenancePinSet(repoRoot)`. Since
+        # docs/development/s6a-pins-scope-narrowing-design-20260930.md this file is no longer a
+        # provenance input (the pinned executor is .github/workflows/stock-prep-powershell51.yml),
+        # so run-list edits here need no pin recompute. Keeping both lanes would have run the same
+        # seven files twice per PR for no additional coverage.
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
@@ -1878,8 +1854,6 @@ jobs:
           kill $(cat server.pid) || true
 
       - name: Build web app
-        # Skip on Node 18 - @vitejs/plugin-vue@6.x requires Node 20+ (crypto.hash API)
-        if: matrix.node-version != '18.x'
         run: |
           pnpm --filter @metasheet/web build
 
@@ -1887,7 +1861,7 @@ jobs:
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
         # title-prefix anchoring. Deliberately NO `if:` pin added here — this
-        # step already runs UNCONDITIONALLY on both matrix legs (18.x/20.x);
+        # step already runs UNCONDITIONALLY on every matrix leg (only 20.x since 2026-10-07);
         # copying the `if: matrix.node-version == '20.x'` pin from the
         # approval/multitable siblings would NARROW coverage to one leg, a
         # real behaviour change this round does not make. The wiring guard's
