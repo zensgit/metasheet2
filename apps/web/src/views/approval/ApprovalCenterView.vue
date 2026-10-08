@@ -1361,8 +1361,13 @@ function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): voi
 // through loadCurrentTab), after a pane read, and on an existing approval counts frame — there is
 // no dedicated realtime event, so a CC that arrives while the page sits idle shows on the next of
 // those. Decorative like the pending badge: a failed or disabled count hides the badge (0).
+// The NEWEST request wins: several refreshes can be in flight at once (a list reload, a counts
+// frame, a pane read, a source change), and an older answer that lands last — e.g. the previous
+// source's count arriving after a source change — must not overwrite the newer one.
 const ccUnreadCount = ref(0)
+let ccUnreadCountRequest = 0
 async function refreshCcUnreadCount(): Promise<void> {
+  const request = ++ccUnreadCountRequest
   if (!ccUnreadBadgeEnabled.value) {
     ccUnreadCount.value = 0
     return
@@ -1371,21 +1376,27 @@ async function refreshCcUnreadCount(): Promise<void> {
     // Read through a closure (never at setup): several approval-center specs mock the api module
     // with an explicit export list that does not name this function.
     const result = await Promise.resolve().then(() => getCcUnreadCount(sourceSystemFilter.value))
+    if (request !== ccUnreadCountRequest) return
     ccUnreadCount.value = Number.isFinite(result?.count) ? result.count : 0
   } catch {
+    if (request !== ccUnreadCountRequest) return
     ccUnreadCount.value = 0
   }
 }
 const mineOutcomeUnseenCount = ref(0)
+let mineOutcomeUnseenCountRequest = 0
 async function refreshMineOutcomeUnseenCount(): Promise<void> {
+  const request = ++mineOutcomeUnseenCountRequest
   if (!mineOutcomeBadgeEnabled.value) {
     mineOutcomeUnseenCount.value = 0
     return
   }
   try {
     const result = await Promise.resolve().then(() => getMineOutcomesUnseenCount(sourceSystemFilter.value))
+    if (request !== mineOutcomeUnseenCountRequest) return
     mineOutcomeUnseenCount.value = Number.isFinite(result?.count) ? result.count : 0
   } catch {
+    if (request !== mineOutcomeUnseenCountRequest) return
     mineOutcomeUnseenCount.value = 0
   }
 }
@@ -1893,6 +1904,10 @@ watch(
 // presence data, a failure is silent and never a toast. On success the row's own dot is cleared in
 // place and the badge re-polled, so neither waits for the next list reload.
 function markPaneSelectionRead(id: string): void {
+  // The selection check is subsumed by the rendered-id check below today (the pane controller nulls
+  // `paneApproval` synchronously on every select/clear, and only a still-current fetch commits).
+  // Kept as the statement of intent, and for a controller that would keep the previous detail on
+  // screen while the next one loads.
   if (selectedApprovalId.value !== id) return
   if (paneApproval.value?.id !== id) return
   void Promise.resolve()

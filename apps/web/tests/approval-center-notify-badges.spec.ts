@@ -28,7 +28,8 @@ import {
 // This spec pins the web half: switch OFF ⇒ zero new requests and nothing rendered; switch ON ⇒
 // the badge shows the server's number (hidden at 0 or on failure), dots follow the server's per-row
 // verdict exactly, the count is re-asked on every list (re)load / tab switch / source change / an
-// existing approval counts frame / a pane read — and never feeds the header 待办/未读 numbers.
+// existing approval counts frame / a pane read — the newest request's answer wins even when an
+// older one lands last — and never feeds the header 待办/未读 numbers.
 // ---------------------------------------------------------------------------
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
@@ -456,6 +457,20 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
     ;(q(`[data-testid="test-switch-tab-${name}"]`) as HTMLButtonElement).click()
     await flushUi()
   }
+  const changeSource = async (value: string) => {
+    const sourceSelect = q('[data-testid="approval-source-filter"]') as HTMLSelectElement
+    sourceSelect.value = value
+    sourceSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+  }
+  /** Makes `spy` answer only when the test says so, per source: the newest call per source wins. */
+  function holdCountAnswers(spy: ReturnType<typeof vi.fn>): Map<string, (count: number) => void> {
+    const pending = new Map<string, (count: number) => void>()
+    spy.mockImplementation((source: unknown) => new Promise<{ count: number }>((resolve) => {
+      pending.set(String(source), (count) => resolve({ count }))
+    }))
+    return pending
+  }
 
   // -------------------------------------------------------------------------
   // T3 — 抄送我的 unread badge.
@@ -543,6 +558,27 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
       countsFrameHandler!({ count: 0, unreadCount: 0 })
       await flushUi()
       expect(q('[data-testid="approval-cc-unread-badge"]')).toBeNull()
+    })
+
+    it('switch ON: an older count that answers last never overwrites the newer one (previous source after a source change)', async () => {
+      enabledFeatures.add('approvalCcUnreadBadge')
+      await mountView()
+      const answer = holdCountAnswers(getCcUnreadCountSpy)
+
+      // A re-ask for the current source is in flight when the user narrows the source.
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      await changeSource('platform')
+      expect(getCcUnreadCountSpy).toHaveBeenLastCalledWith('platform')
+
+      answer.get('platform')!(2)
+      await flushUi()
+      expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
+
+      // The previous source's slower answer lands last: it must not replace the current one.
+      answer.get('all')!(9)
+      await flushUi()
+      expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
     })
 
     it('lock B: the header 待办 / 未读 numbers come from the pending count only — the CC count never feeds them', async () => {
@@ -658,6 +694,25 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
       countsFrameHandler!({ count: 0, unreadCount: 0 })
       await flushUi()
       expect(getMineOutcomesUnseenCountSpy.mock.calls.length).toBe(beforeFrame + 1)
+    })
+
+    it('switch ON: an older count that answers last never overwrites the newer one (previous source after a source change)', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      await mountView()
+      const answer = holdCountAnswers(getMineOutcomesUnseenCountSpy)
+
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      await changeSource('platform')
+      expect(getMineOutcomesUnseenCountSpy).toHaveBeenLastCalledWith('platform')
+
+      answer.get('platform')!(1)
+      await flushUi()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
+
+      answer.get('all')!(8)
+      await flushUi()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
     })
 
     it('switch ON, wide pane: opening an unseen outcome records the read, clears its dot and re-asks the count', async () => {
