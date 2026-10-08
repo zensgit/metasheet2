@@ -463,11 +463,15 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
     sourceSelect.dispatchEvent(new Event('change'))
     await flushUi()
   }
-  /** Makes `spy` answer only when the test says so, per source: the newest call per source wins. */
-  function holdCountAnswers(spy: ReturnType<typeof vi.fn>): Map<string, (count: number) => void> {
-    const pending = new Map<string, (count: number) => void>()
-    spy.mockImplementation((source: unknown) => new Promise<{ count: number }>((resolve) => {
-      pending.set(String(source), (count) => resolve({ count }))
+  type HeldCount = { answer: (count: number) => void; fail: () => void }
+  /** Makes `spy` answer (or fail) only when the test says so, per source: the newest call per source wins. */
+  function holdCountAnswers(spy: ReturnType<typeof vi.fn>): Map<string, HeldCount> {
+    const pending = new Map<string, HeldCount>()
+    spy.mockImplementation((source: unknown) => new Promise<{ count: number }>((resolve, reject) => {
+      pending.set(String(source), {
+        answer: (count) => resolve({ count }),
+        fail: () => reject(new Error('unavailable')),
+      })
     }))
     return pending
   }
@@ -563,7 +567,7 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
     it('switch ON: an older count that answers last never overwrites the newer one (previous source after a source change)', async () => {
       enabledFeatures.add('approvalCcUnreadBadge')
       await mountView()
-      const answer = holdCountAnswers(getCcUnreadCountSpy)
+      const held = holdCountAnswers(getCcUnreadCountSpy)
 
       // A re-ask for the current source is in flight when the user narrows the source.
       countsFrameHandler!({ count: 0, unreadCount: 0 })
@@ -571,12 +575,31 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
       await changeSource('platform')
       expect(getCcUnreadCountSpy).toHaveBeenLastCalledWith('platform')
 
-      answer.get('platform')!(2)
+      held.get('platform')!.answer(2)
       await flushUi()
       expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
 
       // The previous source's slower answer lands last: it must not replace the current one.
-      answer.get('all')!(9)
+      held.get('all')!.answer(9)
+      await flushUi()
+      expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
+    })
+
+    it('switch ON: an older count that FAILS last never hides the newer one', async () => {
+      enabledFeatures.add('approvalCcUnreadBadge')
+      await mountView()
+      const held = holdCountAnswers(getCcUnreadCountSpy)
+
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      await changeSource('platform')
+
+      held.get('platform')!.answer(2)
+      await flushUi()
+      expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
+
+      // Only the newest request's failure may hide the badge; an older one's may not.
+      held.get('all')!.fail()
       await flushUi()
       expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('2')
     })
@@ -699,18 +722,36 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
     it('switch ON: an older count that answers last never overwrites the newer one (previous source after a source change)', async () => {
       enabledFeatures.add('approvalMineOutcomeBadge')
       await mountView()
-      const answer = holdCountAnswers(getMineOutcomesUnseenCountSpy)
+      const held = holdCountAnswers(getMineOutcomesUnseenCountSpy)
 
       countsFrameHandler!({ count: 0, unreadCount: 0 })
       await flushUi()
       await changeSource('platform')
       expect(getMineOutcomesUnseenCountSpy).toHaveBeenLastCalledWith('platform')
 
-      answer.get('platform')!(1)
+      held.get('platform')!.answer(1)
       await flushUi()
       expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
 
-      answer.get('all')!(8)
+      held.get('all')!.answer(8)
+      await flushUi()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
+    })
+
+    it('switch ON: an older count that FAILS last never hides the newer one', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      await mountView()
+      const held = holdCountAnswers(getMineOutcomesUnseenCountSpy)
+
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      await changeSource('platform')
+
+      held.get('platform')!.answer(1)
+      await flushUi()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
+
+      held.get('all')!.fail()
       await flushUi()
       expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('1')
     })
