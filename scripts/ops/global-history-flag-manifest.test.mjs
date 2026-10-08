@@ -262,7 +262,7 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
   assert.deepEqual(
     phantom,
     [],
-    `manifest lists flags NOT read anywhere in packages/core-backend/src (stale or typo'd key): ${phantom.join(', ')}`,
+    `manifest lists flags NOT read anywhere in the scanned sources (packages/core-backend/src, and ${ATTENDANCE_PLUGIN_SOURCE} for the ATTENDANCE_CANCEL_ROUND_ family) (stale or typo'd key): ${phantom.join(', ')}`,
   )
   // every spec carries a non-empty source citation — a rule with no citation is not verified
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
