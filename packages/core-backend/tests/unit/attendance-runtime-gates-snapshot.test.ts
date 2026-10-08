@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   resolveAttendanceNotificationDeliveryJob,
@@ -349,5 +351,38 @@ describe('GET /api/attendance/settings carries `runtimeGates`; PUT and the persi
   it('no new route is registered for this report (it rides the existing admin GET)', async () => {
     const { routes } = await createHarness()
     expect([...routes.keys()].filter((key) => /runtime|gate/i.test(key))).toEqual([])
+  })
+})
+
+describe('OpenAPI documents the runtimeGates sibling (gate r1 P3-3)', () => {
+  // The generated contract (packages/openapi/dist, rebuilt from the sources in CI) must keep describing exactly what
+  // the snapshot builder returns, as an OPTIONAL sibling of `data` on the GET only.
+  const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url))
+  const doc = JSON.parse(readFileSync(`${repoRoot}packages/openapi/dist/openapi.json`, 'utf8')) as any
+  const schemaRef = (name: string) => ({ $ref: `#/components/schemas/${name}` })
+
+  it('GET /api/attendance/settings lists runtimeGates as an optional sibling of data; PUT does not mention it', () => {
+    const settings = doc.paths['/api/attendance/settings']
+    const getSchema = settings.get.responses['200'].content['application/json'].schema
+    expect(getSchema.properties.runtimeGates).toEqual(schemaRef('AttendanceRuntimeGates'))
+    expect(getSchema.required ?? []).not.toContain('runtimeGates') // older servers omit it
+    expect(JSON.stringify(settings.put)).not.toContain('runtimeGates')
+  })
+
+  it('the documented shape is exactly the shape buildAttendanceRuntimeGateSnapshot returns', () => {
+    const gates = doc.components.schemas.AttendanceRuntimeGates
+    const entry = doc.components.schemas.AttendanceRuntimeGateEntry
+    const snapshot = helpers.buildAttendanceRuntimeGateSnapshot() as Record<string, Record<string, unknown>>
+    expect(Object.keys(snapshot).sort()).toEqual(Object.keys(gates.properties).sort())
+    expect([...gates.required].sort()).toEqual(Object.keys(gates.properties).sort())
+    for (const feature of Object.keys(gates.properties)) {
+      expect(gates.properties[feature]).toEqual(schemaRef('AttendanceRuntimeGateEntry'))
+      expect(Object.keys(snapshot[feature]).sort()).toEqual(Object.keys(entry.properties).sort())
+    }
+    expect([...entry.required].sort()).toEqual(['closedGates', 'gatesOpen'])
+    expect(entry.properties.gatesOpen.type).toBe('boolean')
+    // ids stay an open string list: a newer server may add gate ids, and the client degrades unknown ones
+    expect(entry.properties.closedGates).toMatchObject({ type: 'array', items: { type: 'string' } })
+    expect(entry.properties.closedGates.items.enum).toBeUndefined()
   })
 })
