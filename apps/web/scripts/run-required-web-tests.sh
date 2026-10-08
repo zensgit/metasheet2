@@ -1403,6 +1403,13 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # approval-web-guard.yml's targeted run line. It matches exactly one spec file, and a bidirectional
 # substring scan against every token in this file finds no token that contains it or is contained by
 # it (the `approval-date-range-*` tokens are the closest neighbours and share no substring relation).
+# Test report 2026-10-08 gate r1 P2-1: ONE token added, `approval-civil-date-tz-probe` — the
+# out-of-process host-timezone probe for the civil-date rendering (apps/web/tests/
+# approval-civil-date-tz-probe.spec.ts; its fixture tests/helpers/approvalCivilDateTzProbe.ts is
+# not a spec file and is never collected), paired with the same token on approval-web-guard.yml's
+# targeted run line. It matches exactly one spec file, and a bidirectional substring scan against
+# every token in this file finds no token that contains it or is contained by it (the
+# `approval-center*` and `approval-comments-*` tokens are the closest neighbours).
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1415,6 +1422,7 @@ exec npx vitest run \
   approval-center \
   approval-center-detail-pane-controller \
   approval-center-master-detail \
+  approval-civil-date-tz-probe \
   approval-comments-client \
   approval-comments-panel \
   approval-common-template-presets \

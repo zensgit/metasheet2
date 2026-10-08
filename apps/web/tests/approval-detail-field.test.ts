@@ -456,6 +456,14 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
         .toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN'))
       // Unparsable text still passes through unchanged.
       expect(buildDisplayFields(civilSchema, { fld_day: 'not-a-date' })[0].value).toBe('not-a-date')
+      // Gate r1 P3-1: a string of the civil SHAPE that is not a real calendar day is not a civil date
+      // either. The read-back check refuses the roll-over, so it keeps the instant path and never
+      // renders a rolled-over day (2026/3/2, 2027/1/1). V8 reads '2026-02-30' leniently as an instant
+      // (so it shows a time of day) and cannot read '2026-13-01' at all (so it passes through as is).
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-02-30' })[0].value)
+        .toBe(new Date('2026-02-30').toLocaleString('zh-CN'))
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-02-30' })[0].value).not.toBe('2026/3/2')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-13-01' })[0].value).toBe('2026-13-01')
       // A datetime field is an instant (Lock-8 D-2): even a bare date string stays on the instant path.
       expect(buildDisplayFields(civilSchema, { fld_dt: '2026-10-08' })[0].value)
         .toBe(new Date('2026-10-08').toLocaleString('zh-CN'))
