@@ -1667,10 +1667,6 @@ exec npx vitest run \
   multitable-gallery-view \
   multitable-gantt-view \
   multitable-grid \
-  multitable-range-fill-flag \
-  multitable-range-fill-planner \
-  multitable-range-fill-writer \
-  multitable-range-fill-interaction \
   multitable-grid-cell-edit-commit-round2.spec.ts \
   multitable-grid-cell-edit-commit.spec.ts \
   multitable-grid-expand-record \
@@ -1714,6 +1710,10 @@ exec npx vitest run \
   multitable-phase8 \
   multitable-phase9 \
   multitable-qrcode-field \
+  multitable-range-fill-flag \
+  multitable-range-fill-interaction \
+  multitable-range-fill-planner \
+  multitable-range-fill-writer \
   multitable-record-approval-panel \
   multitable-record-approval-progress \
   multitable-record-approval-submit \
