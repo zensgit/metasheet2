@@ -940,6 +940,8 @@ authRouter.post('/invite/accept', async (req: Request, res: Response) => {
         success: false,
         error: 'Password does not meet requirements',
         details: passwordValidation.errors,
+        // Machine-readable codes parallel to `details`, for clients that localise.
+        reasons: passwordValidation.reasons,
       })
     }
 
@@ -1076,6 +1078,8 @@ authRouter.post('/password/change', async (req: Request, res: Response) => {
         success: false,
         error: 'Password does not meet requirements',
         details: passwordValidation.errors,
+        // Machine-readable codes parallel to `details`, for clients that localise.
+        reasons: passwordValidation.reasons,
       })
     }
 

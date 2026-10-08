@@ -3277,6 +3277,60 @@ describe('admin-users routes', () => {
 
     expect(response.statusCode).toBe(400)
     expect((response.body as Record<string, any>).error.code).toBe('PASSWORD_POLICY_FAILED')
+    // English message and the `details.details` string array are unchanged; `details.reasons`
+    // is the additive machine-readable list the web console localises by.
+    expect((response.body as Record<string, any>).error.message).toBe('Password does not meet requirements')
+    expect((response.body as Record<string, any>).error.details).toEqual({
+      details: [
+        'Password must be at least 8 characters long',
+        'Password must contain at least one uppercase letter',
+        'Password must contain at least one number',
+      ],
+      reasons: ['too_short', 'no_uppercase', 'no_digit'],
+    })
+  })
+
+  it('rejects a create-user password containing a common fragment with only the weak_pattern reason', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: 'operator.a',
+        name: 'Operator A',
+        password: '123456Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'PASSWORD_POLICY_FAILED',
+      message: 'Password does not meet requirements',
+      details: {
+        details: ['Password contains a common weak pattern'],
+        reasons: ['weak_pattern'],
+      },
+    })
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
+  })
+
+  it('rejects a non-ASCII login name with INVALID_USERNAME and the stable login_name_ascii rule code', async () => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        username: '测试员',
+        name: '测试员',
+        password: '12345Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect((response.body as Record<string, any>).error).toEqual({
+      code: 'INVALID_USERNAME',
+      message: 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed',
+      details: { rule: 'login_name_ascii' },
+    })
+    expect(pgMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users ('))).toBe(false)
   })
 
   it('creates a no-email user with username/mobile and skips invite issuance', async () => {

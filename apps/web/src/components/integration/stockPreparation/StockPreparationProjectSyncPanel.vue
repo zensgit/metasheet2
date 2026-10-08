@@ -43,13 +43,14 @@
         {{ busy ? bi(...runningLabel) : bi(...runLabel) }}
       </button>
       <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
-           一线自己拉数据 widened who may press it — a stock-prep operator now can — so this line no
-           longer says "only a platform administrator": it names both tiers, because sending someone
-           to the wrong person is its own kind of dead end. -->
+           R-33 (2026-10-08) moved the pull to the 拉取人员 (`stock-prep:pull`): a floor operator
+           sees this line instead of the button. It names the 拉取人员 first and the platform
+           administrator second, because sending someone to the wrong person is its own kind of
+           dead end — and it does NOT say 「备料操作权限」, which the reader already holds. -->
       <p v-else class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
         {{ bi(
-          '从 PLM 拉数据要有备料操作权限,或者是平台管理员。您可以看这里的结果,同步请找有权限的同事或平台管理员执行。',
-          'Pulling data from PLM needs the stock-preparation operator permission, or a platform administrator. You can read the results here; ask a colleague who has it, or a platform administrator, to run the sync.',
+          '从 PLM 拉数据由拉取人员负责。您可以看这里的结果,需要拉取请联系拉取人员(或平台管理员)。',
+          'Pulling data from PLM is done by a pull operator (拉取人员). You can read the results here; to pull, please contact a pull operator — or a platform administrator.',
         ) }}
       </p>
     </div>

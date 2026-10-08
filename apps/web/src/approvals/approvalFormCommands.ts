@@ -668,9 +668,15 @@ export function removeFormField(
  * Typed property patch for `updateFormFieldProperties`. Deliberately EXCLUDES
  * identity (`id`/`localId` — FB-D5: commands never re-mint or accept identity
  * edits), `type` (that is `retypeFormField`), `detailColumns` (the dedicated
- * column commands), `original` (round-trip preservation is serializer-owned),
- * and the record-link base/sheet pins (their typed pickers arrive with the F4
- * production mount, where the parent-owned catalog lives).
+ * column commands), and `original` (round-trip preservation is
+ * serializer-owned).
+ *
+ * The record-link base/sheet pins are patchable on `record-link` fields only
+ * (delta §3.4 typed pickers; parity ledger deferral (3)). Their values come
+ * from the inspector's typed pickers over the PARENT-OWNED catalog — never
+ * from free text. This command has no catalog, so it does not decide whether
+ * a sheet still belongs to a new base: the caller resolves that and submits
+ * both pins in ONE patch, which the adapter records as ONE history entry.
  */
 export interface FormFieldPropertyPatch {
   readonly label?: string
@@ -698,6 +704,10 @@ export interface FormFieldPropertyPatch {
   readonly userDefaultMode?: FieldAuthoringDraft['userDefaultMode']
   readonly userDefaultIds?: readonly string[]
   readonly userMaxSelectionsText?: string
+  /** `record-link` only: target base pin (typed picker value; '' clears). */
+  readonly recordLinkBaseId?: string
+  /** `record-link` only: target sheet pin (typed picker value; '' clears). */
+  readonly recordLinkSheetId?: string
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -768,6 +778,12 @@ export function updateFormFieldProperties(
       patch.departmentDefaultIds !== undefined ||
       patch.departmentMaxSelectionsText !== undefined) &&
     current.type !== 'department'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.recordLinkBaseId !== undefined ||
+      patch.recordLinkSheetId !== undefined) &&
+    current.type !== 'record-link'
   )
     return rejected('unsupported_field_type')
   if (
@@ -847,6 +863,12 @@ export function updateFormFieldProperties(
       : {}),
     ...(patch.userMaxSelectionsText !== undefined
       ? { userMaxSelectionsText: patch.userMaxSelectionsText }
+      : {}),
+    ...(patch.recordLinkBaseId !== undefined
+      ? { recordLinkBaseId: patch.recordLinkBaseId }
+      : {}),
+    ...(patch.recordLinkSheetId !== undefined
+      ? { recordLinkSheetId: patch.recordLinkSheetId }
       : {}),
   }
   const fields = [...draft.fields]

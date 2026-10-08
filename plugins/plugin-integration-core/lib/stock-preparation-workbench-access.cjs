@@ -31,9 +31,10 @@
 // THE LADDER (and the one place it is deliberately a CONJUNCTION, not an implication)
 //
 //   platform admin (`role:admin` | `integration:admin`)  -> satisfies every code below
-//   `stock-prep:admin`                                   -> satisfies read and operate
+//   `stock-prep:admin`                                   -> satisfies read, operate and pull
 //   `stock-prep:read`                                    -> satisfies read
 //   `stock-prep:operate` AND `stock-prep:read`           -> satisfies operate
+//   `stock-prep:pull` AND `operate` AND `read`           -> satisfies pull
 //
 // `operate` requires `read` alongside it rather than implying it. That is not pedantry, it is the
 // alignment principle made unbreakable: the page is reachable exactly on `read`, so an
@@ -42,6 +43,11 @@
 // confer nothing at all on either side, so no permission subset can produce a misaligned actor.
 // Note the direction: the conjunction is STRICTER than an implication would be, so it can only
 // refuse callers an implication would have admitted. It is never a widening.
+//
+// `pull` (S0 of the 2026-10-08 ADR, owner ruling of the same day) takes the same shape one rung up:
+// the pull panel lives on the project board, and the board is OPERATE, so a pull-WITHOUT-operate
+// grant would be a principal the server admits to the pull routes who can never reach the panel
+// that drives them. The three-way conjunction makes that grant confer nothing, for the same reason.
 //
 // FAIL-CLOSED: an unknown code in this namespace is refused for EVERYONE, platform admin included.
 // A typo in a route's gate token therefore 403s loudly instead of silently falling through to the
@@ -71,8 +77,20 @@ const STOCK_PREP_OPERATE = 'stock-prep:operate'
  * nothing. The RBAC description below says the same, and a migration carries it to existing rows.
  */
 const STOCK_PREP_ADMIN = 'stock-prep:admin'
+/**
+ * PULL — 「拉取人员」. The owner ruled on 2026-10-08 (ADR adr-stock-prep-project-sheets-20261008,
+ * addendum A) that a floor operator must NOT pull from PLM: only a holder of this code may run the
+ * pull (dry-run / apply / the large-BOM background channel / reconcile), and — in the slices that
+ * follow S0 — create a project's sheet and archive / restore it. This REVERSES the earlier
+ * 「一线可以自助拉取」 ruling that the operator-pull block below used to encode; see that block.
+ *
+ * It is a CONJUNCTION with operate and read (`satisfiesStockPrepAccess`): the pull panel is on the
+ * project board, which is OPERATE, so a pull-without-operate grant would be permitted-but-hidden.
+ * `stock-prep:admin` and the platform admins satisfy it through the ladder, unchanged.
+ */
+const STOCK_PREP_PULL = 'stock-prep:pull'
 
-const STOCK_PREP_PERMISSION_CODES = Object.freeze([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN])
+const STOCK_PREP_PERMISSION_CODES = Object.freeze([STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN, STOCK_PREP_PULL])
 
 // Human-readable rows for the RBAC seed migration; kept next to the codes so the two cannot drift.
 const STOCK_PREP_PERMISSION_DESCRIPTORS = Object.freeze([
@@ -83,6 +101,9 @@ const STOCK_PREP_PERMISSION_DESCRIPTORS = Object.freeze([
   // migration (zzzz20260927120000_update_stock_prep_admin_permission_description), which the
   // permission-matrix suite pins byte-equal to this string.
   Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no provisioning, no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on)' }),
+  // Seeded by its own migration (zzzz20261008120000_add_stock_prep_pull_permission), which the
+  // permission-matrix suite pins byte-equal to this row.
+  Object.freeze({ code: STOCK_PREP_PULL, name: 'Stock Prep Pull', description: 'Pull from PLM into the stock-preparation sheet (dry-run, apply, large-BOM background channel, reconcile); in later slices also create project sheets and archive/restore them. The holder must also hold stock-prep:operate and stock-prep:read' }),
 ])
 
 /**
@@ -221,32 +242,44 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
 const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 
 // ---------------------------------------------------------------------------
-// 一线自己拉数据 — THE OPERATOR PULL GATE SPLIT
+// 拉取人员拉数据 — THE PULL GATE SPLIT (was 一线自己拉数据; reversed 2026-10-08)
 // ---------------------------------------------------------------------------
 //
-// The owner ruled that a floor operator may self-serve the PLM pull. Two things about that ruling
-// have to be encoded rather than remembered, and this block is where they live.
+// THE RULING, AND ITS REVERSAL. The owner first ruled that a floor operator may self-serve the PLM
+// pull, and this block encoded that: the split admitted the OPERATE tier (operate ∧ read). On
+// 2026-10-08 the owner REVERSED it (ADR adr-stock-prep-project-sheets-20261008, addendum A; decision
+// register R-33): a floor operator fills the sheet and decides held rows, but does NOT pull. Pulling
+// — and, in later slices, creating a project's sheet and archiving / restoring it — belongs to the
+// 「拉取人员」, a holder of `stock-prep:pull` (which must ride on operate and read). So the tier this
+// split admits is now PULL, decided by `operatorMayRunStockPrepPull` below, and nothing else about
+// the split changed. Two things about the split still have to be encoded rather than remembered:
 //
 // FIRST: THE ROUTES IT TOUCHES ARE GENERIC. `/api/integration/table-actions/:actionId/dry-run` and
 // `.../apply` serve EVERY table action on the deployment, present and future. So the split is not
-// "the operator tier now satisfies the dry-run gate" — that would hand a stock-prep operator every
-// other connector's plan and write. It is scoped to ONE frozen action id, compared for EQUALITY (no
+// "the pull tier now satisfies the dry-run gate" — that would hand a stock-prep puller every other
+// connector's plan and write. It is scoped to ONE frozen action id, compared for EQUALITY (no
 // prefix, no namespace, no wildcard), and that comparison is the whole rule.
 //
 // SECOND: IT IS ADDITIVE, NEVER A REPLACEMENT. The legacy `integration:read` / `integration:write`
-// gates on those two routes are untouched and still admit exactly whom they admitted. The operator
-// tier is checked only AFTER the legacy gate has already refused, so no existing caller's outcome
-// can change — the split can add an admission, never remove one, and never re-route an existing one.
+// gates on those two routes are untouched and still admit exactly whom they admitted. The pull tier
+// is checked only AFTER the legacy gate has already refused, so no legacy caller's outcome can
+// change — the split can add an admission, never remove one, and never re-route an existing one.
+// (The reversal itself DOES remove an admission — the operate-only tier's — and that is the ruling,
+// not a side effect. It takes effect on upgrade, with no switch: see R-33 and the ADR's runbook
+// note that the 「备料拉取人员」 role must exist BEFORE the upgrade.)
 //
 // WHAT DID NOT MOVE, and why it is named here rather than left implicit:
 //   * mvp-persist — writes the snapshot batch; still platform-admin and still flag-gated. Its
-//     absence costs an operator nothing on their own run: the rows they came for are already in the
+//     absence costs a puller nothing on their own run: the rows they came for are already in the
 //     sheet, and what is missing is a housekeeping copy the diff view uses.
-// RECONCILE DID MOVE, and the reasoning is with its manifest row below: it is the step that puts
-// held rows into the confirmation queue, so leaving it behind left the operator pointed at a queue
-// that could never contain their work.
-// The web orchestration degrades over both of those (skip with a reason, never an error), which is
-// what makes an operator's four-step run finish honestly rather than reddening on a 403.
+//   * confirm, value read-back, export, handoff advance, the project board and the project
+//     directory — all still OPERATE. The owner kept those for the floor: a held row that nobody
+//     decides is never written, and the floor is who decides it.
+// RECONCILE DID MOVE (with the pull, in round-2 C13), and the reasoning is with its manifest row
+// below: it is the step that puts held rows into the confirmation queue, so leaving it behind left
+// the puller pointed at a queue that could never contain their work.
+// The web orchestration degrades over mvp-persist (skip with a reason, never an error), which is
+// what makes a puller's four-step run finish honestly rather than reddening on a 403.
 //
 // These rows are NOT members of STOCK_PREP_WORKBENCH_CAPABILITIES, deliberately and for the same
 // reason `canRunStockPrepInstall` is not: that manifest is the confirmation-queue CONTROL set,
@@ -256,13 +289,13 @@ const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 // equality for every legacy `integration:*` holder, who reaches them without holding any stock-prep
 // code at all. They get their own suite instead (stock-preparation-operator-pull-gate.test.cjs).
 
-/** The ONE table action an operator may self-serve. Compared for equality — never a prefix. */
+/** The ONE table action the pull tier may self-serve. Compared for equality — never a prefix. */
 const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 
 /**
- * The sub-routes that MOVED to the operator tier, each naming the legacy gate it also still keeps.
- * `legacyGate` is the token the route passes to `hasPermission` first; the operator tier is only
- * consulted when that has already said no.
+ * The sub-routes that ride the split (the PULL tier since 2026-10-08; the operator tier before),
+ * each naming the legacy gate it also still keeps. `legacyGate` is the token the route passes to
+ * `hasPermission` first; the pull tier is only consulted when that has already said no.
  */
 const STOCK_PREP_OPERATOR_PULL_STEPS = Object.freeze([
   Object.freeze({
@@ -404,7 +437,10 @@ function satisfiesStockPrepAccess(permissions, code) {
   if (code === STOCK_PREP_ADMIN) return false
   if (code === STOCK_PREP_READ) return held.includes(STOCK_PREP_READ)
   // See the header: a CONJUNCTION, never an implication.
-  return held.includes(STOCK_PREP_OPERATE) && held.includes(STOCK_PREP_READ)
+  const operate = held.includes(STOCK_PREP_OPERATE) && held.includes(STOCK_PREP_READ)
+  if (code === STOCK_PREP_OPERATE) return operate
+  // PULL — one rung up, the same shape: pull AND the whole operate conjunction (R-33, 2026-10-08).
+  return operate && held.includes(STOCK_PREP_PULL)
 }
 
 /**
@@ -421,23 +457,25 @@ function grantedStockPrepCapabilities(permissions) {
 }
 
 /**
- * MAY THIS PRINCIPAL SELF-SERVE THIS TABLE ACTION'S PULL? The whole operator-pull rule, as one pure
- * function of `(permissions, actionId)` so the route, the suite and the web mirror all read the SAME
- * decision instead of three restatements of it.
+ * MAY THIS PRINCIPAL SELF-SERVE THIS TABLE ACTION'S PULL? The whole pull rule, as one pure function
+ * of `(permissions, actionId)` so the route, the suite and the web mirror all read the SAME decision
+ * instead of three restatements of it. (The name keeps its historical `operator` prefix so the one
+ * call site in http-routes.cjs and the suites stay greppable; the tier it decides is PULL.)
  *
  * Both halves are load-bearing:
  *   * the action id must EQUAL the one frozen id — a different action, a prefix of it, an empty
  *     string or a null all answer false, so the split can never leak across the table-action
  *     namespace; and
- *   * the permission side delegates to `satisfiesStockPrepAccess`, so the operate-AND-read
- *     conjunction and the platform-admin short-circuit stay defined in exactly one place.
+ *   * the permission side delegates to `satisfiesStockPrepAccess` at the PULL tier (R-33,
+ *     2026-10-08; it was OPERATE before), so the pull-AND-operate-AND-read conjunction and the
+ *     platform-admin / `stock-prep:admin` short-circuits stay defined in exactly one place.
  *
  * It GRANTS nothing on its own: the routes call it only after their legacy gate has refused, and a
  * false answer there is the same refusal the caller already had.
  */
 function operatorMayRunStockPrepPull(permissions, actionId) {
   if (typeof actionId !== 'string' || actionId !== STOCK_PREP_OPERATOR_PULL_ACTION_ID) return false
-  return satisfiesStockPrepAccess(permissions, STOCK_PREP_OPERATE)
+  return satisfiesStockPrepAccess(permissions, STOCK_PREP_PULL)
 }
 
 /**
@@ -620,6 +658,7 @@ module.exports = {
   STOCK_PREP_PERMISSION_DESCRIPTORS,
   STOCK_PREP_PERMISSION_NAMESPACE,
   STOCK_PREP_PLATFORM_ADMIN_PULL_STEPS,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GATES,
   STOCK_PREP_RAIL_GATE_OPERATOR_BOARD,
   STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,

@@ -48,6 +48,15 @@ export interface OperatorNextStepInput {
    * the button name one press in one set of words. Optional: absent reads as "not the last step".
    */
   handoffLastStep?: boolean
+  /**
+   * R-33 (2026-10-08): whether the signed-in viewer may run the pull themselves — the caller passes
+   * the SAME predicate its pull button renders on (`canRunStockPrepProjectSync`). `false` keeps the
+   * rule (the step is still the next step) but rewrites the two pull-driving sentences to name the
+   * 拉取人员 and strips their action, so the bar never tells a floor operator to press a button they
+   * do not have. Optional: absent reads as `true`, so callers that have no principal in hand (and
+   * specs written before the ruling) keep today's words.
+   */
+  canPull?: boolean
 }
 
 /** The last step's press, in the words the button and the bar share (the queue's own label, H-09). */
@@ -71,8 +80,19 @@ export interface OperatorNextStepResult {
  * condition is true wins, and it is the ONLY one that renders.
  */
 export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStepResult {
+  const canPull = input.canPull !== false
   // 1. 看板 404 / 从没拉过
   if (!input.boardFound || input.pulledRowCount <= 0) {
+    if (!canPull) {
+      return {
+        key: 'pull',
+        zh: '这个项目号在您这里还没有数据。请联系拉取人员把它从 PLM 拉进来。',
+        en: 'There is no data for this project number here yet. Please contact a pull operator (拉取人员) to pull it in from PLM.',
+        actionZh: '',
+        actionEn: '',
+        action: null,
+      }
+    }
     return {
       key: 'pull',
       zh: '这个项目号在您这里还没有数据。先把它从 PLM 拉进来。',
@@ -100,8 +120,14 @@ export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStep
     const n = input.pendingDecisionCount
     return {
       key: 'pending',
-      zh: `有 ${n} 件系统拿不准的事等您拿主意;处理完回来再同步一次。`,
-      en: `${n} thing(s) need your call — come back and sync again once you are done.`,
+      // R-33: the trailing clause is the one part of this rule that drives a pull, so it follows
+      // `canPull` like rules 1 and 4; the action (go and decide) is the floor's own and stays.
+      zh: canPull
+        ? `有 ${n} 件系统拿不准的事等您拿主意;处理完回来再同步一次。`
+        : `有 ${n} 件系统拿不准的事等您拿主意;处理完告知拉取人员再同步一次。`,
+      en: canPull
+        ? `${n} thing(s) need your call — come back and sync again once you are done.`
+        : `${n} thing(s) need your call — once you are done, tell a pull operator (拉取人员) to sync again.`,
       actionZh: `现在就处理这 ${n} 件事`,
       actionEn: `Handle these ${n} now`,
       action: 'go-confirm',
@@ -109,6 +135,16 @@ export function operatorNextStep(input: OperatorNextStepInput): OperatorNextStep
   }
   // 4. 刚确认完(本次会话内 pending 归零且上次 verdict=held)
   if (input.justConfirmed) {
+    if (!canPull) {
+      return {
+        key: 'resync',
+        zh: '都确认完了。请联系拉取人员再同步一次,数据才会写进多维表。',
+        en: 'All confirmed. Please ask a pull operator (拉取人员) to sync again so the data is written into the multitable.',
+        actionZh: '',
+        actionEn: '',
+        action: null,
+      }
+    }
     return {
       key: 'resync',
       zh: '都确认完了。再同步一次,数据才会写进多维表。',

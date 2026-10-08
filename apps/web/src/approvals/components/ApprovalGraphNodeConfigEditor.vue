@@ -6,8 +6,10 @@
     :data-node-type="node.type"
   >
     <!-- G-2: editable condition node (rules / conjunction / default fall-through edge).
-         Topology (which branches exist, their edgeKeys/targets) is NOT editable here — only
-         the matching LOGIC. Branch add/remove is a later slice. -->
+         Topology (which branches exist, their edgeKeys/targets) is NOT edited by these controls —
+         only the matching LOGIC. T5a (test report 2026-10-08): the one topology control mounted
+         here is 「删除分支」 on a NON-default branch card; it only calls the parent's typed topology
+         op (unified undo), never mutates the graph itself. -->
     <div
       v-if="node.type === 'condition' && conditionEditFor(node.key)"
       class="template-authoring__condition"
@@ -66,7 +68,28 @@
             <el-option label="全部满足 (AND)" value="and" />
             <el-option label="任一满足 (OR)" value="or" />
           </el-select>
+          <!-- T5a (test report 2026-10-08): delete a NON-default branch. The default card below never
+               renders this control (D0 §4.1). Mounted only where the delete joins the Canvas undo
+               history; a shape the command refuses keeps the button disabled and states why. -->
+          <el-button
+            v-if="branchDeleteAvailable && branch.edgeKey !== conditionEditFor(node.key)!.defaultEdgeKey"
+            size="small"
+            type="danger"
+            text
+            class="template-authoring__condition-branch-remove"
+            :disabled="readOnly || Boolean(branchRemovalBlocker(node.key, branch.edgeKey))"
+            :aria-label="branchRemoveAriaLabel(node.key, branchIndex)"
+            :title="branchRemoveTitle(node.key, branch.edgeKey)"
+            data-testid="approval-condition-branch-remove"
+            @click="removeConditionBranchAt(node.key, branch.edgeKey)"
+          >删除分支</el-button>
         </div>
+        <p
+          v-if="branchDeleteAvailable && !readOnly && branchRemovalBlocker(node.key, branch.edgeKey)"
+          class="template-authoring__hint"
+          role="note"
+          data-testid="approval-condition-branch-remove-blocked"
+        >{{ branchRemovalBlocker(node.key, branch.edgeKey) }}</p>
         <template v-if="branch.predicateMode === 'rules'">
           <div
             v-for="(rule, ruleIndex) in branch.rules"
@@ -224,8 +247,8 @@
       </div>
       <!-- D0 §4.1 / P1-D: the default (fall-through) branch is presented as an explanatory card,
            visually de-emphasized from the ordered branch cards above, and excluded from rule
-           editing. It is not a mutable topology affordance in this slice — no delete/duplicate is
-           mounted here (a future slice may add branch delete with its own authorization).
+           editing. It is never a delete target — no delete/duplicate is mounted here (D0 §4.1:
+           the default cannot be deleted; T5a's 「删除分支」 lives on non-default cards only).
            M8 honesty: the explanatory copy is gated on a real `defaultEdgeKey` — when none is
            designated, the runtime falls through to the FIRST outgoing edge
            (ApprovalGraphExecutor.resolveConditionTarget), never an undefined "default flow", so
@@ -254,14 +277,17 @@
           未指定默认分支：所有条件都不满足时，流程走向不确定，请指定默认分支。
         </p>
         <el-form-item label="默认分支（无匹配时）" class="template-authoring__condition-default">
+          <!-- T5a / verify X1: bound one-way + normalized — Element Plus clears a clearable select to
+               `undefined`, which used to land in the edit model and throw on the next `.trim()`. -->
           <el-select
-            v-model="conditionEditFor(node.key)!.defaultEdgeKey"
+            :model-value="conditionEditFor(node.key)!.defaultEdgeKey"
             size="small"
             clearable
             :disabled="readOnly"
             class="ms-w-220"
             placeholder="（无默认分支）"
             data-testid="approval-condition-default-edge"
+            @update:model-value="(value: unknown) => setConditionDefaultEdgeKey(node.key, value)"
           >
             <el-option
               v-for="edgeKey in conditionOutgoingEdgeKeys(node.key)"
@@ -304,6 +330,13 @@
         <li>并行分支：{{ (node.config as ParallelNodeConfig).branches.map((edgeKey) => graphEdgeTargetLabel(node.key, edgeKey)).join('、') || '（无）' }}</li>
         <li>汇聚节点：{{ (node.config as ParallelNodeConfig).joinNodeKey ? graphNodeLabel((node.config as ParallelNodeConfig).joinNodeKey) : '（无）' }}</li>
       </ul>
+      <!-- T5b (test report 2026-10-08): say where more lanes come from — the lane count is not fixed
+           at two, and 「+添加分支」 in the inspector toolbar above adds one per click. -->
+      <p
+        v-if="canvasAuthoringActive && !readOnly"
+        class="template-authoring__hint"
+        data-testid="approval-parallel-add-branch-hint"
+      >共 {{ (node.config as ParallelNodeConfig).branches.length }} 个并行分支，点击上方「+添加分支」可再增加一路</p>
     </div>
 
     <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
@@ -1274,6 +1307,45 @@ const conditionFormulaDryRunResult = api.conditionFormulaDryRunResult
 const conditionFormulaDryRunLoading = api.conditionFormulaDryRunLoading
 const dryRunConditionFormula = api.dryRunConditionFormula
 const conditionOutgoingEdgeKeys = api.conditionOutgoingEdgeKeys
+// T5a (test report 2026-10-08): condition-branch delete — every member is OPTIONAL on the api, and
+// an absent member renders no control at all (fail-closed), so component harnesses that do not wire
+// branch delete are unaffected.
+const canvasAuthoringActive = computed(() => Boolean(unwrap(api.canvasAuthoringActive ?? false)))
+const conditionBranchRemovalBlockerApi = api.conditionBranchRemovalBlocker
+const removeConditionBranchApi = api.removeConditionBranch
+const branchDeleteAvailable = computed(() => Boolean(
+  canvasAuthoringActive.value
+    && removeConditionBranchApi
+    && conditionBranchRemovalBlockerApi,
+))
+function branchRemovalBlocker(nodeKey: string, edgeKey: string): string | null {
+  return conditionBranchRemovalBlockerApi?.(nodeKey, edgeKey) ?? null
+}
+function isLastConditionBranch(nodeKey: string): boolean {
+  return (conditionEditFor(nodeKey)?.branches.length ?? 0) <= 1
+}
+/** D0 §13.6: a destructive action names its object — by priority, never by an edge key. */
+function branchRemoveAriaLabel(nodeKey: string, branchIndex: number): string {
+  const base = `删除优先级 ${branchIndex + 1} 分支`
+  return isLastConditionBranch(nodeKey) ? `${base}，并移除此条件节点（保留默认分支流程）` : base
+}
+function branchRemoveTitle(nodeKey: string, edgeKey: string): string {
+  const blocker = branchRemovalBlocker(nodeKey, edgeKey)
+  if (blocker) return blocker
+  return isLastConditionBranch(nodeKey)
+    ? '这是最后一个条件分支：删除后移除此条件节点，保留默认分支流程，可撤销'
+    : '删除此分支及其中的节点，可撤销'
+}
+function removeConditionBranchAt(nodeKey: string, edgeKey: string): void {
+  if (readOnly.value || branchRemovalBlocker(nodeKey, edgeKey)) return
+  removeConditionBranchApi?.(nodeKey, edgeKey)
+}
+/** T5a / verify X1: a cleared picker means "no default" — store '', never `undefined`/`null`. */
+function setConditionDefaultEdgeKey(nodeKey: string, value: unknown): void {
+  const edit = conditionEditFor(nodeKey)
+  if (!edit || readOnly.value) return
+  edit.defaultEdgeKey = typeof value === 'string' ? value : ''
+}
 const conditionEdgeLabel = api.conditionEdgeLabel
 const graphEdgeTargetLabel = api.graphEdgeTargetLabel
 const graphNodeLabel = api.graphNodeLabel
@@ -1644,6 +1716,11 @@ const { node } = toRefs(props)
 /* P1-D — priority chip (condition branches) / de-emphasized default-branch label. Text-only
    information carrier (branch order + "default" are both spelled out in words); the token colors
    below are a supplementary accent, never the sole carrier (V-6/V-8). */
+/* T5a: the branch delete sits at the end of the wrapping head row (flat text button, token colors
+   only — no new literal colors in this file). */
+.template-authoring__condition-branch-remove {
+  margin-left: auto;
+}
 .template-authoring__condition-branch-priority {
   display: inline-flex;
   align-items: center;

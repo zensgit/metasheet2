@@ -88,6 +88,7 @@ import {
   STOCK_PREP_LANDING_KEYS,
   STOCK_PREP_OPERATE,
   STOCK_PREP_PERMISSION_CODES,
+  STOCK_PREP_PULL,
   STOCK_PREP_RAIL_GROUPS,
   STOCK_PREP_READ,
   STOCK_PREP_ROUTE_PERMISSION,
@@ -164,6 +165,12 @@ const ACTORS: Actor[] = [
   { name: 'orphan operate (no read)', roles: [], permissions: [STOCK_PREP_OPERATE] },
   { name: 'workbench admin', roles: [], permissions: [STOCK_PREP_ADMIN] },
   { name: 'platform admin', roles: ['admin'], permissions: ['integration:admin'] },
+  // R-33 (2026-10-08): the 拉取人员 (read+operate+pull) and the two degenerate pull grants. On the
+  // confirmation-queue manifest the pull code adds nothing, so the puller must equal
+  // 'operator with read+confirm' cell for cell, and the degenerate grants must equal 'orphan operate'.
+  { name: 'puller (read+operate+pull)', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] },
+  { name: 'pull without operate', roles: [], permissions: [STOCK_PREP_READ, STOCK_PREP_PULL] },
+  { name: 'orphan pull', roles: [], permissions: [STOCK_PREP_PULL] },
   // THE FOUR PRINCIPALS THAT USED TO SIT OUTSIDE THIS TABLE, now inside it — which is the whole
   // point of the change that put them here. Each one separates 「the code the server matches」 from
   // 「the code `useAuth().hasPermission` would expand to」, and the browser predicates are now
@@ -339,6 +346,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
     expect(STOCK_PREP_READ).toBe(backendAccess.STOCK_PREP_READ)
     expect(STOCK_PREP_OPERATE).toBe(backendAccess.STOCK_PREP_OPERATE)
     expect(STOCK_PREP_ADMIN).toBe(backendAccess.STOCK_PREP_ADMIN)
+    // R-33 (2026-10-08): the 拉取人员 code, mirrored like the other three.
+    expect(STOCK_PREP_PULL).toBe(backendAccess.STOCK_PREP_PULL)
+    expect(STOCK_PREP_PULL).toBe('stock-prep:pull')
     expect(PLATFORM_ADMIN_GATE).toBe(backendAccess.PLATFORM_ADMIN_GATE)
     expect(STOCK_PREP_ROUTE_PERMISSION).toBe(backendAccess.STOCK_PREP_ROUTE_PERMISSION)
     expect([...STOCK_PREP_PERMISSION_CODES]).toEqual([...backendAccess.STOCK_PREP_PERMISSION_CODES])
@@ -417,6 +427,11 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       'orphan operate (no read)': 'redirect',
       'workbench admin': 'allow',
       'platform admin': 'allow',
+      // R-33: reachability is still exactly the READ code — the pull code neither opens nor closes
+      // the page. The puller holds read; the two degenerate pull grants answer by whether they do.
+      'puller (read+operate+pull)': 'allow',
+      'pull without operate': 'allow',
+      'orphan pull': 'redirect',
       // THE FOUR ROWS THAT USED TO DIVERGE, now closed. They used to read
       // redirect/allow/allow/allow, because the guard ran on `useAuth().hasPermission`, which
       // expands `*:*`, `stock-prep:*` and `stock-prep:write` → read and treats `users:write` as
