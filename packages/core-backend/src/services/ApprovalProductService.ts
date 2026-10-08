@@ -4336,22 +4336,59 @@ function normalizeApprovalGraph(
       assigneesPerBranch.push(branchAssignees)
     }
     if (!options.allowParallelDuplicateAssignees) {
-      const seen = new Set<string>()
-      for (const branchAssignees of assigneesPerBranch) {
+      const firstBranchByAssignee = new Map<string, number>()
+      assigneesPerBranch.forEach((branchAssignees, branchIndex) => {
         for (const assignee of branchAssignees) {
-          if (seen.has(assignee)) {
-            failValidation(
+          const firstBranchIndex = firstBranchByAssignee.get(assignee)
+          if (firstBranchIndex !== undefined) {
+            failParallelDuplicateApprover(
               context,
               'approvalGraph parallel branches must not contain the same approver',
+              node.key,
+              [firstBranchIndex, branchIndex].map((index) => edgeMap.get(parallelConfig.branches[index])?.target ?? ''),
             )
           }
-          seen.add(assignee)
+          firstBranchByAssignee.set(assignee, branchIndex)
         }
-      }
+      })
     }
   }
 
   return { nodes, edges }
+}
+
+/**
+ * T5b (test report 2026-10-08): the static parallel duplicate-approver failure keeps its code
+ * (`context.code`, i.e. VALIDATION_ERROR on requests) and its message byte-for-byte; it only gains
+ * a machine-readable, values-free `details` block (gateway key + the first node of each conflicting
+ * branch — never an approver id) so the authoring UI can name the two branches in business words
+ * instead of an opaque "保存表单失败".
+ */
+function failParallelDuplicateApprover(
+  context: ValidationContext,
+  message: string,
+  parallelNodeKey: string,
+  conflictingBranchHeadNodeKeys: string[],
+): never {
+  throw new ServiceError(message, context.status, context.code, {
+    reason: 'parallel_duplicate_approver',
+    nodeKey: parallelNodeKey,
+    conflictingNodeKeys: conflictingBranchHeadNodeKeys,
+  })
+}
+
+/**
+ * T5b (test report 2026-10-08): the configure-before-publish placeholder role is NOT an approver.
+ * `insertParallelGateway`/`addParallelBranch` seed every additional lane with it, so a third lane
+ * shared it with the second and the STATIC duplicate check rejected the untouched draft at save
+ * ("保存表单失败") — contradicting the placeholder's own contract ("the draft saves; publish is
+ * guarded"). The duplicate rule exists because the active-assignment unique index cannot hold the
+ * same user active in two branches; a placeholder can never reach runtime
+ * (`assertNoUnconfiguredPlaceholderRoles` fails every publish carrying it), so it is excluded from
+ * the duplicate sets — and ONLY it: two branches naming the same real role/user still fail.
+ */
+function isParallelDuplicateCandidateRoleId(roleId: string): boolean {
+  return roleId !== APPROVAL_ROLE_CONFIGURE_SENTINEL
 }
 
 /**
@@ -4444,7 +4481,9 @@ function collectBranchAssignees(
       config.assigneeIds?.forEach((assignee) => assignees.add(assignee))
       for (const source of config.assigneeSources ?? []) {
         if (source.kind === 'static_user') source.userIds.forEach((assignee) => assignees.add(assignee))
-        if (source.kind === 'static_role') source.roleIds.forEach((assignee) => assignees.add(assignee))
+        if (source.kind === 'static_role') {
+          source.roleIds.filter(isParallelDuplicateCandidateRoleId).forEach((assignee) => assignees.add(assignee))
+        }
       }
     }
     currentKey = outgoing.get(currentKey)?.[0]?.target ?? null
@@ -4508,7 +4547,7 @@ function collectAllBranchAssignees(
         source.userIds.forEach((assignee) => local.push(assignee))
       }
       if (source.kind === 'static_role') {
-        source.roleIds.forEach((assignee) => local.push(assignee))
+        source.roleIds.filter(isParallelDuplicateCandidateRoleId).forEach((assignee) => local.push(assignee))
       }
     }
     return local
@@ -4668,18 +4707,21 @@ function validateAllParallelBranchPaths(
       )
     })
     if (options.allowParallelDuplicateAssignees) continue
-    const seen = new Set<string>()
-    for (const branchAssignees of assigneesPerBranch) {
+    const firstBranchByAssignee = new Map<string, number>()
+    assigneesPerBranch.forEach((branchAssignees, branchIndex) => {
       for (const assignee of branchAssignees) {
-        if (seen.has(assignee)) {
-          failValidation(
+        const firstBranchIndex = firstBranchByAssignee.get(assignee)
+        if (firstBranchIndex !== undefined) {
+          failParallelDuplicateApprover(
             context,
             `approvalGraph parallel node ${node.key} has duplicate approver '${assignee}' across branches`,
+            node.key,
+            [firstBranchIndex, branchIndex].map((index) => edgeMap.get(config.branches[index])?.target ?? ''),
           )
         }
-        seen.add(assignee)
+        firstBranchByAssignee.set(assignee, branchIndex)
       }
-    }
+    })
   }
 }
 

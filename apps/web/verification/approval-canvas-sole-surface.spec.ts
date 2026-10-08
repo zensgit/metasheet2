@@ -141,6 +141,40 @@ const LINEAR_TEMPLATE = {
   },
 }
 
+// T5c (test report 2026-10-08): a flow long enough that the page — not one screen — holds the
+// canvas (8 approvals ⇒ 10 layers ⇒ ~1.7k px stage), the shape the tester reported.
+const LONG_FLOW_STEPS = 8
+const LONG_TEMPLATE = {
+  ...LINEAR_TEMPLATE,
+  key: 'canvas_long_flow_acceptance',
+  name: 'Canvas 验收长流程模板',
+  description: '长流程检查器可见性浏览器验收',
+  latestVersionId: 'ver_canvas_long_1',
+  approvalGraph: {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      ...Array.from({ length: LONG_FLOW_STEPS }, (_, index) => ({
+        key: `approval_${index + 1}`,
+        type: 'approval',
+        name: `第 ${index + 1} 级审批`,
+        config: {
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        },
+      })),
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: ['start', ...Array.from({ length: LONG_FLOW_STEPS }, (_, index) => `approval_${index + 1}`), 'end']
+      .slice(0, -1)
+      .map((source, index, sources) => ({
+        key: `edge-long-${index}`,
+        source,
+        target: sources[index + 1] ?? 'end',
+      })),
+  },
+} as typeof LINEAR_TEMPLATE
+
 async function mountFlow(
   page: Page,
   options: {
@@ -452,4 +486,68 @@ test('flag OFF keeps the linear legacy editor editable and saves its real graph'
   expect(payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.name).toBe('财务复核')
   await expect(stepRow.locator('input').first()).toHaveValue('财务复核')
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+})
+
+// ── T5c (test report 2026-10-08): the node inspector stays in view for a node far down a long flow.
+// The harness mounts the view without the App shell, so the DOCUMENT is the scroll container here
+// (in the app it is `.app-main`); every assertion is relative to the viewport and the sticky bars,
+// never to hard-coded shell offsets. `toBeVisible()` is NOT enough — it passes for an element that
+// has scrolled out of the viewport; `toBeInViewport` + overlap checks are the real gate.
+for (const viewport of [
+  { label: '1440', width: 1440, height: 900 },
+  { label: '1024', width: 1024, height: 768 },
+] as const) {
+  test(`T5c: selecting a node far down a long flow keeps the inspector in view at ${viewport.label}px`, async ({ page }) => {
+    await mountFlow(page, { canvasV2: true, width: viewport.width, height: viewport.height, template: LONG_TEMPLATE })
+    await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
+    const lastKey = `approval_${LONG_FLOW_STEPS}`
+    // The flow really is taller than the viewport (otherwise this proves nothing).
+    const scrollRange = await page.evaluate(() => (
+      document.scrollingElement!.scrollHeight - document.scrollingElement!.clientHeight
+    ))
+    expect(scrollRange).toBeGreaterThan(300)
+
+    await page.evaluate(() => window.scrollTo(0, document.scrollingElement!.scrollHeight))
+    const lastSelector = canvasNodeSelector(page, lastKey)
+    await expect(lastSelector).toBeInViewport()
+    await lastSelector.click()
+
+    const inspector = page.locator('[data-testid="approval-canvas-inspector"]')
+    await expect(inspector).toHaveAttribute('data-inspector-node', lastKey)
+    const heading = inspector.locator('.template-authoring__canvas-inspector-header')
+    await expect(heading).toBeInViewport({ ratio: 1 })
+    await expectNoOverlap(page.locator('.template-authoring__steps'), heading, 'the step bar must not cover the inspector heading')
+    await expectNoOverlap(page.locator('.template-authoring__header'), heading, 'the page header must not cover the inspector heading')
+    // The node's own settings are reachable without scrolling back up.
+    await expect(inspector.locator('[data-testid="approval-canvas-inspector-topology"]')).toBeInViewport()
+    const footer = page.locator('[data-testid="approval-canvas-inspector-footer"]')
+    await expect(footer).toBeInViewport({ ratio: 1 })
+    await expectNoOverlap(page.locator('.template-authoring__section-actions'), footer, 'the sticky 下一步 bar must not cover the inspector footer')
+    // Selecting did not drag the page away from the node the author just clicked.
+    await expect(lastSelector).toBeInViewport()
+    await expectNoDocumentOverflow(page)
+    await page.screenshot({ path: `${OUT}/t5c-long-flow-inspector-${viewport.label}.png` })
+  })
+}
+
+test('T5c: opening and closing a tall inspector does not ratchet the page taller (stage min-height feedback)', async ({ page }) => {
+  await mountFlow(page, { canvasV2: true, width: 1440, height: 900, template: LINEAR_TEMPLATE })
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
+  const pageHeight = () => page.evaluate(() => document.scrollingElement!.scrollHeight)
+  const before = await pageHeight()
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  const inspector = page.locator('[data-testid="approval-canvas-inspector"]')
+  await expect(inspector).toHaveAttribute('data-inspector-node', 'approval_1')
+  // Make the inspector content as tall as an author realistically gets it (several source cards).
+  for (let i = 0; i < 3; i += 1) await page.click('[data-testid="approval-node-source-add"]')
+  // Any viewport sync while the inspector is open (zoom here) used to copy the stretched height
+  // into the stage's inline min-height, which then outlived the inspector.
+  await page.click('[data-testid="approval-canvas-zoom-in"]')
+  await page.click('[data-testid="approval-canvas-zoom-out"]')
+  await page.click('[data-testid="approval-canvas-inspector-close"]')
+  await expect(inspector).toHaveCount(0)
+  expect(await pageHeight()).toBeLessThanOrEqual(before + 2)
+  // D0 §5: closing returns focus to the node that was being edited.
+  await expect(canvasNodeSelector(page, 'approval_1')).toBeFocused()
 })

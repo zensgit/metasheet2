@@ -563,7 +563,10 @@ export async function createTemplate(
       approvalGraph: payload.approvalGraph,
     }
   }
-  return apiPost('/api/approval-templates', payload)
+  // T5b (test report 2026-10-08): template writes surface the server's machine code + values-free
+  // details (`ApprovalApiError`), so `describeTemplateAuthoringError` can map them; the generic
+  // `apiPost` throw kept only "API error: 400" and every failure read 「保存表单失败」.
+  return postApprovalJson<ApprovalTemplateDetailDTO>('/api/approval-templates', payload)
 }
 
 export async function updateTemplate(
@@ -587,14 +590,8 @@ export async function updateTemplate(
       latestVersionId: `ver_${templateId}_${Date.now()}`,
     }
   }
-  const response = await apiFetch(`/api/approval-templates/${encodeURIComponent(templateId)}`, {
-    method: 'PATCH',
-    body: JSON.stringify(payload),
-  })
-  if (!response.ok) {
-    throw new Error(`API error: ${response.status} ${response.statusText}`)
-  }
-  return response.json()
+  // T5b: see createTemplate — the failure keeps its code/details instead of a bare status line.
+  return patchApprovalJson<ApprovalTemplateDetailDTO>(`/api/approval-templates/${encodeURIComponent(templateId)}`, payload)
 }
 
 export async function publishTemplate(
@@ -613,7 +610,8 @@ export async function publishTemplate(
       updatedAt: new Date().toISOString(),
     }
   }
-  return apiPost(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
+  // T5b: see createTemplate.
+  return postApprovalJson<ApprovalTemplateVersionDetailDTO>(`/api/approval-templates/${encodeURIComponent(templateId)}/publish`, payload)
 }
 
 export interface ApprovalFormulaConditionDryRunRequest {
@@ -1243,12 +1241,16 @@ export class ApprovalApiError extends Error {
   readonly status: number
   /** Server-declared machine code, when present (`payload.error.code`). */
   readonly code?: string
+  /** Server-declared machine-readable details (`payload.error.details`), when a plain object.
+   *  T5b: lets authoring copy name the offending nodes/branches without echoing the message. */
+  readonly details?: Record<string, unknown>
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
     super(message)
     this.name = 'ApprovalApiError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -1262,12 +1264,16 @@ export class ApprovalApiError extends Error {
  * a server-supplied message is still shown verbatim.
  */
 export async function approvalRequestError(response: Response): Promise<never> {
-  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null
+  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string; details?: unknown } } | null
   const rawMessage = payload?.error?.message
   const message = typeof rawMessage === 'string' && rawMessage.trim().length > 0
     ? rawMessage
     : (useLocale().isZh.value ? `请求失败（${response.status}）` : `Request failed (${response.status})`)
-  throw new ApprovalApiError(message, response.status, payload?.error?.code)
+  const rawDetails = payload?.error?.details
+  const details = rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)
+    ? rawDetails as Record<string, unknown>
+    : undefined
+  throw new ApprovalApiError(message, response.status, payload?.error?.code, details)
 }
 
 /**
