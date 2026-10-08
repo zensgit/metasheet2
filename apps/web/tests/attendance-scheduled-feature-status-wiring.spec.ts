@@ -20,8 +20,13 @@ import {
 //   - no PUT body changes; the PUT response carries no gate report and none is needed;
 //   - toggling a checkbox never moves the configured status - only a saved response does;
 //   - a missing gate report is "unknown" (fail-closed); an open gate is "on", never "running";
-//   - a failed settings read is "not loaded", never "not configured" - on the first mount AND on a later reload of
-//     the same mounted instance (the reload is the only way to be holding a stale gate report).
+//   - a failed or denied settings read never keeps an earlier "on": the gate report is dropped on the first mount AND
+//     on a later reload of the same mounted instance (the reload is the only way to be holding a stale gate report),
+//     whichever reader fails - "Reload admin" (loadSettings) or the annual card's "Reload policy" (loadAnnualPolicy);
+//   - the 「已配置」 half is never turned into "not configured" by a failed read either: it reads "Not loaded" when the
+//     failed reader owns the document it derives from (loadSettings clears the settings document the digest card
+//     reads), and otherwise keeps the last loaded value (the annual card reads the last SAVED annual policy, which no
+//     failed read clears; loadAnnualPolicy touches neither).
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -380,6 +385,64 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(mounts).toBe(1)
     expect(settingsGets).toBeGreaterThan(getsBefore)
     expectGateReportDropped(root)
+  })
+
+  // ---- a failed "Reload policy" on the SAME mounted instance (gate r2 P2-1) -----------------------------------
+  // The annual card's own "Reload policy" is the SECOND reader of GET /api/attendance/settings (loadAnnualPolicy); the
+  // cases above only drive the first one (loadSettings, through "Reload admin"). It has to drop the gate report on a
+  // failed or denied read as well, and because the two cards share ONE report, BOTH go "unknown". Unlike loadSettings
+  // it neither clears the settings document nor touches the saved annual policy, so BOTH cards keep what was
+  // configured (contrast expectGateReportDropped, where the digest card reads "Not loaded"). `settingsGets` is asserted
+  // to be exactly one more, which shows that no other loader ran and reset the report as a side effect.
+
+  function expectGateReportUnknown(root: HTMLElement): void {
+    for (const card of [digestCard(root), annualCard(root)]) {
+      const status = statusIn(card)
+      expect(status.getAttribute('data-runnable-state')).toBe('unknown')
+      expect(textOf(status.querySelector('[data-scheduled-feature-runnable]'))).toContain('Unknown')
+      expect(textOf(status)).not.toContain('Server run switches are on')
+    }
+  }
+
+  function expectConfiguredKept(root: HTMLElement): void {
+    for (const card of [digestCard(root), annualCard(root)]) {
+      const status = statusIn(card)
+      expect(status.getAttribute('data-configured-state')).toBe('configured')
+      expect(textOf(status.querySelector('[data-scheduled-feature-configured]'))).toBe('Configured')
+    }
+  }
+
+  it('annual: a FAILED "Reload policy" on the same mounted instance drops the last gate report: both cards go "unknown", both keep "Configured"', async () => {
+    const root = await mountWithOpenGates()
+    const getsBefore = settingsGets
+
+    settingsGetStatus = 500
+    buttonByText(annualCard(root), 'Reload policy').click()
+    await flushUi(10)
+
+    expect(mounts).toBe(1)
+    expect(settingsGets).toBe(getsBefore + 1) // the card's own reload, nothing else
+    expectGateReportUnknown(root)
+    expectConfiguredKept(root)
+    // The failure reached the catch branch. Only this one loader ran, so nothing overwrote the shared status line.
+    expect(adminStatusText(root)).toContain('settings unavailable')
+  })
+
+  it('annual: a 403 on "Reload policy" of the same mounted instance also drops the last gate report', async () => {
+    // 'managed' has to be in place BEFORE the first mount: this reload does not re-read the group catalog, and under
+    // any other scope a 403 replaces the whole admin surface with a "permissions required" notice, leaving no card.
+    groupsScope = 'managed'
+    const root = await mountWithOpenGates()
+    const getsBefore = settingsGets
+
+    settingsGetStatus = 403
+    buttonByText(annualCard(root), 'Reload policy').click()
+    await flushUi(10)
+
+    expect(mounts).toBe(1)
+    expect(settingsGets).toBe(getsBefore + 1)
+    expectGateReportUnknown(root)
+    expectConfiguredKept(root)
   })
 
   // ---- monthly annual-leave auto-accrual -------------------------------------------------------------------

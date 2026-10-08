@@ -25552,12 +25552,17 @@ function applyAnnualPolicyToForm(settings: AttendanceSettings): void {
   annualPolicyLoaded.value = true
 }
 
+// A1: this card's own "Reload policy" reads the same GET /api/attendance/settings as loadSettings(), so it follows the
+// same rule: a denied (403) or failed read is "not loaded" and the previous gate report must not survive it - a stale
+// "server run switches are on" would otherwise read as current. Only the gate report is dropped; the saved annual
+// policy and the settings document stay as last loaded, like the annual form beside the card.
 async function loadAnnualPolicy() {
   annualPolicyLoading.value = true
   try {
     const response = await apiFetch(`/api/attendance/settings?${buildQuery({ orgId: normalizedOrgId() }).toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
+      attendanceRuntimeGates.value = null
       return
     }
     const data = await response.json()
@@ -25568,6 +25573,7 @@ async function loadAnnualPolicy() {
     attendanceRuntimeGates.value = parseAttendanceRuntimeGates(data.runtimeGates)
     applyAnnualPolicyToForm((data.data || {}) as AttendanceSettings)
   } catch (error: any) {
+    attendanceRuntimeGates.value = null
     setStatus(readErrorMessage(error, tr('Failed to load annual leave policy', '加载年假策略失败')), 'error')
   } finally {
     annualPolicyLoading.value = false
