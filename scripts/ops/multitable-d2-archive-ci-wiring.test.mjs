@@ -46,6 +46,19 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-source-deletion-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-records-entry-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-sheet-config-entry-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-view-share-entry-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-owned-cleanup-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
@@ -122,6 +135,11 @@ function assertD2ArchiveWiring(config, workflow) {
     '1',
     `${REAL_DB_STEP_IDS.multitable} must arm the D2 fail-not-skip marker with exact string '1'`,
   )
+  assert.equal(
+    step.env.TEST_DATABASE_URL,
+    step.env.DATABASE_URL,
+    `${REAL_DB_STEP_IDS.multitable} must provide matching database aliases for crash children`,
+  )
   assertExactRoster(
     wholeFileVitestArgs(step),
     `the parsed ${REAL_DB_STEP_IDS.multitable} whole-file Vitest arguments`,
@@ -130,6 +148,24 @@ function assertD2ArchiveWiring(config, workflow) {
 
 test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
   assertD2ArchiveWiring(readFileSync(CONFIG, 'utf8'), readFileSync(WORKFLOW, 'utf8'))
+})
+
+test('D2 crash-child database contract rejects missing or mismatched aliases', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const target = '        id: multitable-real-db-integration\n' +
+    "        if: matrix.node-version == '20.x'\n" +
+    '        env:\n' +
+    '          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  const alias = '          TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test\n'
+  for (const replacement of ['', alias.replace('metasheet_test', 'metasheet_other')]) {
+    const changed = workflow.replace(target + alias, target + replacement)
+    assert.notEqual(changed, workflow, 'database-alias mutation must apply')
+    assert.throws(() => assertD2ArchiveWiring(config, changed), (error) => {
+      assert.match(String(error.message), /matching database aliases for crash children/)
+      return true
+    })
+  }
 })
 
 test('D2 archive roster contract rejects a duplicate section-causality whole-file arg', () => {
@@ -196,6 +232,252 @@ test('archive roster contract rejects dropping D4 reconstruction from no-DB excl
     '',
   )
   assert.notEqual(dropped, config, 'D4 reconstruction exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping bounded capture from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-bounded-source-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'bounded capture removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping bounded capture from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'bounded capture exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping committed claim from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-owned-claim-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'committed claim removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping committed claim from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'committed claim exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned RR capture from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-owned-capture-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'owned RR capture removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned RR capture from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'owned RR capture exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping source deletion, records entry, sheet config entry, or view share entry from either required placement', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  for (const file of [
+    'tests/integration/multitable-recovery-archive-source-deletion-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-records-entry-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-sheet-config-entry-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-view-share-entry-realdb.test.ts',
+  ]) {
+    const droppedWorkflow = workflow.replace(file, file.replace('-realdb.test.ts', '-removed.test.ts'))
+    const droppedConfig = config.replace(`      '${file}',\n`, '')
+    assert.notEqual(droppedWorkflow, workflow, 'whole-file removal mutation must apply')
+    assert.notEqual(droppedConfig, config, 'exclusion removal mutation must apply')
+    for (const [changedConfig, changedWorkflow] of [[config, droppedWorkflow], [droppedConfig, workflow]]) {
+      assert.throws(() => assertD2ArchiveWiring(changedConfig, changedWorkflow), (error) => {
+        assert.match(String(error.message), /no duplicates or extras/)
+        return true
+      })
+    }
+  }
+})
+
+test('archive roster contract rejects dropping attachment metadata admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-attachment-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'attachment metadata admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping attachment metadata admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'attachment metadata admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping foreign-sheet recovery admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-foreign-reset-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'foreign-sheet recovery admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping foreign-sheet recovery admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'foreign-sheet recovery admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping tombstone retention admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-retention-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'tombstone retention admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping tombstone retention admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'tombstone retention admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping fresh ordinary-writer admission from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-fresh-writer-admission-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'fresh ordinary-writer admission removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping fresh ordinary-writer admission from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'fresh ordinary-writer admission exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned manual generation composer from the real-DB union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-owned-composer-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'owned manual generation composer removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping owned manual generation composer from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'owned manual generation composer exclusion removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true

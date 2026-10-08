@@ -2,13 +2,20 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+vi.mock('../../src/multitable/recovery-local-filesystem', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../src/multitable/recovery-local-filesystem')>(),
+}))
+import * as filesystem from '../../src/multitable/recovery-local-filesystem'
 import { createLocalCustodyBackup, createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
 import { assertLocalCustodyMountIsolation, createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 
 const roots: string[] = []
 const refusal = 'RECOVERY_LOCAL_CUSTODY_STORE_REFUSED'
-afterEach(async () => { for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
+afterEach(async () => {
+  vi.restoreAllMocks()
+  for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true })
+})
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-custody-store-'))
   roots.push(root)
@@ -26,6 +33,16 @@ async function fixture() {
 }
 
 describe('explicit encrypted local custody package storage', () => {
+  test('filesystem refusal is checked at admission and again before package IO', async () => {
+    const f = await fixture()
+    const store = await createLocalCustodyStore(f.options)
+    vi.spyOn(filesystem, 'assertRecoveryLocalFilesystem').mockRejectedValue(new Error('synthetic-private-native-error'))
+    await expect(createLocalCustodyStore(f.options)).rejects.toEqual(new Error(refusal))
+    await expect(store.putBackup(randomUUID(), f.backup)).rejects.toEqual(new Error(refusal))
+    expect(await fs.readdir(f.custodyPath)).toEqual([])
+    expect(await fs.readdir(f.archivePath)).toEqual([])
+  })
+
   test('mount admission rejects device aliases and subdirectory mounts, without mounting anything', () => {
     const base = '1 0 8:1 / / rw - ext4 /dev/synthetic rw'
     expect(() => assertLocalCustodyMountIsolation(base, ['/custody', '/archive'])).not.toThrow()

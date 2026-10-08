@@ -7,7 +7,7 @@ const run = promisify(execFile)
 const repoRoot = resolve(__dirname, '../../../..')
 
 // The required backend unit chain discovers this wrapper; root ops has no default test glob.
-test('runs the whole Phase5 sampling contract without skipped cases', async () => {
+test('runs the whole Phase5 validity and sampling union without skipped cases', async () => {
   const { stdout } = await run(process.execPath, [
     '--test', '--test-reporter=tap', 'scripts/ops/phase5-required-samples-contract.test.mjs',
   ], {
@@ -19,5 +19,5 @@ test('runs the whole Phase5 sampling contract without skipped cases', async () =
   const summary = Object.fromEntries([...stdout.matchAll(
     /^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$/gm,
   )].map(match => [match[1], Number(match[2])]))
-  expect(summary).toEqual({ tests: 8, pass: 8, fail: 0, cancelled: 0, skipped: 0, todo: 0 })
+  expect(summary).toEqual({ tests: 13, pass: 13, fail: 0, cancelled: 0, skipped: 0, todo: 0 })
 }, 150_000)

@@ -220,11 +220,11 @@ test('reports present but unparsed buckets separately from absent families', asy
   pluginSampling(result, { raw_bucket_lines: 1, parsed_family_histograms: 0, selected_count: null, reason: 'family_unparsed' });
 });
 
-test('labels nonfinite percentiles diagnostically without repairing the legacy gate', async () => {
+test('reports nonfinite sampling while the repaired gate refuses unestimable latency', async () => {
   const body = `${passingCounters}\n${passingLatencySamples.replace('le="1"} 10', 'le="malformed"} 10')}`;
   const result = await runPhase5Validation(body);
-  assert.equal(result.code, 0);
-  assert.equal(result.json.summary.passed, 11);
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.json.summary, { total_checks: 11, passed: 9, failed: 2, na: 0, overall_status: 'fail' });
   assert.equal(result.json.percentiles['metasheet_plugin_reload_duration_seconds{plugin_name="example-plugin"}'].p95, null);
   pluginSampling(result, { raw_bucket_lines: 1, parsed_family_histograms: 1, selected_count: 10, reason: 'percentile_unestimable' });
 });
@@ -243,4 +243,68 @@ test('rejects unknown child termination instead of reporting a normal zero exit'
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+function pluginHistogram(buckets, count = 10) {
+  return `${passingCounters}\n${passingLatencySamples.replace(
+    /metasheet_plugin_reload_duration_seconds_(bucket|sum|count)[^\n]*\n/g,
+    '',
+  )}\n${buckets.map(([le, samples]) =>
+    `metasheet_plugin_reload_duration_seconds_bucket{plugin_name="example-plugin",le="${le}"} ${samples}`,
+  ).join('\n')}
+metasheet_plugin_reload_duration_seconds_sum{plugin_name="example-plugin"} 100
+metasheet_plugin_reload_duration_seconds_count{plugin_name="example-plugin"} ${count}
+`;
+}
+
+function assertPluginReport(result, { code, status, actual, count, passed, failed, na }) {
+  assert.equal(result.code, code, JSON.stringify({ exit: result.code, summary: result.json.summary, percentiles: result.json.percentiles, assertions: result.json.assertions }));
+  assert.deepEqual(result.json.summary, {
+    total_checks: 11,
+    passed,
+    failed,
+    na,
+    overall_status: status === 'pass' ? 'pass' : 'fail',
+  });
+  assert.equal(result.json.assertions.length, 11);
+  assert.equal(result.json.percentiles['metasheet_plugin_reload_duration_seconds{plugin_name="example-plugin"}'].count, count);
+  for (const [percentile, threshold] of [['p95', 2], ['p99', 5]]) {
+    const value = typeof actual === 'object' && actual !== null ? actual[percentile] : actual;
+    assert.deepEqual(result.json.assertions.find((entry) => entry.metric === `plugin_reload_latency_${percentile}`), {
+      metric: `plugin_reload_latency_${percentile}`,
+      actual: value,
+      threshold,
+      unit: 'seconds',
+      type: 'upper_bound',
+      comparison: status === 'na' ? 'N/A' : '≤',
+      status,
+    });
+    assert.equal(result.json.percentiles['metasheet_plugin_reload_duration_seconds{plugin_name="example-plugin"}'][percentile], value);
+  }
+  assert.doesNotMatch(result.stderr, /syntax error|illegal character/);
+}
+
+test('fails positive-count percentiles in the +Inf bucket instead of treating null as zero', async () => {
+  const result = await runPhase5Validation(pluginHistogram([['10', 0], ['+Inf', 10]]));
+  assertPluginReport(result, { code: 1, status: 'fail', actual: null, count: 10, passed: 9, failed: 2, na: 0 });
+});
+
+test('fails positive-count percentiles when the only bucket is +Inf', async () => {
+  const result = await runPhase5Validation(pluginHistogram([['+Inf', 10]]));
+  assertPluginReport(result, { code: 1, status: 'fail', actual: null, count: 10, passed: 9, failed: 2, na: 0 });
+});
+
+test('fails positive-count percentiles when buckets do not cover the requested rank', async () => {
+  const result = await runPhase5Validation(pluginHistogram([['1', 1]]));
+  assertPluginReport(result, { code: 1, status: 'fail', actual: null, count: 10, passed: 9, failed: 2, na: 0 });
+});
+
+test('keeps finite interpolation with a +Inf terminal bucket passing', async () => {
+  const result = await runPhase5Validation(pluginHistogram([['0.5', 5], ['1', 10], ['+Inf', 10]]));
+  assertPluginReport(result, { code: 0, status: 'pass', actual: { p95: 0.95, p99: 0.99 }, count: 10, passed: 11, failed: 0, na: 0 });
+});
+
+test('keeps zero-count required histograms NA and overall fail', async () => {
+  const result = await runPhase5Validation(pluginHistogram([['1', 0], ['+Inf', 0]], 0));
+  assertPluginReport(result, { code: 1, status: 'na', actual: 0, count: 0, passed: 9, failed: 0, na: 2 });
 });

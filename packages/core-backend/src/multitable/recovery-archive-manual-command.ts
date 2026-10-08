@@ -1,3 +1,4 @@
+import { bindRecoveryArchiveOwnedComposer, normalizeRecoveryArchiveOwnedFailure, type RecoveryArchiveOwnedComposerOptions } from './recovery-archive-owned-composer'
 import { randomBytes } from 'node:crypto'
 import { acquireCanonicalSheetFence } from './canonical-sheet-fence'
 import { bindRecoveryArchiveManualAdmission, snapshotRecoveryArchiveManualPolicy,
@@ -27,6 +28,7 @@ export function bindRecoveryArchiveManualCommand(
   runtime: RecoveryArchivePreviewRuntime,
   policyInput?: RecoveryArchiveManualAdmissionPolicy,
   readContentAddressed?: Parameters<typeof bindRecoveryArchiveManualContinuation>[2],
+  owned?: RecoveryArchiveOwnedComposerOptions,
 ) {
   const policy = policyInput === undefined ? undefined : snapshotRecoveryArchiveManualPolicy(policyInput)
   const admit = policy ? bindRecoveryArchiveManualAdmission(transaction, authorize, policy) : undefined
@@ -67,6 +69,21 @@ export function bindRecoveryArchiveManualCommand(
       assertEnabled()
       if (!admit || !policy) throw new Error('RECOVERY_ARCHIVE_MANUAL_POLICY_UNAVAILABLE')
       const identity = Object.freeze({ ...input })
+      if (process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED === 'true' && process.env.MULTITABLE_ENABLE_WRITER_FENCE === 'true') {
+        if (!owned) throw new Error('RECOVERY_ARCHIVE_CAPTURE_POLICY_INVALID')
+        const composeOwned = bindRecoveryArchiveOwnedComposer(owned, authorize, runtime, policy)
+        try {
+          await composeOwned(identity)
+          return (await read(identity)).status
+        } catch (error) {
+          // An uncertain final COMMIT is success only after authoritative durable status readback.
+          try {
+            const current = await read(identity)
+            if (current.status.state === 'recoverable') return current.status
+          } catch { /* Failed readback cannot establish success or expose SQL/adapter values. */ }
+          throw normalizeRecoveryArchiveOwnedFailure(error)
+        }
+      }
       const admission = await admit(identity)
       const { status, row } = await read(identity)
       if (status.state !== 'pending') return status
