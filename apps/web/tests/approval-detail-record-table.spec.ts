@@ -1235,6 +1235,48 @@ describe('ApprovalDetailView — T4cd platform /history rows (snake_case + camel
     }
   })
 
+  // Gate r1 P2-2: only a row whose stored name IS its id is named through the directory. A row with
+  // NO stored name is left alone: no platform writer stores one (every route falls back to the id),
+  // and the rows that carry none are a `plm:` instance's upstream rows (ApprovalBridgeService
+  // getPlmHistory: `actorName: null`, the upstream user id as `actorId`). Those ids belong to the
+  // upstream system, so a local lookup could name an unrelated local account; the rows keep the
+  // baseline 系统 label. A blank stored name takes the same fallback instead of an empty label.
+  it('a row with no stored name (a plm: upstream row) keeps 系统 and its id never reaches the directory resolver', async () => {
+    mockRouteParams.id = 'plm:eco-approval-7'
+    mockActiveApproval.value = baseInstance({ id: 'plm:eco-approval-7', sourceSystem: 'plm' })
+    // A local account that happens to share the upstream id: resolving the upstream id would name it.
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([
+      { id: '1', name: '赵六' },
+      { id: 'user_blank_5', name: '孙七' },
+    ])
+    mockHistory.value = await historyFromWire([
+      {
+        id: '9',
+        action: 'approve',
+        actorId: '1',
+        actorName: null,
+        comment: null,
+        fromStatus: null,
+        toStatus: 'approved',
+        occurredAt: APPROVED_AT,
+        metadata: { ecoId: 3, stageId: 2, approvalType: 'stage', requiredRole: null },
+      },
+      wireRow('rec_blank', 'created', 'user_blank_5', '  ', CREATED_AT, null, 'pending'),
+    ])
+    await mountView()
+    await flushUi(12)
+
+    const items = timelineItems()
+    expect(items).toHaveLength(2)
+    expect(items.map((item) => item.querySelector('.approval-detail__timeline-header strong')?.textContent?.trim())).toEqual(['系统', '系统'])
+    expect(items.map((item) => item.querySelector('.approval-detail__actor-avatar')?.textContent?.trim())).toEqual(['系', '系'])
+    expect(container!.textContent).not.toContain('赵六')
+    expect(container!.textContent).not.toContain('孙七')
+    const resolvedIds = resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])
+    expect(resolvedIds).not.toContain('1')
+    expect(resolvedIds).not.toContain('user_blank_5')
+  })
+
   it('a row whose stored name is only the id shows the directory-resolved name, or 未知用户 — never the id', async () => {
     // Unresolved (inactive / nameless account): values-free fallback.
     mockHistory.value = await historyFromWire([

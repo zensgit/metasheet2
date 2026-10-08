@@ -1928,7 +1928,7 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
 // might need to display a name for — every `assignments` row's `assigneeId` (feeds
 // `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
 // `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below) PLUS (test report
-// 2026-10-08 T4cd) the actor id of every history row that stores no name for it (feeds
+// 2026-10-08 T4cd) the actor id of every history row that stores only that id as its name (feeds
 // `historyActorName`). A single
 // consolidated `watch` (side effect) rather than one per consumer — they draw from overlapping id
 // universes and Vue de-dupes redundant `ensureUserNamesResolved` calls internally anyway. Never
@@ -2258,21 +2258,27 @@ function historySystemActorKind(actorId: string | null | undefined): 'autoApprov
   return null
 }
 
-// T4cd — a person row whose stored name is empty or is the id itself: the writer only had the id
-// (`name ?? email ?? id` at write time for an account with neither, or the `original_approver`
-// auto-approval mode, which stores the approver's id as the name). Such a row is named through the
-// directory resolver (ensured by the consolidated watch below), never by printing the id.
+// T4cd — a person row whose stored name is the id itself: the writer only had the id (`name ?? email
+// ?? id` at write time for an account with neither, or the `original_approver` auto-approval mode,
+// which stores the approver's id as the name). Such a row is named through the directory resolver
+// (ensured by the consolidated watch below), never by printing the id.
+// A row with NO stored name is deliberately not resolved (gate r1 P2-2). No platform writer stores
+// one (every route falls back to the id); the rows that carry none are a `plm:` instance's upstream
+// rows (`actorName: null`, the UPSTREAM system's user id as `actorId`), and looking such an id up in
+// the local directory could name an unrelated local account. They keep the system fallback.
 function historyActorIdToResolve(item: HistoryActorFields): string | null {
   const actorId = typeof item.actorId === 'string' ? item.actorId.trim() : ''
   if (!actorId || historySystemActorKind(actorId)) return null
   const storedName = (item.actorName ?? '').trim()
-  return !storedName || storedName === actorId ? actorId : null
+  return storedName === actorId ? actorId : null
 }
 
 // Timeline / record-table actor label. The cancel-round system closure writes a sentinel as BOTH its
 // actor id and actor name (lock:131 「系统终结身份」); it is shown as 「系统」, never as the raw id —
 // and so, since T4cd, is every other engine sentinel (see historySystemActorKind). A row with no
-// actor fields at all (a server that sends only the snake_case columns) keeps the 「系统」 fallback.
+// actor fields at all (a server that sends only the snake_case columns) keeps the 「系统」 fallback,
+// and so does a row whose stored name is missing or blank (see historyActorIdToResolve), which
+// would otherwise render an empty label.
 function historyActorName(item: HistoryActorFields): string {
   if (item.metadata?.autoApproved) return t.value.systemAutoApproval
   if (isCancelRoundSystemActor(item.actorId, item.actorName)) return t.value.system
@@ -2281,7 +2287,7 @@ function historyActorName(item: HistoryActorFields): string {
   if (systemKind === 'system') return t.value.system
   const unresolvedId = historyActorIdToResolve(item)
   if (unresolvedId) return getResolvedUserName(unresolvedId) ?? unknownUserLabel(isZh.value)
-  return item.actorName ?? t.value.system
+  return (item.actorName ?? '').trim() || t.value.system
 }
 
 // The record table's synthetic 结束 row and the 复制摘要 text state the instance's status through the
