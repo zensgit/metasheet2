@@ -2327,7 +2327,7 @@ function formatCommentDraftContent(content: string): string {
 // #5808: a mention id is any non-empty string the create route accepted, so it can be an
 // Object.prototype key ("constructor", "toString", "__proto__"). Only the map's OWN string entries count.
 function ownMentionLabel(labels: Record<string, string> | undefined, mentionId: string): string {
-  if (!labels || !Object.hasOwn(labels, mentionId)) return ''
+  if (!labels || !Object.prototype.hasOwnProperty.call(labels, mentionId)) return ''
   const label: unknown = labels[mentionId]
   return typeof label === 'string' ? label.trim() : ''
 }

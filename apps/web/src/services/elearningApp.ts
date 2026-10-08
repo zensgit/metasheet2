@@ -12,8 +12,8 @@ export function parseElearningAppInstallation(value: unknown): ElearningAppInsta
   }
   const row = value as Record<string, unknown>
   if (Object.keys(row).length !== 3
-    || !Object.hasOwn(row, 'status') || !Object.hasOwn(row, 'notificationsEnabled')
-    || !Object.hasOwn(row, 'canManage') || typeof row.canManage !== 'boolean'
+    || !Object.prototype.hasOwnProperty.call(row, 'status') || !Object.prototype.hasOwnProperty.call(row, 'notificationsEnabled')
+    || !Object.prototype.hasOwnProperty.call(row, 'canManage') || typeof row.canManage !== 'boolean'
     || !['not-installed', 'inactive', 'active'].includes(row.status as string)
     || typeof row.notificationsEnabled !== 'boolean') {
     throw new Error('invalid_response')

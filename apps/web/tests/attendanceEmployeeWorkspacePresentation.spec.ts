@@ -82,6 +82,7 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(workWindowShortLabel('—')).toBeNull()
     expect(suggestOffDutyTime('09:00-12:00 / 13:00-18:00 · Asia/Shanghai')).toBe('18:00')
     expect(suggestOffDutyTime('—')).toBeNull()
+    expect(suggestOffDutyTime('Office hours · UTC')).toBeNull()
   })
 
   it('treats only an open check-in as clocked in', () => {

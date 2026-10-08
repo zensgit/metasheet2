@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { readFile } from 'node:fs/promises'
+import { buildRouteGuardContext, buildRouteGuardInput, resolveRouteGuardDecision } from '../src/router/guardPolicy'
 import {
   applyExternalSystemToForm,
   applyK3WiseGateJsonToForm,
@@ -511,7 +512,6 @@ describe('K3 WISE setup helpers', () => {
 
   it('keeps the K3 WISE setup route behind integration write permission', async () => {
     const source = await readFile('src/router/appRoutes.ts', 'utf8')
-    const mainSource = await readFile('src/main.ts', 'utf8')
     const routeStart = source.indexOf("path: '/integrations/k3-wise'")
     const routeEnd = source.indexOf("path: '/workflows'", routeStart)
     const routeBlock = source.slice(routeStart, routeEnd)
@@ -520,8 +520,35 @@ describe('K3 WISE setup helpers', () => {
     expect(routeBlock).toContain("titleZh: 'K3 WISE 预设'")
     expect(routeBlock).toContain("permissions: ['integration:write']")
     expect(routeBlock).not.toContain("requiredFeature: 'attendanceAdmin'")
-    expect(mainSource).toContain('to.meta?.permissions')
-    expect(mainSource).toContain('auth.hasPermission(permission)')
+    const declaration = /permissions:\s*\[([^\]]*)\]/.exec(routeBlock)
+    expect(declaration).not.toBeNull()
+    const permissions = Array.from(declaration![1].matchAll(/'([^']+)'/g), (match) => match[1])
+    expect(permissions).toEqual(['integration:write'])
+    const route = { path: '/integrations/k3-wise', meta: { permissions } }
+    const input = buildRouteGuardInput(route)
+    expect(input.path).toBe('/integrations/k3-wise')
+    expect(input.meta).toBe(route.meta)
+    const auth = {
+      hasPermission: vi.fn(() => false),
+      getAccessSnapshot: vi.fn(() => ({ roles: [], permissions: [] })),
+    }
+    const flags = {
+      hasFeature: () => true,
+      isAttendanceFocused: () => false,
+      isPlmWorkbenchFocused: () => false,
+      resolveHomePath: () => '/HOME',
+    }
+    expect(resolveRouteGuardDecision(input, buildRouteGuardContext({ auth, flags })))
+      .toEqual({ action: 'redirect', target: '/HOME' })
+    expect(auth.hasPermission.mock.calls).toEqual([['integration:write']])
+    expect(auth.getAccessSnapshot).not.toHaveBeenCalled()
+
+    auth.hasPermission.mockClear()
+    auth.hasPermission.mockReturnValue(true)
+    expect(resolveRouteGuardDecision(input, buildRouteGuardContext({ auth, flags })))
+      .toEqual({ action: 'allow' })
+    expect(auth.hasPermission.mock.calls).toEqual([['integration:write']])
+    expect(auth.getAccessSnapshot).not.toHaveBeenCalled()
   })
 
   it('splits comma and newline table lists', () => {

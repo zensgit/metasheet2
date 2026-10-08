@@ -323,7 +323,7 @@ const ALLOWLIST: AllowlistEntry[] = [
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalDepartmentPicker tree heading -- directory-validated department name with a static root label fallback, never an id', [
     // O-8 / F8-1: the static root label is now locale-aware; same fallback, the entry follows the line.
-    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || (isZh ? '全部部门' : 'All departments')"],
+    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack[browseStack.length - 1]?.name || (isZh ? '全部部门' : 'All departments')"],
   ]),
 
   // ---- OUT-OF-SCOPE: admin-only raw-id render, matches the pre-existing #5010/hand-list precedent ----
