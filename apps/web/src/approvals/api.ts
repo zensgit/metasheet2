@@ -1059,6 +1059,18 @@ function approvalListSearchParams(query: ApprovalListQuery | undefined, includeP
 /** The filters the list is showing. Paging is deliberately not part of an export request. */
 export type ApprovalExportQuery = Omit<ApprovalListQuery, 'page' | 'pageSize'>
 
+/**
+ * How the SERVER should write the export's header row and status words (T1). Opt-in: with no
+ * options the request is exactly `?<filters>&format=csv` and the server answers with its default
+ * (`header=code`: the DTO keys, raw status values), so a caller that does not ask is unaffected.
+ * The approval center asks for `header=label` in the current UI language. The values are the
+ * server's exact literals; nothing here builds or rewrites any CSV text.
+ */
+export interface ApprovalExportCsvOptions {
+  header?: 'label' | 'code'
+  lang?: 'zh' | 'en'
+}
+
 /** Used when the response's `Content-Disposition` is absent, unreadable, or not a plain CSV name. */
 export const APPROVAL_EXPORT_DEFAULT_FILE_NAME = 'approvals-export.csv'
 
@@ -1124,9 +1136,16 @@ function readExportFileName(response: Response): string {
  * implement the CSV branch answers the same URL with the JSON list, and handing that to the user
  * as `approvals-export.csv` would look like a successful export.
  */
-export async function exportApprovalsCsv(query?: ApprovalExportQuery): Promise<ApprovalCsvExportResult> {
+export async function exportApprovalsCsv(
+  query?: ApprovalExportQuery,
+  options?: ApprovalExportCsvOptions,
+): Promise<ApprovalCsvExportResult> {
   const params = approvalListSearchParams(query, false)
   params.set('format', 'csv')
+  // Kept out of `query` on purpose: `query` is the feed's filters (shared with the JSON list, and
+  // compared against it), whereas header mode / language describe how this one file is written.
+  if (options?.header) params.set('header', options.header)
+  if (options?.lang) params.set('lang', options.lang)
   const response = await apiFetch(`/api/approvals?${params.toString()}`, {
     method: 'GET',
     headers: { Accept: 'text/csv' },

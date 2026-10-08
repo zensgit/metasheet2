@@ -1112,7 +1112,9 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
     { file: 'src/views/approval/ApprovalCenterDetailPane.vue', ternary: 4 },
     { file: 'src/views/approval/ApprovalCenterTable.vue', ternary: 2 },
     // ifZhBlock = `tabEmptyText` (pinned separately above) and the CSV-export `exportCopy`.
-    { file: 'src/views/approval/ApprovalCenterView.vue', ternary: 14, ifZhBlock: 2 },
+    // ternary 14 -> 15 (T1): the export asks the server for its header language with
+    // `isZh.value ? 'zh' : 'en'` — a language CODE sent in the request, not UI copy (no CJK on either side).
+    { file: 'src/views/approval/ApprovalCenterView.vue', ternary: 15, ifZhBlock: 2 },
     { file: 'src/views/approval/ApprovalCommentsPanel.vue', ternary: 3 },
     {
       file: 'src/views/approval/ApprovalDetailView.vue',
