@@ -50,7 +50,10 @@ import {
   viewerRolesFailClosed,
 } from '../services/approval-instance-readability'
 import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
-import { isApprovalCcUnreadBadgeEnabled } from '../services/approval-notify-badge-flags'
+import {
+  isApprovalCcUnreadBadgeEnabled,
+  isApprovalMineOutcomeBadgeEnabled,
+} from '../services/approval-notify-badge-flags'
 import { countApprovalPendingForViewer } from '../services/approval-pending-query'
 import {
   assignmentMatchesActor,
@@ -2640,6 +2643,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // 抄送我的 per-row unread (test report 2026-10-08): only while its switch is on, and never
         // for the CSV export (whose columns do not carry it). Off ⇒ the feed is byte-identical.
         annotateCcUnread: !isCsvExport && isApprovalCcUnreadBadgeEnabled(),
+        // 我发起的 per-row new outcome: same rule — only while its own switch is on, never for CSV.
+        annotateMineOutcomeUnseen: !isCsvExport && isApprovalMineOutcomeBadgeEnabled(),
       })
 
       if (isCsvExport) {
@@ -3283,6 +3288,63 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         error,
         'APPROVAL_CC_UNREAD_COUNT_FAILED',
         'Failed to count unread CC approvals',
+        () => res.json({ count: 0, degraded: true }),
+      )
+    }
+  })
+
+  // 我发起的 new-outcome badge (test report 2026-10-08, T6). Same contract and same placement rule as
+  // `/cc-unread-count` above: a dedicated count (never part of the lock-B 待办 counts or their socket
+  // events), behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED (default OFF, exact 'true'; off ⇒ 404 with its
+  // own code before any query), counting the 我发起的 feed for the list's own `sourceSystem` mapping
+  // plus the new-outcome conjunct (`ApprovalBridgeService.countMineOutcomesUnseenForViewer`). A
+  // requester gets no realtime frame when someone else decides their request (only the actor and
+  // the remaining seats are pushed); the badge refreshes on the next list load or tab switch.
+  r.get('/api/approvals/mine-outcomes/unseen-count', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
+    if (!isApprovalMineOutcomeBadgeEnabled()) {
+      return res.status(404).json(
+        approvalErrorResponse('APPROVAL_MINE_OUTCOME_BADGE_DISABLED', 'The new-outcome badge is not enabled'),
+      )
+    }
+    try {
+      if (!pool) {
+        return res.status(503).json(
+          approvalErrorResponse('APPROVALS_DATABASE_UNAVAILABLE', 'Database not available'),
+        )
+      }
+
+      const userId = resolveApprovalActorId(req)
+      if (!userId) {
+        return res.status(401).json(
+          approvalErrorResponse('APPROVAL_USER_REQUIRED', 'User ID not found in token'),
+        )
+      }
+
+      const rawSourceSystem = typeof req.query.sourceSystem === 'string' ? req.query.sourceSystem.trim() : ''
+      if (rawSourceSystem && !['platform', 'plm', 'all'].includes(rawSourceSystem)) {
+        return res.status(400).json(
+          approvalErrorResponse(
+            'APPROVAL_SOURCE_SYSTEM_INVALID',
+            "sourceSystem must be one of 'platform', 'plm', or 'all'",
+          ),
+        )
+      }
+      const source = resolveApprovalListSourceOptions(rawSourceSystem, true)
+
+      const count = await getBridgeService(options).countMineOutcomesUnseenForViewer({
+        sourceSystem: source.sourceSystem,
+        includeExternalTabSources: source.includeExternalTabSources,
+        actorId: userId,
+        actorRoles: resolveApprovalActorRoles(req),
+        actorPermissions: resolveApprovalActorPermissions(req),
+      })
+      res.json({ count })
+    } catch (error) {
+      handleApprovalsError(
+        res,
+        error,
+        'APPROVAL_MINE_OUTCOME_COUNT_FAILED',
+        'Failed to count unseen request outcomes',
         () => res.json({ count: 0, degraded: true }),
       )
     }

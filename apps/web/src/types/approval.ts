@@ -579,6 +579,13 @@ export interface UnifiedApprovalDTO {
    * newest CC targeting them. `undefined` everywhere else; callers treat that as "no dot".
    */
   ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08): populated ONLY on the 我发起的 (mine) tab and only
+   * while the server's outcome-badge switch is on — `true` when the viewer's own request was decided
+   * (approved / rejected / revoked / cancelled) by someone else and not opened since.
+   * `undefined` everywhere else ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }

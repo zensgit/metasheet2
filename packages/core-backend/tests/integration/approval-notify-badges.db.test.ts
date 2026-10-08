@@ -11,6 +11,8 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  *
  * T3 (抄送我的): `GET /api/approvals/cc-unread-count` + the list's per-row `ccUnread`, behind
  * APPROVAL_CC_UNREAD_BADGE_ENABLED (default OFF, exact 'true').
+ * T6 (我发起的): `GET /api/approvals/mine-outcomes/unseen-count` + the list's per-row
+ * `outcomeUnseen`, behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED (default OFF, exact 'true').
  *
  * WHAT IS GATED, and the mutation each case exists to catch:
  *   - the unread RULE is a time comparison against the newest CC row, not "has a read row":
@@ -26,6 +28,14 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
  *     `/api/todo/count` 0 while their CC count is positive (fold a CC arm into the pending query ⇒
  *     red); this is the class the lock's A0 fixtures do not contain;
  *   - switch OFF: 404 with the feature's own code, and list rows carry no `ccUnread` key.
+ *   - T6: the outcome is the newest audit row that moved the request INTO its current terminal
+ *     status — self-decided outcomes (own revoke, own approval followed by the system `sign` row
+ *     or by an auto-approval row repeating the status, own cancellation after someone else's
+ *     approval) are not badged (drop "actor ≠ viewer", the `sign` exclusion or
+ *     `from_status IS DISTINCT FROM to_status` ⇒ red); a later comment does not re-light a seen
+ *     outcome; opened-while-pending is still unseen (drop the time comparison ⇒ red); another
+ *     person's read does not count (drop the user test ⇒ red); a timeout jump and a terminal
+ *     return (which emits no completion event) are badged.
  *
  * FIXTURE DISCIPLINE. Every id is suffixed per run and every identity's role claim is unique, so
  * the shared integration database's other rows cannot reach these counts. Timestamps are written
@@ -67,6 +77,9 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
   const claimOnlyHolderId = `nb-claimonly-${suffix}`
   const userRolesOnlyHolderId = `nb-urolesonly-${suffix}`
   const ccOnlyId = `nb-cconly-${suffix}`
+  // T6: the requester whose own requests are counted, and the people who decide them.
+  const requester2Id = `nb-requester2-${suffix}`
+  const deciderId = `nb-decider-${suffix}`
   // A role claim nobody seats or CCs: identities that must not hold any role-typed match carry it.
   const inertRole = `nb-inert-${suffix}`
   // The cc-only identity's own role (users.role AND its token claim), targeted by one role-typed CC.
@@ -84,10 +97,28 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     ccOnlyUser: `nb_cc_only_user_${suffix}`,
     ccOnlyRole: `nb_cc_only_role_${suffix}`,
   }
-  const seededInstanceIds = Object.values(ids)
+  const outcomeIds = {
+    rejectedNew: `nb_out_rejected_new_${suffix}`,
+    approvedSeen: `nb_out_approved_seen_${suffix}`,
+    openedWhilePending: `nb_out_opened_pending_${suffix}`,
+    selfRevoked: `nb_out_self_revoked_${suffix}`,
+    selfApprovedWithSign: `nb_out_self_approved_${suffix}`,
+    selfApprovedThenAuto: `nb_out_self_approved_auto_${suffix}`,
+    timeoutJump: `nb_out_timeout_jump_${suffix}`,
+    stillPending: `nb_out_pending_${suffix}`,
+    notMine: `nb_out_not_mine_${suffix}`,
+    otherRead: `nb_out_other_read_${suffix}`,
+    selfCancelledAfterApproval: `nb_out_self_cancelled_${suffix}`,
+    terminalReturn: `nb_out_terminal_return_${suffix}`,
+    laterComment: `nb_out_later_comment_${suffix}`,
+    plm: `plm:nb_out_plm_${suffix}`,
+  }
+  const seededInstanceIds = [...Object.values(ids), ...Object.values(outcomeIds)]
   const seededUserIds = [
     viewerId, otherId, requesterId, approverId, roleHolderId, claimOnlyHolderId, userRolesOnlyHolderId, ccOnlyId,
+    requester2Id, deciderId,
   ]
+  const outcomeSwitchBeforeSuite = process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
 
   async function seedUser(userId: string, role: string): Promise<void> {
     await pool().query(
@@ -98,7 +129,7 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     )
   }
 
-  async function seedInstance(id: string, status: string, sourceSystem = 'platform'): Promise<void> {
+  async function seedInstance(id: string, status: string, sourceSystem = 'platform', requester = requesterId): Promise<void> {
     await pool().query(
       `INSERT INTO approval_instances
          (id, status, version, source_system, workflow_key, business_key, title,
@@ -113,8 +144,24 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
         `nb-wf-${suffix}`,
         `nb:${id}`,
         `NB ${id}`,
-        JSON.stringify({ id: requesterId, name: requesterId }),
+        JSON.stringify({ id: requester, name: requester }),
       ],
+    )
+  }
+
+  /** One audit row, `minutesAgo` in the past — a decision, a bookkeeping row or a comment. */
+  async function seedRecord(
+    instanceId: string,
+    action: string,
+    actorId: string,
+    fromStatus: string | null,
+    toStatus: string,
+    minutesAgo: number,
+  ): Promise<void> {
+    await pool().query(
+      `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, metadata, occurred_at)
+       VALUES ($1, $2, $3, $3, $4, $5, '{}'::jsonb, now() - ($6::text || ' minutes')::interval)`,
+      [instanceId, action, actorId, fromStatus, toStatus, String(minutesAgo)],
     )
   }
 
@@ -173,11 +220,26 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     return { rows: payload.data.filter((row) => seededInstanceIds.includes(row.id)), total: payload.total }
   }
 
+  async function outcomeCount(bearer: string, sourceSystem = 'all'): Promise<number> {
+    const { status, body } = await getJson(`/api/approvals/mine-outcomes/unseen-count?sourceSystem=${sourceSystem}`, bearer)
+    expect(status).toBe(200)
+    expect(Object.keys(body)).toEqual(['count'])
+    return body.count as number
+  }
+
+  /** This suite's own rows of the 我发起的 feed. */
+  async function mineTab(bearer: string, sourceSystem = 'all'): Promise<{ rows: Array<{ id: string; outcomeUnseen?: boolean }>; total: number }> {
+    const { status, body } = await getJson(`/api/approvals?tab=mine&sourceSystem=${sourceSystem}&limit=200`, bearer)
+    expect(status).toBe(200)
+    const payload = body as { data: Array<{ id: string; outcomeUnseen?: boolean }>; total: number }
+    return { rows: payload.data.filter((row) => seededInstanceIds.includes(row.id)), total: payload.total }
+  }
+
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
     await ensureApprovalSchemaReady()
 
-    for (const id of [viewerId, otherId, requesterId, approverId, claimOnlyHolderId, ccOnlyId]) {
+    for (const id of [viewerId, otherId, requesterId, approverId, claimOnlyHolderId, ccOnlyId, requester2Id, deciderId]) {
       await seedUser(id, 'viewer')
     }
     // Production shape of "holds the role": `users.role` is what both the request's role set and
@@ -234,6 +296,75 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
     await seedCc(ids.ccOnlyRole, 'role', ccOnlyRole, 10)
     await seedUser(ccOnlyId, ccOnlyRole)
 
+    // ---- T6 fixtures: requests of `requester2Id`. ----
+    // rejectedNew — rejected by the decider 10 min ago, never opened since ⇒ new.
+    await seedInstance(outcomeIds.rejectedNew, 'rejected', 'platform', requester2Id)
+    await seedRecord(outcomeIds.rejectedNew, 'created', requester2Id, null, 'pending', 30)
+    await seedRecord(outcomeIds.rejectedNew, 'reject', deciderId, 'pending', 'rejected', 10)
+    // approvedSeen — approved 10 min ago, opened 5 min ago ⇒ seen.
+    await seedInstance(outcomeIds.approvedSeen, 'approved', 'platform', requester2Id)
+    await seedRecord(outcomeIds.approvedSeen, 'approve', deciderId, 'pending', 'approved', 10)
+    await seedRead(requester2Id, outcomeIds.approvedSeen, 5)
+    // openedWhilePending — opened 20 min ago while pending, rejected 10 min ago ⇒ new.
+    await seedInstance(outcomeIds.openedWhilePending, 'rejected', 'platform', requester2Id)
+    await seedRead(requester2Id, outcomeIds.openedWhilePending, 20)
+    await seedRecord(outcomeIds.openedWhilePending, 'reject', deciderId, 'pending', 'rejected', 10)
+    // selfRevoked — the requester withdrew it ⇒ not news to them.
+    await seedInstance(outcomeIds.selfRevoked, 'revoked', 'platform', requester2Id)
+    await seedRecord(outcomeIds.selfRevoked, 'revoke', requester2Id, 'pending', 'revoked', 10)
+    // selfApprovedWithSign — the requester approved the final node themselves; the system's
+    // aggregate-cancellation `sign` row follows in the same transaction (same time, higher id) ⇒
+    // not news. Without the `sign` exclusion the outcome would read as decided by `system`.
+    await seedInstance(outcomeIds.selfApprovedWithSign, 'approved', 'platform', requester2Id)
+    await pool().query(
+      `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, metadata, occurred_at)
+       VALUES ($1, 'approve', $2, $2, 'pending', 'approved', '{}'::jsonb, now() - interval '10 minutes'),
+              ($1, 'sign', 'system', 'System', 'pending', 'approved', '{"autoCancelled":true}'::jsonb, now() - interval '10 minutes')`,
+      [outcomeIds.selfApprovedWithSign, requester2Id],
+    )
+    // selfApprovedThenAuto — the requester approved a node themselves and a following auto-approval
+    // node wrote its own `approve` row in the same transaction, REPEATING the final status
+    // (from = to = approved, actor `system`, same time, higher id) ⇒ not news. Only the
+    // `from_status IS DISTINCT FROM to_status` test keeps that repeat from being read as the outcome.
+    await seedInstance(outcomeIds.selfApprovedThenAuto, 'approved', 'platform', requester2Id)
+    await pool().query(
+      `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, metadata, occurred_at)
+       VALUES ($1, 'approve', $2, $2, 'pending', 'approved', '{}'::jsonb, now() - interval '10 minutes'),
+              ($1, 'approve', 'system', 'System', 'approved', 'approved', '{"autoApproved":true}'::jsonb, now() - interval '10 minutes')`,
+      [outcomeIds.selfApprovedThenAuto, requester2Id],
+    )
+    // timeoutJump — the scheduler's timeout effect moved it to approved ⇒ new.
+    await seedInstance(outcomeIds.timeoutJump, 'approved', 'platform', requester2Id)
+    await seedRecord(outcomeIds.timeoutJump, 'jump', 'system:approval-timeout', 'pending', 'approved', 10)
+    // stillPending — not finished ⇒ never counted (but listed in 我发起的).
+    await seedInstance(outcomeIds.stillPending, 'pending', 'platform', requester2Id)
+    await seedRecord(outcomeIds.stillPending, 'created', requester2Id, null, 'pending', 10)
+    // notMine — someone else's request the requester2 decided ⇒ not in 我发起的 at all.
+    await seedInstance(outcomeIds.notMine, 'rejected', 'platform', requesterId)
+    await seedRecord(outcomeIds.notMine, 'reject', requester2Id, 'pending', 'rejected', 10)
+    // otherRead — rejected 10 min ago; someone ELSE opened it 5 min ago ⇒ still new.
+    await seedInstance(outcomeIds.otherRead, 'rejected', 'platform', requester2Id)
+    await seedRecord(outcomeIds.otherRead, 'reject', deciderId, 'pending', 'rejected', 10)
+    await seedRead(otherId, outcomeIds.otherRead, 5)
+    // selfCancelledAfterApproval — approved by the decider 20 min ago, then the requester's own
+    // cancellation moved it approved → cancelled 10 min ago: the outcome is the cancellation, theirs.
+    await seedInstance(outcomeIds.selfCancelledAfterApproval, 'cancelled', 'platform', requester2Id)
+    await seedRecord(outcomeIds.selfCancelledAfterApproval, 'approve', deciderId, 'pending', 'approved', 20)
+    await seedRecord(outcomeIds.selfCancelledAfterApproval, 'revoke', requester2Id, 'approved', 'cancelled', 10)
+    // terminalReturn — a return that ended the flow as rejected (that path emits no completion
+    // event; the audit row is enough) ⇒ new.
+    await seedInstance(outcomeIds.terminalReturn, 'rejected', 'platform', requester2Id)
+    await seedRecord(outcomeIds.terminalReturn, 'return', deciderId, 'pending', 'rejected', 10)
+    // laterComment — rejected 20 min ago, opened 15 min ago, then someone commented 10 min ago
+    // (a comment repeats the status) ⇒ seen: a comment is not a new outcome.
+    await seedInstance(outcomeIds.laterComment, 'rejected', 'platform', requester2Id)
+    await seedRecord(outcomeIds.laterComment, 'reject', deciderId, 'pending', 'rejected', 20)
+    await seedRead(requester2Id, outcomeIds.laterComment, 15)
+    await seedRecord(outcomeIds.laterComment, 'comment', deciderId, 'rejected', 'rejected', 10)
+    // plm — a mirrored request of requester2 rejected through the bridge ⇒ new under `all` / `plm`.
+    await seedInstance(outcomeIds.plm, 'rejected', 'plm', requester2Id)
+    await seedRecord(outcomeIds.plm, 'reject', deciderId, 'pending', 'rejected', 10)
+
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
     const address = server.getAddress()
@@ -251,6 +382,8 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
   afterEach(() => {
     if (ccSwitchBeforeSuite === undefined) delete process.env.APPROVAL_CC_UNREAD_BADGE_ENABLED
     else process.env.APPROVAL_CC_UNREAD_BADGE_ENABLED = ccSwitchBeforeSuite
+    if (outcomeSwitchBeforeSuite === undefined) delete process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
+    else process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = outcomeSwitchBeforeSuite
   })
 
   afterAll(async () => {
@@ -371,6 +504,98 @@ describeIfDatabase('test report 2026-10-08 — tab read-state badges (real Postg
       const bad = await getJson('/api/approvals/cc-unread-count?sourceSystem=elsewhere', viewer)
       expect(bad.status).toBe(400)
       expect(bad.body?.error?.code).toBe('APPROVAL_SOURCE_SYSTEM_INVALID')
+    })
+  })
+
+  describe('T6 — 我发起的 new-outcome badge', () => {
+    it('switch OFF: the count answers 404 with its own code and the 我发起的 rows carry no outcomeUnseen key', async () => {
+      delete process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
+      const requester2 = await token(requester2Id, inertRole)
+      const off = await getJson('/api/approvals/mine-outcomes/unseen-count?sourceSystem=all', requester2)
+      expect(off.status).toBe(404)
+      expect(off.body?.error?.code).toBe('APPROVAL_MINE_OUTCOME_BADGE_DISABLED')
+
+      const { rows } = await mineTab(requester2)
+      expect(rows.length).toBeGreaterThan(0)
+      for (const row of rows) expect(Object.prototype.hasOwnProperty.call(row, 'outcomeUnseen')).toBe(false)
+    })
+
+    it('the rule: decided by someone else and not opened since ⇒ new; self-decided, seen, still pending or merely commented ⇒ not', async () => {
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const requester2 = await token(requester2Id, inertRole)
+      const { rows } = await mineTab(requester2)
+      const verdict = Object.fromEntries(rows.map((row) => [row.id, row.outcomeUnseen]))
+
+      expect(verdict).toEqual({
+        [outcomeIds.rejectedNew]: true,
+        [outcomeIds.approvedSeen]: false,
+        [outcomeIds.openedWhilePending]: true,
+        [outcomeIds.selfRevoked]: false,
+        [outcomeIds.selfApprovedWithSign]: false,
+        [outcomeIds.selfApprovedThenAuto]: false,
+        [outcomeIds.timeoutJump]: true,
+        [outcomeIds.stillPending]: false,
+        [outcomeIds.otherRead]: true,
+        [outcomeIds.selfCancelledAfterApproval]: false,
+        [outcomeIds.terminalReturn]: true,
+        [outcomeIds.laterComment]: false,
+        [outcomeIds.plm]: true,
+      })
+      expect(verdict[outcomeIds.notMine]).toBeUndefined()
+      expect(await outcomeCount(requester2)).toBe(6)
+    })
+
+    it('count == the rows 我发起的 marks new, and ≤ its total, for every sourceSystem value', async () => {
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const requester2 = await token(requester2Id, inertRole)
+      const expected: Record<string, { unseen: number; rows: number }> = {
+        all: { unseen: 6, rows: 13 },
+        platform: { unseen: 5, rows: 12 },
+        plm: { unseen: 1, rows: 1 },
+      }
+      for (const [sourceSystem, want] of Object.entries(expected)) {
+        const { rows, total } = await mineTab(requester2, sourceSystem)
+        const count = await outcomeCount(requester2, sourceSystem)
+        expect(rows.length, sourceSystem).toBe(want.rows)
+        expect(rows.filter((row) => row.outcomeUnseen === true).length, sourceSystem).toBe(count)
+        expect(count, sourceSystem).toBe(want.unseen)
+        expect(count, sourceSystem).toBeLessThanOrEqual(total)
+      }
+    })
+
+    it('opening the outcome through the real mark-read endpoint drops it from the count and flips its row', async () => {
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const requester2 = await token(requester2Id, inertRole)
+      const before = await outcomeCount(requester2)
+
+      const marked = await fetch(`${baseUrl}/api/approvals/${encodeURIComponent(outcomeIds.rejectedNew)}/mark-read`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${requester2}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      expect(marked.status).toBe(200)
+
+      expect(await outcomeCount(requester2)).toBe(before - 1)
+      const { rows } = await mineTab(requester2)
+      expect(rows.find((row) => row.id === outcomeIds.rejectedNew)?.outcomeUnseen).toBe(false)
+      await pool().query('DELETE FROM approval_reads WHERE user_id = $1 AND instance_id = $2', [requester2Id, outcomeIds.rejectedNew])
+    })
+
+    it('the decider sees none of it: their own decisions on someone else\'s requests are not "my outcomes"', async () => {
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const decider = await token(deciderId, inertRole)
+      expect(await outcomeCount(decider)).toBe(0)
+      expect((await mineTab(decider)).rows).toEqual([])
+    })
+
+    it('lock B: the outcome badge leaves the requester\'s pending and todo counts at zero', async () => {
+      process.env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED = 'true'
+      const requester2 = await token(requester2Id, inertRole)
+      expect(await outcomeCount(requester2)).toBeGreaterThan(0)
+      const pending = await getJson('/api/approvals/pending-count?sourceSystem=all', requester2)
+      expect(pending.body).toEqual({ count: 0, unreadCount: 0 })
+      const todo = await getJson('/api/todo/count', requester2)
+      expect(todo.body?.count).toBe(0)
     })
   })
 })

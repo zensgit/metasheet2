@@ -39,7 +39,10 @@ vi.mock('../../src/middleware/auth', () => ({
 }))
 
 import { approvalsRouter } from '../../src/routes/approvals'
-import { isApprovalCcUnreadBadgeEnabled } from '../../src/services/approval-notify-badge-flags'
+import {
+  isApprovalCcUnreadBadgeEnabled,
+  isApprovalMineOutcomeBadgeEnabled,
+} from '../../src/services/approval-notify-badge-flags'
 
 const CASES: ReadonlyArray<readonly [string, string | undefined, boolean]> = [
   ['unset', undefined, false],
@@ -59,6 +62,13 @@ const SWITCHES = [
     disabledCode: 'APPROVAL_CC_UNREAD_BADGE_DISABLED',
     predicate: isApprovalCcUnreadBadgeEnabled,
     payloadLine: 'approvalCcUnreadBadge: isApprovalCcUnreadBadgeEnabled(),',
+  },
+  {
+    env: 'APPROVAL_MINE_OUTCOME_BADGE_ENABLED',
+    path: '/api/approvals/mine-outcomes/unseen-count',
+    disabledCode: 'APPROVAL_MINE_OUTCOME_BADGE_DISABLED',
+    predicate: isApprovalMineOutcomeBadgeEnabled,
+    payloadLine: 'approvalMineOutcomeBadge: isApprovalMineOutcomeBadgeEnabled(),',
   },
 ] as const
 

@@ -47,6 +47,13 @@ export interface ProductFeatures {
    */
   approvalCcUnreadBadge: boolean
   /**
+   * 我发起的 new-outcome badge (test report 2026-10-08). Mirrors the backend's
+   * APPROVAL_MINE_OUTCOME_BADGE_ENABLED switch (default OFF, exact 'true'), the same predicate that
+   * gates GET /api/approvals/mine-outcomes/unseen-count. While false the approval center issues no
+   * count request and shows no badge or row dot on 我发起的. Never inferred from role/mode/plugin.
+   */
+  approvalMineOutcomeBadge: boolean
+  /**
    * W6-3 (#4556) OD-W6-7=(a) — group effective-policy panel gate. Mirrors the backend's two-layer
    * default-OFF switch (master `ATTENDANCE_GROUP_EFFECTIVE_POLICY_PANEL_ENABLED` env AND a per-org
    * exact allowlist — see `w6-group-effective-policy-panel-flag.ts`). No role/mode/plugin
@@ -102,6 +109,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
   approvalCcUnreadBadge: false,
+  approvalMineOutcomeBadge: false,
   attendanceGroupEffectivePolicyPanel: false,
   elearning: false,
   tasks: false,
@@ -287,6 +295,8 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
           : undefined,
     approvalCcUnreadBadge:
       typeof featuresNode.approvalCcUnreadBadge === 'boolean' ? featuresNode.approvalCcUnreadBadge : undefined,
+    approvalMineOutcomeBadge:
+      typeof featuresNode.approvalMineOutcomeBadge === 'boolean' ? featuresNode.approvalMineOutcomeBadge : undefined,
     attendanceGroupEffectivePolicyPanel:
       typeof featuresNode.attendanceGroupEffectivePolicyPanel === 'boolean'
         ? featuresNode.attendanceGroupEffectivePolicyPanel
@@ -421,6 +431,11 @@ function resolveFeatures(
     override.approvalCcUnreadBadge,
     backend.approvalCcUnreadBadge,
   )
+  // 我发起的 new-outcome badge: same default-OFF discipline.
+  const approvalMineOutcomeBadge = boolOrDefault(
+    override.approvalMineOutcomeBadge,
+    backend.approvalMineOutcomeBadge,
+  )
 
   // W6-3 (#4556) OD-W6-7=(a): same default-OFF discipline — only an explicit backend/override
   // boolean enables it; no admin/mode/plugin inference.
@@ -454,6 +469,7 @@ function resolveFeatures(
     approvalCanvasV2,
     approvalFwbWriteback,
     approvalCcUnreadBadge,
+    approvalMineOutcomeBadge,
     attendanceGroupEffectivePolicyPanel,
     elearning,
     tasks,

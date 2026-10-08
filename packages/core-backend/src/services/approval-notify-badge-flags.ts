@@ -16,3 +16,10 @@
 export function isApprovalCcUnreadBadgeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.APPROVAL_CC_UNREAD_BADGE_ENABLED === 'true'
 }
+
+/**
+ * 我发起的 tab: new-outcome badge, per-row dot, `GET /api/approvals/mine-outcomes/unseen-count`.
+ */
+export function isApprovalMineOutcomeBadgeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.APPROVAL_MINE_OUTCOME_BADGE_ENABLED === 'true'
+}

@@ -21,6 +21,9 @@ import {
 //   session feature `approvalCcUnreadBadge`, the 抄送我的 tab carries its own unread-CC badge (its
 //   own endpoint, never the 待办/未读 numbers — todo-center lock B) and a per-row dot from the
 //   list's `ccUnread`.
+//   T6 (我发起的): a requester whose request was rejected got no prompt. Behind
+//   `approvalMineOutcomeBadge`, the 我发起的 tab carries a new-outcome badge and a per-row dot from
+//   the list's `outcomeUnseen`, with exactly the same discipline.
 //
 // This spec pins the web half: switch OFF ⇒ zero new requests and nothing rendered; switch ON ⇒
 // the badge shows the server's number (hidden at 0 or on failure), dots follow the server's per-row
@@ -62,6 +65,7 @@ vi.mock('element-plus', async () => {
 
 const getPendingCountSpy = vi.fn().mockResolvedValue({ count: 0, unreadCount: 0 })
 const getCcUnreadCountSpy = vi.fn().mockResolvedValue({ count: 0 })
+const getMineOutcomesUnseenCountSpy = vi.fn().mockResolvedValue({ count: 0 })
 const markApprovalReadSpy = vi.fn().mockResolvedValue({ ok: true })
 const getApprovalSpy = vi.fn()
 
@@ -69,6 +73,7 @@ vi.mock('../src/approvals/api', () => ({
   dispatchAction: vi.fn().mockResolvedValue({}),
   getPendingCount: (...args: unknown[]) => getPendingCountSpy(...args),
   getCcUnreadCount: (...args: unknown[]) => getCcUnreadCountSpy(...args),
+  getMineOutcomesUnseenCount: (...args: unknown[]) => getMineOutcomesUnseenCountSpy(...args),
   markAllApprovalsRead: vi.fn().mockResolvedValue({ markedCount: 0 }),
   markApprovalRead: (...args: unknown[]) => markApprovalReadSpy(...args),
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
@@ -398,6 +403,7 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
     loadCcSpy.mockClear()
     getPendingCountSpy.mockReset().mockResolvedValue({ count: 0, unreadCount: 0 })
     getCcUnreadCountSpy.mockReset().mockResolvedValue({ count: 0 })
+    getMineOutcomesUnseenCountSpy.mockReset().mockResolvedValue({ count: 0 })
     markApprovalReadSpy.mockReset().mockResolvedValue({ ok: true })
     getApprovalSpy.mockReset()
     __resetResolvedDirectoryNamesForTests()
@@ -583,6 +589,131 @@ describe('ApprovalCenterView — tab read-state badges (test report 2026-10-08)'
       expect(dotOf('cc_2')).toBeTruthy()
       expect(getCcUnreadCountSpy.mock.calls.length).toBeGreaterThan(before)
       expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('1')
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // T6 — 我发起的 new-outcome badge.
+  // -------------------------------------------------------------------------
+  describe('我发起的 new-outcome badge (T6)', () => {
+    it('switch OFF: no count request on load or tab switch, no badge, and no dot even on a row the server marked unseen', async () => {
+      mockMyApprovals.value = [row('mine_1', '出差报销', { status: 'rejected', outcomeUnseen: true })]
+      await mountView()
+      await switchTab('mine')
+
+      expect(getMineOutcomesUnseenCountSpy).not.toHaveBeenCalled()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')).toBeNull()
+      expect(tabLabel('mine')?.textContent).toBe('我发起的')
+      expect(dotOf('mine_1')).toBeNull()
+    })
+
+    it('switch ON: the badge shows the server count with its tooltip; zero renders nothing', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      getMineOutcomesUnseenCountSpy.mockResolvedValueOnce({ count: 2 })
+      await mountView()
+
+      expect(getMineOutcomesUnseenCountSpy).toHaveBeenCalledWith('all')
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('2')
+      expect(q('[data-tooltip-content="2 条新结果"]')).toBeTruthy()
+      expect(tabLabel('mine')?.textContent).toContain('我发起的')
+
+      getMineOutcomesUnseenCountSpy.mockResolvedValueOnce({ count: 0 })
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')).toBeNull()
+      expect(tabLabel('mine')?.textContent).toBe('我发起的')
+    })
+
+    it('switch ON: row dots follow outcomeUnseen exactly, and the 催办 actions of a pending row are untouched', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      mockMyApprovals.value = [
+        row('mine_new', '已驳回', { status: 'rejected', outcomeUnseen: true }),
+        row('mine_seen', '已通过', { status: 'approved', outcomeUnseen: false }),
+        row('mine_pending', '审批中'),
+      ]
+      await mountView()
+
+      expect(dotOf('mine_new')).toBeTruthy()
+      expect(dotOf('mine_seen')).toBeNull()
+      expect(dotOf('mine_pending')).toBeNull()
+      expect(q('[data-testid="approval-urge-mine_pending"]')).toBeTruthy()
+    })
+
+    it('switch ON: re-asked on tab switch, on a source change (with the new source) and on an approval counts frame', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      await mountView()
+      const afterMount = getMineOutcomesUnseenCountSpy.mock.calls.length
+      expect(afterMount).toBeGreaterThan(0)
+
+      await switchTab('mine')
+      expect(getMineOutcomesUnseenCountSpy.mock.calls.length).toBeGreaterThan(afterMount)
+
+      const sourceSelect = q('[data-testid="approval-source-filter"]') as HTMLSelectElement
+      sourceSelect.value = 'plm'
+      sourceSelect.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(getMineOutcomesUnseenCountSpy).toHaveBeenLastCalledWith('plm')
+
+      const beforeFrame = getMineOutcomesUnseenCountSpy.mock.calls.length
+      countsFrameHandler!({ count: 0, unreadCount: 0 })
+      await flushUi()
+      expect(getMineOutcomesUnseenCountSpy.mock.calls.length).toBe(beforeFrame + 1)
+    })
+
+    it('switch ON, wide pane: opening an unseen outcome records the read, clears its dot and re-asks the count', async () => {
+      setViewport('wide')
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      getMineOutcomesUnseenCountSpy.mockResolvedValue({ count: 1 })
+      mockMyApprovals.value = [row('mine_new', '已驳回', { status: 'rejected', outcomeUnseen: true })]
+      getApprovalSpy.mockResolvedValue(row('mine_new', '已驳回', { status: 'rejected' }))
+      await mountView()
+      await switchTab('mine')
+      expect(dotOf('mine_new')).toBeTruthy()
+
+      getMineOutcomesUnseenCountSpy.mockResolvedValue({ count: 0 })
+      const before = getMineOutcomesUnseenCountSpy.mock.calls.length
+      ;(q('[data-el-row="mine_new"]') as HTMLElement).click()
+      await flushUi(10)
+
+      expect(markApprovalReadSpy).toHaveBeenCalledWith('mine_new')
+      expect(dotOf('mine_new')).toBeNull()
+      expect(getMineOutcomesUnseenCountSpy.mock.calls.length).toBeGreaterThan(before)
+      expect(q('[data-testid="approval-mine-outcome-badge"]')).toBeNull()
+    })
+
+    it('the two switches are independent: only the enabled badge asks and renders', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      getMineOutcomesUnseenCountSpy.mockResolvedValue({ count: 3 })
+      getCcUnreadCountSpy.mockResolvedValue({ count: 5 })
+      await mountView()
+
+      expect(getMineOutcomesUnseenCountSpy).toHaveBeenCalled()
+      expect(getCcUnreadCountSpy).not.toHaveBeenCalled()
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('3')
+      expect(q('[data-testid="approval-cc-unread-badge"]')).toBeNull()
+    })
+
+    it('lock B: with both badges on, the header 待办 / 未读 numbers still come from the pending count only', async () => {
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      enabledFeatures.add('approvalCcUnreadBadge')
+      getPendingCountSpy.mockResolvedValue({ count: 2, unreadCount: 1 })
+      getCcUnreadCountSpy.mockResolvedValue({ count: 4 })
+      getMineOutcomesUnseenCountSpy.mockResolvedValue({ count: 6 })
+      await mountView()
+
+      const stats = Array.from(container!.querySelectorAll('.approval-center__stat strong')).map((el) => el.textContent)
+      expect(stats).toEqual(['2', '1'])
+      expect(q('[data-testid="approval-mine-outcome-badge"]')?.getAttribute('data-badge-value')).toBe('6')
+      expect(q('[data-testid="approval-cc-unread-badge"]')?.getAttribute('data-badge-value')).toBe('4')
+    })
+
+    it('English locale: the badge tooltip is English', async () => {
+      useLocale().setLocale('en')
+      enabledFeatures.add('approvalMineOutcomeBadge')
+      getMineOutcomesUnseenCountSpy.mockResolvedValue({ count: 1 })
+      await mountView()
+
+      expect(q('[data-tooltip-content="1 new outcome(s)"]')).toBeTruthy()
     })
   })
 })

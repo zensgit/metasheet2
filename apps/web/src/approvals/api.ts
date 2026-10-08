@@ -1634,6 +1634,20 @@ export async function getCcUnreadCount(
 }
 
 /**
+ * 我发起的 new-outcome count — the viewer's own requests that reached a final status decided by
+ * someone else and were not opened since, over the same feed the 我发起的 tab lists for this
+ * `sourceSystem`. Never part of the 待办 counts.
+ */
+export async function getMineOutcomesUnseenCount(
+  sourceSystem: 'all' | 'platform' | 'plm' = 'all',
+): Promise<ApprovalTabBadgeCountResponse> {
+  if (USE_MOCK) {
+    return { count: 0 }
+  }
+  return apiGet(`/api/approvals/mine-outcomes/unseen-count?sourceSystem=${encodeURIComponent(sourceSystem)}`)
+}
+
+/**
  * Wave 2 WP3 slice 2 — mark a single approval as read for the current user.
  *
  * Used by `ApprovalDetailView` on-mount (fire-and-forget). The endpoint is

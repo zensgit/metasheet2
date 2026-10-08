@@ -35,6 +35,7 @@ import type {
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
 import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
+import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -846,6 +847,36 @@ export class ApprovalBridgeService {
     return parseInt(result.rows[0]?.count || '0', 10)
   }
 
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08): the 我发起的 feed (`buildListWhere` with
+   * `tab: 'mine'` and the caller's source scope) with ONE conjunct appended —
+   * `approvalMineOutcomeUnseenConditionSql`, bound to the actor placeholder the tab filter bound.
+   * Same contract as `countCcUnreadForViewer`: never above the tab's total for the same
+   * `sourceSystem`, equal to the rows that tab marks `outcomeUnseen`, client filters not applied.
+   */
+  async countMineOutcomesUnseenForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'mine',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: listWhere.tabActorParam }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
   async listApprovals(options?: ApprovalQueryOptions): Promise<{
     data: UnifiedApprovalDTO[]
     total: number
@@ -927,6 +958,25 @@ export class ApprovalBridgeService {
       ccUnreadInstanceIds = new Set(ccUnreadResult.rows.map((row) => row.id))
     }
 
+    // 我发起的 new outcome (test report 2026-10-08): same shape as the cc annotation above — only on
+    // request, only on the mine tab, and with the SAME conjunct the badge count appends to this feed.
+    let outcomeUnseenInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateMineOutcomeUnseen === true
+      && options.tab === 'mine'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const outcomeResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: 2 })}`,
+        [instancesResult.rows.map((row) => row.id), params[listWhere.tabActorParam - 1]],
+      )
+      outcomeUnseenInstanceIds = new Set(outcomeResult.rows.map((row) => row.id))
+    }
+
     const data = instancesResult.rows.map((row) => {
       const dto = toUnifiedDTO(
         row,
@@ -938,6 +988,9 @@ export class ApprovalBridgeService {
       }
       if (ccUnreadInstanceIds) {
         dto.ccUnread = ccUnreadInstanceIds.has(row.id)
+      }
+      if (outcomeUnseenInstanceIds) {
+        dto.outcomeUnseen = outcomeUnseenInstanceIds.has(row.id)
       }
       return dto
     })

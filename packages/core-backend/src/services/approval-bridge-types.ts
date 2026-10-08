@@ -174,6 +174,13 @@ export interface UnifiedApprovalDTO {
    * not `isRead`, because the two tabs' rules differ (row presence vs. time comparison).
    */
   ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08, behind APPROVAL_MINE_OUTCOME_BADGE_ENABLED):
+   * `true` when the viewer's own request reached a terminal status decided by someone else and the
+   * viewer has not opened it since (`approvalMineOutcomeUnseenConditionSql`). Populated ONLY on the
+   * 我发起的 (mine) tab and only while the flag is on; `undefined` elsewhere ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }
@@ -291,6 +298,11 @@ export interface ApprovalQueryOptions {
    * the queries it always did and its DTOs carry no new key.
    */
   annotateCcUnread?: boolean
+  /**
+   * 我发起的 tab only: resolve `outcomeUnseen` per returned row (one extra id-scoped query). Set by
+   * the route only while APPROVAL_MINE_OUTCOME_BADGE_ENABLED is on.
+   */
+  annotateMineOutcomeUnseen?: boolean
 }
 
 /**

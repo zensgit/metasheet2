@@ -360,6 +360,27 @@
       </el-tab-pane>
 
       <el-tab-pane :label="t.tabMine" name="mine">
+        <!-- Test report 2026-10-08 (T6): new-outcome badge — the viewer's own requests decided by
+             someone else and not opened since — ONLY while the server's outcome-badge switch is on
+             (session feature `approvalMineOutcomeBadge`); off ⇒ the plain `t.tabMine` label above
+             and no count request. Its own count — never folded into 待办/未读 (lock B). -->
+        <template v-if="mineOutcomeBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabMine }}</span>
+            <el-tooltip
+              v-if="mineOutcomeUnseenCount > 0"
+              :content="mineOutcomeBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="mineOutcomeUnseenCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-mine-outcome-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
@@ -379,6 +400,7 @@
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'mine' ? selectedApprovalId : null"
           :actions-width="170"
+          :unread-dot-for="mineOutcomeBadgeEnabled ? isOutcomeUnseenRow : undefined"
           @row-click="handleRowClick"
         >
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
@@ -685,6 +707,7 @@ import {
   exportApprovalsCsv,
   getApproval,
   getCcUnreadCount,
+  getMineOutcomesUnseenCount,
   getPendingCount,
   markAllApprovalsRead,
   markApprovalRead,
@@ -756,6 +779,8 @@ const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.v
 // Test report 2026-10-08 (T3): the 抄送我的 unread badge + row dots. Mirrors the server switch the
 // count endpoint is gated on; while false nothing below issues a request or renders anything.
 const ccUnreadBadgeEnabled = computed(() => hasFeature('approvalCcUnreadBadge'))
+// Test report 2026-10-08 (T6): the 我发起的 new-outcome badge + row dots, same discipline.
+const mineOutcomeBadgeEnabled = computed(() => hasFeature('approvalMineOutcomeBadge'))
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
 // Reuses the SAME matchMedia-based composable/pattern as `isMobileLayout` above (a second,
@@ -918,6 +943,7 @@ const t = computed(() => (isZh.value ? CENTER_ZH : CENTER_EN))
 const filterSummaryText = computed(() => (isZh.value ? `已启用 ${activeFilterCount.value} 项筛选` : `${activeFilterCount.value} filter(s) active`))
 const pendingBadgeTooltip = computed(() => (isZh.value ? `待办 ${pendingTotalCount.value} / 其中 ${pendingBadgeCount.value} 未读` : `${pendingTotalCount.value} to-do / ${pendingBadgeCount.value} unread`))
 const ccUnreadBadgeTooltip = computed(() => `${ccUnreadCount.value} ${t.value.ccUnreadBadgeSuffix}`)
+const mineOutcomeBadgeTooltip = computed(() => `${mineOutcomeUnseenCount.value} ${t.value.mineOutcomeBadgeSuffix}`)
 const newTodoPillText = computed(() => (isZh.value ? `${newTodoPill.value.delta} 条新待办 · 点击刷新` : `${newTodoPill.value.delta} new to-do(s) · click to refresh`))
 const selectionCountText = computed(() => (isZh.value ? `已选 ${selectedPending.value.length} 项` : `${selectedPending.value.length} selected`))
 const batchRejectSummaryText = computed(() => (isZh.value ? `将驳回所选的 ${selectedPending.value.length} 项审批。` : `The ${selectedPending.value.length} selected approval(s) will be rejected.`))
@@ -1350,11 +1376,27 @@ async function refreshCcUnreadCount(): Promise<void> {
     ccUnreadCount.value = 0
   }
 }
+const mineOutcomeUnseenCount = ref(0)
+async function refreshMineOutcomeUnseenCount(): Promise<void> {
+  if (!mineOutcomeBadgeEnabled.value) {
+    mineOutcomeUnseenCount.value = 0
+    return
+  }
+  try {
+    const result = await Promise.resolve().then(() => getMineOutcomesUnseenCount(sourceSystemFilter.value))
+    mineOutcomeUnseenCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    mineOutcomeUnseenCount.value = 0
+  }
+}
 async function refreshTabBadgeCounts(): Promise<void> {
-  await refreshCcUnreadCount()
+  await Promise.all([refreshCcUnreadCount(), refreshMineOutcomeUnseenCount()])
 }
 function isCcUnreadRow(row: UnifiedApprovalDTO): boolean {
   return row.ccUnread === true
+}
+function isOutcomeUnseenRow(row: UnifiedApprovalDTO): boolean {
+  return row.outcomeUnseen === true
 }
 
 useApprovalCountsRealtime({
@@ -1871,6 +1913,7 @@ function clearRowUnreadMarkers(id: string): void {
     if (row.id !== id) continue
     if (row.isRead === false) row.isRead = true
     if (row.ccUnread === true) row.ccUnread = false
+    if (row.outcomeUnseen === true) row.outcomeUnseen = false
   }
 }
 

@@ -67,6 +67,20 @@ test('approval CC unread badge switch (test report 2026-10-08): boolean, exact t
   assert.equal(isActivated(spec, ' true'), false)
 })
 
+test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact true, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'True'), false)
+})
+
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
 // a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
 // the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which
