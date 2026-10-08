@@ -1,3 +1,4 @@
+import { snapshotRecoveryArchiveCaptureLimits, type RecoveryArchiveCaptureLimits } from './recovery-archive-bounded-source'
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import * as fs from 'node:fs/promises'
@@ -25,6 +26,7 @@ export interface RecoveryLocalStartupConfig {
   sweepLimit: number
   maxChunksPerRun: number
   manualCapture?: RecoveryArchiveManualAdmissionPolicy
+  manualCaptureLimits?: RecoveryArchiveCaptureLimits
 }
 
 const REFUSED = 'RECOVERY_LOCAL_STARTUP_REFUSED'
@@ -40,7 +42,12 @@ function closed(value: unknown, keys: string[]): value is Record<string, unknown
 
 export function parseRecoveryLocalStartupConfig(value: unknown): Readonly<RecoveryLocalStartupConfig> {
   const withManual = Boolean(value && typeof value === 'object' && Object.hasOwn(value, 'manualCapture'))
-  if (!closed(value, withManual ? [...CONFIG_KEYS, 'manualCapture'] : CONFIG_KEYS)) refuse()
+  const withLimits = Boolean(value && typeof value === 'object' && Object.hasOwn(value, 'manualCaptureLimits'))
+  if (!closed(value, [...CONFIG_KEYS, ...(withManual ? ['manualCapture'] : []), ...(withLimits ? ['manualCaptureLimits'] : [])])) refuse()
+  let manualCaptureLimits: Readonly<RecoveryArchiveCaptureLimits> | undefined
+  if (withLimits) {
+    try { manualCaptureLimits = snapshotRecoveryArchiveCaptureLimits(value.manualCaptureLimits as RecoveryArchiveCaptureLimits) } catch { refuse() }
+  }
   let manualCapture: Readonly<RecoveryArchiveManualAdmissionPolicy> | undefined
   if (withManual) {
     try { manualCapture = snapshotRecoveryArchiveManualPolicy(value.manualCapture as RecoveryArchiveManualAdmissionPolicy) }
@@ -64,6 +71,7 @@ export function parseRecoveryLocalStartupConfig(value: unknown): Readonly<Recove
     || !Number.isSafeInteger(value.receipt.size) || (value.receipt.size as number) < 1
     || (value.receipt.size as number) > 16_384) refuse()
   return Object.freeze({ ...value, receipt: Object.freeze({ ...value.receipt }),
+    ...(manualCaptureLimits ? { manualCaptureLimits } : {}),
     ...(manualCapture ? { manualCapture } : {}) }) as unknown as Readonly<RecoveryLocalStartupConfig>
 }
 
@@ -139,6 +147,7 @@ export async function prepareRecoveryLocalStartup(input: {
       asyncResumeHorizonMs: config.asyncResumeHorizonMs,
       workerIntervalMs: config.workerIntervalMs,
       ...(config.manualCapture ? { manualCapture: config.manualCapture } : {}),
+      ...(config.manualCaptureLimits ? { manualCaptureLimits: config.manualCaptureLimits } : {}),
       worker: Object.freeze({
         ...createRecoveryArchiveWorkerCallbacks(database),
         leaseMs: config.leaseMs, replayHorizonMs: config.replayHorizonMs,

@@ -34,6 +34,8 @@ import * as sectionCheckpoints from '../../src/db/migrations/zzzz20260918120000_
 import * as preparedCaptures from '../../src/db/migrations/zzzz20260918130000_create_recovery_archive_prepared_captures'
 import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests'
 import * as nonceObjectIdentity from '../../src/db/migrations/zzzz20260919130000_extend_archive_nonce_object_identity'
+import * as cleanupAnchor from '../../src/db/migrations/zzzz20261007120000_amend_recovery_archive_cleanup_anchor'
+import * as abandonedBindings from '../../src/db/migrations/zzzz20261001120000_add_archive_abandoned_object_bindings'
 import * as attachmentRestoreStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 import * as retypeConvertTombstoneReason from '../../src/db/migrations/zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert'
 
@@ -231,9 +233,24 @@ const MIGRATIONS: NamedMigration[] = [
       down: (db) => db.transaction().execute(retypeConvertTombstoneReason.down),
     },
   },
+  {
+    name: 'zzzz20261001120000_add_archive_abandoned_object_bindings',
+    module: {
+      up: (db) => db.transaction().execute(abandonedBindings.up),
+      down: (db) => db.transaction().execute(abandonedBindings.down),
+    },
+  },
+  {
+    name: 'zzzz20261007120000_amend_recovery_archive_cleanup_anchor',
+    module: {
+      up: (db) => db.transaction().execute(cleanupAnchor.up),
+      down: (db) => db.transaction().execute(cleanupAnchor.down),
+    },
+  },
 ]
 
 const TOUCHED_RELATIONS = [
+  'meta_recovery_archive_abandoned_bindings',
   'meta_recovery_archive_attachment_stages',
   'meta_recovery_archive_manual_requests',
   'meta_recovery_archive_prepared_captures',
@@ -487,6 +504,7 @@ const RECOVERY_ARCHIVE_FUNCTIONS = [
   'meta_recovery_archive_coverage_guard_row',
   'meta_recovery_archive_attachment_ref_guard_row',
   'meta_recovery_archive_attachment_finalize_guard_row',
+  'meta_recovery_archive_abandoned_binding_guard',
   'meta_recovery_archive_abandoned_cleanup_claim_guard_row',
   'meta_recovery_archive_claim_abandoned_cleanup',
   'meta_recovery_archive_staging_object_guard_row',
@@ -579,6 +597,8 @@ const RECOVERY_ARCHIVE_TRIGGERS = [
   'trg_meta_recovery_archive_coverage_guard_row',
   'trg_meta_recovery_archive_attachment_ref_guard_row',
   'trg_meta_recovery_archive_attachment_finalize_guard_row',
+  'trg_meta_recovery_archive_abandoned_binding_guard',
+  'trg_meta_recovery_archive_abandoned_binding_truncate_guard',
   'trg_meta_recovery_archive_abandoned_cleanup_claim_guard_row',
   'trg_meta_recovery_archive_staging_object_guard_row',
   'trg_meta_recovery_archive_staging_object_finalize_guard_row',

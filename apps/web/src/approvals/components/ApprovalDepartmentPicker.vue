@@ -57,7 +57,7 @@
         >
           {{ t.browseUp }}
         </button>
-        <span>{{ browseStack.at(-1)?.name || (isZh ? '全部部门' : 'All departments') }}</span>
+        <span>{{ browseStack[browseStack.length - 1]?.name || (isZh ? '全部部门' : 'All departments') }}</span>
       </div>
       <p v-if="browseLoading" role="status">{{ t.loading }}</p>
       <p v-else-if="browseOptions.length === 0" class="approval-department-picker__empty">{{ t.empty }}</p>
@@ -264,7 +264,7 @@ function browseInto(option: ApprovalDirectoryDepartment): void {
 
 function browseUp(): void {
   browseStack.value.pop()
-  void loadTree(browseStack.value.at(-1)?.id ?? null)
+  void loadTree(browseStack.value[browseStack.value.length - 1]?.id ?? null)
 }
 
 onMounted(() => void runSearch(''))

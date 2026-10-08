@@ -536,7 +536,7 @@ export function splitList(value: string): string[] {
 function normalizeSqlObjectLeaf(value: string): string {
   const normalized = value.trim().replace(/[[\]"'`]/g, '')
   const parts = normalized.split('.').map((part) => part.trim()).filter(Boolean)
-  return (parts.at(-1) || normalized).toLowerCase()
+  return (parts[parts.length - 1] || normalized).toLowerCase()
 }
 
 function isK3CoreBusinessTable(value: string): boolean {

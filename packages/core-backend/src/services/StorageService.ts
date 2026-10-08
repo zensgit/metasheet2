@@ -4,6 +4,7 @@
  */
 
 import * as fs from 'fs/promises'
+import { constants } from 'fs'
 import * as path from 'path'
 import * as crypto from 'crypto'
 import type { Readable } from 'stream'
@@ -69,6 +70,7 @@ export interface StorageProvider {
   reserveRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<void>
   readRecoveryAttachment?(storageKey: string, ownershipKey: string): Promise<ContentAddressedAttachmentSource>
   uploadContentAddressed?(file: Buffer, options: UploadOptions): Promise<StorageFile>
+  readContentAddressedBounded?(storageKey: string, maxBytes: number): Promise<ContentAddressedAttachmentSource>
   readContentAddressed?(storageKey: string): Promise<ContentAddressedAttachmentSource>
   upload(file: Buffer | Readable, options: UploadOptions): Promise<StorageFile>
   /** B3-07 §7: write a physical object AT a caller-chosen deterministic storage key — the symmetric
@@ -285,6 +287,43 @@ class LocalStorageProvider implements StorageProvider {
       throw new Error('ATTACHMENT_SOURCE_DRIFTED')
     }
     return { bytes, immutableVersion: `sha256:${match[1]}`, contentSha256: match[1]!, sizeBytes: bytes.length }
+  }
+
+  /** Owned archive input bound; the legacy content-addressed reader remains unchanged. */
+  async readContentAddressedBounded(storageKey: string, maxBytes: number): Promise<ContentAddressedAttachmentSource> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 2147483647) {
+      throw new Error('ATTACHMENT_SOURCE_BYTE_LIMIT_EXCEEDED')
+    }
+    const match = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sha256-([0-9a-f]{64})$/.exec(storageKey)
+    if (!match) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    let handle: fs.FileHandle | undefined
+    let bytes: Buffer | undefined
+    try {
+      handle = await fs.open(resolveWithinBase(this.basePath, storageKey), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      const before = await handle.stat()
+      if (!before.isFile()) throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE')
+      if (!Number.isSafeInteger(before.size) || before.size > maxBytes) throw new Error('ATTACHMENT_SOURCE_BYTE_LIMIT_EXCEEDED')
+      bytes = Buffer.alloc(before.size + 1)
+      let length = 0
+      while (length < bytes.length) {
+        const read = await handle.read(bytes, length, bytes.length - length, null)
+        if (!read.bytesRead) break
+        length += read.bytesRead
+      }
+      const after = await handle.stat()
+      if (length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs
+        || after.ctimeMs !== before.ctimeMs || crypto.createHash('sha256').update(bytes.subarray(0, length)).digest('hex') !== match[1]) {
+        throw new Error('ATTACHMENT_SOURCE_DRIFTED')
+      }
+      return { bytes: bytes.subarray(0, length), immutableVersion: `sha256:${match[1]}`, contentSha256: match[1]!, sizeBytes: length }
+    } catch (error) {
+      bytes?.fill(0)
+      const code = error instanceof Error ? error.message : ''
+      if (['ATTACHMENT_SOURCE_BYTE_LIMIT_EXCEEDED', 'ATTACHMENT_SOURCE_DRIFTED', 'ATTACHMENT_SOURCE_UNAVAILABLE'].includes(code)) throw error
+      throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE')
+    } finally {
+      try { await handle?.close() } catch { bytes?.fill(0); throw new Error('ATTACHMENT_SOURCE_UNAVAILABLE') }
+    }
   }
 
   // B3-07 §7: key-addressed write. Containment (G2) is asserted exactly as `downloadByKey`/`deleteByKey`
@@ -580,6 +619,11 @@ export class StorageServiceImpl extends EventEmitter implements StorageService {
     const result = await this.provider.uploadContentAddressed(file, options)
     this.emit('file:uploaded', result)
     return result
+  }
+
+  async readContentAddressedBounded(storageKey: string, maxBytes: number): Promise<ContentAddressedAttachmentSource> {
+    if (!this.provider.readContentAddressedBounded) throw new Error('ATTACHMENT_SOURCE_VERSION_UNAVAILABLE')
+    return this.provider.readContentAddressedBounded(storageKey, maxBytes)
   }
 
   async readContentAddressed(storageKey: string): Promise<ContentAddressedAttachmentSource> {

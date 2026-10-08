@@ -1,0 +1,27 @@
+# Source attachment deletion native companion
+
+Frozen runtime base: ad0db6b22c911e782c6ac18cae0676a523d1f65b. Scope: record-bound HTTP DELETE attachment (cell strip/revision/seal plus original local binary deletion), direct binary purge, orphan sweep and compensating blob sweep. The only runtime correction maps the reproduced attachment DELETE writer-block error to the existing 409 response when both archive and fence flags are exact true. Old fixtures, flags and native lanes remain unchanged. Root owns native execution, CI wiring and Git.
+
+Each operation gets a fresh actual migrated scratch DB and newly owned local filesystem scope. Use the real owned-claim producer, actual full source-pin set and real content-addressed bytes/size/SHA/version. Never seed/reset ownership in genuine arms. Snapshot after claim includes all bounded source/history/markers/operations/catalog/reservations/pins/key/manual/generation surfaces and physical identity. Live and real SQL-clock-expired claims must leave the complete snapshot and original file unchanged. Unblocked positives must really delete bytes and mutate the intended rows/history. Direct helper resolves on refusal; guarded sweep durable-block refusal returns exact zero counters, not the pin-only skipped result.
+
+Both actual canonical-fence holder/waiter orders are exercised for every entry. Publisher first: native waiter must be observed, then commit causes zero source/provider mutation. Purge first: hold the actual purge transaction canonical fence (HTTP second transaction), observe the publisher waiting, then release for COMMIT and require publisher refusal. Independently pause the original provider call after the actual purge-claim COMMIT and verify that a later genuine publisher refuses CLAIM_ATTACHMENT_UNAVAILABLE. HTTP metadata COMMIT is a separate handoff: a publisher may win before purge claim, preserving bytes while HTTP still succeeds. Release every barrier in finally and await all original operations; no fake query/provider results or clocks.
+
+Selected dual exact-true HTTP refusal is 409/RECOVERY_IN_PROGRESS, intentionally RED against the frozen route catch's 500. Archive-OFF/fence-ON retains its actual legacy HTTP refusal; fence-OFF retains legacy writes. These local OFF controls do not enable production. Existing independently seeded pin-only authority neighbor remains separate; no new artificial owner release isolates pins.
+
+Test-only TM_SOURCE_ATTACHMENT_TEST_ROOT may select a root-owned fresh APFS parent; absent it, CI uses a new temp scope. TM_SOURCE_ATTACHMENT_TEST_EVIDENCE_ROOT retains append-only private600 before/after snapshots, file identity and case/DB identity for host copy before native closure. It requires the owned test parent. Validate exact directory/file ownership and containment; delete only the new scope in ordinary CI. Scratch teardown must be non-forced and residue-free. The correction changes no writer admission, provider or authorization policy. Scope: 35 native cases plus one arming sentinel (36 total), including two default-storage positives exercising call-time ATTACHMENT_PATH. Actual unarmed collection and source-only checks will be recorded; native acceptance remains OPEN until root's fresh genuine execution and independent result review.
+
+Fixture adapter supplies only the freshly owned native pool; SQL/results/errors are original. Timing barriers run after fulfilled original statements or before the original official provider deletion, never inside fabricated SQL responses. Route provider prototype observation calls its original method with original receiver; helper storage ports delegate the original provider. Provider depth measures its originating deletion transaction; a concurrent publisher transaction is tracked separately in aggregate drain depth. Logger sinks suppress private runtime values without changing command errors. Private INITIALIZED identity is saved before subsequent migrations; MIGRATIONS_READY and DISPOSED are separate append-only markers. This companion does not close whole-writer, owner, deployment, required CI or staging gates.
+
+Local acceptance uses synthetic data on a fresh owned macOS APFS volume, PostgreSQL15 and Node24. The existing upload admission test now uses the repository's pinned HTTP server; its assertions, mock/provider behavior, timing and 43 case definitions are unchanged. The original two neighbor failures are retained; their precise transport cause remains unconfirmed.
+
+| Gate | Local result |
+| --- | --- |
+| New family, unfiltered | 36 passed, zero skipped; 8 native lock waiters, 6 actual deletion positives |
+| Three genuine admission neighbors, unfiltered | 104 passed, zero skipped after transport repair |
+| Existing constructed pin-only neighbor | One selected case passed; other 17 intentionally unselected |
+| Archive-OFF response guard | Removing only the archive condition made the selected case fail; exact restoration passed all 36 |
+| Resource closure | 71 source cases non-forced disposed; own cluster stopped and image detached, zero residual DBs/clients |
+| Full strict imported graph | OPEN: existing 88 diagnostics; zero diagnostics in the two new files |
+| Current-main integration, Node20 CI, staging and owner enablement | OPEN |
+
+Evidence: `artifacts/tm-source-attachment-delete-20261008/attempt-03-fixed-continuous/root-local-native-final-readback.json`. Failed preparation and earlier RED results remain append-only. This local slice does not declare Time Machine complete.

@@ -1,5 +1,7 @@
 import type { Request, Response, Router } from 'express'
 import { z } from 'zod'
+import { SheetWriterBlockedError } from '../multitable/canonical-sheet-fence'
+import { archiveSourceProtectionEnabled } from '../multitable/attachment-purge-claim'
 import type { RecoveryArchiveManualStatus } from '../multitable/recovery-archive-manual-command'
 import { isRecoveryArchiveRestoreWorkerEnabled } from '../multitable/recovery-archive-restore-worker'
 
@@ -461,6 +463,12 @@ function sendValidationError(res: Response) {
 }
 
 function sendServiceError(res: Response, error: unknown) {
+  if (archiveSourceProtectionEnabled() && error instanceof SheetWriterBlockedError) {
+    return res.status(409).json({ ok: false, error: {
+      code: 'RECOVERY_IN_PROGRESS',
+      message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+    } })
+  }
   if (error instanceof RecoveryArchivePreviewError) {
     switch (error.code) {
       case 'RECOVERY_ARCHIVE_PREVIEW_INVALID_INPUT':

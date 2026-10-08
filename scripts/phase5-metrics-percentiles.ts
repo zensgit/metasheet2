@@ -17,6 +17,7 @@ import * as fs from 'fs';
 import * as https from 'https';
 import * as http from 'http';
 import * as path from 'path';
+import { createHash } from 'node:crypto';
 
 interface HistogramBucket {
   le: number; // less than or equal to
@@ -32,9 +33,9 @@ interface Histogram {
 }
 
 interface PercentileResult {
-  p50: number;
-  p95: number;
-  p99: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
   count: number;
   sum: number;
   mean: number;
@@ -43,6 +44,20 @@ interface PercentileResult {
 interface MetricsOutput {
   timestamp: string;
   metrics: Record<string, PercentileResult>;
+  sampling: {
+    source: 'SECOND_PERCENTILE_SCRAPE';
+    input_sha256: string;
+    parsed_histograms: number;
+    relevant_histograms: number;
+    thresholds: Array<{
+      metric: string;
+      raw_bucket_lines: number;
+      parsed_family_histograms: number;
+      selected_count: number | null;
+      reason: 'family_absent' | 'family_unparsed' | 'selector_missing' |
+        'count_unparsed' | 'count_invalid' | 'zero_samples' | 'positive_samples' | 'percentile_unestimable';
+    }>;
+  };
   raw_data: {
     histograms: Histogram[];
   };
@@ -104,7 +119,7 @@ async function fetchMetrics(url: string): Promise<string> {
 /**
  * Parse Prometheus text format and extract histograms
  */
-function parsePrometheusMetrics(text: string): Histogram[] {
+function parsePrometheusMetrics(text: string, countWitnesses?: Map<Histogram, boolean>): Histogram[] {
   const lines = text.split('\n');
   const histograms: Map<string, Histogram> = new Map();
 
@@ -128,7 +143,7 @@ function parsePrometheusMetrics(text: string): Histogram[] {
         labels[match[1]] = match[2];
       }
 
-      const le = labels.le ? parseFloat(labels.le) : Infinity;
+      const le = labels.le === '+Inf' ? Infinity : labels.le ? parseFloat(labels.le) : Infinity;
       delete labels.le; // Remove 'le' from labels as it's stored separately
 
       const key = `${metricName}:${JSON.stringify(labels)}`;
@@ -187,6 +202,12 @@ function parsePrometheusMetrics(text: string): Histogram[] {
 
       if (histograms.has(key)) {
         histograms.get(key)!.count = count;
+        const token = line.slice(countMatch[0].length - countMatch[3].length).trim().split(/\s+/)[0];
+        const completeCount = Number(token);
+        countWitnesses?.set(histograms.get(key)!,
+          /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(token) &&
+          Number.isFinite(completeCount) && completeCount >= 0 && completeCount === count,
+        );
       }
     }
   }
@@ -202,14 +223,18 @@ function parsePrometheusMetrics(text: string): Histogram[] {
 /**
  * Calculate percentile from histogram buckets
  */
-function calculatePercentile(buckets: HistogramBucket[], totalCount: number, percentile: number): number {
+function calculatePercentile(buckets: HistogramBucket[], totalCount: number, percentile: number): number | null {
   if (totalCount === 0) return 0;
+  if (!Number.isFinite(totalCount)) return null;
 
   const targetCount = totalCount * percentile;
 
   // Find the bucket containing the percentile
   for (let i = 0; i < buckets.length; i++) {
     if (buckets[i].count >= targetCount) {
+      // An unbounded or invalid range cannot yield a finite percentile.
+      if (!Number.isFinite(buckets[i].le)) return null;
+
       // Linear interpolation within bucket
       if (i === 0) {
         // First bucket: assume uniform distribution from 0 to le
@@ -221,6 +246,7 @@ function calculatePercentile(buckets: HistogramBucket[], totalCount: number, per
         const currCount = buckets[i].count;
         const prevLe = buckets[i - 1].le;
         const currLe = buckets[i].le;
+        if (!Number.isFinite(prevLe)) return null;
 
         if (currCount === prevCount) {
           // No samples in this bucket
@@ -233,10 +259,8 @@ function calculatePercentile(buckets: HistogramBucket[], totalCount: number, per
     }
   }
 
-  // If we reach here, percentile is in the +Inf bucket
-  // Return the last finite bucket value
-  const lastFiniteBucket = buckets.filter(b => isFinite(b.le)).pop();
-  return lastFiniteBucket ? lastFiniteBucket.le : 0;
+  // The buckets do not cover the requested rank.
+  return null;
 }
 
 /**
@@ -283,7 +307,8 @@ async function main() {
     const metricsText = await fetchMetrics(metricsUrl);
 
     console.error(`[INFO] Parsing Prometheus metrics...`);
-    const allHistograms = parsePrometheusMetrics(metricsText);
+    const countWitnesses = new Map<Histogram, boolean>();
+    const allHistograms = parsePrometheusMetrics(metricsText, countWitnesses);
     console.error(`[INFO] Found ${allHistograms.length} histogram metrics`);
 
     // Load target metrics dynamically from thresholds.json
@@ -292,13 +317,17 @@ async function main() {
 
     console.error(`[INFO] Loading thresholds from ${thresholdsPath}...`);
     const thresholdsContent = fs.readFileSync(thresholdsPath, 'utf-8');
-    const thresholdsData = JSON.parse(thresholdsContent);
+    const thresholdsData: { thresholds: Array<{
+      metric: string;
+      kind: string;
+      prometheus_metric: string;
+      label_selector?: Record<string, string>;
+    }> } = JSON.parse(thresholdsContent);
 
     // Extract unique prometheus_metric values from latency thresholds
-    const targetMetrics = Array.from(new Set(
-      thresholdsData.thresholds
-        .filter((t: any) => t.kind === 'latency')
-        .map((t: any) => t.prometheus_metric)
+    const latencyThresholds = thresholdsData.thresholds.filter(t => t.kind === 'latency');
+    const targetMetrics = Array.from(new Set<string>(
+      latencyThresholds.map(t => t.prometheus_metric)
     ));
 
     console.error(`[INFO] Dynamically loaded ${targetMetrics.length} target metrics: ${targetMetrics.join(', ')}`);
@@ -307,6 +336,7 @@ async function main() {
     console.error(`[INFO] Filtered to ${relevantHistograms.length} relevant histograms`);
 
     const metrics: Record<string, PercentileResult> = {};
+    const histogramsByKey = new Map<string, Histogram>();
 
     for (const histogram of relevantHistograms) {
       // Create key with labels for labeled metrics (e.g., metric{operation="restore"})
@@ -317,15 +347,55 @@ async function main() {
       const result = calculatePercentiles(histogram);
 
       console.error(`[INFO] ${key}:`);
-      console.error(`       P50=${result.p50.toFixed(3)}s, P95=${result.p95.toFixed(3)}s, P99=${result.p99.toFixed(3)}s`);
+      console.error(`       P50=${result.p50?.toFixed(3) ?? 'null'}s, P95=${result.p95?.toFixed(3) ?? 'null'}s, P99=${result.p99?.toFixed(3) ?? 'null'}s`);
       console.error(`       count=${result.count}, mean=${result.mean.toFixed(3)}s`);
 
       metrics[key] = result;
+      histogramsByKey.set(key, histogram);
     }
+
+    const rawLines = metricsText.split('\n');
+    const sampling: MetricsOutput['sampling'] = {
+      source: 'SECOND_PERCENTILE_SCRAPE',
+      input_sha256: createHash('sha256').update(metricsText).digest('hex'),
+      parsed_histograms: allHistograms.length,
+      relevant_histograms: relevantHistograms.length,
+      thresholds: latencyThresholds.map(threshold => {
+        const family = threshold.prometheus_metric;
+        const rawBucketLines = rawLines.filter(line =>
+          line.startsWith(`${family}_bucket{`) || line.startsWith(`${family}_bucket `),
+        ).length;
+        const parsedFamilyHistograms = allHistograms.filter(h => h.metric === family).length;
+        // Keep the validator's exact key, including label order and every label.
+        const selector = threshold.label_selector;
+        const key = selector
+          ? `${family}{${Object.entries(selector).map(([k, v]) => `${k}="${v}"`).join(',')}}`
+          : family;
+        const selected = histogramsByKey.get(key);
+        const percentile = threshold.metric.match(/p[0-9]+/g)?.pop() as 'p50' | 'p95' | 'p99';
+        const reason = rawBucketLines === 0 ? 'family_absent'
+          : parsedFamilyHistograms === 0 ? 'family_unparsed'
+          : !selected ? 'selector_missing'
+          : !countWitnesses.has(selected) ? 'count_unparsed'
+          : !countWitnesses.get(selected) ? 'count_invalid'
+          : selected.count === 0 ? 'zero_samples'
+          : !Number.isFinite(metrics[key][percentile]) ? 'percentile_unestimable'
+          : 'positive_samples';
+        return {
+          metric: threshold.metric,
+          raw_bucket_lines: rawBucketLines,
+          parsed_family_histograms: parsedFamilyHistograms,
+          selected_count: selected && countWitnesses.get(selected)
+            ? selected.count : null,
+          reason,
+        };
+      }),
+    };
 
     const output: MetricsOutput = {
       timestamp: new Date().toISOString(),
       metrics,
+      sampling,
       raw_data: {
         histograms: relevantHistograms
       }
