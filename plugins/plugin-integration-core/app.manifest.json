@@ -29,13 +29,14 @@
   "permissions": [
     "stock-prep:read",
     "stock-prep:operate",
-    "stock-prep:admin"
+    "stock-prep:admin",
+    "stock-prep:pull"
   ],
   "permissionPolicy": {
     "automaticHolders": [],
     "seededBy": "STOCK_PREP_PERMISSION_DESCRIPTORS (RBAC seed rows)",
     "source": "plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs",
-    "note": "R-11 映射零自动:安装只把三个码种子化,持有者为零。没有任何既有 scope 会自动变成备料 scope —— integration:write 不会成为 operate。每一次授予都是显式的、按角色的。"
+    "note": "R-11 映射零自动:安装只把四个码种子化,持有者为零。没有任何既有 scope 会自动变成备料 scope —— integration:write 不会成为 operate。每一次授予都是显式的、按角色的。R-33(2026-10-08):stock-prep:pull 是「拉取人员」码,从 PLM 拉取、建项目表、归档/恢复由其持有者负责;一线(read+operate)不再拉取。拉取人员角色由现场在角色管理里建,不随迁移播种。"
   },
   "featureFlags": [],
   "objects": [

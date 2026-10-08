@@ -889,12 +889,12 @@ function blockerKind(blocker: StockPreparationPreflightBlocker): 'http' | 'env' 
 const blockerPlain = stockPrepBlockerPlain
 const permissionPlain = stockPrepPermissionPlain
 
-/** The three permission codes §14's own defaults panel already lists — restated here, not retyped. */
+/** The permission codes §14's own defaults panel already lists — restated here, not retyped. */
 const accessCodes = computed<string[]>(() => {
   const fromManifest = props.defaults?.permissions.codes
   return Array.isArray(fromManifest) && fromManifest.length > 0
     ? fromManifest
-    : ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin']
+    : ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin', 'stock-prep:pull']
 })
 
 /**

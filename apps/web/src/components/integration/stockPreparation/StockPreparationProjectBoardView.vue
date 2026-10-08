@@ -733,9 +733,11 @@ async function scrollToConfirmPanel(): Promise<void> {
  * on the panel that reports it.
  *
  * NEVER AN UNEXERCISABLE PRESS. The composed queue renders this button only for a caller who passes
- * `canOpenStockPrepProjectBoard` (operate ∧ read), and `canRunStockPrepProjectSync` is that same tier
- * plus platform admin — so every caller who can see it can run it. The panel's own `run` re-checks
- * permission and busy state anyway; this adds no second implementation of what 同步 means.
+ * `canOpenStockPrepProjectBoard` (operate ∧ read); `canRunStockPrepProjectSync` is one rung ABOVE
+ * that since R-33 (pull ∧ operate ∧ read, or platform admin), and `nextStep` below strips the
+ * pull/resync action for a caller who fails it — so every caller who can see this button can run
+ * it. The panel's own `run` re-checks permission and busy state anyway; this adds no second
+ * implementation of what 同步 means.
  */
 async function onEmbeddedResync(): Promise<void> {
   await nextTick()
@@ -808,8 +810,11 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   // same class of wrong answer as 「都清了」 for a project nobody has ever heard of.
   //
   // So the board says the honest thing FIRST — this number has no data here yet — and names the
-  // control. The administrator sentence is kept for the one case where it is true: the pull panel is
-  // absent because this caller may not press it.
+  // control. The 「请联系拉取人员」 sentence is kept for the one case where it is true: the pull panel
+  // is absent because this caller may not press it. Since R-33 (2026-10-08) that is every floor
+  // operator — pulling belongs to a holder of `stock-prep:pull` (the 拉取人员), a `stock-prep:admin`
+  // or a platform administrator — so the sentence names the 拉取人员 first, never 「备料操作权限」,
+  // which the reader already holds.
   if (canRunPull.value) {
     return {
       zh: `这个项目号在您这里还没有数据。`,
@@ -821,8 +826,8 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   return {
     zh: '这个项目号在您这里还没有数据,而拉取数据不是您能做的一步。',
     en: 'There is no data for this project number here yet, and pulling it in is not a step you can run.',
-    zhNext: '请找有备料操作权限的同事或平台管理员把它拉进来;也请顺便核对一下号码有没有打错。',
-    enNext: 'Ask a colleague with the stock-preparation operator permission, or a platform administrator, to pull it in — and check the number for a typo while you are at it.',
+    zhNext: '请联系拉取人员(或平台管理员)把它拉进来;也请顺便核对一下号码有没有打错。',
+    enNext: 'Please contact a pull operator (拉取人员) — or a platform administrator — to pull it in, and check the number for a typo while you are at it.',
   }
 })
 

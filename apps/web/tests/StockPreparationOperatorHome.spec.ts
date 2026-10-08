@@ -566,7 +566,9 @@ describe('三处徽标同词一致 (P0-6) — home card / workspace title / sync
 
   beforeEach(() => {
     h.locale = 'zh-CN'
-    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+    // R-33 (2026-10-08): this block presses the composed sync panel's run button, so its actor is
+    // the 拉取人员 (read+operate+PULL); the floor operator no longer has that button.
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
     try { window.localStorage.clear() } catch { /* jsdom always has it; guard anyway */ }
     // P0 补项 4c: the board's OWN directory read is throttled (operatorHomeDirectory.ts). Reset
     // between tests so a fixture two tests ago cannot silently answer THIS test's mount — every test
