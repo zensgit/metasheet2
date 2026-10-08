@@ -199,6 +199,9 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import { ApprovalApiError } from '../../approvals/api'
 import {
+  CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
+  CANCEL_ROUND_CLIENT_COPY,
+  CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT,
   cancelRoundDeliveryChannelLabel,
   cancelRoundDeliveryStatusLabel,
   cancelRoundStatusKeyFromSummary,
@@ -349,16 +352,38 @@ async function confirmLaunch(): Promise<void> {
   }
 }
 
+/** One of the client's own refusals (`approvals/cancelRound.ts`), as the progress line shows it. */
+function clientRefusal(code: string): CancelRoundErrorDescription {
+  const copy = CANCEL_ROUND_CLIENT_COPY[code]
+  return { message: isZh.value ? copy.zh : copy.en, cls: 'other', code, presentationKey: null }
+}
+
+/**
+ * The withdraw names the round this panel rendered (reviewer finding F1, 2026-10-08), so a stale tab —
+ * the leave's round withdrawn and a new one launched elsewhere — is refused by the server (409, nothing
+ * written) instead of withdrawing a round this page never showed. The refusal has the same code as a
+ * round that already finished, so the panel re-reads first: another round now ⇒ the stale-round copy
+ * next to the new round; the same round ⇒ the registered withdraw copy (P-8), unchanged.
+ */
 async function withdraw(): Promise<void> {
-  if (busy.value) return
+  const shownRoundId = round.value?.roundId ?? null
+  if (busy.value || !shownRoundId) return
   busy.value = 'withdraw'
   progressError.value = null
   try {
-    await withdrawCancelRound(props.request.id)
+    const withdrawnRoundId = await withdrawCancelRound(props.request.id, null, shownRoundId)
     await load()
+    // Accepted, but not (provably) for the round on screen: never a silent success.
+    if (withdrawnRoundId !== shownRoundId) progressError.value = clientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED)
   } catch (error) {
-    progressError.value = describe(error, 'The cancellation request could not be withdrawn.', '撤销申请未能撤回')
-    void load()
+    await load()
+    const replaced = (error as { code?: unknown } | null)?.code === 'INVALID_STATUS_TRANSITION'
+      && loadState.value === 'ready'
+      && round.value !== null
+      && round.value.roundId !== shownRoundId
+    progressError.value = replaced
+      ? clientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT)
+      : describe(error, 'The cancellation request could not be withdrawn.', '撤销申请未能撤回')
   } finally {
     busy.value = null
   }
