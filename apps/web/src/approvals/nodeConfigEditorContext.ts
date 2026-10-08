@@ -51,6 +51,20 @@ export interface ApprovalNodeConfigEditorApi {
   conditionFormulaDryRunLoading: (nodeKey: string, edgeKey: string) => boolean
   dryRunConditionFormula: (nodeKey: string, branch: ConditionBranchEdit) => void | Promise<void>
   conditionOutgoingEdgeKeys: (nodeKey: string) => string[]
+  /**
+   * T5a/T5b (test report 2026-10-08) — true when this editor is hosted by the Canvas V2 inspector,
+   * i.e. where topology actions join the unified Canvas undo history and the inspector toolbar shows
+   * 「+添加分支」. The flag-off structured rollback renderer has no Canvas undo control, so it never
+   * offers branch delete. OPTIONAL (absent ⇒ false ⇒ no delete control, fail-closed) so
+   * component-level tests that never exercise it can omit it; present on the shipped app's api.
+   */
+  canvasAuthoringActive?: ComputedRef<boolean> | Ref<boolean> | boolean
+  /** T5a — `null` when the non-default branch can be deleted, else the business-language reason
+   *  the disabled control shows (a dry run of the SAME topology command — never a re-implementation). */
+  conditionBranchRemovalBlocker?: (nodeKey: string, edgeKey: string) => string | null
+  /** Delete a non-default branch through the unified topology-op path (one undo entry). Deleting the
+   *  last non-default branch removes the condition node and keeps the default path. */
+  removeConditionBranch?: (nodeKey: string, edgeKey: string) => void
   conditionEdgeLabel: (nodeKey: string, edgeKey: string) => string
   graphEdgeTargetLabel: (nodeKey: string, edgeKey: string) => string
   graphNodeLabel: (nodeKey: string) => string

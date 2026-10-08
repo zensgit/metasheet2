@@ -502,15 +502,93 @@
         </div>
       </section>
 
-      <!-- record-link: values-free summary only; the typed base/sheet pickers
-           stay with the parent-owned catalog and arrive at the F4 mount. -->
+      <!-- record-link (delta §3.4 typed pickers; parity ledger deferral (3)): the target base and
+           sheet are chosen from the PARENT-OWNED catalog (F0 gate #2) — this pane never fetches; it
+           renders the snapshot and emits a load/retry intent. Option text is a business name or the
+           values-free 目标不可用 placeholder for a stale pin, never a raw id, and there is no
+           free-text id entry. A base change commits ONE patch carrying both pins (a sheet outside
+           the new base is cleared); the empty option clears, like the legacy clearable picker. -->
       <section
         v-if="field.type === 'record-link'"
         class="approval-form-field-inspector__section"
         data-testid="approval-form-field-inspector-record-link"
       >
+        <p class="approval-form-field-inspector__label">关联目标</p>
+        <div
+          v-if="recordLinkCatalogError"
+          class="approval-form-field-inspector__option-row"
+          role="alert"
+          data-testid="approval-form-field-inspector-record-link-catalog-error"
+        >
+          <span class="approval-form-field-inspector__error">{{ recordLinkCatalogError }}</span>
+          <button
+            type="button"
+            class="approval-form-field-inspector__minor-action"
+            data-testid="approval-form-field-inspector-record-link-catalog-retry"
+            :disabled="recordLinkCatalogLoading"
+            @click="requestRecordLinkCatalog"
+          >
+            重试
+          </button>
+        </div>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">目标空间</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-record-link-base"
+            :value="field.recordLinkBaseId.trim()"
+            :disabled="recordLinkCatalogLoading"
+            :aria-busy="recordLinkCatalogLoading"
+            @focus="onRecordLinkPickerFocus"
+            @change="onRecordLinkBaseChange($event)"
+          >
+            <option value="">请选择目标空间</option>
+            <option
+              v-for="option in recordLinkBaseOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <label class="approval-form-field-inspector__row">
+          <span class="approval-form-field-inspector__hint">目标表</span>
+          <select
+            class="approval-form-field-inspector__control"
+            data-testid="approval-form-field-inspector-record-link-sheet"
+            :value="field.recordLinkSheetId.trim()"
+            :disabled="recordLinkCatalogLoading || !field.recordLinkBaseId.trim()"
+            :aria-busy="recordLinkCatalogLoading"
+            @focus="onRecordLinkPickerFocus"
+            @change="onRecordLinkSheetChange($event)"
+          >
+            <option value="">请选择目标表</option>
+            <option
+              v-for="option in recordLinkSheetOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </label>
+        <p
+          v-if="recordLinkCatalogHint"
+          class="approval-form-field-inspector__hint"
+          role="status"
+          data-testid="approval-form-field-inspector-record-link-catalog-hint"
+        >
+          {{ recordLinkCatalogHint }}
+        </p>
+        <p
+          class="approval-form-field-inspector__hint"
+          data-testid="approval-form-field-inspector-record-link-summary"
+        >
+          {{ recordLinkSummary }}
+        </p>
         <p class="approval-form-field-inspector__hint">
-          {{ recordLinkConfigured ? '已选择目标空间与目标表。' : '尚未选择目标空间与目标表。' }}
+          仅可选择目标表中的一条记录。提交时会验证发起人是否可查看所选记录；不可用的历史目标需重新选择。
         </p>
       </section>
 
@@ -658,6 +736,17 @@ export const INSPECTOR_RETYPE_REFUSAL_PREFIX =
 export const INSPECTOR_DELETE_REFUSAL_PREFIX =
   '暂不能删除，以下配置正在使用此字段，请先调整后重试：'
 
+/**
+ * Record-link target picker copy (delta §3.4). The two summaries are the pre-existing F3 copy; a
+ * stale pin instead shows the SAME message the publish check reports
+ * (`validateRecordLinkPinAgainstLoadedCatalog`), so the pane and the checklist cannot disagree.
+ * The loading/empty-catalog lines are new UI copy (owner/design-confirmable).
+ */
+export const INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE = '尚未选择目标空间与目标表。'
+export const INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE = '已选择目标空间与目标表。'
+export const INSPECTOR_RECORD_LINK_LOADING_MESSAGE = '关联表目录加载中…'
+export const INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE = '暂无可选的目标空间。'
+
 /** Business labels for every dependency kind (never internal locations/IDs). */
 export const DEPENDENCY_KIND_BUSINESS_LABELS: Record<FormDependencyKind, string> = {
   visibility_rule: '字段显示条件',
@@ -718,6 +807,11 @@ export function describeDependencyRefusal(
  *   and never regenerated (§3.4).
  * - No persistent/local IDs in any rendered copy; `localId` appears only in
  *   non-visible data-* attributes/test ids (§8).
+ * - Record-link target base/sheet typed pickers (§3.4; parity ledger
+ *   deferral (3)) render the PARENT-OWNED catalog (`recordLinkCatalog`, F0
+ *   gate #2) and commit through the same typed `update-properties` command; a
+ *   load/retry is an emitted intent (`retry-record-link-catalog`), never a
+ *   fetch from this pane.
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormAdapterResult } from '../approvalFormAuthoringAdapter'
@@ -737,6 +831,13 @@ import {
 } from './ApprovalFormPalette.vue'
 import ApprovalDepartmentPicker from './ApprovalDepartmentPicker.vue'
 import { useApprovalDirectory, type DirectoryUserOption } from '../useApprovalDirectory'
+import {
+  buildRecordLinkBaseSelectOptions,
+  buildRecordLinkSheetSelectOptions,
+  recordLinkSheetAfterBaseChange,
+  validateRecordLinkPinAgainstLoadedCatalog,
+  type RecordLinkAuthoringCatalog,
+} from '../recordLinkField'
 
 const props = withDefaults(
   defineProps<{
@@ -754,14 +855,26 @@ const props = withDefaults(
     execute: (command: FormFieldInspectorCommand) => FormAdapterResult | null
     /** Opaque value seam for NEW options (§3.4); injectable for determinism. */
     optionValueFactory?: () => string
+    /**
+     * Delta §3.4: the PARENT-OWNED record-link catalog snapshot (F0 gate #2) the typed base/sheet
+     * pickers render. Null when no owner supplies one (standalone harnesses): the pickers then
+     * offer only the current pins, shown as the values-free unavailable placeholder.
+     */
+    recordLinkCatalog?: RecordLinkAuthoringCatalog | null
   }>(),
   {
     references: () => [],
     visibilityOptions: () => [],
     readOnly: false,
     optionValueFactory: undefined,
+    recordLinkCatalog: null,
   },
 )
+
+const emit = defineEmits<{
+  /** Ask the catalog OWNER to (re)load the record-link catalog — never a fetch from here. */
+  (e: 'retry-record-link-catalog'): void
+}>()
 
 const VISIBILITY_OPERATOR_OPTIONS: readonly {
   value: FieldVisibilityDraft['operator']
@@ -813,6 +926,63 @@ const recordLinkConfigured = computed(
     field.value!.recordLinkBaseId.trim() !== '' &&
     field.value!.recordLinkSheetId.trim() !== '',
 )
+
+// --- record-link target pickers (delta §3.4) ----------------------------------
+
+const recordLinkCatalogLoading = computed(
+  () => props.recordLinkCatalog?.loading === true,
+)
+const recordLinkCatalogError = computed(() => props.recordLinkCatalog?.error ?? '')
+
+/** Business-name options; a pin missing from the catalog becomes the 目标不可用 placeholder. */
+const recordLinkBaseOptions = computed(() => {
+  const current = field.value
+  if (!current || current.type !== 'record-link') return []
+  return buildRecordLinkBaseSelectOptions(
+    props.recordLinkCatalog?.bases ?? [],
+    current.recordLinkBaseId,
+  )
+})
+
+/** Sheets scoped to the CURRENT base pin (none until a base is chosen). */
+const recordLinkSheetOptions = computed(() => {
+  const current = field.value
+  if (!current || current.type !== 'record-link') return []
+  return buildRecordLinkSheetSelectOptions(
+    props.recordLinkCatalog?.sheets ?? [],
+    current.recordLinkBaseId,
+    current.recordLinkSheetId,
+  )
+})
+
+const recordLinkCatalogHint = computed(() => {
+  const catalog = props.recordLinkCatalog
+  if (!catalog) return ''
+  if (catalog.loading) return INSPECTOR_RECORD_LINK_LOADING_MESSAGE
+  if (catalog.loaded && !catalog.error && catalog.bases.length === 0) {
+    return INSPECTOR_RECORD_LINK_EMPTY_CATALOG_MESSAGE
+  }
+  return ''
+})
+
+/**
+ * Same predicate as the publish check: unconfigured → the F3 summary; a pin the LOADED catalog
+ * proves unusable → the publish-check message itself; otherwise configured.
+ */
+const recordLinkSummary = computed(() => {
+  const current = field.value
+  if (!current || !recordLinkConfigured.value) {
+    return INSPECTOR_RECORD_LINK_UNCONFIGURED_MESSAGE
+  }
+  const catalog = props.recordLinkCatalog
+  const issue = catalog
+    ? validateRecordLinkPinAgainstLoadedCatalog(current, {
+        loaded: catalog.loaded,
+        sheets: catalog.sheets,
+      })
+    : null
+  return issue ?? INSPECTOR_RECORD_LINK_CONFIGURED_MESSAGE
+})
 const visibilityNeedsValue = computed(() => {
   const operator = field.value?.visibility.operator
   return operator === 'eq' || operator === 'neq' || operator === 'in'
@@ -1320,6 +1490,45 @@ function onDateRangeDateTypeChange(event: Event): void {
   }
 }
 
+function requestRecordLinkCatalog(): void {
+  emit('retry-record-link-catalog')
+}
+
+/** Legacy parity (`visible-change` → retry): opening a picker of an unloaded catalog loads it. */
+function onRecordLinkPickerFocus(): void {
+  const catalog = props.recordLinkCatalog
+  if (catalog && (catalog.loaded || catalog.loading)) return
+  requestRecordLinkCatalog()
+}
+
+/**
+ * ONE committed edit carrying BOTH pins: the sheet survives only when the loaded catalog proves it
+ * belongs to the new base (`recordLinkSheetAfterBaseChange`); the empty option clears both.
+ */
+function onRecordLinkBaseChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  const recordLinkBaseId = select.value.trim()
+  const recordLinkSheetId = recordLinkSheetAfterBaseChange(
+    props.recordLinkCatalog?.sheets ?? [],
+    recordLinkBaseId,
+    current.recordLinkSheetId,
+  )
+  if (!commitPatch({ recordLinkBaseId, recordLinkSheetId })) {
+    select.value = current.recordLinkBaseId.trim()
+  }
+}
+
+function onRecordLinkSheetChange(event: Event): void {
+  const current = field.value
+  if (!current) return
+  const select = event.target as HTMLSelectElement
+  if (!commitPatch({ recordLinkSheetId: select.value.trim() })) {
+    select.value = current.recordLinkSheetId.trim()
+  }
+}
+
 function onVisibilityDependsChange(event: Event): void {
   const current = field.value
   if (!current) return
@@ -1676,6 +1885,11 @@ defineExpose({ settlePendingEdits, isDirty })
   margin: 0;
   font-size: 12px;
   color: var(--el-text-color-placeholder);
+}
+
+.approval-form-field-inspector__error {
+  font-size: 12px;
+  color: var(--el-color-danger);
 }
 
 .approval-form-field-inspector__control {

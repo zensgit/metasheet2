@@ -268,21 +268,26 @@
               v-bind="numberFieldProps(field)"
               class="ms-w-100pct"
             />
-            <!-- date -->
+            <!-- date: bound as the strict YYYY-MM-DD civil string the server validates (T4a-E1;
+                 see approvals/datePickerFormat.ts) -->
             <el-date-picker
               v-else-if="field.type === 'date'"
               v-model="formData[field.id]"
               type="date"
+              :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
               :placeholder="field.placeholder || selectPlaceholder(field.label)"
               class="ms-w-100pct"
             />
 
-            <!-- datetime -->
+            <!-- datetime: minute-granular entry with a real default time of day (T4a); the stored
+                 value is unchanged (a Date, i.e. an ISO instant on the wire) -->
             <el-date-picker
               v-else-if="field.type === 'datetime'"
               v-model="formData[field.id]"
               type="datetime"
-              :placeholder="field.placeholder || selectPlaceholder(field.label)"
+              :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+              :default-time="datetimeDefaultTime"
+              :placeholder="field.placeholder || t.datetimePlaceholder"
               class="ms-w-100pct"
             />
 
@@ -430,6 +435,7 @@
                       v-else-if="column.type === 'date'"
                       v-model="row[column.id]"
                       type="date"
+                      :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
                       :placeholder="column.label"
                       class="ms-w-100pct"
                     />
@@ -437,6 +443,8 @@
                       v-else-if="column.type === 'datetime'"
                       v-model="row[column.id]"
                       type="datetime"
+                      :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+                      :default-time="datetimeDefaultTime"
                       :placeholder="column.label"
                       class="ms-w-100pct"
                     />
@@ -714,6 +722,11 @@ import {
   dateRangePickerValueFormat,
 } from '../../approvals/dateRangeField'
 import {
+  APPROVAL_CIVIL_DATE_VALUE_FORMAT,
+  APPROVAL_DATETIME_DISPLAY_FORMAT,
+  approvalDatetimeDefaultTime,
+} from '../../approvals/datePickerFormat'
+import {
   deleteApprovalAttachment,
   fetchApprovalAttachmentRefs,
   preValidateAttachments,
@@ -729,6 +742,10 @@ const router = useRouter()
 // copy lives in approvalNewLabels.ts, interpolated copy is an `isZh.value ? … : …` pair below.
 const { isZh } = useLocale()
 const t = computed(() => (isZh.value ? NEW_ZH : NEW_EN))
+// T4a: the datetime pickers' `default-time` — the time this form was opened, to the minute. Element
+// Plus reads `default-time` once, when each picker mounts, so a single value read at setup is what
+// every picker on the page (top-level and 明细 cells) would see anyway.
+const datetimeDefaultTime = approvalDatetimeDefaultTime()
 
 function inputPlaceholder(label: string): string {
   return isZh.value ? `请输入${label}` : `Enter ${label}`

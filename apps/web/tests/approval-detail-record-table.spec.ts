@@ -1072,3 +1072,231 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
     })
   })
 })
+
+// -----------------------------------------------------------------------------------------------
+// Test report 2026-10-08 T4cd — the 审批记录 timeline/table on a PLATFORM instance. The platform
+// branch of GET /api/approvals/:id/history used to send only the snake_case columns, so this view
+// (which reads the camelCase DTO) showed 「-」 for every time and 「系统」 for every actor. The
+// server now adds camelCase copies beside the snake_case columns (unit-pinned in
+// approval-history-routing.test.ts, real-DB-pinned in approval-history-authz-guard.db.test.ts);
+// the rows below are that wire shape, taken through the REAL envelope normalizer.
+//
+// Once the stored actor reaches the view, the engine's own sentinels arrive as written ('system'
+// named 'System'; `system:*` sentinels named after themselves) and an account with no name and no
+// email arrives with its id as the name — none of which may render. These cases are RED at base,
+// where the actor label was `actorName ?? '系统'`.
+// -----------------------------------------------------------------------------------------------
+describe('ApprovalDetailView — T4cd platform /history rows (snake_case + camelCase copies)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockRouteParams.id = 'apv_1'
+    createApprovalCommentsClientSpy.mockClear()
+    mockActiveApproval.value = baseInstance()
+    mockHistory.value = []
+    mockLoading.value = false
+    mockCanAct.value = false
+    mockApprovalMobileFlag.value = false
+    mockDetailActiveTemplate.value = null
+    mockDetailActiveVersion.value = null
+    setViewport(false)
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    pushSpy.mockClear()
+    mockCurrentUserId.value = null
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of ['ElDivider', 'ElEmpty', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElInput', 'ElTag']) {
+      app.component(name, stub(name))
+    }
+    app.component('ElDialog', ElDialog)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  /** One platform row as the server now sends it: snake_case columns plus the camelCase copies. */
+  function wireRow(id: string, action: string, actorId: string | null, actorName: string | null, occurredAt: string, fromStatus: string | null, toStatus: string): Record<string, unknown> {
+    return {
+      id,
+      occurred_at: occurredAt,
+      actor_id: actorId,
+      actor_name: actorName,
+      action,
+      comment: null,
+      from_status: fromStatus,
+      to_status: toStatus,
+      version: 1,
+      from_version: null,
+      to_version: 1,
+      actorId,
+      actorName,
+      occurredAt,
+      fromStatus,
+      toStatus,
+    }
+  }
+
+  async function historyFromWire(rows: Array<Record<string, unknown>>): Promise<any[]> {
+    const { normalizeApprovalHistoryEnvelope } = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
+    return normalizeApprovalHistoryEnvelope({ ok: true, data: { items: rows, page: 1, pageSize: 50, total: rows.length } })
+  }
+
+  function timelineItems(): HTMLElement[] {
+    return Array.from(container!.querySelectorAll<HTMLElement>('[data-stub="ElTimelineItem"]'))
+  }
+
+  // The tester's own instance shape: approved by a person, a cc row the engine wrote, and the
+  // requester's submission (newest first, as the route orders them).
+  const APPROVED_AT = '2026-10-08T02:30:00.000Z'
+  const CC_AT = '2026-10-08T02:30:00.000Z'
+  const CREATED_AT = '2026-10-08T01:00:00.000Z'
+  function testerInstanceRows(): Array<Record<string, unknown>> {
+    return [
+      wireRow('rec_3', 'approve', 'user_100', '李四', APPROVED_AT, 'pending', 'approved'),
+      wireRow('rec_2', 'cc', 'system', 'System', CC_AT, 'pending', 'pending'),
+      wireRow('rec_1', 'created', 'user_99', '张三', CREATED_AT, null, 'pending'),
+    ]
+  }
+
+  it('timeline: every row shows its action time and the real actor; the engine-written cc row shows 系统, never the stored English name', async () => {
+    mockHistory.value = await historyFromWire(testerInstanceRows())
+    await mountView()
+
+    const items = timelineItems()
+    expect(items).toHaveLength(3)
+    expect(items.map((item) => item.getAttribute('timestamp'))).toEqual([
+      new Date(APPROVED_AT).toLocaleString('zh-CN'),
+      new Date(CC_AT).toLocaleString('zh-CN'),
+      new Date(CREATED_AT).toLocaleString('zh-CN'),
+    ])
+    const actorLabels = items.map((item) => item.querySelector('.approval-detail__timeline-header strong')?.textContent?.trim())
+    expect(actorLabels).toEqual(['李四', '系统', '张三'])
+    const avatars = items.map((item) => item.querySelector('.approval-detail__actor-avatar')?.textContent?.trim())
+    expect(avatars).toEqual(['李', '系', '张'])
+    expect(container!.textContent).not.toContain('System')
+  })
+
+  it('table view: the 审批人 column names the real actors and every row carries its time', async () => {
+    mockHistory.value = await historyFromWire(testerInstanceRows())
+    await mountView()
+    q(container!, 'approval-detail-record-view-table')!.click()
+    await flushUi()
+
+    const rows = recordTableRows(container!)
+    expect(rows).toHaveLength(3)
+    expect(rows.map((row) => row.querySelector('[data-el-cell="审批人"]')?.textContent?.trim())).toEqual(['李四', '系统', '张三'])
+    for (const [index, at] of [APPROVED_AT, CC_AT, CREATED_AT].entries()) {
+      expect(rows[index].querySelector('.approval-detail__record-time')?.textContent?.trim()).toBe(new Date(at).toLocaleString('zh-CN'))
+    }
+  })
+
+  it('every engine sentinel renders as 系统 / 系统自动审批 — never the sentinel or the stored English name', async () => {
+    mockHistory.value = await historyFromWire([
+      wireRow('rec_auto', 'approve', 'system:auto-approval', 'System Auto Approval', APPROVED_AT, 'pending', 'pending'),
+      wireRow('rec_timeout', 'transfer', 'system:approval-timeout', 'system:approval-timeout', APPROVED_AT, 'pending', 'pending'),
+      wireRow('rec_departure', 'transfer', 'system:approval-departure', 'system:approval-departure', APPROVED_AT, 'pending', 'pending'),
+      wireRow('rec_1', 'created', 'user_99', '张三', CREATED_AT, null, 'pending'),
+    ])
+    await mountView()
+
+    const actorLabels = timelineItems().map((item) => item.querySelector('.approval-detail__timeline-header strong')?.textContent?.trim())
+    expect(actorLabels).toEqual(['系统自动审批', '系统', '系统', '张三'])
+    const text = container!.textContent ?? ''
+    expect(text).not.toContain('system:')
+    expect(text).not.toContain('System Auto Approval')
+    // No sentinel is ever sent to the directory resolver as if it were a person.
+    for (const call of resolveApprovalDirectoryUsersSpy.mock.calls) {
+      expect((call[0] as string[]).some((id) => id.startsWith('system'))).toBe(false)
+    }
+  })
+
+  // Gate r1 P2-2: only a row whose stored name IS its id is named through the directory. A row with
+  // NO stored name is left alone: no platform writer stores one (every route falls back to the id),
+  // and the rows that carry none are a `plm:` instance's upstream rows (ApprovalBridgeService
+  // getPlmHistory: `actorName: null`, the upstream user id as `actorId`). Those ids belong to the
+  // upstream system, so a local lookup could name an unrelated local account; the rows keep the
+  // baseline 系统 label. A blank stored name takes the same fallback instead of an empty label.
+  it('a row with no stored name (a plm: upstream row) keeps 系统 and its id never reaches the directory resolver', async () => {
+    mockRouteParams.id = 'plm:eco-approval-7'
+    mockActiveApproval.value = baseInstance({ id: 'plm:eco-approval-7', sourceSystem: 'plm' })
+    // A local account that happens to share the upstream id: resolving the upstream id would name it.
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([
+      { id: '1', name: '赵六' },
+      { id: 'user_blank_5', name: '孙七' },
+    ])
+    mockHistory.value = await historyFromWire([
+      {
+        id: '9',
+        action: 'approve',
+        actorId: '1',
+        actorName: null,
+        comment: null,
+        fromStatus: null,
+        toStatus: 'approved',
+        occurredAt: APPROVED_AT,
+        metadata: { ecoId: 3, stageId: 2, approvalType: 'stage', requiredRole: null },
+      },
+      wireRow('rec_blank', 'created', 'user_blank_5', '  ', CREATED_AT, null, 'pending'),
+    ])
+    await mountView()
+    await flushUi(12)
+
+    const items = timelineItems()
+    expect(items).toHaveLength(2)
+    expect(items.map((item) => item.querySelector('.approval-detail__timeline-header strong')?.textContent?.trim())).toEqual(['系统', '系统'])
+    expect(items.map((item) => item.querySelector('.approval-detail__actor-avatar')?.textContent?.trim())).toEqual(['系', '系'])
+    expect(container!.textContent).not.toContain('赵六')
+    expect(container!.textContent).not.toContain('孙七')
+    const resolvedIds = resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])
+    expect(resolvedIds).not.toContain('1')
+    expect(resolvedIds).not.toContain('user_blank_5')
+  })
+
+  it('a row whose stored name is only the id shows the directory-resolved name, or 未知用户 — never the id', async () => {
+    // Unresolved (inactive / nameless account): values-free fallback.
+    mockHistory.value = await historyFromWire([
+      wireRow('rec_idonly', 'approve', 'user_secret_77', 'user_secret_77', APPROVED_AT, 'pending', 'approved'),
+    ])
+    await mountView()
+    await flushUi(12)
+    expect(timelineItems()[0].querySelector('.approval-detail__timeline-header strong')?.textContent?.trim()).toBe('未知用户')
+    expect(container!.textContent).not.toContain('user_secret_77')
+    expect(resolveApprovalDirectoryUsersSpy).toHaveBeenCalled()
+    expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain('user_secret_77')
+
+    // POSITIVE CONTROL: the same row resolves to the person's name once the directory has one.
+    app!.unmount()
+    app = null
+    __resetResolvedDirectoryNamesForTests()
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([{ id: 'user_secret_77', name: '赵六' }])
+    await mountView()
+    await flushUi(12)
+    expect(timelineItems()[0].querySelector('.approval-detail__timeline-header strong')?.textContent?.trim()).toBe('赵六')
+    expect(container!.textContent).not.toContain('user_secret_77')
+  })
+})
