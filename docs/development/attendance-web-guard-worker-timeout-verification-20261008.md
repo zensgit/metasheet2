@@ -163,3 +163,33 @@ none in this file or in `apps/web/tests/attendance-admin-regressions.spec.ts`.
 
 The three web specs added by `644310ba6` are `multitable-conditional-formatting.spec.ts`,
 `multitable-datetime-business-tz.spec.ts`, and `multitable-field-display-i18n.spec.ts`.
+
+## 8. Alignment onto main `9d65b8318` (Harold, 2026-10-08)
+
+Fetched `origin/main` again. It was exactly
+`9d65b8318f3d5cbc323b458cb5c96c2240a144f7`. Nothing newer than that tip was on `main`.
+Harold approved merging the six commits, including the two that touch sensitive paths.
+`git merge 9d65b8318` into this branch had no conflicts.
+
+| Commit | Sensitive paths | Web test infrastructure / attendance |
+|---|---|---|
+| `ceb5442ed2fa6853d0f63ae698bdcbb3a4019aae` | `.github/workflows/approval-web-guard.yml` | `apps/web/scripts/run-required-web-tests.sh` and `run-required-web-tests.tokens` (tokens `approval-date-picker-values`, `approval-civil-date-tz-probe`). New helper `apps/web/tests/helpers/approvalCivilDateTzProbe.ts`. No attendance web code |
+| `311c1fc2e8205987b971324d28e6e40a7c6f85a1` | migration `packages/core-backend/src/db/migrations/zzzz20261008120000_add_stock_prep_pull_permission.ts`; `plugins/plugin-integration-core/lib/http-routes.cjs`; pins file `plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json` | stock-prep web specs only. No attendance web code, no web test runner change |
+| `a6321f3b4bb4b15d0610e2c169ba10ddf8ada8bc` | none | `apps/web/tests/userManagementView.spec.ts`. No attendance web code |
+| `2f91694c6fa06474512e2445a53ce60fdd027a84` | none | `approval-center.spec.ts`, `approvalApiErrorSurfacing.spec.ts`, `templateCenterI18n.spec.ts`. No attendance web code |
+| `c147a2d78029dd3097d973e7512e354242ae4883` | none | `approval-form-field-inspector.spec.ts`, `approval-form-field-update.test.ts`, `approval-record-link.test.ts`, `approvalTemplateAuthoring.spec.ts`. No attendance web code |
+| `9d65b8318f3d5cbc323b458cb5c96c2240a144f7` | none | eight approval web specs (`approval-authoring-history`, `approval-graph-topology-edit`, `approval-member-identity-coverage-enumeration`, `approval-template-authoring-canvas-inspector`, `approval-template-authoring-condition-edit`, `approval-template-authoring-errors`, `approvalApiErrorSurfacing`, `approvalTemplateAuthoring`). No attendance web code |
+
+No drain helper, `vitest.config.ts`, timemachine script, `univer-meta.ts`, `recovery-archive-contract.ts`, or `src/index.ts` changed in this range.
+
+### Pins
+
+`s6a-package-provenance-pins.json` still has 66 leaf fields and 63 SHA-256 values. The three non-hash leaves are `packageProvenanceVersion` and the two dependency version strings. The only pin field that changed versus `9eee3a3cd` is `runtimeFiles.pluginHttpRoutes`, which hashes `plugins/plugin-integration-core/lib/http-routes.cjs`. `computePackageProvenancePinSet` on this work tree matched the pins file on every field, including `pluginHttpRoutes` (0 mismatches).
+
+`node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs` runs 18 cases and exited 0 (`sealed-export-package-provenance.test.cjs OK`).
+
+### Migration
+
+`zzzz20261008120000_add_stock_prep_pull_permission.ts` is last in filename order: 375 of 375 files under `packages/core-backend/src/db/migrations`, immediately after `zzzz20261001120000_create_approval_form_drafts.ts`.
+
+This environment has no Postgres client and no Docker, so the full migration chain and the Time Machine replay were not run locally. The replay list in `multitable-timemachine-migration-replay-realdb.verify.ts` is still the 33 recovery migrations ending at `zzzz20260928150000_relax_field_value_tombstone_reason_for_retype_convert`. The new stock-prep permission migration is not in that list, so the replay PASS line is not expected to move from 33 migrations because of this file. `catalog_objects` and the live PASS line come from CI `test (20.x)`.
