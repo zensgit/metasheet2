@@ -1296,7 +1296,7 @@
                   />
                 </label>
                 <label class="directory-admin__field">
-                  <span>用户名（可选）</span>
+                  <span>登录名（可选）</span>
                   <input
                     :value="readManualAdmissionDraft(item.account).username"
                     class="directory-admin__input"
@@ -1316,7 +1316,8 @@
                   />
                 </label>
               </div>
-              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
+              <p class="directory-admin__hint" data-directory-admission-rule="login-name">{{ DIRECTORY_ADMISSION_LOGIN_NAME_HINT }}</p>
+              <p class="directory-admin__hint">姓名必填；邮箱、登录名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
             </div>
             <div class="directory-admin__actions">
               <button
@@ -1780,7 +1781,7 @@
               v-if="!account.localUser && isManualAdmissionExpanded(account.id)"
               class="directory-admin__review-admission"
             >
-              <p class="directory-admin__hint">从当前钉钉同步成员创建本地用户并立即绑定。邮箱可为空，用户名或手机号可作为登录账号。</p>
+              <p class="directory-admin__hint">从当前钉钉同步成员创建本地用户并立即绑定。邮箱可为空，登录名或手机号可作为登录账号。</p>
               <div class="directory-admin__form-grid">
                 <label class="directory-admin__field">
                   <span>姓名</span>
@@ -1803,7 +1804,7 @@
                   />
                 </label>
                 <label class="directory-admin__field">
-                  <span>用户名（可选）</span>
+                  <span>登录名（可选）</span>
                   <input
                     :value="readManualAdmissionDraft(account).username"
                     class="directory-admin__input"
@@ -1823,7 +1824,8 @@
                   />
                 </label>
               </div>
-              <p class="directory-admin__hint">姓名必填；邮箱、用户名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
+              <p class="directory-admin__hint" data-directory-admission-rule="login-name">{{ DIRECTORY_ADMISSION_LOGIN_NAME_HINT }}</p>
+              <p class="directory-admin__hint">姓名必填；邮箱、登录名、手机号至少填写一项。无邮箱用户会走临时密码 + 首登强制改密。</p>
               <div class="directory-admin__actions">
                 <button
                   class="directory-admin__button"
@@ -3697,6 +3699,26 @@ function readApiErrorCode(payload: unknown): string {
   return typeof error?.code === 'string' ? error.code : ''
 }
 
+// #6259: the admit-user route answers a login-name rule failure with 400 INVALID_USERNAME and
+// `details.rule === 'login_name_ascii'` (English message unchanged). Localise by that code, never by
+// the English prose. Copy matches the create-user form (UserManagementView, #6257); when #6257's
+// shared copy module lands this can call it instead. Unknown codes return null (server message kept).
+const DIRECTORY_ADMISSION_LOGIN_NAME_RULE_COPY = '登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏'
+const DIRECTORY_ADMISSION_LOGIN_NAME_HINT = '登录名：只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏。'
+
+function describeDirectoryAdmissionError(payload: unknown): string | null {
+  const error = payload && typeof payload === 'object'
+    ? (payload as { error?: { code?: unknown; details?: unknown } }).error
+    : undefined
+  const details = error?.details && typeof error.details === 'object' && !Array.isArray(error.details)
+    ? error.details as Record<string, unknown>
+    : null
+  if (error?.code === 'INVALID_USERNAME' && details?.rule === 'login_name_ascii') {
+    return DIRECTORY_ADMISSION_LOGIN_NAME_RULE_COPY
+  }
+  return null
+}
+
 async function readJson(response: Response): Promise<any> {
   try {
     return await response.json()
@@ -5424,7 +5446,7 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
   }
   manualAdmissionDrafts[account.id] = nextDraft
   if (!nextDraft.name || (!nextDraft.email && !nextDraft.username && !nextDraft.mobile)) {
-    setStatus(`${memberLabel} ${account.name} 的姓名必填，且邮箱、用户名、手机号至少填写一项`, 'error')
+    setStatus(`${memberLabel} ${account.name} 的姓名必填，且邮箱、登录名、手机号至少填写一项`, 'error')
     return
   }
 
@@ -5443,7 +5465,8 @@ async function createAndBindDirectoryAccountUser(account: DirectoryAccount, cont
     })
     const body = await readJson(response)
     if (!response.ok || body?.ok !== true) {
-      throw new Error(readApiError(body, '创建本地用户并绑定失败'))
+      // #6259: known input-rule codes render Chinese copy; anything else keeps the server message.
+      throw new Error(describeDirectoryAdmissionError(body) ?? readApiError(body, '创建本地用户并绑定失败'))
     }
     const data = body?.data as Record<string, unknown> | undefined
     const createdUser = readCreatedLocalUserOption(data ?? {}, nextDraft)
