@@ -1678,8 +1678,10 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_READ_NOT_PERMITTED: Object.freeze({
     zh: '当前账号没有从 PLM 拉取这个项目数据的权限',
     en: 'This account is not allowed to pull this project’s data from PLM',
-    zhNext: '请联系管理员补充「备料操作」权限,或换有权限的账号再试;重试本身不会自动获得权限。',
-    enNext: 'Ask an administrator to grant the stock-prep operate permission, or try again with an account that already has it — retrying alone will not grant it.',
+    // R-33 (2026-10-08): the missing code is the 拉取人员's `stock-prep:pull` (on top of operate and
+    // read), not 「备料操作」 — a floor operator already holds that and must not be sent to get it twice.
+    zhNext: '拉取由拉取人员负责:请联系拉取人员代为拉取,或请管理员把「从PLM拉取数据(拉取人员)」权限加到您的角色;重试本身不会自动获得权限。',
+    enNext: 'Pulling is done by a pull operator (拉取人员): ask one to pull for you, or ask an administrator to add the stock-prep pull permission to your role — retrying alone will not grant it.',
   }),
   PLAN_READ_FAILED_UNKNOWN: Object.freeze({
     zh: '没能连上取数,原因暂时无法判断',

@@ -17,6 +17,7 @@
       :directory="directory"
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
+      :can-pull="canRunPull"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
@@ -1104,6 +1105,9 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
     isCurrentHandler: notifyPressable.value,
     // …and the SAME words as the button: on the last step both say 「通知仓库和采购」.
     handoffLastStep: notifyTarget.value === 'last-step',
+    // R-33: the SAME predicate as the pull button, so the two pull-driving sentences name the
+    // 拉取人员 for a floor operator instead of telling them to press a button they do not have.
+    canPull: canRunPull.value,
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run

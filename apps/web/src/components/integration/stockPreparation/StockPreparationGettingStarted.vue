@@ -889,12 +889,14 @@ function blockerKind(blocker: StockPreparationPreflightBlocker): 'http' | 'env' 
 const blockerPlain = stockPrepBlockerPlain
 const permissionPlain = stockPrepPermissionPlain
 
-/** The permission codes §14's own defaults panel already lists — restated here, not retyped. */
+/** The three ENTRY codes §14's own defaults panel already lists — restated here, not retyped.
+ *  (`stock-prep:pull` is a modifier code and is deliberately not in the manifest; see
+ *  app-manifest.test.cjs.) */
 const accessCodes = computed<string[]>(() => {
   const fromManifest = props.defaults?.permissions.codes
   return Array.isArray(fromManifest) && fromManifest.length > 0
     ? fromManifest
-    : ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin', 'stock-prep:pull']
+    : ['stock-prep:read', 'stock-prep:operate', 'stock-prep:admin']
 })
 
 /**
@@ -1075,8 +1077,10 @@ function copyHandoffMessage(): void {
     ? 'The stock-prep workbench is ready to use: open /stock-prep with your own account.'
     : 'Please try opening the stock-prep workbench once: open /stock-prep with your own account.'
   void handoffCopy.run(bi(
-    `${zhLead}用法:找到您的项目 → 从 PLM 拉进来 → 有拿不准的就逐条拿主意 → 回来再同步一次 → 导出 Excel。打不开或看不到项目,说明权限还没配到您头上,找管理员。`,
-    `${enLead} How to use it: find your project → pull it in from PLM → decide anything the system is unsure about → sync once more → export to Excel. If it will not open, or shows no projects, your account has not been granted access yet — ask an administrator.`,
+    // R-33 (2026-10-08): the floor no longer pulls, so the message names the 拉取人员 for the two
+    // pull steps rather than telling the reader to press a button they may not have.
+    `${zhLead}用法:找到您的项目 → 由拉取人员从 PLM 拉进来 → 有拿不准的就逐条拿主意 → 请拉取人员再同步一次 → 导出 Excel。打不开或看不到项目,说明权限还没配到您头上,找管理员。`,
+    `${enLead} How to use it: find your project → a pull operator (拉取人员) pulls it in from PLM → decide anything the system is unsure about → ask the pull operator to sync once more → export to Excel. If it will not open, or shows no projects, your account has not been granted access yet — ask an administrator.`,
   ))
 }
 </script>

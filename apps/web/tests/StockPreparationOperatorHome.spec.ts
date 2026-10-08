@@ -185,6 +185,23 @@ describe('operatorNextStep — 设计稿 §4.2 七条规则(优先级从上到�
     expect(result.action).toBe('pull')
   })
 
+  it('1c / R-33. a viewer who cannot pull is sent to the 拉取人员 on BOTH pull-driving rules, with no action', () => {
+    const pull = operatorNextStep({ ...base, boardFound: false, pulledRowCount: 0, canPull: false })
+    expect(pull.key).toBe('pull')
+    expect(pull.action).toBeNull()
+    expect(pull.actionZh).toBe('')
+    expect(pull.zh).toContain('请联系拉取人员')
+    expect(pull.zh).not.toContain('先把它从 PLM 拉进来')
+    const resync = operatorNextStep({ ...base, justConfirmed: true, canPull: false })
+    expect(resync.key).toBe('resync')
+    expect(resync.action).toBeNull()
+    expect(resync.zh).toContain('请联系拉取人员')
+    // The other rules are untouched by the flag.
+    expect(operatorNextStep({ ...base, missingComponentsCount: 3, canPull: false }).action).toBe('view-missing')
+    // Absent reads as true — callers without a principal keep today's words.
+    expect(operatorNextStep({ ...base, boardFound: false, pulledRowCount: 0 }).zh).toContain('先把它从 PLM 拉进来')
+  })
+
   it('2. 缺件 > 0 → 看缺哪些件', () => {
     const result = operatorNextStep({ ...base, missingComponentsCount: 3 })
     expect(result.action).toBe('view-missing')
@@ -1296,6 +1313,29 @@ describe('预读失败静默 (G3) + 空态三值互不共享文案 (P0-2)', () =
     })
     expect(nothingToday.root.querySelector('[data-testid="stock-prep-operator-home-empty"] .sp-home__link')).toBeNull()
     nothingToday.unmount()
+  })
+
+  it('R-33: a viewer who cannot pull is never invited to pull — empty-state action, hint and fallback heading all change', () => {
+    const cannot = mountIsolated(StockPreparationOperatorHome, { directory: emptyDirectory(), directoryLoaded: true, canPull: false })
+    const empty = cannot.root.querySelector('[data-testid="stock-prep-operator-home-empty"]') as HTMLElement
+    expect(empty.getAttribute('data-empty-state')).toBe('no_projects')
+    expect(empty.textContent).toContain('由拉取人员拉取')
+    expect(empty.textContent).not.toContain('自己拉')
+    const link = empty.querySelector('.sp-home__link') as HTMLElement
+    expect(link, 'the fallback input is still offered — opening a project needs no pull').not.toBeNull()
+    expect(link.textContent).toContain('打开一个项目')
+    expect(link.textContent).not.toContain('拉一个新项目')
+    const heading = cannot.root.querySelector('.sp-home__quick-open-title') as HTMLElement
+    expect(heading.textContent).toContain('打开一个项目')
+    cannot.unmount()
+
+    // The default (no prop / true) keeps today's words, so parents without a principal are unchanged.
+    const can = mountIsolated(StockPreparationOperatorHome, { directory: emptyDirectory(), directoryLoaded: true })
+    const canEmpty = can.root.querySelector('[data-testid="stock-prep-operator-home-empty"]') as HTMLElement
+    expect(canEmpty.textContent).toContain('自己拉')
+    expect((canEmpty.querySelector('.sp-home__link') as HTMLElement).textContent).toContain('拉一个新项目')
+    expect((can.root.querySelector('.sp-home__quick-open-title') as HTMLElement).textContent).toContain('拉一个新项目')
+    can.unmount()
   })
 
   it('G2: a chip whose count is 0 says so — an empty card grid is its own empty state, not a blank box', async () => {
