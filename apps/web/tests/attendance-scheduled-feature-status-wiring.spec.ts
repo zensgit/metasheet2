@@ -20,7 +20,8 @@ import {
 //   - no PUT body changes; the PUT response carries no gate report and none is needed;
 //   - toggling a checkbox never moves the configured status - only a saved response does;
 //   - a missing gate report is "unknown" (fail-closed); an open gate is "on", never "running";
-//   - a failed settings read is "not loaded", never "not configured".
+//   - a failed settings read is "not loaded", never "not configured" - on the first mount AND on a later reload of
+//     the same mounted instance (the reload is the only way to be holding a stale gate report).
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -72,6 +73,10 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
   let settingsData: Record<string, unknown> = {}
   let runtimeGates: unknown = undefined
   let settingsGetStatus = 200
+  let settingsGets = 0
+  let mounts = 0
+  // null = leave GET /api/attendance/groups to the catch-all (catalog scope resolves to 'org').
+  let groupsScope: 'managed' | null = null
   let puts: RecordedApiCall[] = []
   let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
 
@@ -79,6 +84,9 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     settingsData = {}
     runtimeGates = undefined
     settingsGetStatus = 200
+    settingsGets = 0
+    mounts = 0
+    groupsScope = null
     puts = []
     useLocale().setLocale('en')
     window.history.replaceState({}, '', '/attendance')
@@ -92,12 +100,16 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
           // The PUT response echoes the saved document and carries NO gate report (the backend leaves PUT alone).
           return jsonResponse(200, { ok: true, data: { ...settingsData, ...(call.body ?? {}) } })
         }
+        settingsGets += 1
         if (settingsGetStatus !== 200) {
           return jsonResponse(settingsGetStatus, { ok: false, error: { code: 'INTERNAL_ERROR', message: 'settings unavailable' } })
         }
         const body: Record<string, unknown> = { ok: true, data: settingsData }
         if (runtimeGates !== undefined) body.runtimeGates = runtimeGates
         return jsonResponse(200, body)
+      }
+      if (groupsScope && call.method === 'GET' && /\/api\/attendance\/groups\?/.test(call.url)) {
+        return jsonResponse(200, { ok: true, data: { items: [], total: 0, scope: groupsScope } })
       }
       return emptyAttendanceResponse()
     })
@@ -119,6 +131,7 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
   })
 
   async function mountAdmin(): Promise<HTMLElement> {
+    mounts += 1
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
@@ -290,6 +303,85 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     expect(textOf(digest.querySelector('[data-scheduled-feature-runnable]'))).toContain('Unknown')
   })
 
+  // ---- a failed RELOAD on the SAME mounted instance (gate r1 P2-1) ---------------------------------------------
+  // The first-mount test above cannot guard the reset in loadSettings(): the gate report starts as null, so the cards
+  // read "unknown" whether or not the reset exists. The only way to be HOLDING a stale report is a successful load
+  // followed by a failing reload. A remount restarts from null and would prove nothing, so both loads below go
+  // through ONE mounted app (`mounts` is asserted to be 1) and the failing load is triggered from the page itself.
+  // Trigger = the "Reload admin" button of the admin console header (@click="loadAdminData"), which is always
+  // rendered in admin mode. The status-bar "Reload admin" action only exists after an error, and admin mode renders
+  // no org input to drive the orgId watcher.
+  // The assertions re-query the cards after the reload instead of holding on to the nodes from before it: a 403
+  // blocks the admin surface until the group catalog answers, which re-creates the cards (the gate report lives in
+  // the parent, so the new cards must read "unknown" too). The admin status line is NOT asserted: a later loader's
+  // success message ("Rule templates loaded.") overwrites the settings error in that one shared line.
+
+  async function mountWithOpenGates(): Promise<HTMLElement> {
+    settingsData = { attendanceReportDigestPolicy: DIGEST_ON, annualLeavePolicy: ANNUAL(true, true) }
+    runtimeGates = GATES_ALL_OPEN
+    const root = await mountAdmin()
+    for (const card of [digestCard(root), annualCard(root)]) {
+      expect(statusIn(card).getAttribute('data-configured-state')).toBe('configured')
+      expect(statusIn(card).getAttribute('data-runnable-state')).toBe('open')
+    }
+    return root
+  }
+
+  function clickReloadAdmin(root: HTMLElement): void {
+    const button = buttonByText(root, 'Reload admin')
+    expect(button.disabled).toBe(false)
+    button.click()
+  }
+
+  function expectGateReportDropped(root: HTMLElement): void {
+    const digest = statusIn(digestCard(root))
+    const annual = statusIn(annualCard(root))
+    // The stale "server run switches are on" must be gone from BOTH cards.
+    expect(digest.getAttribute('data-runnable-state')).toBe('unknown')
+    expect(annual.getAttribute('data-runnable-state')).toBe('unknown')
+    expect(textOf(digest.querySelector('[data-scheduled-feature-runnable]'))).toContain('Unknown')
+    expect(textOf(annual.querySelector('[data-scheduled-feature-runnable]'))).toContain('Unknown')
+    expect(textOf(digest)).not.toContain('Server run switches are on')
+    expect(textOf(annual)).not.toContain('Server run switches are on')
+    // Current, deliberate asymmetry (gate r1 P2-1 asked for it to be written into the case): the digest card derives
+    // "configured" from the settings document, which a failed read clears, so it reads "Not loaded"; the annual card
+    // derives it from the last SAVED annual policy, which a failed read leaves in place - exactly like the annual form
+    // beside it, which also keeps its last loaded values. Only the gate report is dropped on both.
+    expect(digest.getAttribute('data-configured-state')).toBe('unknown')
+    expect(textOf(digest.querySelector('[data-scheduled-feature-configured]'))).toBe('Not loaded')
+    expect(annual.getAttribute('data-configured-state')).toBe('configured')
+  }
+
+  it('a FAILED reload on the same mounted instance drops the last gate report: both cards go "unknown", neither keeps "on"', async () => {
+    const root = await mountWithOpenGates()
+    const getsBefore = settingsGets
+
+    settingsGetStatus = 500
+    clickReloadAdmin(root)
+    await flushUi(16)
+
+    expect(mounts).toBe(1)
+    expect(settingsGets).toBeGreaterThan(getsBefore) // the reload really hit the failing endpoint
+    expectGateReportDropped(root)
+  })
+
+  it('a 403 on the next load of the same mounted instance also drops the last gate report', async () => {
+    const root = await mountWithOpenGates()
+    const getsBefore = settingsGets
+
+    // On a 403 the admin surface is replaced by a "permissions required" notice unless the group catalog says the
+    // user manages groups (a delegated group manager can read groups but not settings). Switch the catalog to
+    // 'managed' together with the 403 so the cards are rendered again once every loader has finished.
+    settingsGetStatus = 403
+    groupsScope = 'managed'
+    clickReloadAdmin(root)
+    await flushUi(16)
+
+    expect(mounts).toBe(1)
+    expect(settingsGets).toBeGreaterThan(getsBefore)
+    expectGateReportDropped(root)
+  })
+
   // ---- monthly annual-leave auto-accrual -------------------------------------------------------------------
 
   it('annual: configured + gates closed shows 已配置 and "No", names only the closed gates, and the manual run stays out of it', async () => {
@@ -372,6 +464,25 @@ describe('AttendanceView · scheduled features show 已配置 and 当前是否�
     buttonByText(card, 'Save policy').click()
     await flushUi(10)
     expect(adminStatusText(root)).toBe('Annual leave policy saved')
+  })
+
+  it('annual: "Reload policy" re-reads the settings and refreshes the gate report along with the policy', async () => {
+    // Ops turn the switches on and restart the server while the page stays open; the card's own Reload button
+    // is how the admin picks that up without reloading the whole console.
+    settingsData = { annualLeavePolicy: ANNUAL(true, true) }
+    runtimeGates = GATES_ALL_CLOSED
+    const root = await mountAdmin()
+    const card = annualCard(root)
+    expect(statusIn(card).getAttribute('data-runnable-state')).toBe('closed')
+    const getsBefore = settingsGets
+
+    runtimeGates = GATES_ALL_OPEN
+    buttonByText(card, 'Reload policy').click()
+    await flushUi(10)
+
+    expect(settingsGets).toBe(getsBefore + 1) // the card's own reload, nothing else
+    expect(statusIn(card).getAttribute('data-runnable-state')).toBe('open')
+    expect(statusIn(card).getAttribute('data-configured-state')).toBe('configured')
   })
 
   // ---- zh leg ------------------------------------------------------------------------------------------------
