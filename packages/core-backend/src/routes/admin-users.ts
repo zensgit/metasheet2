@@ -699,6 +699,9 @@ function todayUtcDate(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+/** Stable code for the single login-name rule below (lowercase ASCII letters, digits, . _ -; 3-64; at least one letter). */
+const USERNAME_RULE_LOGIN_NAME_ASCII = 'login_name_ascii'
+
 function validateUsername(username: string | null): string | null {
   if (!username) return null
   if (!/^(?=.*[a-z])[a-z0-9._-]{3,64}$/.test(username)) {
@@ -3656,7 +3659,11 @@ export function adminUsersRouter(): Router {
 
       const usernameValidationError = validateUsername(cleanUsername)
       if (usernameValidationError) {
-        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError)
+        // `details.rule` is the stable machine-readable code clients localise by; the English
+        // message stays as-is for existing callers.
+        return jsonError(res, 400, 'INVALID_USERNAME', usernameValidationError, {
+          rule: USERNAME_RULE_LOGIN_NAME_ASCII,
+        })
       }
 
       if (cleanName.length < 2 || cleanName.length > 100) {
@@ -3683,6 +3690,7 @@ export function adminUsersRouter(): Router {
       if (!passwordValidation.valid) {
         return jsonError(res, 400, 'PASSWORD_POLICY_FAILED', 'Password does not meet requirements', {
           details: passwordValidation.errors,
+          reasons: passwordValidation.reasons,
         })
       }
 
