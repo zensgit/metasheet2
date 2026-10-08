@@ -429,6 +429,53 @@ describe('detailField — buildDisplayFields (B1-02 humanized scalar snapshot)',
     expect(malformed[0].value).toBe('-')
   })
 
+  // Test report 2026-10-08, T4a-E2. A `date` value is a floating civil date stored as the strict
+  // `YYYY-MM-DD` string the server validates. Read as an instant it is UTC midnight, so the old
+  // rendering always carried a time of day (08:00:00 at UTC+8, 00:00:00 at UTC) and, west of UTC,
+  // the previous day. The expected strings below carry no time part at all, so the base rendering
+  // fails them on any host timezone.
+  describe('T4a-E2: a civil date (YYYY-MM-DD) renders date-only, as the day that was entered', () => {
+    const civilSchema: FormSchema = {
+      fields: [
+        { id: 'fld_day', type: 'date', label: '出发日期' },
+        { id: 'fld_dt', type: 'datetime', label: '会议时间' },
+      ],
+    }
+
+    it('a date field shows the calendar day only, in both shell locales', () => {
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-10-08' })[0].value).toBe('2026/10/8')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-10-08' }, { isZh: false })[0].value).toBe('10/8/2026')
+      // Year/month boundaries are where a UTC-midnight reading shifts the visible day west of UTC.
+      expect(buildDisplayFields(civilSchema, { fld_day: '2027-01-01' })[0].value).toBe('2027/1/1')
+      expect(buildDisplayFields(civilSchema, { fld_day: '2024-02-29' })[0].value).toBe('2024/2/29')
+    })
+
+    it('only a real strict calendar string takes the civil path; anything else keeps the instant path', () => {
+      // A legacy instant stored in a date field keeps the pre-existing rendering.
+      expect(buildDisplayFields(civilSchema, { fld_day: '2026-01-02T03:04:05Z' })[0].value)
+        .toBe(new Date('2026-01-02T03:04:05Z').toLocaleString('zh-CN'))
+      // Unparsable text still passes through unchanged.
+      expect(buildDisplayFields(civilSchema, { fld_day: 'not-a-date' })[0].value).toBe('not-a-date')
+      // A datetime field is an instant (Lock-8 D-2): even a bare date string stays on the instant path.
+      expect(buildDisplayFields(civilSchema, { fld_dt: '2026-10-08' })[0].value)
+        .toBe(new Date('2026-10-08').toLocaleString('zh-CN'))
+    })
+
+    it('a date_range with dateType "date" renders both civil endpoints date-only; other granularities are unchanged', () => {
+      const civilRange: FormSchema = {
+        fields: [{ id: 'fld_trip', type: 'date_range', label: '行程', props: { dateType: 'date' } } as FormField],
+      }
+      expect(buildDisplayFields(civilRange, { fld_trip: { start: '2026-10-08', end: '2026-10-09' } })[0].value)
+        .toBe('2026/10/8 ~ 2026/10/9')
+
+      const minuteRange: FormSchema = {
+        fields: [{ id: 'fld_trip', type: 'date_range', label: '行程', props: { dateType: 'date_minute' } } as FormField],
+      }
+      expect(buildDisplayFields(minuteRange, { fld_trip: { start: '2026-10-08T09:30:00', end: '2026-10-09T18:00:00' } })[0].value)
+        .toBe(`${new Date('2026-10-08T09:30:00').toLocaleString('zh-CN')} ~ ${new Date('2026-10-09T18:00:00').toLocaleString('zh-CN')}`)
+    })
+  })
+
   it('appends snapshot keys absent from the schema after schema-ordered entries, using the raw key as label', () => {
     const fields = buildDisplayFields(displaySchema, {
       fld_reason: '原因内容',

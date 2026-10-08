@@ -1194,20 +1194,23 @@
                 v-model="sampleFormData[field.id]"
                 class="ms-w-100pct"
               />
-              <!-- date -->
+              <!-- date: the same strict YYYY-MM-DD binding as the fill form (T4a-E1) -->
               <el-date-picker
                 v-else-if="field.type === 'date'"
                 v-model="sampleFormData[field.id]"
                 type="date"
+                :value-format="APPROVAL_CIVIL_DATE_VALUE_FORMAT"
                 :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
                 class="ms-w-100pct"
               />
-              <!-- datetime -->
+              <!-- datetime: the same entry settings as the fill form (T4a) -->
               <el-date-picker
                 v-else-if="field.type === 'datetime'"
                 v-model="sampleFormData[field.id]"
                 type="datetime"
-                :placeholder="field.placeholder || `请选择${fieldDisplayLabel(field)}`"
+                :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
+                :default-time="tryRunDatetimeDefaultTime"
+                :placeholder="field.placeholder || '请选择日期和时间'"
                 class="ms-w-100pct"
               />
               <!-- select -->
@@ -1439,6 +1442,11 @@ import { createRoutePreviewController } from '../../approvals/routePreviewContro
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
+import {
+  APPROVAL_CIVIL_DATE_VALUE_FORMAT,
+  APPROVAL_DATETIME_DISPLAY_FORMAT,
+  approvalDatetimeDefaultTime,
+} from '../../approvals/datePickerFormat'
 import { buildLinearStepSpine, type LinearStepSpineChip } from '../../approvals/linearStepSpine'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import CategoryCandidateInput from '../../approvals/components/CategoryCandidateInput.vue'
@@ -4128,6 +4136,9 @@ async function confirmPublish() {
 // of a second hand-rolled loading/race implementation.
 const sampleRequesterId = ref<string | null>(null)
 const sampleFormData = ref<Record<string, unknown>>({})
+// T4a: the try-run datetime pickers take the fill form's settings (approvals/datePickerFormat.ts);
+// Element Plus reads `default-time` once, when each picker mounts.
+const tryRunDatetimeDefaultTime = approvalDatetimeDefaultTime()
 const routePreview = ref<ApprovalRoutePreview | null>(null)
 const routePreviewLoading = ref(false)
 const routePreviewError = ref('')
