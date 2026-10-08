@@ -151,6 +151,30 @@ describe('describeScheduledFeatureStatus', () => {
     expect(describeScheduledFeatureStatus(enTr, { ...input, configured: 'configured' }).configuredLabel).toBe('Configured')
   })
 
+  it('zh copy carries no stray English: the only Latin text anywhere is the env variable names (gate r1 NIT-1)', () => {
+    const ENV_NAME = /ATTENDANCE_[A-Z_]+/g
+    for (const feature of features) {
+      for (const configured of configuredStates) {
+        for (const gate of [null, OPEN, feature === 'reportDigest' ? CLOSED_DIGEST : CLOSED_ACCRUAL]) {
+          const view = describeScheduledFeatureStatus(zhTr, { feature, configured, gate })
+          const notice = scheduledFeatureSaveNotice(zhTr, { feature, configured, gate })
+          const texts = [view.configLabel, view.configuredLabel, view.runLabel, view.runnableLabel, view.detail, notice, ...view.closedGateLabels]
+          for (const text of texts) {
+            expect(text.replace(ENV_NAME, '')).not.toMatch(/[A-Za-z]/)
+          }
+        }
+      }
+    }
+    expect(annualAccrualSwitchHint(zhTr)).not.toMatch(/[A-Za-z]/)
+  })
+
+  it('zh names the notification-delivery gate 通知投递任务, not "worker" (gate r1 NIT-1)', () => {
+    const view = describeScheduledFeatureStatus(zhTr, { feature: 'reportDigest', configured: 'configured', gate: CLOSED_DIGEST })
+    expect(view.closedGateLabels).toContain('通知投递任务 (ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED)')
+    expect(view.detail).toContain('通知投递任务')
+    expect(view.detail.replace(/ATTENDANCE_[A-Z_]+/g, '')).not.toMatch(/worker/i) // the env name itself says WORKER
+  })
+
   it('digest configured + gates closed: says it will not send and names every closed gate with its env name', () => {
     const zh = describeScheduledFeatureStatus(zhTr, { feature: 'reportDigest', configured: 'configured', gate: CLOSED_DIGEST })
     expect(zh.runnable).toBe('closed')

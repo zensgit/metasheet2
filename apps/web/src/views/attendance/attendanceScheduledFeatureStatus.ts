@@ -118,7 +118,7 @@ const GATE_COPY: Record<string, { en: string; zh: string; env: string }> = {
   digestProducer: { en: 'digest producer switch', zh: '统计通知生成开关', env: 'ATTENDANCE_REPORT_DIGEST_ENABLED' },
   accrualTrigger: { en: 'monthly auto-accrual switch', zh: '每月自动计提开关', env: 'ATTENDANCE_ANNUAL_LEAVE_ACCRUAL_SCHEDULED_ENABLED' },
   scheduler: { en: 'attendance scheduler', zh: '考勤调度器', env: 'ATTENDANCE_SCHEDULER_ENABLED' },
-  deliveryWorker: { en: 'notification delivery worker', zh: '通知投递 worker', env: 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' },
+  deliveryWorker: { en: 'notification delivery worker', zh: '通知投递任务', env: 'ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED' },
 }
 
 function closedGateLabels(tr: TranslateFn, ids: readonly string[]): string[] {
