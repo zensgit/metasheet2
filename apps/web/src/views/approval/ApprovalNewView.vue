@@ -445,7 +445,7 @@
                       type="datetime"
                       :format="APPROVAL_DATETIME_DISPLAY_FORMAT"
                       :default-time="datetimeDefaultTime"
-                      :placeholder="column.placeholder || t.datetimePlaceholder"
+                      :placeholder="column.label"
                       class="ms-w-100pct"
                     />
                     <el-select

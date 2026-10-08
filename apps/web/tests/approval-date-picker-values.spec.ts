@@ -301,6 +301,9 @@ describe('ApprovalNewView — real date/datetime pickers (test report 2026-10-08
     // The visible row's editors show the picks, so the panels above were the real row's.
     const rowEditors = container!.querySelectorAll<HTMLInputElement>('.el-table__body .el-date-editor input')
     expect(Array.from(rowEditors, (input) => input.value)).toEqual(['2026-10-15', '2026-10-16 14:23'])
+    // Gate r1 NIT-1: a 明细 cell's placeholder is its column label, for the datetime cell as for every
+    // sibling cell (the date cell included); only the top-level datetime field uses the generic ask.
+    expect(Array.from(rowEditors, (input) => input.getAttribute('placeholder'))).toEqual(['日期', '到达时间'])
     const formData = await submit()
 
     const rows = formData.items as Array<Record<string, unknown>>
