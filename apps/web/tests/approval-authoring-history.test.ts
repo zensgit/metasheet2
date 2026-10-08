@@ -543,6 +543,32 @@ describe('approvalAuthoringHistory — gateway branch lists follow the restored 
     for (const branch of branchesOf(restored, 'c1')) expect(edgeKeys.has(branch.edgeKey)).toBe(true)
   })
 
+  // Gate r1 P3-6: a live default-branch choice survives undo ONLY while it still names one of the
+  // gateway's own non-branch edges in the restored graph. Picking the just-added branch's edge as the
+  // default (the picker lists every outgoing edge) and then undoing the add must fall back to the
+  // restored graph's default — never a default that names an edge which no longer exists.
+  it('undo of a condition-branch ADD drops a live default that named the removed edge, restoring the base default', () => {
+    let draft = draftWithGraph(conditionGraph())
+    const history = reseedAuthoringSessionHistory(draft)
+    const added = applyTopologyOpToSession(history, draft, (g) => addConditionBranch(g, 'c1'), { kind: 'node', nodeKey: 'c1' })
+    expect(added.ok).toBe(true)
+    draft = added.draft
+    const addedEdgeKey = branchesOf(buildApprovalGraph(draft), 'c1').at(-1)!.edgeKey
+    expect(['e-a', 'e-b', 'e-low']).not.toContain(addedEdgeKey)
+    draft.conditionEdits!.c1.defaultEdgeKey = addedEdgeKey // inspector-only edit after the op
+    expect((buildApprovalGraph(draft).nodes.find((n) => n.key === 'c1')!.config as { defaultEdgeKey?: string }).defaultEdgeKey)
+      .toBe(addedEdgeKey)
+
+    const undone = undoAuthoringSession(added.history, buildApprovalGraph(draft))
+    expect(undone.ok).toBe(true)
+    if (!undone.ok) return
+    const restored = buildApprovalGraph(draftFromSessionGraph(draft, undone.history.graph))
+    expect(restored.edges.some((edge) => edge.key === addedEdgeKey)).toBe(false)
+    const config = restored.nodes.find((n) => n.key === 'c1')!.config as { defaultEdgeKey?: string }
+    expect(config.defaultEdgeKey).toBe('e-low')
+    expect(branchesOf(restored, 'c1').map((b) => b.edgeKey)).toEqual(['e-a', 'e-b'])
+  })
+
   it('undo of a parallel-branch ADD restores the 2-lane branch list; a joinMode edit made afterwards survives', () => {
     const graph: ApprovalGraph = {
       nodes: [

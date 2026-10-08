@@ -843,6 +843,11 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelector('[data-canvas-node="approval_high"]')).toBeNull()
     expect(container!.querySelector('[data-canvas-node="cc_1"]')).not.toBeNull()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+    // Gate r1 P3-4 / D0 §5: the inspector that held focus is gone with the gateway — keyboard focus
+    // goes to the node now occupying its slot (the default path's head), not to <body>.
+    expect(document.activeElement).toBe(
+      container!.querySelector('[data-canvas-node="cc_1"] [data-testid="approval-canvas-node-select"]'),
+    )
 
     ;(container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement).click()
     await flushUi()
@@ -912,8 +917,21 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
+    // Gate r1 P3-3 (T5a): 「删除分支」 honours read-only. Positive control first — while manage is
+    // allowed, this gateway's only branch is deletable (no refusal applies), so after the flip the
+    // ONLY thing that can disable it is read-only.
+    clickCanvasNode('cond_1')
+    await flushUi()
+    const branchRemove = () => container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch-remove"]',
+    ) as HTMLButtonElement | null
+    expect(branchRemove()).not.toBeNull()
+    expect(branchRemove()!.disabled).toBe(false)
     canManageTemplates.value = false
     await flushUi()
+    expect(branchRemove(), 'the control still renders in read-only mode, disabled').not.toBeNull()
+    expect(branchRemove()!.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-condition-branch-remove-blocked"]')).toBeNull()
     clickCanvasNode('fork_1')
     await flushUi()
 

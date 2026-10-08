@@ -2955,6 +2955,44 @@ describe('TemplateAuthoringView', () => {
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === gatewayKey).config.branches).toHaveLength(3)
   })
 
+  // Gate r1 P2-1: the CONDITION half of 「select the NEW gateway after insert」 (D0 §3.4) — the image4
+  // path the tester actually walked. Reverting `onInsertConditionAfter`'s selectionAfter to the
+  // SOURCE node (the pre-fix behaviour) must fail here, as the parallel twin above fails for its half.
+  it('T5b: inserting a CONDITION gateway from an edge 「+」 selects the NEW gateway (D0 §3.4); its toolbar offers 「+添加分支」 and grows a 2nd rule branch', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_condition' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    const keysBefore = new Set(Array.from(container!.querySelectorAll('[data-testid="approval-canvas-node"]'))
+      .map((card) => card.getAttribute('data-canvas-node')))
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-condition"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector, 'the new gateway opens in the inspector').not.toBeNull()
+    expect(inspector.getAttribute('data-inspector-type')).toBe('condition')
+    const gatewayKey = inspector.getAttribute('data-inspector-node')!
+    expect(gatewayKey).not.toBe('approval_1') // never the source node
+    expect(keysBefore.has(gatewayKey)).toBe(false) // the node the insert just created
+    expect(container!.querySelector(`[data-canvas-node="${gatewayKey}"]`)).not.toBeNull()
+
+    // NIT-4 (gate r1): the condition gateway's add-a-branch control reads 「+添加分支」 too.
+    const addBranch = inspector.querySelector(`[data-testid="approval-canvas-add-condition-${gatewayKey}"]`) as HTMLButtonElement
+    expect(addBranch).not.toBeNull()
+    expect(addBranch.textContent?.trim()).toBe('+添加分支')
+    const ruleBranchCards = () => container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    )
+    expect(ruleBranchCards()).toHaveLength(1)
+    addBranch.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-node')).toBe(gatewayKey)
+    expect(ruleBranchCards()).toHaveLength(2)
+  })
+
   it('T5b: a gateway fork edge carries NO insertion 「+」 (no insert command is valid there, D0 §3.4/§15); ordinary edges keep theirs', async () => {
     approvalCanvasV2.value = true
     setRouteParams({ id: 'tpl_t5b_fork_edges' })
@@ -3016,6 +3054,43 @@ describe('TemplateAuthoringView', () => {
       expect(summary.textContent).not.toContain(key)
     }
     expect(scrolledElements.at(-1)).toBe(summary) // brought into view, not left above the canvas
+  })
+
+  // Gate r1 P3-5: the PUBLISH half of the attribution + reveal. The server's placeholder gate names
+  // the node in its values-free details; the banner must name it by its business label, never by its
+  // key, never the opaque 「发布表单失败」, and must be brought into view like the save path's banner.
+  // (The draft itself is placeholder-free, so the client-side checklist lets confirm through — this
+  // is the server-side gate's copy, e.g. for a client whose checklist is behind the server.)
+  it('T5b: a publish the server rejects with the placeholder code names the node in the banner and brings it into view', async () => {
+    setRouteParams({ id: 'tpl_t5b_publish_placeholder' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_t5b_publish_placeholder' }))
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    publishTemplateSpy.mockRejectedValue(new ApprovalApiError(
+      'server-side placeholder message',
+      400,
+      'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
+      { nodeKey: 'approval_1' },
+    ))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    expect(confirmButton.disabled).toBe(false)
+    scrolledElements = []
+    confirmButton.click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1) // the save half succeeded
+    expect(publishTemplateSpy).toHaveBeenCalledTimes(1)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.textContent).toContain('审批节点「审批人 1」仍为占位审批角色，请先替换为真实审批人后再发布')
+    for (const forbidden of ['approval_1', '发布表单失败', 'server-side placeholder message']) {
+      expect(summary.textContent).not.toContain(forbidden)
+    }
+    expect(scrolledElements.at(-1)).toBe(summary)
   })
 
   it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {

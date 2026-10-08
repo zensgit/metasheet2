@@ -3729,8 +3729,14 @@ describe('ApprovalProductService', () => {
       const { APPROVAL_ROLE_CONFIGURE_SENTINEL, assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
       const finance = { kind: 'static_role', roleIds: ['finance'] }
       // Positive control on the exemption's narrowness: a placeholder lane between two real
-      // duplicates must not mask them.
-      const graph = placeholderLanesGraph([finance, { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }, finance])
+      // duplicates must not mask them. Gate r1 P3-1: a distinct lane comes FIRST, so the first
+      // conflicting lane sits at index 1, not 0 — attributing it by a constant index cannot pass.
+      const graph = placeholderLanesGraph([
+        { kind: 'requester' },
+        finance,
+        { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] },
+        finance,
+      ])
       let thrown: unknown
       try {
         assertApprovalGraph(graph)
@@ -3741,10 +3747,65 @@ describe('ApprovalProductService', () => {
         statusCode: 400,
         code: 'VALIDATION_ERROR',
         message: 'approvalGraph parallel branches must not contain the same approver',
-        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['lane_1', 'lane_3'] },
+        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['lane_2', 'lane_4'] },
       })
       // Values-free: the attribution carries node keys only, never the shared approver id.
       expect(JSON.stringify((thrown as { details?: unknown }).details)).not.toContain('finance')
+    })
+
+    // Gate r1 P3-1: the SECOND (all-path) duplicate check — reached only when the first-edge walk
+    // misses the overlap because it sits on a NON-first path of a condition inside a lane — carries
+    // the same values-free attribution, also with the first conflicting lane away from index 0.
+    it('T5b: a duplicate that only the ALL-PATH walk finds (non-first condition path inside a lane) carries the same values-free attribution', async () => {
+      const { assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-a', 'e-fork-cond', 'e-fork-c'], joinMode: 'all', joinNodeKey: 'join' } },
+          { key: 'lane_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-a'] } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'lane_c', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-a', source: 'fork', target: 'lane_a' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-c', source: 'fork', target: 'lane_c' },
+          // Rules edge FIRST, default edge SECOND: the first-edge walk sees only user-high in lane 2.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-a-join', source: 'lane_a', target: 'join' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-c-join', source: 'lane_c', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      let thrown: unknown
+      try {
+        assertApprovalGraph(graph)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        // The all-path site's pre-existing message (unchanged by this slice; the UI never echoes it).
+        message: "approvalGraph parallel node fork has duplicate approver 'user-shared' across branches",
+        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['cond_1', 'lane_c'] },
+      })
+      expect(JSON.stringify((thrown as { details?: unknown }).details)).not.toContain('user-shared')
     })
   })
 

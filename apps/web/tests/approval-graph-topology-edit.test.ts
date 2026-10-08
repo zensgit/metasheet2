@@ -596,6 +596,94 @@ describe('T5a — condition-branch delete (planConditionBranchRemoval)', () => {
     expect(refusalCode(() => removeConditionBranch(twoIn, 'cond_1', 'e-a'))).toBe('gateway-not-linear')
   })
 
+  // Gate r1 P3-2: collapsing a gateway that still carries an UNCONFIGURED outgoing edge (API or
+  // legacy data — the backend tolerates stray edges the runtime never takes) would leave that edge
+  // dangling from a deleted node. It is refused before mutation like every other unproven shape.
+  it('refuses to collapse a gateway that still has a stray (unconfigured) outgoing edge', () => {
+    const one = removeConditionBranch(TWO_BRANCH, 'cond_1', 'e-b')
+    const stray: ApprovalGraph = {
+      nodes: one.nodes,
+      edges: [...one.edges, { key: 'e-stray', source: 'cond_1', target: 'end' }],
+    }
+    const before = snap(stray)
+    expect(refusalCode(() => removeConditionBranch(stray, 'cond_1', 'e-a'))).toBe('complex-branch')
+    expect(conditionBranchRemovalBlocker(stray, 'cond_1', 'e-a')).toBe('该分支含嵌套结构或与其他分支共用节点，暂不支持删除')
+    expect(stray).toEqual(before)
+    // Positive control: the same gateway without the stray edge collapses.
+    expect(planConditionBranchRemoval(one, 'cond_1', 'e-a').removedGateway).toBe(true)
+  })
+
+  // Gate r1 P3-7 (a): only a CONFIGURED branch can be deleted. An edge key that is not in the
+  // branch list — gone, or an outgoing edge the config never declared — is refused as such, even
+  // when the edge exists and leaves this gateway.
+  it('refuses an edge that is not a configured branch of this gateway (unknown-branch), leaving the input untouched', () => {
+    expect(refusalCode(() => removeConditionBranch(TWO_BRANCH, 'cond_1', 'e-gone'))).toBe('unknown-branch')
+    expect(conditionBranchRemovalBlocker(TWO_BRANCH, 'cond_1', 'e-gone')).toBe('该分支已不存在，请刷新后重试')
+    const stray: ApprovalGraph = {
+      nodes: [...TWO_BRANCH.nodes, { key: 'side', type: 'cc', name: '旁路', config: { targetType: 'user', targetIds: ['u'] } }],
+      edges: [
+        ...TWO_BRANCH.edges,
+        { key: 'e-c-side', source: 'cond_1', target: 'side' },
+        { key: 'e-side-cc', source: 'side', target: 'cc_1' },
+      ],
+    }
+    const before = snap(stray)
+    expect(refusalCode(() => removeConditionBranch(stray, 'cond_1', 'e-c-side'))).toBe('unknown-branch')
+    expect(stray).toEqual(before)
+  })
+
+  // Gate r1 P3-7 (b): with NO designated default the runtime falls through to the gateway's FIRST
+  // outgoing edge (backend conditionSuccessorTargets / resolveConditionTarget), so that edge is a
+  // path of this block even when it is not a configured branch. Here the fall-through path bypasses
+  // the node where the two rule branches meet (j1) and only rejoins at cc_1, so the block's join is
+  // cc_1: a new branch rejoins there, and deleting a rule branch — whose walk to cc_1 crosses the
+  // shared j1 — is refused instead of guessed.
+  it('with NO default, the first outgoing edge (the runtime fall-through) counts as a path when inferring the join', () => {
+    const fallThroughFirst: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'cond_1',
+          type: 'condition',
+          name: '金额判断',
+          config: {
+            branches: [
+              { edgeKey: 'e-a', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }] },
+              { edgeKey: 'e-b', rules: [{ fieldId: 'amount', operator: 'gte', value: 100 }] },
+            ],
+          },
+        },
+        { key: 'fall', type: 'approval', name: '兜底', config: { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'app_b', type: 'approval', name: 'B', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'j1', type: 'approval', name: '复核', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'user', targetIds: ['user-1'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        // The FIRST outgoing edge of cond_1 is NOT a configured branch: it is the fall-through.
+        { key: 'e-fall', source: 'cond_1', target: 'fall' },
+        { key: 'e-a', source: 'cond_1', target: 'app_a' },
+        { key: 'e-b', source: 'cond_1', target: 'app_b' },
+        { key: 'e-fall-cc', source: 'fall', target: 'cc_1' },
+        { key: 'e-a-j1', source: 'app_a', target: 'j1' },
+        { key: 'e-b-j1', source: 'app_b', target: 'j1' },
+        { key: 'e-j1-cc', source: 'j1', target: 'cc_1' },
+        { key: 'e-cc-end', source: 'cc_1', target: 'end' },
+      ],
+    }
+    const added = addConditionBranch(fallThroughFirst, 'cond_1', '第三分支')
+    const addedBranch = (node(added, 'cond_1')!.config as { branches: Array<{ edgeKey: string }> }).branches.at(-1)!
+    const addedHead = added.edges.find((edge) => edge.key === addedBranch.edgeKey)!.target
+    expect(edgeBetween(added, addedHead, 'cc_1')).toBeTruthy() // the block's join, past the fall-through
+    expect(edgeBetween(added, addedHead, 'j1')).toBeFalsy()
+
+    const before = snap(fallThroughFirst)
+    expect(refusalCode(() => removeConditionBranch(fallThroughFirst, 'cond_1', 'e-b'))).toBe('complex-branch')
+    expect(fallThroughFirst).toEqual(before)
+  })
+
   it('refuses a collapse that would leave a parallel lane empty (D0 §4.2), and one whose gateway is a multi-input parallel join', () => {
     // A condition that is the ONLY content of a parallel lane, with an EMPTY default path.
     const lane: ApprovalGraph = {
