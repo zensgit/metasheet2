@@ -39,6 +39,7 @@ vi.mock('../../src/middleware/auth', () => ({
 }))
 
 import { approvalsRouter } from '../../src/routes/approvals'
+import { usePinnedServer } from '../utils/pinned-server'
 import {
   isApprovalCcUnreadBadgeEnabled,
   isApprovalMineOutcomeBadgeEnabled,
@@ -71,6 +72,11 @@ const SWITCHES = [
     payloadLine: 'approvalMineOutcomeBadge: isApprovalMineOutcomeBadgeEnabled(),',
   },
 ] as const
+
+// TRANSPORT: usePinnedServer() + request(pinned.url()) — `request(app)` in tests/unit is the #4154
+// app-mode debt the supertest-app-mode-tripwire keeps at zero. The app is still built per request
+// site so each case mounts the router after its env switch is set.
+const pinned = usePinnedServer()
 
 function createApp() {
   const app = express()
@@ -105,7 +111,8 @@ describe('tab read-state badge switches (test report 2026-10-08)', () => {
 
         // An unknown sourceSystem is refused right after the gate, before any query: 404 ⇔ gate
         // closed, 400 ⇔ gate open. Either way no query runs.
-        const response = await request(createApp()).get(`${sw.path}?sourceSystem=elsewhere`)
+        pinned.setApp(createApp())
+        const response = await request(pinned.url()).get(`${sw.path}?sourceSystem=elsewhere`)
         if (expected) {
           expect(response.status).toBe(400)
           expect(response.body?.error?.code).toBe('APPROVAL_SOURCE_SYSTEM_INVALID')
@@ -118,7 +125,8 @@ describe('tab read-state badge switches (test report 2026-10-08)', () => {
 
       it('switched on: an unknown sourceSystem is a 400 before any query', async () => {
         process.env[sw.env] = 'true'
-        const response = await request(createApp()).get(`${sw.path}?sourceSystem=elsewhere`)
+        pinned.setApp(createApp())
+        const response = await request(pinned.url()).get(`${sw.path}?sourceSystem=elsewhere`)
         expect(response.status).toBe(400)
         expect(response.body?.error?.code).toBe('APPROVAL_SOURCE_SYSTEM_INVALID')
         expect(poolState.query).not.toHaveBeenCalled()
@@ -127,7 +135,8 @@ describe('tab read-state badge switches (test report 2026-10-08)', () => {
       it('switched on: a request without a user id is a 401 before any query', async () => {
         process.env[sw.env] = 'true'
         authState.userId = null
-        const response = await request(createApp()).get(`${sw.path}?sourceSystem=all`)
+        pinned.setApp(createApp())
+        const response = await request(pinned.url()).get(`${sw.path}?sourceSystem=all`)
         expect(response.status).toBe(401)
         expect(poolState.query).not.toHaveBeenCalled()
       })
