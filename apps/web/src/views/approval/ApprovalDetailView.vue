@@ -2463,9 +2463,17 @@ function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
 // `formSchema` is already frozen from the pinned version without an admin-guarded fetch) — that is
 // backend work and a separate follow-up slice, not something this frontend-only fix can do without
 // adding a new endpoint or widening the admin guard (both out of scope here).
+//
+// Test report 2026-10-08 T4cd (node half): platform `/history` rows now carry their `nodeKey`, so
+// this runs for every platform instance. The template store is app-wide and `loadTemplate` leaves
+// it untouched on failure — a viewer outside this template's visibility scope gets a 404 — so it
+// can still hold ANOTHER template, whose nodes often share default keys (`approval_1`, …). Only
+// this instance's own template may name its nodes; any other falls to the values-free placeholder.
 function nodeLabel(nodeKey: string): string {
   if (!nodeKey) return '-'
-  const live = templateStore.activeTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
+  const template = templateStore.activeTemplate
+  const ownTemplate = template && template.id === approval.value?.templateId ? template : null
+  const live = ownTemplate?.approvalGraph.nodes.find((entry) => entry.key === nodeKey)
   if (live?.name?.trim()) return live.name.trim()
   return t.value.nodeChanged
 }
