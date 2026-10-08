@@ -4450,7 +4450,10 @@ export function evaluateMetaFilterCondition(
   }
 
   if (isNumericQueryFieldType(effectiveType) || effectiveType === 'date') {
-    const toComparable = effectiveType === 'date' ? toEpoch : toComparableNumber
+    // #6204: a `date` (date-only) field compares the DAY each side shows (dateOnlyFilterDayMs), not the raw
+    // timestamp — `is 2026-09-18` matches a cell stored `2026-09-17T16:00:00.000Z` (09-18 in Asia/Shanghai, the day
+    // the grid shows). Numeric types are untouched; `dateTime` has its own branch above.
+    const toComparable = effectiveType === 'date' ? dateOnlyFilterDayMs : toComparableNumber
     const left = toComparable(cellValue)
     const right = toComparable(value)
 
@@ -4463,7 +4466,7 @@ export function evaluateMetaFilterCondition(
     // 2a: between — inclusive range. `value` is a [min, max] array (read condition.value directly, not
     // the scalar-normalized value). Reversed bounds tolerated (min/max swap); a missing/incomplete or
     // unparseable bound = inactive filter (match all), mirroring the empty-filter convention. Works for
-    // numeric AND date (toComparable already maps date cells → epoch in this branch).
+    // numeric AND date (toComparable already maps date cells → their day in this branch, inclusive by day).
     if (opNorm === 'between') {
       const arr = Array.isArray(condition.value) ? condition.value : []
       if (arr.length < 2) return true
@@ -4475,8 +4478,12 @@ export function evaluateMetaFilterCondition(
     // 2a (view filter operators): relative-date operators (date fields only). Compares the cell's LOCAL
     // calendar day against `nowMs`. The helper returns null when `opNorm` is not a relative-date op, so a
     // numeric field (or an unknown op) falls through to the catch-all below unchanged.
+    // #6204: deliberately still fed the raw epoch (toEpoch), NOT the business-day key above — the relative
+    // operators measure "today" as the UTC day (evaluateRelativeDateOp), and moving only the cell side to the
+    // business day would mix two frames. Moving both is a semantic change for every `date` cell (the UTC vs
+    // business "today" differs between 00:00 and 08:00 Beijing) and is left as a follow-up.
     if (effectiveType === 'date') {
-      const rel = evaluateRelativeDateOp(opNorm, left, condition.value, nowMs)
+      const rel = evaluateRelativeDateOp(opNorm, toEpoch(cellValue), condition.value, nowMs)
       if (rel !== null) return rel
     }
     // Unrecognized operator on a numeric field → no-op (pre-existing catch-all). Accepted
@@ -4550,6 +4557,21 @@ function toEpoch(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed
   }
   return null
+}
+
+/**
+ * #6204: filter comparison key of a `date` (date-only) value — UTC midnight (ms) of the day it SHOWS on, i.e.
+ * `formatDateOnlyValue` in the instance business timezone (the grid's day, the export's day): a day as written keeps
+ * that day; a stored instant is its business-timezone day, never its UTC day. Applied to BOTH sides — the cell and
+ * the filter value (the web sends a `YYYY-MM-DD` day) — so is / isNot / greater* / less* / between compare whole
+ * days. `null` when the value names no day (same convention as toEpoch: no match; an unparseable `between` bound is
+ * inactive). Sort (compareMetaSortValue) and the relative-date operators keep toEpoch.
+ */
+function dateOnlyFilterDayMs(value: unknown): number | null {
+  const day = formatDateOnlyValue(value, resolveMultitableBusinessTimezone())
+  if (day === null) return null
+  const ms = Date.parse(`${day}T00:00:00.000Z`)
+  return Number.isFinite(ms) ? ms : null
 }
 
 const DASHBOARD_GROUPABLE_FIELD_TYPES = new Set<UniverMetaField['type']>([
