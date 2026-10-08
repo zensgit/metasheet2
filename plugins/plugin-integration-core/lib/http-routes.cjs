@@ -1078,18 +1078,22 @@ function requireAccess(req, action) {
 }
 
 /**
- * 一线自己拉数据 — THE TABLE-ACTION GATE, WITH THE OPERATOR SPLIT.
+ * 拉取人员拉数据 — THE TABLE-ACTION GATE, WITH THE PULL SPLIT (was 一线自己拉数据).
  *
- * `requireAccess` answers "does this principal hold this tier". Two table-action sub-routes need a
- * second question answered after that one says no: "…or is this the ONE stock-prep pull action a
- * floor operator was ruled able to self-serve?".
+ * `requireAccess` answers "does this principal hold this tier". The pull sub-routes need a second
+ * question answered after that one says no: "…or is this the ONE stock-prep pull action, and does
+ * the caller hold the PULL tier (`stock-prep:pull` ∧ operate ∧ read, or `stock-prep:admin`)?".
+ * Until 2026-10-08 that second question asked for the OPERATE tier — a floor operator could pull.
+ * The owner reversed that (ADR adr-stock-prep-project-sheets-20261008 addendum A; register R-33):
+ * the floor fills and decides, the 拉取人员 pulls. The tier is decided inside
+ * `operatorMayRunStockPrepPull`, so this function and its one call site did not change shape.
  *
  * THE ORDER IS THE CONTRACT, and it is what makes this additive rather than a rewrite:
  *   1. no principal            -> 401, exactly as before;
  *   2. the LEGACY tier passes  -> admitted, exactly as before, with no operator check performed at
  *      all. Every caller who reaches these routes today takes this branch and nothing about them
  *      changes — not the tenant resolution below it, not the audit, not the B2a fence;
- *   3. otherwise, and ONLY for the one frozen action id, the stock-prep operator tier is consulted;
+ *   3. otherwise, and ONLY for the one frozen action id, the stock-prep PULL tier is consulted;
  *   4. otherwise 403, with the same code and message `requireAccess` would have produced.
  *
  * It is therefore impossible for this helper to REMOVE an admission or to re-route an existing one.
@@ -6057,10 +6061,11 @@ function requireStockPreparationAudit() {
       })))
     },
 
-    // 一线自己拉数据: the legacy `integration:read` tier is unchanged; a stock-prep operator
-    // (operate ∧ read) is additionally admitted, for the pull-bom action id ONLY. Nothing below this
-    // line differs by which branch admitted the caller — the tenant resolution, the B2a fence and
-    // the plan are identical, so an operator's dry run is the same dry run it always was.
+    // 拉取人员拉数据 (R-33, 2026-10-08; was 一线自己拉数据): the legacy `integration:read` tier is
+    // unchanged; a stock-prep PULLER (pull ∧ operate ∧ read) is additionally admitted, for the
+    // pull-bom action id ONLY. Nothing below this line differs by which branch admitted the caller —
+    // the tenant resolution, the B2a fence and the plan are identical, so a puller's dry run is the
+    // same dry run it always was.
     async tableActionDryRun(req, res) {
       // The action id is read from the route params FIRST because the gate is scoped to it — but it
       // is a pure param read, so the 401/403 still precedes every other validation and every IO.
@@ -6173,11 +6178,11 @@ function requireStockPreparationAudit() {
     // values-free manual-confirm decision metadata (duplicate_expanded_key class, first cut). No
     // plan row is applied, no request-supplied plan/value payload is accepted, and the canonical
     // sheet is untouched by construction (the ledger module holds no capability toward it).
-    // 一线自己拉数据: reconcile is the step that puts HELD rows into the confirmation queue, so the
-    // operator split had to include it — without it a plan with human-confirm rows left the operator
+    // 拉取人员拉数据: reconcile is the step that puts HELD rows into the confirmation queue, so the
+    // pull split had to include it — without it a plan with human-confirm rows left the puller
     // pointed at a queue that could never contain their work. Same frozen action id, same equality
     // comparison, legacy 'admin' checked first; the source read underneath runs under the server-held
-    // binding owner, exactly as the dry-run's does.
+    // binding owner, exactly as the dry-run's does. The tier is PULL since R-33 (2026-10-08).
     async tableActionConfirmationDecisionsReconcile(req, res) {
       const reconcileActionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const user = await requireTableActionAccess(req, reconcileActionId, 'admin', tenantPrincipalDirectory)
@@ -6485,9 +6490,9 @@ function requireStockPreparationAudit() {
       }, result.persisted ? 201 : 200)
     },
 
-    // 一线自己拉数据: same split as the dry run above — the legacy `integration:write` tier is
-    // unchanged, and a stock-prep operator is additionally admitted for the pull-bom action ONLY.
-    // The dry-run TOKEN is still the thing that authorizes what gets written, so an operator cannot
+    // 拉取人员拉数据: same split as the dry run above — the legacy `integration:write` tier is
+    // unchanged, and a stock-prep PULLER is additionally admitted for the pull-bom action ONLY.
+    // The dry-run TOKEN is still the thing that authorizes what gets written, so a puller cannot
     // apply anything they did not just plan.
     async tableActionApply(req, res) {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID

@@ -92,7 +92,7 @@ export function stockPrepStepOutcomeText(status: string): StockPrepPlainText {
 // ---------------------------------------------------------------------------
 
 /**
- * The three codes, led by WHAT THE HOLDER CAN DO rather than by the code. The code itself stays
+ * The codes, led by WHAT THE HOLDER CAN DO rather than by the code. The code itself stays
  * visible next to the sentence — it is what an implementer greps for and what an admin types into
  * the role editor — but it is no longer the whole of what the page says.
  */
@@ -115,6 +115,13 @@ export const STOCK_PREP_PERMISSION_PLAIN: Record<string, StockPrepPlainEntry> = 
     zhNext: '能打开安装页、看默认配置与体检结果。建表本身仍需平台管理员。',
     enNext: 'Can open the install page and read the defaults and the health check. Creating the tables themselves still needs a platform admin.',
   }),
+  // R-33 (2026-10-08): the 拉取人员. Pulling left the operate tier; this is the code that carries it.
+  'stock-prep:pull': Object.freeze({
+    zh: '从PLM拉取数据(拉取人员)',
+    en: 'Pull data from PLM (pull operator)',
+    zhNext: '能对项目做试算、写入、对账;要和「查看」「填写数据 / 做确认」一起授予才生效。一线不再拉取,需要时请联系拉取人员。',
+    enNext: 'Can dry-run, apply and reconcile a project. Only effective together with the view and the enter-and-confirm codes. The floor no longer pulls; it contacts a pull operator instead.',
+  }),
 })
 
 export function stockPrepPermissionPlain(code: string): StockPrepPlainEntry | null {
@@ -126,8 +133,8 @@ export function stockPrepPermissionPlain(code: string): StockPrepPlainEntry | nu
  * install behaving correctly rather than a step that failed.
  */
 export const STOCK_PREP_NO_AUTOMATIC_HOLDERS: StockPrepPlainEntry = Object.freeze({
-  zh: '安装后暂无人持有这三项权限,需要管理员在角色里逐个分配。',
-  en: 'After installing, nobody holds any of the three — an admin assigns each one in the role editor.',
+  zh: '安装后暂无人持有这些权限,需要管理员在角色里逐个分配。',
+  en: 'After installing, nobody holds any of them — an admin assigns each one in the role editor.',
   zhNext: '这是有意的:安装不会把任何现有角色悄悄变成备料角色。',
   enNext: 'That is deliberate: installing never turns an existing role into a stock-preparation role behind your back.',
 })
@@ -1671,8 +1678,10 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_READ_NOT_PERMITTED: Object.freeze({
     zh: '当前账号没有从 PLM 拉取这个项目数据的权限',
     en: 'This account is not allowed to pull this project’s data from PLM',
-    zhNext: '请联系管理员补充「备料操作」权限,或换有权限的账号再试;重试本身不会自动获得权限。',
-    enNext: 'Ask an administrator to grant the stock-prep operate permission, or try again with an account that already has it — retrying alone will not grant it.',
+    // R-33 (2026-10-08): the missing code is the 拉取人员's `stock-prep:pull` (on top of operate and
+    // read), not 「备料操作」 — a floor operator already holds that and must not be sent to get it twice.
+    zhNext: '拉取由拉取人员负责:请联系拉取人员代为拉取,或请管理员把「从PLM拉取数据(拉取人员)」权限加到您的角色;重试本身不会自动获得权限。',
+    enNext: 'Pulling is done by a pull operator (拉取人员): ask one to pull for you, or ask an administrator to add the stock-prep pull permission to your role — retrying alone will not grant it.',
   }),
   PLAN_READ_FAILED_UNKNOWN: Object.freeze({
     zh: '没能连上取数,原因暂时无法判断',

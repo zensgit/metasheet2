@@ -51,13 +51,21 @@
       <div class="user-admin__section-head">
         <div>
           <h2>创建用户</h2>
-          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。密码需至少 8 位，包含大小写字母和数字。</p>
+          <p class="user-admin__hint">可选择自动生成临时密码，后续再在权限页补充直接权限。</p>
+          <p class="user-admin__hint" data-create-user-rule="login-name">{{ createUserRuleHints.loginName }}</p>
+          <p class="user-admin__hint" data-create-user-rule="password">{{ createUserRuleHints.password }}</p>
         </div>
       </div>
       <div class="user-admin__create-grid">
         <input v-model.trim="createForm.name" class="user-admin__search" type="text" placeholder="姓名" />
         <input v-model.trim="createForm.email" class="user-admin__search" type="email" placeholder="邮箱（可选）" />
-        <input v-model.trim="createForm.username" class="user-admin__search" type="text" placeholder="用户名（可选）" />
+        <input
+          v-model.trim="createForm.username"
+          class="user-admin__search"
+          type="text"
+          placeholder="登录名（可选，小写字母/数字）"
+          aria-label="登录名（可选）"
+        />
         <input v-model.trim="createForm.mobile" class="user-admin__search" type="text" placeholder="手机号（可选）" />
         <input v-model.trim="createForm.employeeNo" class="user-admin__search" type="text" placeholder="员工号（可选）" />
         <input v-model.trim="createForm.department" class="user-admin__search" type="text" placeholder="部门（可选）" />
@@ -812,6 +820,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
 import { subscribeToLocationChanges } from '../utils/browserLocation'
+import { describeCreateUserError, getCreateUserRuleHints } from '../utils/createUserValidationCopy'
 
 type ManagedUser = {
   id: string
@@ -1122,6 +1131,7 @@ const profileDraftDepartment = ref('')
 const profileDraftPosition = ref('')
 const profileDraftHireDate = ref('')
 const appliedUserNavigationKey = ref('')
+const createUserRuleHints = getCreateUserRuleHints('zh')
 const createForm = ref<CreateUserForm>({
   name: '',
   email: '',
@@ -2508,6 +2518,9 @@ async function createUser(): Promise<void> {
     const payload = await readJson(response)
     if (!response.ok || payload.ok !== true) {
       const errorPayload = payload.error as Record<string, unknown> | undefined
+      // Known validation codes render Chinese copy; anything else keeps the server message.
+      const localizedError = describeCreateUserError(errorPayload, 'zh')
+      if (localizedError) throw new Error(localizedError)
       const detailText = Array.isArray(errorPayload?.details) ? `：${(errorPayload?.details as string[]).join('；')}` : ''
       throw new Error(String(errorPayload?.message || '创建用户失败') + detailText)
     }

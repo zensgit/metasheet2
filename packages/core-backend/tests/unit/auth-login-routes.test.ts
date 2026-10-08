@@ -735,6 +735,37 @@ describe('auth login routes', () => {
     expect((response.body as Record<string, any>).data.token).toBe('fresh-token')
   })
 
+  it('rejects a forced password change that hits the weak-pattern rule with the weak_pattern reason code', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+      must_change_password: true,
+      created_at: new Date('2026-03-13T00:00:00.000Z'),
+      updated_at: new Date('2026-03-13T00:00:00.000Z'),
+    })
+
+    const response = await invokeRoute('post', '/password/change', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: {
+        password: '123456Asd',
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).toEqual({
+      success: false,
+      error: 'Password does not meet requirements',
+      details: ['Password contains a common weak pattern'],
+      reasons: ['weak_pattern'],
+    })
+    expect(bcryptMocks.hash).not.toHaveBeenCalled()
+  })
+
   it('rejects password-change calls when the session is not marked for forced rotation', async () => {
     authServiceMocks.verifyToken.mockResolvedValue({
       id: 'user-1',
