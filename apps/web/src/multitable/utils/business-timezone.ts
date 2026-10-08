@@ -313,8 +313,12 @@ export function dateTimeTextNamesZone(text: unknown): boolean {
 // optional trailing time part that is IGNORED (the day is the day as written).
 const CALENDAR_DAY_RE = /^(\d{4})([-/.])(\d{1,2})\2(\d{1,2})(?:[T ].*)?$/
 
-// Text that STARTS like an ISO-ish day. Reaching the fallback with this shape means the grammar above refused it.
-const ISO_DAY_PREFIX_RE = /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/
+// Text that STARTS like an ISO-ish day and then ENDS, or has a letter / sign glued straight onto the day
+// (`2026-09-18Z`, `2026-09-18T`, `2026-09-18+08:00`). Reaching the fallback with this shape means the grammar
+// above refused it (mixed separators, impossible day, glued designator). A day followed by something else —
+// a weekday in brackets as Chinese spreadsheets write it, `2026-09-18(五)` / `2026/9/18(周五)` — is NOT
+// matched here and keeps going to rule 3, which reads the day as written (review of #6254, finding 1).
+const ISO_DAY_PREFIX_RE = /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[A-Za-z+-]|$)/
 
 // Text that is just a number (`2026`, `5`, `-1`, `20260918`, `1758211200000`, `46283.5`). V8's legacy parser
 // reads such text as a year, a month in 2001, or a year in the far future — never a day anybody wrote.
