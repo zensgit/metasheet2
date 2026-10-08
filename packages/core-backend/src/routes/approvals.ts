@@ -269,6 +269,29 @@ export function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
 }
 
+/**
+ * How `GET /api/approvals` turns its validated `sourceSystem` query value into the feed's source
+ * options: `platform` / `plm` narrow to that source; `all` asks for the mixed feed AND switches the
+ * tab filters to their external-source branch; an absent value keeps the legacy rule that an
+ * explicitly supplied tab implies the platform feed (and no tab means the mixed feed).
+ *
+ * Exported so a count over a tab (the 抄送我的 / 我发起的 badges) maps the SAME query value onto
+ * the SAME list options as the tab it counts — a badge that read `all` differently from the list
+ * could count rows the tab never shows.
+ */
+export function resolveApprovalListSourceOptions(
+  rawSourceSystem: string,
+  tabProvided: boolean,
+): { sourceSystem: 'platform' | 'plm' | undefined; includeExternalTabSources: boolean } {
+  const explicit = rawSourceSystem === 'all' || rawSourceSystem === ''
+    ? undefined
+    : (rawSourceSystem as 'platform' | 'plm')
+  return {
+    sourceSystem: rawSourceSystem !== '' ? explicit : (tabProvided ? 'platform' : undefined),
+    includeExternalTabSources: rawSourceSystem === 'all',
+  }
+}
+
 function parsePaging(value: unknown, fallback: number, max: number = MAX_APPROVAL_PAGE_SIZE): number {
   const parsed = Number.parseInt(String(value || ''), 10)
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -2412,7 +2435,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       const sourceSystem = rawSourceSystem === 'all' || rawSourceSystem === ''
         ? undefined
         : (rawSourceSystem as 'platform' | 'plm')
-      const sourceSystemProvided = rawSourceSystem !== ''
       // P3-1 — refuse `?format=csv&sourceSystem=plm` outright, BEFORE it can reach the
       // `sourceSystem === 'plm'` sync branch below. Two independent reasons converge on the same
       // 400, not one: (1) that branch calls `bridgeService.syncPlmApprovals({ status, limit,
@@ -2587,16 +2609,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // THIS EXPRESSION ALONE IS NOT ENOUGH, and saying otherwise was a defect in its own right:
       // `listApprovals`'s non-external branch used to push its own
       // `COALESCE(source_system, 'platform') = 'platform'` conjunct for ANY tab, so leaving
-      // `effectiveSourceSystem` undefined still produced a platform-only feed once `tab` always had
+      // the effective source undefined still produced a platform-only feed once `tab` always had
       // a value. `tabDefaulted` below is what actually keeps the tab-less request on the mixed
       // platform+plm feed; measured at the merge-base, a tab-less request returned both source
       // systems and an explicit `?tab=pending` returned platform rows only, and both still do.
-      const effectiveSourceSystem = sourceSystemProvided
-        ? sourceSystem
-        : (tabProvided ? 'platform' : undefined)
+      // (`resolveApprovalListSourceOptions` is that mapping, shared with the tab badge counts.)
+      const effectiveSource = resolveApprovalListSourceOptions(rawSourceSystem, tabProvided)
 
       const result = await bridgeService.listApprovals({
-        sourceSystem: effectiveSourceSystem,
+        sourceSystem: effectiveSource.sourceSystem,
         status,
         workflowKey,
         businessKey,
@@ -2609,7 +2630,7 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         // own status filter is served NO tab, so the query is the scope plus that filter.
         tab: defaultTabSuppressedByStatusFilter ? undefined : tab,
         tabDefaulted: !tabProvided,
-        includeExternalTabSources: rawSourceSystem === 'all',
+        includeExternalTabSources: effectiveSource.includeExternalTabSources,
         actorId: actorId || undefined,
         actorRoles,
         actorPermissions: resolveApprovalActorPermissions(req),
