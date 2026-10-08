@@ -1386,13 +1386,17 @@ function parseLookupFieldConfig(property: unknown): LookupFieldConfig | null {
  * applyLookupRollup does (`cfg.foreignSheetId ?? link.foreignSheetId`); one field load per distinct foreign sheet.
  * Only field TYPES / zone properties are read — no foreign VALUES, so no readability gate is involved here (the
  * values themselves were already masked by applyLookupRollup).
+ *
+ * #6204: a lookup whose target is a `date` (date-only) column is present too, with `dateOnly: true` and the
+ * business timezone — its values export as the `YYYY-MM-DD` day the target column shows (formatDateOnlyValue,
+ * the same rule as a direct `date` column), not the raw stored text.
  */
 async function resolveLookupDateTimeTargetZones(
   query: QueryFn,
   fields: UniverMetaField[],
   relationalLinkFields: RelationalLinkField[],
-): Promise<Map<string, string>> {
-  const zones = new Map<string, string>()
+): Promise<Map<string, { zone: string; dateOnly: boolean }>> {
+  const zones = new Map<string, { zone: string; dateOnly: boolean }>()
   const lookups = fields
     .filter((field) => field.type === 'lookup')
     .map((field) => ({ fieldId: field.id, cfg: parseLookupFieldConfig(field.property) }))
@@ -1410,8 +1414,9 @@ async function resolveLookupDateTimeTargetZones(
     }
     const target = foreignFields.find((candidate) => candidate.id === cfg.targetFieldId)
     if (!target) continue
-    if (target.type === 'dateTime') zones.set(fieldId, resolveDateTimeFieldTimeZone(target.property))
-    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, resolveMultitableBusinessTimezone())
+    if (target.type === 'dateTime') zones.set(fieldId, { zone: resolveDateTimeFieldTimeZone(target.property), dateOnly: false })
+    else if (target.type === 'createdTime' || target.type === 'modifiedTime') zones.set(fieldId, { zone: resolveMultitableBusinessTimezone(), dateOnly: false })
+    else if (target.type === 'date') zones.set(fieldId, { zone: resolveMultitableBusinessTimezone(), dateOnly: true })
   }
   return zones
 }
@@ -16780,9 +16785,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         else if (field.type === 'date') exportDateOnlyZoneById.set(field.id, resolveMultitableBusinessTimezone())
       }
       // #4c follow-up: a LOOKUP column whose target field is a date-time exports each looked-up instant as the
-      // target column's wall clock, not the raw ISO. Lookups are computed on read (never materialized), so this
-      // map is filled only where the rows are hydrated through applyLookupRollup (the filtered branch below).
-      let exportLookupDateTimeZoneById = new Map<string, string>()
+      // target column's wall clock, not the raw ISO; #6204: a lookup of a `date` column exports each looked-up
+      // value as the `YYYY-MM-DD` day that column shows (same rule as the direct `date` export above). Lookups are
+      // computed on read (never materialized), so this map is filled only where the rows are hydrated through
+      // applyLookupRollup (the filtered branch below).
+      let exportLookupDateTimeZoneById = new Map<string, { zone: string; dateOnly: boolean }>()
       const projectRecord = (record: { data: Record<string, unknown> }): Array<string | number | boolean | null | undefined> => {
         const data = filterRecordDataByFieldIds(record.data, fieldIds)
         return fields.map((field) => {
@@ -16804,10 +16811,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             // A value that names no day (legacy junk) keeps the raw projection — never dropped.
             if (day !== null) return day
           }
-          const lookupZone = exportLookupDateTimeZoneById.get(field.id)
-          if (lookupZone && Array.isArray(cell)) {
-            // Same joining as any array cell; a looked-up value that is not a date-time keeps its raw text.
-            return serializeXlsxCell(cell.map((item) => formatDateTimeValue(item, lookupZone) ?? item))
+          const lookupTarget = exportLookupDateTimeZoneById.get(field.id)
+          if (lookupTarget && Array.isArray(cell)) {
+            // Same joining as any array cell; a looked-up value that names no date-time / day keeps its raw text.
+            const formatItem = lookupTarget.dateOnly ? formatDateOnlyValue : formatDateTimeValue
+            return serializeXlsxCell(cell.map((item) => formatItem(item, lookupTarget.zone) ?? item))
           }
           return serializeXlsxCell(cell)
         })
