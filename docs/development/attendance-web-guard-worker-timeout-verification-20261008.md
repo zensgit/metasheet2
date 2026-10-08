@@ -140,6 +140,26 @@ Current main dropped the 18.x matrix leg (`plugin-tests.yml` keeps a one-entry `
 so the required check name stays `test (20.x)`). A PR based on current main therefore has no
 `test (18.x)` job.
 
-## 6. CI on this PR head
+## 6. CI on the first PR head
 
-Filled in after the draft PR's checks settle. Workflow file diff: none.
+Head `0f15a310ade568ecdba8666b9b673cb6841f2443` (parent of the alignment merge below).
+`attendance-web-guard` attempt 1, targeted vitest step: 69 passed (69), 1371 passed (1371),
+duration 254.45s. Job https://github.com/zensgit/metasheet2/actions/runs/37715093672/job/113109641098 .
+The thirteen required checks on that head all passed on attempt 1. Workflow file diff: none.
+
+## 7. Alignment onto main `9eee3a3cd` (Harold, 2026-10-08)
+
+Fetched `origin/main` before the merge. It was exactly
+`9eee3a3cd0e734f6a4abb972068f4f535eb08ebf`. Nothing newer than that tip was on `main`.
+Previous base was `afd32b704c6ff4c82dbfe90b94066fcaf3fc0074`. The three commits in between
+were merged with `git merge` (no rebase, no force push). The merge had no conflicts, including
+none in this file or in `apps/web/tests/attendance-admin-regressions.spec.ts`.
+
+| Commit | What it changes | Sensitive paths |
+|---|---|---|
+| `317cf60d9042cd8f7df4c593fa010986025927a8` | Docs only: `docs/development/takeover-beiliao-20260821/customer-reply-20260924.md` | none |
+| `644310ba60953b021d85ae393d94ef3408e25cb9` | Business-timezone day for date-only leftovers. `apps/web/src/multitable/import/delimited.ts`, `apps/web/src/multitable/utils/business-timezone.ts`, `apps/web/src/multitable/utils/conditional-formatting.ts`, `apps/web/src/multitable/utils/field-display.ts`, `apps/web/tests/multitable-conditional-formatting.spec.ts`, `apps/web/tests/multitable-datetime-business-tz.spec.ts`, `apps/web/tests/multitable-field-display-i18n.spec.ts`, `docs/development/takeover-beiliao-20260821/decision-register.md`, `packages/core-backend/src/multitable/date-time-wall-clock.ts`, `packages/core-backend/src/routes/univer-meta.ts`, `packages/core-backend/tests/integration/multitable-xlsx-routes.test.ts`, `packages/core-backend/tests/unit/multitable-datetime-wall-clock.test.ts`, `packages/core-backend/tests/unit/multitable-view-filter-operators.test.ts` | `packages/core-backend/src/routes/univer-meta.ts` (loaded by the manual checkpoint script). No workflow, `vitest.config.ts`, migration, pins file, drain helper, timemachine script, `recovery-archive-contract.ts`, `src/index.ts`, or `http-routes.cjs` |
+| `9eee3a3cd0e734f6a4abb972068f4f535eb08ebf` | Access presets stop granting unregistered `workflow:read`. `packages/core-backend/src/auth/access-presets.ts`, `packages/core-backend/tests/integration/multitable-permmatrix-b4-g8-comments-visibility-realdb.test.ts`, `packages/core-backend/tests/unit/access-presets-permission-catalogue.guard.test.ts`, `packages/core-backend/tests/unit/admin-users-create-preset-grant-failure.test.ts` | none. The guard reads the catalogue from existing migrations; this commit does not change a migration file |
+
+The three web specs added by `644310ba6` are `multitable-conditional-formatting.spec.ts`,
+`multitable-datetime-business-tz.spec.ts`, and `multitable-field-display-i18n.spec.ts`.
